@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use Skill Evaluator in academic or technical work, please cite this software."
+title: "Skill Evaluator"
+type: software
+version: "0.1.0"
+authors:
+  - name: "NVIDIA Corporation"
+license: Apache-2.0
+repository-code: "https://github.com/NVIDIA/SkillEvaluator"

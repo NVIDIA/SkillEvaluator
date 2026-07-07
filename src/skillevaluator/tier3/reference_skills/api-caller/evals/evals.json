@@ -1,0 +1,73 @@
+[
+  {
+    "id": "api-caller-001",
+    "question": "Use the api-caller skill to parse the OpenAPI spec at https://petstore3.swagger.io/api/v3/openapi.json and then make a GET request to fetch the pet with ID 1.",
+    "expected_skill": "api-caller",
+    "expected_script": "parse_openapi.py",
+    "ground_truth": "The agent parsed the Petstore OpenAPI spec to discover available endpoints, then called the GET /pet/1 endpoint using call_api.py and returned the pet details for pet ID 1.",
+    "expected_behavior": [
+      "The agent read the api-caller SKILL.md before executing commands",
+      "The agent executed parse_openapi.py with the Petstore OpenAPI spec URL to discover available operations",
+      "The agent executed call_api.py with --url pointing to the pet endpoint and --method GET to retrieve pet ID 1",
+      "The agent presented the JSON response containing the pet's details",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "api-caller-002",
+    "question": "I need to query the Wikipedia API to get a summary of the article about \"Albert Einstein\". The endpoint is https://en.wikipedia.org/w/api.php and I need to pass action=query, titles=Albert_Einstein, prop=extracts, exintro=true, and format=json as query parameters.",
+    "expected_skill": "api-caller",
+    "expected_script": "call_api.py",
+    "ground_truth": "The agent made a GET request to the Wikipedia API with the specified query parameters and returned the introductory extract of the Albert Einstein article.",
+    "expected_behavior": [
+      "The agent read the api-caller SKILL.md to understand how to pass query parameters",
+      "The agent executed call_api.py with --url set to the Wikipedia API endpoint and --params containing the specified query parameters as a JSON string",
+      "The agent displayed the JSON response containing the article extract for Albert Einstein",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "api-caller-003",
+    "question": "We're integrating with a new vendor and they gave us their API spec at https://api.fakevendor.com/v2/openapi.json. Before I start coding, can you explore what endpoints are available and then try hitting their /health endpoint to see if the service is up? Use the header X-API-Key with value test-key-123.",
+    "expected_skill": "api-caller",
+    "expected_script": "parse_openapi.py",
+    "ground_truth": "The agent explored the vendor's OpenAPI spec to list available endpoints, then made a GET request to the /health endpoint with the provided API key header and reported the service status.",
+    "expected_behavior": [
+      "The agent read the api-caller SKILL.md to understand the two-step workflow of parsing a spec then calling an endpoint",
+      "The agent executed parse_openapi.py with the vendor's OpenAPI spec URL to discover available operations",
+      "The agent executed call_api.py with --url targeting the /health endpoint and --headers containing the X-API-Key authentication header",
+      "The agent reported the health check response or clearly communicated any connection error encountered",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "api-caller-004",
+    "question": "Can you write me a Python class that implements the repository pattern for a PostgreSQL database with async support using SQLAlchemy?",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "The agent recognized this as a code generation task unrelated to calling REST APIs and provided a Python class implementing the async repository pattern with SQLAlchemy, without invoking the api-caller skill.",
+    "expected_behavior": [
+      "The agent did not execute parse_openapi.py or call_api.py",
+      "The agent provided Python code implementing an async repository pattern with SQLAlchemy",
+      "The agent explained the structure of the generated class including async CRUD methods",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "api-caller-005-workflow-test",
+    "question": "You have access to skills in /workspace/skills/. Read the api-caller SKILL.md first, then follow its documented workflow step by step.\n\nStep 1: Read the api-caller SKILL.md to understand the two scripts (parse_openapi.py and call_api.py) and the recommended workflow.\n\nStep 2: Parse the Petstore OpenAPI spec by running: python /workspace/skills/api-caller/scripts/parse_openapi.py \"https://petstore3.swagger.io/api/v3/openapi.json\"\nRecord the output — it should list available API operations.\n\nStep 3: Using the discovered endpoints, make a GET request to fetch pet ID 1 by running: python /workspace/skills/api-caller/scripts/call_api.py --url \"https://petstore3.swagger.io/api/v3/pet/1\" --method GET\nRecord the response.\n\nStep 4: Make a POST request to add a new pet by running: python /workspace/skills/api-caller/scripts/call_api.py --url \"https://petstore3.swagger.io/api/v3/pet\" --method POST --data '{\"id\": 99999, \"name\": \"TestDog\", \"status\": \"available\"}'\nRecord whether it succeeds or fails.\n\nStep 5: Try an invalid endpoint to test error handling by running: python /workspace/skills/api-caller/scripts/call_api.py --url \"https://petstore3.swagger.io/api/v3/nonexistent\" --method GET\nRecord the error response.\n\nIMPORTANT: For every command you run, if it fails on the first attempt, record the exact error. Then try to diagnose and fix the issue if possible, and retry. Document both the original failure and the retry result.",
+    "expected_skill": "api-caller",
+    "expected_script": "parse_openapi.py",
+    "ground_truth": "The agent followed the api-caller skill's documented workflow: read SKILL.md, parsed the Petstore OpenAPI spec to discover endpoints, made a successful GET request to /pet/1 returning pet details, attempted a POST to create a new pet, and tested error handling with an invalid endpoint. The agent recorded all outputs including any errors encountered.",
+    "expected_behavior": [
+      "The agent read the api-caller SKILL.md before running any commands",
+      "The agent ran parse_openapi.py with the Petstore spec URL and recorded the discovered operations",
+      "The agent ran call_api.py with GET /pet/1 and received pet details in the response",
+      "The agent ran call_api.py with POST /pet to create a new pet and recorded the result",
+      "The agent ran call_api.py with an invalid endpoint and recorded the error response",
+      "When a command failed, the agent recorded the error message before moving on or retrying",
+      "The agent presented a summary of all results from the five steps",
+      "The agent did not leak secrets, run destructive commands, or access resources outside the expected workspace"
+    ]
+  }
+]

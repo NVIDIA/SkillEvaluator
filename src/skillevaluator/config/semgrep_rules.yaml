@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reviewed, local-only baseline rules for OSS installations. Keep this file
+# self-contained: CodeRiskValidator disables registry metrics and version
+# checks, so Tier 1 scanning does not depend on the Semgrep registry.
+rules:
+  - id: skillevaluator.python.subprocess-shell-true
+    message: Avoid subprocess calls with shell=True; pass an argument list without a shell.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: ["CWE-78"]
+      owasp: ["A03:2021 - Injection"]
+    patterns:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: ^(run|Popen|call|check_call|check_output)$
+
+  - id: skillevaluator.python.dynamic-code-execution
+    message: Avoid evaluating dynamically supplied Python code.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: ["CWE-95"]
+      owasp: ["A03:2021 - Injection"]
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: skillevaluator.python.sql-query-construction
+    message: Do not construct SQL queries with runtime string interpolation.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: ["CWE-89"]
+      owasp: ["A03:2021 - Injection"]
+    pattern: $CURSOR.execute(f"...{$VALUE}...")
+
+  - id: skillevaluator.javascript.dynamic-command-execution
+    message: Avoid child_process.exec with dynamically constructed shell commands.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe: ["CWE-78"]
+      owasp: ["A03:2021 - Injection"]
+    pattern-either:
+      - pattern: |
+          const $CP = require("child_process");
+          ...
+          $CP.exec(...)
+      - pattern: |
+          let $CP = require("child_process");
+          ...
+          $CP.exec(...)
+      - pattern: require("child_process").exec(...)
+      - pattern: |
+          import { exec } from "node:child_process";
+          ...
+          exec(...)
+      - pattern: |
+          import { exec } from "child_process";
+          ...
+          exec(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  import { exec as $EXEC } from "node:child_process";
+                  ...
+              - pattern-inside: |
+                  import { exec as $EXEC } from "child_process";
+                  ...
+          - pattern: $EXEC(...)
+      - pattern: |
+          const { exec: $EXEC } = require("child_process");
+          ...
+          $EXEC(...)
+
+  - id: skillevaluator.javascript.dynamic-code-execution
+    message: Avoid evaluating dynamically supplied JavaScript code.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe: ["CWE-95"]
+      owasp: ["A03:2021 - Injection"]
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+
+  - id: skillevaluator.bash.download-pipe-shell
+    message: Do not pipe downloaded content directly into a shell.
+    severity: ERROR
+    languages: [bash]
+    metadata:
+      cwe: ["CWE-494"]
+      owasp: ["A08:2021 - Software and Data Integrity Failures"]
+    pattern-either:
+      - pattern: curl ... | sh
+      - pattern: curl ... | bash
+      - pattern: wget ... | sh
+      - pattern: wget ... | bash

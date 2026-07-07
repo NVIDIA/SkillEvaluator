@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# skillevaluator validation profile: external
+#
+# This is the default policy for public repositories. It accepts any
+# well-formed contributor email address and keeps licensing errors blocking.
+
+profile: external
+
+identity:
+  # Disable domain restriction. The author shape (Name <email@host>) is
+  # still validated by the schema validator, independent of this regex.
+  author_email_regex: null
+
+severity_overrides:
+  # Schema / repository governance
+  SCHEMA.author_missing: high
+  SCHEMA.author_format: high
+
+  # Workflows
+  WORKFLOWS.author_format: high
+
+  # License issues block publication.
+  LICENSE.*: critical

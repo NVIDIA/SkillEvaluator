@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Feature request
+description: Suggest an improvement to Skill Evaluator.
+title: "[FEA]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the user need or workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Explain the expected behavior and alternatives considered.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Do not include credentials, private datasets, or proprietary benchmark content.
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Before submitting
+      options:
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/NVIDIA/SkillEvaluator/blob/main/CODE_OF_CONDUCT.md)
+          required: true
+        - label: I have searched the [open issues](https://github.com/NVIDIA/SkillEvaluator/issues?q=is%3Aopen+is%3Aissue+label%3Aenhancement) and found no duplicate of this request
+          required: true

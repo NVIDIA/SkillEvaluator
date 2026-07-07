@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Bug report
+description: Report a reproducible problem in Skill Evaluator.
+title: "[BUG]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include credentials, private datasets, or security vulnerabilities."
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Include the expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe example that reproduces the issue.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Skill Evaluator version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python version, operating system, installation method, and relevant public provider or agent configuration.
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Before submitting
+      options:
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/NVIDIA/SkillEvaluator/blob/main/CODE_OF_CONDUCT.md)
+          required: true
+        - label: I have searched the [open issues](https://github.com/NVIDIA/SkillEvaluator/issues?q=is%3Aopen+is%3Aissue+label%3Abug) and found no duplicate of this report
+          required: true

@@ -1,0 +1,211 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools >= 77", "wheel"]
+
+[project]
+name = "skillevaluator"
+version = "0.1.0"
+description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
+authors = [{ name = "NVIDIA Corporation" }]
+readme = "README.md"
+keywords = [
+    "skills-evaluation",
+    "skills",
+    "skill-uplift",
+    "ai-agents",
+    "security",
+    "vulnerability-scanner",
+    "claude-code",
+]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+]
+requires-python = ">=3.12,<3.14"
+license = "Apache-2.0"
+license-files = [
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+]
+# Base install is static-validation capable (Tier 1) and must NOT pull Harbor,
+# LLM, or OpenTelemetry. Those live behind the extras below.
+dependencies = [
+    "click>=8.1.8,<8.2",
+    "jinja2>=3.1",
+    "pydantic>=2.11.0",
+    "pyyaml>=6.0",
+    "rich>=13.5.0",
+]
+
+[project.optional-dependencies]
+# Shared public LLM / embedding clients used by LLM-backed checks, Tier 2, and Tier 3.
+llm = [
+    "anthropic>=0.83.0",
+    "boto3>=1.34.0",
+    "litellm>=1.83.10,<1.89.0.dev0",
+    "openai>=2.21.0",
+    "protobuf>=6.33.5",
+]
+# Tier 2 intra-skill deduplication and local-catalog inter-skill similarity.
+tier2 = [
+    "skillevaluator[llm]",
+]
+# Tier 3 live agent evaluation through Harbor's native environments.
+tier3 = [
+    "skillevaluator[llm]",
+    "harbor==0.13.2",
+]
+# OpenTelemetry export (optional; telemetry degrades gracefully when absent).
+telemetry = [
+    "opentelemetry-api>=1.37.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.37.0",
+    "opentelemetry-sdk>=1.37.0",
+    # CVE-2026-0994 / BDSA-2025-123809 fixed floor.
+    "protobuf>=6.33.5",
+]
+# Static security scanners (floors raised to the established release baseline).
+security = [
+    "bandit>=1.9.4",
+    "pip-audit>=2.10.0",
+    "protobuf>=6.33.5",
+    "semgrep>=1.162.0",
+    "skillspector @ git+https://github.com/NVIDIA/SkillSpector.git@ad55ceb60bcf38feb12227531c17b620c8b416af",
+]
+# Full public install convenience bundle.
+all = [
+    "skillevaluator[tier2,tier3,telemetry,security]",
+]
+dev = [
+    # PyPA build backs the `make build` target.
+    "build>=1.2",
+    "httpx>=0.27",
+    "pytest>=8.4.0",
+    "pytest-cov>=6.2.0",
+    # pytest-xdist carried over for parallel test execution (-n auto).
+    "pytest-xdist>=3.6.0",
+    "ruff>=0.15.4",
+]
+
+[project.urls]
+Documentation = "https://github.com/NVIDIA/SkillEvaluator#readme"
+Repository = "https://github.com/NVIDIA/SkillEvaluator"
+
+[project.scripts]
+# Single console script for the consolidated distribution.
+skillevaluator = "skillevaluator.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["skillevaluator*"]
+
+[tool.setuptools.package-data]
+"skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
+"skillevaluator.reporting" = ["templates/*.j2"]
+"skillevaluator.tier3.harbor" = [
+    "templates/*.py",
+    "templates/*.sh",
+]
+"skillevaluator.tier3.reference_skills" = [
+    "*/SKILL.md",
+    "*/evals/*.json",
+    "*/evals/*.jsonl",
+    "*/evals/*.yaml",
+    "*/evals/*.yml",
+    "*/evals/harbor/**/*",
+    "*/evals/files/**/*",
+    "*/references/**/*",
+    "*/scripts/*.py",
+    "*/scripts/*.sh",
+    "*/files/**/*",
+    "*/environment/docker-compose*.yml",
+    "*/environment/docker-compose*.yaml",
+    "*/mcp_servers.toml",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+exclude = ["**/evals/results/**", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Union of the established rule selections and the broader static-analysis set.
+select = ["E", "F", "I", "N", "W", "UP", "B", "A", "COM", "C4", "DTZ", "T10", "EXE", "FA", "ISC", "ICN", "G", "INP", "PIE", "T20", "Q", "RSE", "RET", "SLF", "SLOT", "SIM", "TID", "TCH", "INT", "ARG", "PTH", "TD", "FIX", "ERA", "PD", "PGH", "PL", "FLY", "NPY", "AIR", "PERF", "FURB", "LOG", "RUF"]
+# Union of the ignore lists across all three repos.
+ignore = [
+    "E402",      # Module-level import not at top of file
+    "E501",      # Line too long
+    "E741",      # Ambiguous variable name
+    "N806",      # Variable in function should be lowercase
+    "N818",      # Exception name should end in Error
+    "G004",      # Logging statement uses f-string
+    "COM812",    # Trailing comma (conflicts with formatter)
+    "ISC001",    # Implicit string concatenation (conflicts with formatter)
+    "TRY003",    # Long messages outside the exception class
+    "EM101",     # Raw string in exception
+    "EM102",     # f-string in exception
+    "PLR2004",   # Magic value in comparison
+    "S101",      # Use of assert
+    "BLE001",    # Blind except
+    "PLC0415",   # Import not at top level (allow lazy imports)
+    "UP007",     # Use X | Y for type annotations (3.10+ compatibility)
+    "PERF203",   # Try-except in loop
+    "PLR0913",   # Too many arguments in function definition
+    "PLR0915",   # Too many statements in function
+    "PLR0912",   # Too many branches
+    "PLR0911",   # Too many return statements (consistent with the other relaxed PLR complexity rules)
+    "PLR0911",   # Too many return statements (consistent with the other relaxed PLR complexity rules)
+    "PLW2901",   # Loop variable overwritten
+    "PLW1510",   # subprocess.run without check (errors handled manually)
+    "SLF001",    # Private member access
+    "ARG001",    # Unused function argument
+    "EXE001",    # Shebang without executable bit
+    "SIM108",    # Use ternary operator (readability preference)
+    "PIE810",    # startswith with tuple (readability)
+    "PERF401",   # Use list.extend (readability preference)
+    "TC003",     # Move stdlib import into type-checking block
+]
+
+[tool.ruff.lint.per-file-ignores]
+# CLI/gate scripts print human-readable results to stdout (T201) and are run as
+# standalone files, not imported as packages (INP001).
+"scripts/**" = ["T201", "INP001"]
+# Tier 3 dataset CLIs are standalone command-line tools that print
+# human-readable progress and results to stdout by design.
+"src/skillevaluator/tier3/generate_dataset.py" = ["T201"]
+# Reference skill scripts are standalone executables run by the agent under
+# Harbor (not imported); printing to stdout is their output contract.
+"src/skillevaluator/tier3/reference_skills/**" = ["T201"]
+# pytest test directories are implicit namespace packages by design (no
+# __init__.py anywhere under tests/).
+"tests/**" = ["INP001"]
+# Test helper / fixture scripts run standalone and print to stdout by design.
+"tests/golden/generate_cli_surface.py" = ["T201"]
+"tests/fixtures/skills/**" = ["T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["skillevaluator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put the repo root on sys.path so the release tooling tests can
+# ``import scripts.release.*`` (the tooling is not part of the installed wheel).
+pythonpath = ["."]
+# Union of the file-discovery patterns, including *_test.py.
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# addopts + markers carried over so marker-based selection works
+# and live/integration suites are excluded from the default fast loop.
+addopts = "--tb=short -m 'not live and not integration'"
+markers = [
+    "integration: end-to-end integration tests (may require fixtures or longer runtime)",
+    "live: live tests against the in-process Harbor backend (requires the tier3 extra + NVIDIA_API_KEY)",
+]

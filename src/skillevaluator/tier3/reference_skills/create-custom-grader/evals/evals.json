@@ -1,0 +1,43 @@
+[
+  {
+    "id": "create-custom-grader-001",
+    "question": "I have a benchmark folder with task.yaml, code/ fixtures, prompt variants, coverage.target_skill, expected non-trigger skills, and a five-item rubric. Convert it into an SkillEvaluator bring-your-own-grader workflow for the target skill, using default evaluator metrics plus custom rubric metrics.",
+    "expected_skill": "create-custom-grader",
+    "expected_script": null,
+    "ground_truth": "The agent uses create-custom-grader to map the benchmark into SkillEvaluator BYOG: evals/evals.json entries from the benchmark prompts, fixtures under evals/files, evals/config.yml with grading.mode default_plus_custom, a real evals/grader.py or grader.sh that writes reward.json/reward.txt with custom_metrics for the rubric, and validation/evaluation commands.",
+    "expected_behavior": [
+      "The agent reads create-custom-grader/SKILL.md before designing the conversion.",
+      "The agent chooses top-level BYOG with grading.mode default_plus_custom unless the user asks to replace default metrics.",
+      "The agent maps benchmark prompts, target skill, trigger boundaries, fixtures, and rubric criteria into evaluator files instead of storing all benchmark metadata blindly in evals.json.",
+      "The agent implements executable grader logic that writes /logs/verifier/reward.json and /logs/verifier/reward.txt with numeric custom metrics.",
+      "The agent runs or explicitly plans skillevaluator validate --harbor-contract and reports what was proven."
+    ]
+  },
+  {
+    "id": "create-custom-grader-002",
+    "question": "Our skill already has evals/evals.json, but we want to add one more verifier that checks generated files and reports a domain-specific score alongside the standard evaluator metrics. Build the custom grader structure and explain the data exchange contract.",
+    "expected_skill": "create-custom-grader",
+    "expected_script": null,
+    "ground_truth": "The agent adds a top-level BYOG grader for the existing generated tasks, keeps grading.mode default_plus_custom, explains that the grader reads /logs/agent/trajectory.json, /tests/entry.json, and workspace artifacts, and writes reward.json plus reward.txt with non-reserved custom_metrics. It preserves the existing evals.json tasks and validates the Harbor contract.",
+    "expected_behavior": [
+      "The agent reads create-custom-grader/SKILL.md before acting.",
+      "The agent keeps the existing evals/evals.json as the task source rather than converting to native Harbor unnecessarily.",
+      "The agent uses or recommends skillevaluator init-custom-grader with the appropriate language.",
+      "The agent avoids reserved metric-name collisions and keeps default evaluator metrics separate from custom metrics.",
+      "The agent includes validation and E2E verification steps rather than stopping at placeholder files."
+    ]
+  },
+  {
+    "id": "create-custom-grader-003-negative",
+    "question": "Create a normal three-case evals/evals.json dataset for a calculator skill. I do not need a custom grader or any Harbor task files.",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "The agent recognizes this as ordinary eval dataset authoring and does not activate create-custom-grader. It uses the normal dataset workflow instead and does not create grader.py, grader.sh, evals/harbor, or custom grading config.",
+    "expected_behavior": [
+      "The agent does not read or activate create-custom-grader/SKILL.md.",
+      "The agent does not create custom grader files when the user explicitly says they are not needed.",
+      "The agent routes to normal evals/evals.json dataset authoring."
+    ]
+  }
+]

@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# PII Detection Patterns for SkillEvaluator
+# Version: 2.4.0 - organization-neutral email and home-path policy
+# Version: 2.3.0 - home_paths flags only the author/submitter username
+#                  (identity-based), not unrelated /home roots
+# Version: 2.1.0 - Added suggestion field for CI failure analysis
+# Keys used by the code:
+# - pattern (required): regex pattern
+# - severity (optional): critical/high/medium/low
+# - description (optional): human-readable description
+# - suggestion (optional): how to fix the issue
+# - exceptions (optional): per-pattern exception list
+
+# Personal file paths
+personal_paths:
+  - pattern: "/Users/[^/\\s]+/"
+    severity: high
+    description: Personal macOS user path
+    suggestion: "Use generic path like /path/to/file or environment variable like $HOME"
+    exceptions:
+      # REST API route patterns (e.g., /users/:id/profile, /users/{id})
+      - "/users/:"
+      - "/users/{"
+      - "/Users/:"
+      - "/Users/{"
+      # API endpoint documentation
+      - "GET /users"
+      - "POST /users"
+      - "PUT /users"
+      - "PATCH /users"
+      - "DELETE /users"
+      - "api/users"
+
+  - pattern: 'C:\\Users\\[^\\s]+'
+    severity: high
+    description: Personal Windows user path
+    suggestion: "Use generic path like C:\\path\\to\\file or %USERPROFILE% variable"
+
+# Personal Linux home directories (may leak the submitter's own identity)
+# The first path component after /home/ is captured (group 1). A match is
+# flagged ONLY when that component equals the skill author or submitter username
+# (identity-based check in security.py). Unrelated /home/<root> paths are left
+# unflagged without maintaining an organization-specific allowlist. A
+# contributor's own home directory -- e.g. /home/example-user/ when
+# example-user authored or submitted the skill -- is still flagged. See
+# SecurityValidator._is_personal_home_path.
+home_paths:
+  - pattern: "/home/([^/\\s]+)/"
+    severity: high
+    description: Personal Linux home directory path
+    suggestion: "Use a generic path or an environment variable like $HOME"
+
+# Email addresses (excluding placeholder/test domains and OData property names)
+emails:
+  - pattern: '[A-Za-z0-9._%+-]+@(?!([a-z0-9-]+\.)*example\.com|([a-z0-9-]+\.)*example\.org|([a-z0-9-]+\.)*test\.com|odata\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+    severity: high
+    description: Non-placeholder email address
+    suggestion: "Remove the address or use a placeholder like user@example.com"
+    exceptions:
+      # Third-party license attributions (copyright notices are legitimate)
+      - "Copyright"
+      - "copyright"
+      - "LICENSE"
+      - "license"
+      - "(c)"
+      - "Authors"
+      # URL credential syntax (userinfo@host is not an email)
+      - "://"
+      # OData/Redfish JSON property names (e.g. Members@odata.count, @odata.type)
+      - "@odata."
+
+# Phone numbers
+# The US pattern requires explicit separators (NNN-NNN-NNNN or NNN.NNN.NNNN).
+# A bare 10-digit run (e.g. a nanosecond timestamp, byte offset, or numeric ID
+# common in technical reference docs) is no longer treated as a phone number,
+# which removes a large class of false positives while still catching formatted
+# numbers and the 555-555-5555 placeholder.
+phone_numbers:
+  - pattern: '\b\d{3}[-.]\d{3}[-.]\d{4}\b'
+    severity: medium
+    description: US phone number pattern
+    suggestion: "Remove phone number or use placeholder like 555-555-5555"
+    exceptions:
+      # URL query parameters (e.g., pageId=4329597638)
+      - "pageId="
+      - "http://"
+      - "https://"
+      - "?id="
+      - "&id="
+      - "Id="
+
+  - pattern: '\+\d{1,3}[\s.-]?\(?\d{1,4}\)?[\s.-]?\d{1,4}[\s.-]?\d{1,9}'
+    severity: medium
+    description: International phone number
+    suggestion: "Remove phone number or use placeholder like +1-555-555-5555"
+    exceptions:
+      - "http://"
+      - "https://"
+      - "pageId="
+
+# Social Security Numbers
+ssn:
+  - pattern: '\b\d{3}-\d{2}-\d{4}\b'
+    severity: critical
+    description: Social Security Number
+    suggestion: "Remove SSN immediately - use placeholder like XXX-XX-XXXX if needed"
+
+# IP addresses (excluding RFC1918 private ranges and localhost)
+ip_addresses:
+  - pattern: '\b(?!10\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168\.|127\.|0\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+    severity: medium
+    description: Non-RFC1918 IP address
+    suggestion: "Use private IP (10.x.x.x, 192.168.x.x) or placeholder like 0.0.0.0"
+
+# Database connection strings (CRITICAL - common in config files)
+database_credentials:
+  - pattern: '(postgres|postgresql|mysql|mariadb|mongodb|redis)://[^:]+:[^@]+@[^/\s]+'
+    severity: critical
+    description: Database connection string with credentials
+    suggestion: "Use environment variable like $DATABASE_URL or config file reference"
+
+  - pattern: '(jdbc:[a-z]+://[^:]+:[0-9]+/[a-z0-9_-]+)'
+    severity: high
+    description: JDBC connection string
+    suggestion: "Move connection string to environment variable or secure config"
+
+  - pattern: '(?i)(connection|conn)[-_]?string.*password='
+    severity: critical
+    description: Connection string containing password
+    suggestion: "Remove password from connection string - use environment variable"
+
+# JWT tokens (commonly leaked in logs/examples)
+jwt_tokens:
+  - pattern: '\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    severity: high
+    description: JWT token
+    suggestion: "Remove JWT token - use placeholder like eyJ...REDACTED...xyz"
+
+# Generic secrets/credentials in code
+hardcoded_secrets:
+  - pattern: '(?i)(secret|password|passwd|pwd|api[-_]?key|apikey|auth[-_]?token|bearer)\s*[=:]\s*[''"][^''"]{16,}[''"]'
+    severity: critical
+    description: Hardcoded secret/credential in code
+    suggestion: "Use environment variable or secrets manager instead of hardcoded value"
+    exceptions:
+      - example
+      - test
+      - dummy
+      - placeholder
+      - YOUR_
+      - INSERT_
+      # Lowercase placeholder patterns common in documentation
+      - "your-"
+      - "your_"
+      - "<your"
+      - "{your"
+      - "${YOUR"
+      - "${your"
+      # Environment variable references (not actual secrets)
+      - "${"
+      - "$("
+
+# Webhook URLs (Slack, Discord, etc.)
+webhook_urls:
+  - pattern: 'https://hooks\.slack\.com/services/T[A-Z0-9]{8}/B[A-Z0-9]{8}/[A-Za-z0-9]{24}'
+    severity: high
+    description: Slack webhook URL
+    suggestion: "Remove webhook URL - store in environment variable like $SLACK_WEBHOOK_URL"
+
+  - pattern: 'https://discord\.com/api/webhooks/[0-9]{18}/[A-Za-z0-9_-]{68}'
+    severity: high
+    description: Discord webhook URL
+    suggestion: "Remove webhook URL - store in environment variable"
+
+# AWS credentials and resources
+aws_identifiers:
+  - pattern: '\b(AKIA|ASIA)[A-Z0-9]{16}\b'
+    severity: critical
+    description: AWS Access Key ID
+    suggestion: "Remove AWS key - use IAM roles or AWS_ACCESS_KEY_ID environment variable"
+
+  - pattern: 'arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:[a-z0-9-/_]+'
+    severity: medium
+    description: AWS ARN (may expose infrastructure details)
+    suggestion: "Consider using placeholder ARN or environment variable for sensitive resources"
+
+# GitHub tokens
+github_tokens:
+  - pattern: '\bghp_[A-Za-z0-9]{36}\b'
+    severity: critical
+    description: GitHub Personal Access Token
+    suggestion: "Remove token immediately - use GITHUB_TOKEN environment variable"
+
+  - pattern: '\bghs_[A-Za-z0-9]{36}\b'
+    severity: critical
+    description: GitHub OAuth token
+    suggestion: "Remove token immediately - use secure credential storage"
+
+# Private keys
+private_keys:
+  - pattern: '-----BEGIN[A-Z\s]*PRIVATE KEY-----'
+    severity: critical
+    description: Private key in PEM format
+    suggestion: "Remove private key - store in secure vault or use key file reference"
+
+# Credit card numbers (less common but high severity)
+# Note: Matches are post-validated with the Luhn algorithm in security.py.
+# Numbers that fail Luhn are silently discarded (not valid card numbers).
+# The lookbehind/lookahead reject matches embedded in a longer digit run or
+# immediately preceded by a decimal point -- this prevents floating-point
+# eval scores like "score": 0.8603333333333333 in JSON dumps from being
+# misread as 16-digit card numbers (the 16-digit window 8603333333333333
+# happens to pass Luhn).
+credit_cards:
+  - pattern: '(?<![\d.])[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}(?!\d)'
+    severity: critical
+    description: Possible credit card number
+    suggestion: "Remove credit card number - use placeholder like 4111-1111-1111-1111"
+    exceptions:
+      # Browser automation commands
+      - "agent-browser"
+      - "fill @"
+      # Test/example context (specific phrases, not bare "test")
+      - "example"
+      - "placeholder"
+      - "mock"
+      - "fake"
+      - "dummy"
+      - "test card"
+      - "test number"
+      - "for testing"
+      # Well-known test card numbers (full, not prefix substrings)
+      - "4111111111111111"
+      - "4111-1111-1111-1111"
+      - "5500000000000004"
+      - "5500-0000-0000-0004"
+      - "378282246310005"
+
+# Cryptocurrency addresses
+crypto_addresses:
+  - pattern: '\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b'
+    severity: medium
+    description: Bitcoin address
+    suggestion: "Remove personal wallet address if not intended for public sharing"
+
+  - pattern: '\b0x[a-fA-F0-9]{40}\b'
+    severity: medium
+    description: Ethereum address
+    suggestion: "Remove personal wallet address if not intended for public sharing"
+
+# MAC addresses
+mac_addresses:
+  - pattern: '\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'
+    severity: low
+    description: MAC address (hardware identifier)
+    suggestion: "Consider using placeholder like 00:00:00:00:00:00 if example is needed"
+
+# GPS coordinates
+# Note: real GPS coordinates carry several decimals of precision (e.g.
+# 37.7749, -122.4194). Both the latitude and longitude components therefore
+# require at least 4 fractional digits. This rejects the low-precision decimal
+# pairs that pepper technical/API reference docs (normalized ROI floats like
+# "0.5, 0.7", scale factors like "1.5, 2.0", etc.) while still flagging genuine
+# location data. The exact-pole forms (90.0 / 180.0) are kept as-is.
+gps_coordinates:
+  - pattern: '[-+]?([1-8]?\d\.\d{4,}|90\.0+)[,\s]+[-+]?(180\.0+|((1[0-7]\d)|([1-9]?\d))\.\d{4,})'
+    severity: medium
+    description: GPS coordinates (location information)
+    suggestion: "Remove location data or use non-sensitive coordinates like 0.0, 0.0"
+    exceptions:
+      # CSS HSL color values (hue saturation% lightness%)
+      - "%"
+      # Canvas/viewport dimensions
+      - "createCanvas"
+      - "Canvas("
+      - "viewport"
+      # CSS variables and properties
+      - "--"
+      - "width:"
+      - "height:"
+      # Common code patterns
+      - "size("
+      - "resize("
+      - "dimensions"
+      # Numeric quantities in text (e.g., "17,500 words", "~20,000 characters")
+      - " words"
+      - " characters"
+      - " lines"
+      - " pages"
+      - " items"
+      - " files"
+      - " bytes"
+      - "Timestamp"
+      - "pageId"
+      - "version"
+      - "~"
+      # Python code patterns (embedding vectors, list comprehensions)
+      - "return ["
+      - "return [["
+      - "for _ in"
+      - "range("
+      - "np.array"
+      - "torch.tensor"
+      # Variable assignments with zero/default values
+      - "= 0.0"
+      - "= -0.0"
+      # CLI geolocation commands
+      - "set geo"
+      - "geo "
+      # X11 display and port notation
+      - "DISPLAY"
+      - ":0.0"
+      # Type annotations and casts with numeric defaults
+      - "float("
+      - ": float"
+      - "double("
+      - ": double"
+      - "decimal("
+      - ": decimal"
+
+# Global exceptions - paths that are allowed
+exceptions:
+  allowed_paths:
+    - /tmp/
+    - /var/tmp/
+    - /opt/
+    - /usr/local/

@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+.smoke-venv
+.env
+.env.*
+build/
+dist/
+reports/
+results/
+log/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

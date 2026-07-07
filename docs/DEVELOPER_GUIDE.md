@@ -1,0 +1,33 @@
+# Developer Guide
+
+## Development Setup
+
+Use Python 3.12 or later, then install the project with its development tools:
+
+```bash
+pip install -e '.[all,dev]'
+```
+
+## Required Checks
+
+Run these commands before opening a pull request:
+
+```bash
+make lint
+make test
+make build
+```
+
+Tier 3 live evaluation requires separately configured public provider and agent
+credentials. Do not add credentials or private datasets to the repository.
+
+## Code Style
+
+Use the existing Python typing and test patterns. Keep changes scoped, add
+regression coverage for behavior changes, and use Ruff for formatting and lint.
+
+## Dependency Changes
+
+Add only publicly available dependencies with compatible licenses. Update
+`pyproject.toml`, `uv.lock`, and [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)
+together, then verify the release SBOM and license scan before publishing.

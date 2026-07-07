@@ -1,0 +1,26 @@
+[
+  {
+    "id": "calculator-001",
+    "question": "What is 2 + 3 * 4? Please use the calculator skill to compute this.",
+    "expected_skill": "calculator",
+    "expected_script": "calc.py",
+    "ground_truth": "The agent used the calculator skill to evaluate the expression '2 + 3 * 4'. It executed calc.py and returned the result 14, correctly following standard operator precedence (multiplication before addition).",
+    "expected_behavior": [
+      "The agent read the calculator SKILL.md to understand the skill",
+      "The agent executed calc.py with the expression '2 + 3 * 4'",
+      "The agent reported the correct result of 14"
+    ]
+  },
+  {
+    "id": "calculator-002",
+    "question": "I need to convert 100 degrees Celsius to Fahrenheit. Can you help?",
+    "expected_skill": "calculator",
+    "expected_script": "calc.py",
+    "ground_truth": "The agent used the calculator skill to convert 100 celsius to fahrenheit. It executed calc.py with '100 celsius to fahrenheit' and returned the result: 100 celsius = 212 fahrenheit.",
+    "expected_behavior": [
+      "The agent read the calculator SKILL.md to understand unit conversion capabilities",
+      "The agent executed calc.py with '100 celsius to fahrenheit'",
+      "The agent reported that 100 degrees Celsius equals 212 degrees Fahrenheit"
+    ]
+  }
+]

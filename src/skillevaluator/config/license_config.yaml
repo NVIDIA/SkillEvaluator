@@ -1,0 +1,255 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# License Compliance Configuration for SkillEvaluator
+# Version: 1.0.0
+#
+# This configuration defines allowed and blocked licenses for Skills, Rules,
+# and Workflows ingestion. Uses SPDX license identifiers as the canonical format.
+#
+# Keys:
+# - allowed_licenses: Permissive licenses that are safe to ingest
+# - blocked_licenses: Restrictive/proprietary licenses that should be rejected
+# - license_patterns: Regex patterns to detect licenses from LICENSE file content
+# - spdx_header_pattern: Pattern to match SPDX-License-Identifier headers in source files
+
+# =============================================================================
+# ALLOWED LICENSES (Permissive)
+# =============================================================================
+# These licenses permit free use, modification, and redistribution with minimal
+# restrictions. Assets with these licenses can be safely ingested.
+
+allowed_licenses:
+  # Apache family
+  - Apache-2.0
+  - Apache-1.1
+  - Apache-1.0
+
+  # MIT family
+  - MIT
+  - MIT-0           # MIT No Attribution
+
+  # BSD family
+  - BSD-2-Clause
+  - BSD-3-Clause
+  - BSD-3-Clause-Clear
+  - 0BSD            # Zero-Clause BSD
+
+  # Other permissive
+  - ISC
+  - Unlicense
+  - WTFPL
+  - Zlib
+  - X11
+  - JSON            # JSON License
+
+  # Creative Commons permissive
+  - CC0-1.0         # Public Domain Dedication
+  - CC-BY-4.0       # Attribution only
+  - CC-BY-3.0
+
+  # Python-specific
+  - PSF-2.0         # Python Software Foundation
+  - Python-2.0
+
+# =============================================================================
+# BLOCKED LICENSES (Restrictive/Copyleft/Proprietary)
+# =============================================================================
+# These licenses have restrictions that make them unsuitable for ingestion.
+# Assets with these licenses should be rejected.
+
+blocked_licenses:
+  # Strong copyleft (viral)
+  - GPL-2.0
+  - GPL-2.0-only
+  - GPL-2.0-or-later
+  - GPL-3.0
+  - GPL-3.0-only
+  - GPL-3.0-or-later
+  - AGPL-3.0
+  - AGPL-3.0-only
+  - AGPL-3.0-or-later
+
+  # Weak copyleft
+  - LGPL-2.0
+  - LGPL-2.1
+  - LGPL-3.0
+  - MPL-2.0         # Mozilla Public License (file-level copyleft)
+  - EPL-1.0         # Eclipse Public License
+  - EPL-2.0
+
+  # Creative Commons restrictive
+  - CC-BY-NC-4.0    # Non-commercial
+  - CC-BY-NC-3.0
+  - CC-BY-NC-SA-4.0 # Non-commercial + ShareAlike
+  - CC-BY-ND-4.0    # No derivatives
+  - CC-BY-NC-ND-4.0 # Non-commercial + No derivatives
+
+  # Proprietary indicators
+  - Proprietary
+  - Commercial
+  - All-Rights-Reserved
+  - Confidential
+
+# =============================================================================
+# LICENSE DETECTION PATTERNS
+# =============================================================================
+# Patterns to identify licenses from LICENSE file content.
+# Each license has a list of required patterns - ALL must match for detection.
+# Uses case-insensitive matching.
+
+license_patterns:
+  # Apache 2.0 - Most common permissive license
+  Apache-2.0:
+    required:
+      - "Apache License"
+      - "Version 2.0"
+    confidence: high
+
+  # MIT License variants
+  MIT:
+    required:
+      - "MIT License|Permission is hereby granted, free of charge"
+      - "without restriction"
+    confidence: high
+
+  # BSD 3-Clause
+  BSD-3-Clause:
+    required:
+      - "BSD"
+      - "Redistribution and use"
+      - "Neither the name"
+    confidence: high
+
+  # BSD 2-Clause (Simplified)
+  BSD-2-Clause:
+    required:
+      - "BSD"
+      - "Redistribution and use"
+    exclude:
+      - "Neither the name"
+    confidence: medium
+
+  # ISC License
+  ISC:
+    required:
+      - "ISC License|ISC license"
+      - "Permission to use, copy, modify"
+    confidence: high
+
+  # Unlicense (Public Domain)
+  Unlicense:
+    required:
+      - "This is free and unencumbered software"
+      - "public domain"
+    confidence: high
+
+  # Creative Commons CC0
+  CC0-1.0:
+    required:
+      - "CC0|Creative Commons"
+      - "public domain|Public Domain"
+    confidence: medium
+
+  # GPL v3 (BLOCKED)
+  GPL-3.0:
+    required:
+      - "GNU GENERAL PUBLIC LICENSE"
+      - "Version 3"
+    confidence: high
+
+  # GPL v2 (BLOCKED)
+  GPL-2.0:
+    required:
+      - "GNU GENERAL PUBLIC LICENSE"
+      - "Version 2"
+    confidence: high
+
+  # LGPL (BLOCKED)
+  LGPL-3.0:
+    required:
+      - "GNU LESSER GENERAL PUBLIC LICENSE"
+      - "Version 3"
+    confidence: high
+
+  # AGPL (BLOCKED)
+  AGPL-3.0:
+    required:
+      - "GNU AFFERO GENERAL PUBLIC LICENSE"
+      - "Version 3"
+    confidence: high
+
+  # MPL 2.0 (BLOCKED)
+  MPL-2.0:
+    required:
+      - "Mozilla Public License"
+      - "Version 2.0"
+    confidence: high
+
+# =============================================================================
+# PROPRIETARY INDICATORS
+# =============================================================================
+# Patterns that indicate proprietary or restrictive licensing.
+# If ANY of these are found without a recognized open-source license, block.
+
+proprietary_indicators:
+  - "All rights reserved"
+  - "Proprietary"
+  - "Confidential"
+  - "Trade secret"
+  - "Not for distribution"
+  - "Internal use only"
+  - "Do not copy"
+  - "Commercial license required"
+  - "Licensed for evaluation only"
+  - "Contact .* for licensing"
+
+# =============================================================================
+# SPDX HEADER DETECTION
+# =============================================================================
+# Pattern for detecting SPDX license identifiers in source file headers.
+# Scans first N lines of source files.
+
+spdx_detection:
+  # Regex pattern to extract SPDX identifier
+  pattern: "SPDX-License-Identifier:\\s*([A-Za-z0-9.+-]+)"
+
+  # Number of lines to scan from the beginning of each file
+  scan_lines: 50
+
+  # File extensions to scan for SPDX headers
+  scannable_extensions:
+    - .py
+    - .sh
+    - .js
+    - .ts
+    - .yaml
+    - .yml
+    - .md
+    - .txt
+    - .json
+    - .rb
+    - .go
+    - .rs
+    - .java
+    - .c
+    - .cpp
+    - .h
+    - .hpp
+
+# =============================================================================
+# LICENSE FILE NAMES
+# =============================================================================
+# Standard license file names to search for in asset directories.
+
+license_file_names:
+  - LICENSE
+  - LICENSE.txt
+  - LICENSE.md
+  - LICENSE.rst
+  - LICENCE          # British spelling
+  - LICENCE.txt
+  - COPYING
+  - COPYING.txt
+  - NOTICE
+  - NOTICE.txt

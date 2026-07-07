@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Ask a question
+    url: https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md
+    about: Usage questions and support channels are described in SUPPORT.md.
+  - name: Report a security vulnerability
+    url: https://github.com/NVIDIA/SkillEvaluator/blob/main/SECURITY.md
+    about: Do not report security vulnerabilities through public GitHub issues. SECURITY.md describes NVIDIA's private reporting process.

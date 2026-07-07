@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="200" viewBox="0 0 560 200" role="img" aria-label="SkillEvaluator">
+  <style>
+    .w { fill: #76B900; font-family: 'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace; font-size: 24px; font-weight: 700; white-space: pre; }
+    .sub { fill: #76B900; font-family: 'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace; font-size: 22px; font-weight: 700; letter-spacing: 0.4em; }
+  </style>
+  <text x="10" y="32" class="w" xml:space="preserve">███████╗██╗  ██╗██╗██╗     ██╗     </text>
+  <text x="10" y="58" class="w" xml:space="preserve">██╔════╝██║ ██╔╝██║██║     ██║     </text>
+  <text x="10" y="84" class="w" xml:space="preserve">███████╗█████╔╝ ██║██║     ██║     </text>
+  <text x="10" y="110" class="w" xml:space="preserve">╚════██║██╔═██╗ ██║██║     ██║     </text>
+  <text x="10" y="136" class="w" xml:space="preserve">███████║██║  ██╗██║███████╗███████╗</text>
+  <text x="10" y="162" class="w" xml:space="preserve">╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝</text>
+  <text x="540" y="190" class="sub" text-anchor="end">EVALUATOR</text>
+</svg>

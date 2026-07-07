@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Unicode Smuggling Detection Patterns for SkillEvaluator
+#
+# Defines invisible Unicode character categories, severity thresholds,
+# and known-safe exceptions for detecting ASCII smuggling, trojan source
+# attacks, and steganographic data hiding.
+#
+# Categories are scanned by default unless marked as optional.
+# Severity can be escalated based on consecutive run thresholds.
+
+categories:
+  unicode_tags:
+    description: "Unicode Tag characters that encode hidden ASCII text"
+    default_severity: critical
+    range_start: 0xE0000
+    range_end: 0xE007F
+    ascii_decodable_start: 0xE0020
+    ascii_decodable_end: 0xE007E
+
+  zero_width:
+    description: "Zero-width characters used for steganography"
+    default_severity: medium
+    characters:
+      0x034F: "COMBINING GRAPHEME JOINER"
+      0x180E: "MONGOLIAN VOWEL SEPARATOR"
+      0x200B: "ZERO WIDTH SPACE"
+      0x200C: "ZERO WIDTH NON-JOINER"
+      0x200D: "ZERO WIDTH JOINER"
+      0x2060: "WORD JOINER"
+      0xFEFF: "ZERO WIDTH NO-BREAK SPACE"
+
+  bidi_marks:
+    description: "Directional override characters (CVE-2021-42574 trojan source)"
+    default_severity: high
+    characters:
+      0x061C: "ARABIC LETTER MARK"
+      0x200E: "LEFT-TO-RIGHT MARK"
+      0x200F: "RIGHT-TO-LEFT MARK"
+      0x202A: "LEFT-TO-RIGHT EMBEDDING"
+      0x202B: "RIGHT-TO-LEFT EMBEDDING"
+      0x202C: "POP DIRECTIONAL FORMATTING"
+      0x202D: "LEFT-TO-RIGHT OVERRIDE"
+      0x202E: "RIGHT-TO-LEFT OVERRIDE"
+      0x2066: "LEFT-TO-RIGHT ISOLATE"
+      0x2067: "RIGHT-TO-LEFT ISOLATE"
+      0x2068: "FIRST STRONG ISOLATE"
+      0x2069: "POP DIRECTIONAL ISOLATE"
+
+  invisible_operators:
+    description: "Invisible math/layout operators"
+    default_severity: medium
+    characters:
+      0x2061: "FUNCTION APPLICATION"
+      0x2062: "INVISIBLE TIMES"
+      0x2063: "INVISIBLE SEPARATOR"
+      0x2064: "INVISIBLE PLUS"
+
+  deprecated_format_controls:
+    description: "Deprecated Unicode format control characters"
+    default_severity: medium
+    characters:
+      0x206A: "INHIBIT SYMMETRIC SWAPPING"
+      0x206B: "ACTIVATE SYMMETRIC SWAPPING"
+      0x206C: "INHIBIT ARABIC FORM SHAPING"
+      0x206D: "ACTIVATE ARABIC FORM SHAPING"
+      0x206E: "NATIONAL DIGIT SHAPES"
+      0x206F: "NOMINAL DIGIT SHAPES"
+
+  variation_selectors:
+    description: "Variation selectors (basic and supplement)"
+    default_severity: low
+    range_basic_start: 0xFE00
+    range_basic_end: 0xFE0F
+    range_supplement_start: 0xE0100
+    range_supplement_end: 0xE01EF
+
+# Optional expanded categories (enabled via --include-spaces flag)
+optional_categories:
+  confusable_spaces:
+    description: "Confusable space characters and fillers"
+    default_severity: low
+    characters:
+      0x00A0: "NO-BREAK SPACE"
+      0x00AD: "SOFT HYPHEN"
+      0x2000: "EN QUAD"
+      0x2001: "EM QUAD"
+      0x2002: "EN SPACE"
+      0x2003: "EM SPACE"
+      0x2004: "THREE-PER-EM SPACE"
+      0x2005: "FOUR-PER-EM SPACE"
+      0x2006: "SIX-PER-EM SPACE"
+      0x2007: "FIGURE SPACE"
+      0x2008: "PUNCTUATION SPACE"
+      0x2009: "THIN SPACE"
+      0x200A: "HAIR SPACE"
+      0x202F: "NARROW NO-BREAK SPACE"
+      0x205F: "MEDIUM MATHEMATICAL SPACE"
+      0x2800: "BRAILLE PATTERN BLANK"
+      0x3000: "IDEOGRAPHIC SPACE"
+      0x3164: "HANGUL FILLER"
+      0xFFA0: "HALFWIDTH HANGUL FILLER"
+
+# Severity escalation thresholds
+thresholds:
+  consecutive_run_critical: 40
+  consecutive_run_high: 10
+  sparse_volume_high: 100
+  per_line_medium: 3
+
+# Known-safe exceptions
+exceptions:
+  - description: "BOM at file start"
+    character: 0xFEFF
+    position: "file_start"
+    max_severity: info

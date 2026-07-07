@@ -1,0 +1,16 @@
+[
+  {
+    "id": "text-analyzer-001",
+    "question": "Can you analyze this text and tell me the word count, line count, and most frequent words? Here is the text: 'The quick brown fox jumps over the lazy dog. The dog barked at the fox. The fox ran away quickly.'",
+    "expected_skill": "text-analyzer",
+    "expected_script": "analyze_text.py",
+    "ground_truth": "The agent used the text-analyzer skill to analyze the provided text. It executed analyze_text.py with the inline text and returned the analysis showing 20 words, 1 line, 97 characters, 3 sentences, and the most frequent word 'the' appearing 5 times, followed by 'fox' (3 times) and 'dog' (2 times).",
+    "expected_behavior": [
+      "The agent read the text-analyzer SKILL.md to understand how to use the skill",
+      "The agent executed analyze_text.py with the --text flag passing the provided text",
+      "The agent reported the word count (20 words) from the analysis results",
+      "The agent reported the most frequent words, noting 'the' appears 5 times",
+      "The agent included additional statistics like character count (97) or sentence count (3) in the response"
+    ]
+  }
+]

@@ -1,52 +1,105 @@
 # Tier 2: Semantic Deduplication
 
-Tier 2 covers two complementary workflows:
+Tier 2 detects duplicate and overlapping skill content with embedding-based
+similarity analysis and, for intra-skill candidates, chat-LLM verification. It
+covers two complementary problems:
 
-- **Intra-skill deduplication** finds repeated or overlapping guidance inside
-  one skill before it bloats the agent's context window.
-- **Inter-skill similarity** compares skills directly or checks one candidate
-  against a versioned local catalog.
+| | Intra-skill context deduplication | Inter-skill similarity |
+| --- | --- | --- |
+| **Scope** | Within one skill directory | Across a skill collection, or one candidate against a local catalog |
+| **Question** | "Does this skill repeat guidance internally?" | "Does this skill overlap an existing skill?" |
+| **Embedding storage** | Ephemeral and in memory for each run | Ephemeral for a direct scan, or a versioned local JSON catalog |
+| **Comparison** | Pairwise cosine similarity followed by Union-Find clustering | Pairwise cosine similarity, or one target compared with catalog entries |
+| **Chat LLM role** | Classifies overlapping candidate clusters | None; the check is embeddings-only |
+| **Command** | `context-optimization-check` (`dedup-scan` is an alias) | `similarity-check` |
 
-Both workflows run from local files. There is no Milvus, vector database,
-catalog server, or NVIDIA-internal service dependency.
+Both modes use local input files. No external vector database or catalog service
+is required.
 
-All three commands need an embeddings API: an LLM provider key
-(see [CONFIGURATION.md](CONFIGURATION.md)) or any local OpenAI-compatible
-endpoint (see the
-[fully-local recipe](CONFIGURATION.md#fully-local-tier-2-no-external-calls)).
+Tier 2 needs a configured embeddings provider. Intra-skill analysis also needs
+a configured chat LLM. If the selected chat provider does not offer embeddings,
+configure an embeddings provider separately. See
+[`CONFIGURATION.md`](CONFIGURATION.md), including the
+[fully local recipe](CONFIGURATION.md#fully-local-tier-2-no-external-calls).
 
-### Data sent to configured providers
+## Table of Contents
 
-- In the default inter-skill mode, skill names and descriptions are sent to
-  the configured embeddings provider. With `--full-body`, the full manifest is sent instead.
-- For intra-skill analysis, scannable content chunks are sent to the embeddings
-  provider. Only overlapping candidate clusters are sent to the configured
-  chat LLM for classification.
+- [Commands](#commands)
+- [Inter-Skill Similarity (`similarity-check`)](#inter-skill-similarity-similarity-check)
+- [Intra-Skill Context Deduplication (`context-optimization-check`)](#intra-skill-context-deduplication-context-optimization-check)
+- [Provider Data and Privacy](#provider-data-and-privacy)
+- [Defaults](#defaults)
+- [Reports and Exit Behavior](#reports-and-exit-behavior)
+- [Safety and Resource Limits](#safety-and-resource-limits)
+- [Edge Cases](#edge-cases)
+- [See Also](#see-also)
 
-Use the fully local provider recipe above when this content must not leave the
-machine. Catalog files remain local unless you explicitly share them.
-
-## Intra-skill deduplication
-
-```bash
-skillevaluator context-optimization-check ./my-skill  # redundant content (threshold 0.8)
-skillevaluator dedup-scan ./my-skill                  # alias for the command above
-```
-
-`context-optimization-check` clusters overlapping sections with embeddings and
-uses a chat LLM to explain the overlap. `dedup-scan` is an alias with the same
-options and behavior. Use `--threshold` to tune sensitivity.
-
-## Inter-skill similarity
-
-Compare every skill in a directory directly:
+## Commands
 
 ```bash
-skillevaluator similarity-check ./skills  # embeddings only; default threshold 0.75
+# Compare every skill in a collection directly.
+skillevaluator similarity-check ./skills --threshold 0.75
+
+# Save a reusable local catalog, then compare one candidate with it.
+skillevaluator similarity-check ./skills --save-catalog ./skill-catalog.json
+skillevaluator similarity-check ./candidate-skill --catalog ./skill-catalog.json
+
+# Find repeated content within one skill.
+skillevaluator context-optimization-check ./my-skill --threshold 0.80
+skillevaluator dedup-scan ./my-skill  # functional alias with the same analysis options
+
+# validate runs the intra-skill pass by default.
+skillevaluator validate ./my-skill
+skillevaluator validate ./my-skill --no-dedup
 ```
 
-For repeated checks, save the collection as a local catalog and compare one
-candidate skill against it:
+`validate` skips its Tier 2 pass with a warning when the optional Tier 2
+dependencies or an embeddings provider are unavailable. Use `--no-dedup` to
+disable that pass explicitly.
+
+## Inter-Skill Similarity (`similarity-check`)
+
+`similarity-check` finds duplicate or overlapping skills with vector-embedding
+cosine similarity. It recursively discovers skill manifests, extracts each
+skill's name and description by default, embeds that text with the configured
+embeddings provider, and reports pairs at or above the selected threshold.
+
+### Direct collection scan
+
+```bash
+skillevaluator similarity-check ./skills
+skillevaluator similarity-check ./skills --full-body --threshold 0.50
+```
+
+A direct scan compares every discovered skill with every other discovered skill.
+The default threshold is `0.75`, which reports `SIMILAR` and stronger matches.
+
+| Classification | Score | Severity/default behavior |
+| --- | --- | --- |
+| `EXACT_DUPLICATE` | >= 0.95 | CRITICAL; blocking |
+| `HIGH_SIMILARITY` | >= 0.90 | HIGH; blocking |
+| `SIMILAR` | >= 0.75 | MEDIUM; advisory |
+| `LOOSELY_RELATED` | >= 0.50 | LOW; advisory |
+| `DISTINCT` | < 0.50 | INFO; advisory; below the default reporting threshold |
+
+The threshold controls which score bands are returned; it does not change the
+classification boundaries. Useful options include:
+
+- `--threshold <0.0-1.0>` controls the minimum reported cosine score.
+- `--full-body` embeds each discovered `SKILL.md` in full, including its
+  frontmatter, with chunked average pooling instead of embedding only the name
+  and description. It does not include supporting files.
+- `--model <model-id>` overrides the configured embedding model for this run.
+- `--type skill` explicitly selects skill discovery when automatic detection is
+  not suitable.
+- `--save-catalog <path>` writes a reusable local catalog from the supplied
+  collection.
+- `--catalog <path>` compares exactly one supplied skill against an existing
+  catalog.
+
+### Local catalog comparison
+
+For repeated checks, save a collection once and query one candidate against it:
 
 ```bash
 skillevaluator similarity-check ./skills --save-catalog ./skill-catalog.json
@@ -54,45 +107,209 @@ skillevaluator similarity-check ./candidate-skill --catalog ./skill-catalog.json
 ```
 
 `--save-catalog` builds the catalog from the supplied collection. `--catalog`
-requires an existing catalog and compares only the supplied target against its
-entries; it does not compare catalog entries with one another or silently
-rebuild a missing catalog.
+requires an existing catalog and a candidate directory containing a root
+`SKILL.md`. It compares only that candidate against the catalog entries; it does
+not compare catalog entries with one another or silently rebuild a missing
+catalog.
 
-Catalogs use a versioned JSON schema and contain finite embedding vectors,
+Catalogs use a versioned JSON schema. They contain finite embedding vectors,
 relative skill paths, display names, descriptions, content fingerprints, and
-the provider/model metadata needed for compatibility checks. They do not
-contain API keys. A malformed, incompatible, non-finite, or oversized catalog
-is rejected with an actionable error; rebuild it with the provider and model
-you intend to query. Because the file includes derived skill content, review it
-before sharing it like any other generated project artifact.
+provider, model, mode, and endpoint-fingerprint metadata for compatibility
+checks. They do not contain API keys.
 
-Direct scans and catalog queries accept `--threshold` to tune sensitivity.
+The provider, model, endpoint, vector length, and description-versus-full-body
+mode used for a query must be compatible with the catalog. A missing, malformed,
+incompatible, non-finite, or oversized catalog is rejected with an actionable
+error. Query with matching settings or rebuild the catalog with the settings
+you intend to use.
 
-## Where the LLM comes in
+Catalogs remain local unless you explicitly share them. Because they contain
+embeddings and other data derived from skill content, review them before sharing
+them like any other generated project artifact.
 
-- `similarity-check` is embeddings-only: no chat LLM is called.
-- `context-optimization-check` and its `dedup-scan` alias use embeddings to
-  find overlap candidates, then a chat LLM to analyze them. Both accept
-  `--llm-model` to override the analysis model.
+## Intra-Skill Context Deduplication (`context-optimization-check`)
 
-## Reports and exit behavior
+As a skill grows, its directory can accumulate repeated content: copied sections
+between `SKILL.md` and reference documents, near-identical guidance under
+different headings, or script docstrings that restate the main instructions.
+That repetition consumes context without adding useful information.
 
-All workflows support CLI, JSON, HTML, and Markdown output:
+Not every similarity is redundant. A short overview in `SKILL.md` and a detailed
+explanation in `references/` are intentional progressive disclosure. Tier 2 uses
+a two-stage process so embeddings can find likely overlap and a chat LLM can
+classify its purpose.
+
+### Two-stage pipeline
+
+```text
+SKILL DIRECTORY
+  SKILL.md | README.md | references/*.md | scripts/*.py, *.sh
+        |
+        v
+  FILE COLLECTOR       Walk the directory, filter extensions, strip frontmatter,
+                       and retain source paths and line numbers
+        |
+        v
+  CONTENT CHUNKER      Markdown heading sections; Python signatures/docstrings;
+                       shell functions and comment blocks
+        |
+        v
+  STAGE 1: EMBEDDINGS  Batch-embed chunks; compare cosine scores;
+                       group connected matches with Union-Find
+        |
+        v
+  STAGE 2: CHAT LLM    Classify each candidate cluster and provide reasoning
+                       plus a suggested author action
+        |
+        v
+  STRUCTURED REPORT    Actionable duplicate findings with source locations
+```
+
+### File collection and chunking
+
+| Extension | Chunking strategy |
+| --- | --- |
+| `.md`, `.mdc` | Heading-based sections; sections over 3,000 characters are split at eligible paragraph boundaries when possible; chunks under 80 characters are dropped |
+| `.py` | Module docstrings plus class and function signatures with their docstrings; implementation bodies are not included |
+| `.sh` | Function bodies and comment blocks of at least three consecutive comment lines |
+| Other extensions | Skipped |
+
+Valid mapping frontmatter is removed from Markdown before chunking. Malformed,
+empty, or non-mapping frontmatter remains part of the analyzed text. Every
+retained chunk keeps its source file and line range so findings can point
+authors to the overlapping sections.
+
+### Stage 1: embedding clustering
+
+All chunks are embedded in batches with the configured embeddings provider. For
+`N` chunks, Tier 2 evaluates `N * (N - 1) / 2` cosine scores. Pairs at or above
+the threshold are joined with Union-Find, and each connected component with at
+least two members becomes a candidate cluster.
+
+The default intra-skill threshold is `0.80`. It is higher than the default
+inter-skill threshold because sections from the same skill naturally share more
+domain vocabulary.
+
+### Stage 2: chat-LLM verification
+
+The actual text in each candidate cluster is sent to the configured chat LLM.
+The model returns a structured verdict with a confidence score, reasoning, and a
+suggested author action:
+
+| Verdict | Meaning | Reporting behavior |
+| --- | --- | --- |
+| `DUPLICATE` | Content repeats the same information without a meaningful addition | Report an actionable finding and recommend consolidation |
+| `INTENTIONAL_DETAIL` | One section summarizes content that another section develops in detail | Do not report an actionable finding |
+| `RELATED_BUT_DISTINCT` | Sections discuss the same topic for different purposes or from different angles | Do not report an actionable finding |
+
+Duplicate findings use the following severity behavior:
+
+| Condition | Severity |
+| --- | --- |
+| `DUPLICATE` with confidence >= 0.70 | HIGH; blocking |
+| `DUPLICATE` with confidence < 0.70 | MEDIUM; advisory |
+| Short, same-file duplicate made only of comment or configuration-style text | Capped at LOW; advisory |
+
+If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the incomplete
+analysis as a blocking error rather than treating the content as clean.
+
+```bash
+skillevaluator context-optimization-check ./my-skill
+skillevaluator context-optimization-check ./my-skill --threshold 0.85
+skillevaluator dedup-scan ./my-skill  # functional alias
+```
+
+Both intra-skill command names accept `--threshold`, `--model`, `--llm-model`,
+and the same report options. Their default report basenames identify which
+command name was invoked.
+
+## Provider Data and Privacy
+
+- A default inter-skill scan sends skill names and descriptions to the configured
+  embeddings provider. `--full-body` sends each discovered `SKILL.md` in full,
+  including frontmatter, in embedding chunks; supporting files are not sent.
+- Intra-skill analysis sends retained content chunks to the configured
+  embeddings provider. Only candidate clusters found by the embedding stage are
+  sent to the configured chat LLM for classification.
+- `similarity-check` never calls a chat LLM.
+- Catalog files are read and written locally; SkillEvaluator does not upload them
+  to a catalog service.
+
+Use the [fully local provider recipe](CONFIGURATION.md#fully-local-tier-2-no-external-calls)
+when skill content must not leave the machine. Review the provider's own data
+handling terms before sending confidential skill content to a hosted endpoint.
+
+## Defaults
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| Inter-skill reporting threshold | `0.75` | Reports `SIMILAR` and stronger matches |
+| Intra-skill clustering threshold | `0.80` | Selects candidate chunk pairs for clustering |
+| Minimum content chunk | `80` characters | Drops fragments too small to compare usefully |
+| Large Markdown section split point | `3,000` characters | Attempts to split oversized sections at eligible paragraph boundaries |
+| High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
+
+Provider endpoints and default models are intentionally documented in
+[`CONFIGURATION.md`](CONFIGURATION.md) instead of duplicated here.
+
+## Reports and Exit Behavior
+
+All Tier 2 commands support CLI, JSON, HTML, and Markdown output:
 
 ```bash
 skillevaluator similarity-check ./skills \
   -r cli,json,html,markdown -o ./reports
 ```
 
-Findings at or above the configured threshold are reported as Tier 2 results.
-Blocking findings produce a non-zero exit code in every output mode, making the
-commands usable as CI gates.
+Inter-skill matches at or above the selected threshold and actionable
+intra-skill duplicate findings are emitted as Tier 2 results. HIGH and CRITICAL
+findings, along with blocking analysis errors, produce a non-zero exit code;
+MEDIUM and LOW findings are advisory. The exit behavior is the same in every
+output mode, so the commands can be used as CI gates.
 
-Tier 2 rejects linked or escaping input files before provider calls and applies
-explicit input, chunk, catalog, and comparison limits. If a project exceeds a
-limit, split the collection into intentional batches rather than scanning an
-unbounded tree.
+## Safety and Resource Limits
 
-`validate` runs the Tier 2 dedup pass by default and skips it gracefully
-when no embedding provider is configured; pass `--no-dedup` to turn it off
-explicitly.
+Tier 2 treats skill content and catalog files as untrusted input. Before any
+provider call, it rejects linked roots, linked or escaping files, non-regular
+files, and paths outside the verified scan root.
+
+Explicit limits bound discovered paths, file counts, per-file and total input
+bytes, content chunks, candidate clusters, catalog size and entry count, vector
+length, returned matches, and pairwise scalar work. Catalog loading also
+rejects duplicate JSON keys, unexpected fields, invalid identities, non-finite
+vectors, and incompatible provider metadata.
+
+If a collection exceeds a limit, split it into intentional batches rather than
+scanning an unbounded directory tree.
+
+## Edge Cases
+
+### Intra-skill analysis
+
+| Scenario | Behavior |
+| --- | --- |
+| Skill contains only `SKILL.md` | Checks repeated sections within that file |
+| Fewer than two chunks remain | Succeeds with “Not enough content to compare” |
+| Markdown has no headings | Treats the body as a preamble and attempts paragraph splitting when oversized; retains the original section if no eligible split is produced |
+| Unsupported extension | Skips the file |
+| Duplicate sections occur in one file | Reports the relevant headings and line ranges |
+| Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
+
+### Inter-skill analysis
+
+| Scenario | Behavior |
+| --- | --- |
+| Direct collection has fewer than two skills | Returns an actionable input error |
+| Catalog source collection is empty | Refuses to save an empty catalog |
+| Catalog path is missing | Returns an error and does not rebuild it silently |
+| Candidate lacks a root `SKILL.md` | Rejects the catalog query |
+| Candidate matches multiple catalog entries | Reports matches in descending similarity order |
+| Provider, endpoint, model, mode, or vector length differs | Rejects the catalog; query with matching settings or rebuild it |
+| Catalog is malformed, non-finite, or oversized | Rejects it before comparison |
+
+## See Also
+
+- [`CONFIGURATION.md`](CONFIGURATION.md) — provider setup and fully local Tier 2.
+- [`TIER1_VALIDATION.md`](TIER1_VALIDATION.md) — static, security, and quality validation.
+- [`TIER3_LIVE_EVALUATION.md`](TIER3_LIVE_EVALUATION.md) — live skill evaluation.
+- [`README.md`](../README.md) — installation and end-to-end examples.

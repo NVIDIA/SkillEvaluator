@@ -101,4 +101,5 @@ skillevaluator --help
 The `gitleaks` secrets scanner is a required external Go binary that pip cannot
 install. When `code-integrity` runs without it, validation is `INCOMPLETE` and
 returns non-zero. Install it separately: `brew install gitleaks` (macOS) or
-`go install github.com/gitleaks/gitleaks/v8@latest`.
+download a binary from the official
+[Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).

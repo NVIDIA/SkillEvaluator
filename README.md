@@ -14,10 +14,11 @@ extends an AI agent — see the
 SkillEvaluator gates skills through three progressively deeper tiers, from
 free offline checks to live agent A/B evaluation:
 
+## Three-tier overview
+
 | Tier | Purpose | Representative commands | Requires |
 | --- | --- | --- | --- |
-| Tier 1 · deterministic core | Validate schema, quality, security, secrets, PII, licenses, code integrity, Unicode safety, and scripts | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts` | No API key; full scanner coverage needs the `security` extra and the external Gitleaks binary |
-| Tier 1 · LLM checks | Judge instruction quality with an LLM; optionally deepen security analysis and suppress false positives | `rubric-eval` (LLM required), optional `--llm` / `--llm-verify` flags on the scans above | An LLM provider key |
+| Tier 1 | Validate schema, quality, security, secrets, PII, licenses, code integrity, Unicode safety, and scripts; optionally add LLM judging and deeper security analysis | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | Deterministic checks need no API key; full scanner coverage needs the `security` extra and Gitleaks; LLM checks need a provider key |
 | Tier 2 | Detect redundant content within one skill and overlapping skills across a collection or local catalog | `context-optimization-check` / `dedup-scan` (intra-skill), `similarity-check` (inter-skill) | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
 | Tier 3 | Create evaluation datasets and measure agent behavior with and without a skill | `create-eval-dataset`, `evaluate`, `compare` | Keyless templates and report inspection need no credential; LLM generation needs a provider key; live evaluation also needs the agent credential and a Docker, local OS, or cloud sandbox |
 
@@ -55,9 +56,11 @@ For a complete offline Tier 1 run, install Gitleaks once, then use `validate`:
 
 ```bash
 brew install gitleaks                                      # macOS
-# go install github.com/gitleaks/gitleaks/v8@latest       # Linux/other with Go
 skillevaluator validate ./my-skill --no-dedup
 ```
+
+On other platforms, install a binary from the official
+[Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
 
 For a smaller Tier 1-only environment, install the `security` extra instead of
 `all`; see [installation options](docs/INSTALLATION.md#choosing-extras).
@@ -82,7 +85,7 @@ flowchart LR
     T3 --> R["Reports<br/>CLI, JSON, HTML, Markdown"]
 ```
 
-## Tier 1: Static and security validation
+## Tier 1: Static and Security Validation
 
 Deterministic checks run offline after their scanner binaries are installed —
 this is the everyday command and a ready-made CI gate (`validate` exits
@@ -96,17 +99,35 @@ skillevaluator security-scan ./my-skill         # one category at a time
 skillevaluator rubric-eval ./my-skill           # LLM-as-judge scoring — the one Tier 1 command that needs a provider key
 ```
 
+| Check | What it covers |
+| --- | --- |
+| `schema` | Frontmatter, folder structure, naming, and content policy |
+| `security` | SkillSpector scanning for prompt injection, data exfiltration, and related risks |
+| `pii` | Credentials, tokens, personal data, and other sensitive information |
+| `license` | Frontmatter, license-file, and SPDX compliance |
+| `code-integrity` | Bandit, packaged Semgrep checks, Gitleaks, links, dependency declarations, and static test discovery |
+| `unicode` | Invisible Unicode, bidirectional overrides, and ASCII smuggling |
+| `quality` | Deterministic quality scoring with a 0–100 score and A–F grade |
+| `lint` | Advisory script structure, nesting, constants, shebang, and input-validation checks |
+| `version` | Optional version metadata validation |
+| `dependency` | Optional dependency vulnerability audit |
+
+`rubric-eval` adds an LLM-as-judge review across nine instruction-quality
+criteria. The optional `--llm` and `--llm-verify` flags deepen security
+analysis and can suppress false positives.
+
 Check selection (`--checks`), report formats (`-r cli,json,html,markdown`), the
-automatically generated `BENCHMARK.md`,
-content types, the optional `--llm`/`--llm-verify` deepening, and a CI recipe:
+automatically generated `BENCHMARK.md`, skill discovery, the optional
+`--llm`/`--llm-verify` deepening, and a CI recipe:
 [Tier 1 guide](docs/TIER1_VALIDATION.md).
 
 ## Configure a provider (for the LLM-backed parts)
 
-Everything beyond the deterministic core shares one configured provider —
-its credential is the "LLM provider key" in the table above. Quickest is a
-free [NVIDIA API Catalog](https://build.nvidia.com/) key; it covers LLM
-judging and Tier 2 embeddings with one variable:
+LLM-backed features use the configured chat provider. Tier 2 also needs an
+embeddings provider: it can use the same service when embeddings are available,
+or a separately configured local or hosted endpoint. A free
+[NVIDIA API Catalog](https://build.nvidia.com/) key covers both LLM judging and
+Tier 2 embeddings with one variable:
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
@@ -116,7 +137,14 @@ export NVIDIA_API_KEY='nvapi-...'
 OpenAI, Anthropic, Bedrock, any OpenAI-compatible endpoint, and fully local
 servers work too: [configuration guide](docs/CONFIGURATION.md).
 
-## Tier 2: Semantic deduplication
+The external publication profile is the default. `--external` is shorthand
+for `--profile external`, and `--policy` can overlay a custom policy file.
+
+Telemetry is disabled by default. To opt in, install the `telemetry` extra
+(included in `all`), set `SKILLEVALUATOR_TELEMETRY_ENABLED=true`, and configure
+an OpenTelemetry endpoint; see the [configuration guide](docs/CONFIGURATION.md#telemetry).
+
+## Tier 2: Semantic Deduplication
 
 With a provider configured, find duplicated guidance inside one skill or
 compare skills with embeddings. `dedup-scan` is an alias for the canonical
@@ -135,13 +163,17 @@ skillevaluator similarity-check ./skills --save-catalog ./skill-catalog.json
 skillevaluator similarity-check ./candidate-skill --catalog ./skill-catalog.json
 ```
 
+Similarity findings use four classifications: `EXACT_DUPLICATE` (at least
+0.95), `HIGH_SIMILARITY` (at least 0.90), `SIMILAR` (at least 0.75), and
+`LOOSELY_RELATED` (at least 0.50).
+
 The catalog is a versioned JSON file containing embeddings and skill metadata,
-not credentials. It stays local unless you choose to share it; no Milvus,
-vector database, or catalog service is involved. Thresholds, reports, catalog
+not credentials. It stays local unless you choose to share it; no external
+vector database or catalog service is involved. Thresholds, reports, catalog
 validation, and exactly where the chat LLM comes in:
 [Tier 2 guide](docs/TIER2_DEDUPLICATION.md).
 
-## Tier 3: Skill evaluation with live agents
+## Tier 3: Live Agent Evaluation
 
 Tier 3 evaluates your skill by running a real agent (`codex`, and other
 supported CLIs) against generated tasks, with and without the skill, inside
@@ -155,11 +187,31 @@ runtime/system exceptions. Unsandboxed local execution requires explicitly
 opting into trusted mode. Cloud backends are available through the same
 `--env-mode` flag.
 
-**Two credentials are needed before a live run:** the evaluator provider key
-from the section above (generates tasks and judges results), and the selected
-agent's own native key — for example `codex` needs an OpenAI Responses key plus
-`OPENAI_BASE_URL`, while `claude-code` needs an Anthropic key. NVIDIA Build's
-key is not interchangeable with either agent credential.
+Standard grading reports lead with five human-readable dimensions. Skill Lift
+is the measured difference between the with-skill and without-skill runs, while
+pass@k shows multi-attempt reliability separately from the dimension scores.
+In `custom_only` mode, the user-owned grader defines the score instead.
+
+| Dimension | Question |
+| --- | --- |
+| **Security** | Is it safe to use? |
+| **Correctness** | Does it do what it is supposed to? |
+| **Discoverability** | Is it loaded when it should be? |
+| **Effectiveness** | Is it better with the skill than without? |
+| **Efficiency** | Does it use tools and tokens efficiently? |
+
+Live evaluation has **two credential roles**: the evaluator provider generates
+tasks and performs standard grading, while the selected agent needs credentials
+compatible with its own API. A compatible local-mode agent can reuse a mapped
+provider credential; Docker and cloud agents receive values configured through
+`evals/config.yml`. When NVIDIA Build is the evaluator, `codex` needs a separate
+OpenAI-compatible Responses credential and model, while `claude-code` needs an
+Anthropic credential and model.
+
+The commands below assume that the agent credential is mapped through
+`harbor.runtime_env` as shown in the [Tier 3 guide](docs/TIER3_LIVE_EVALUATION.md#prerequisites-and-credentials).
+For `codex` with NVIDIA Build, also select an OpenAI-compatible model with
+`--agent-model`:
 
 ```bash
 # 1. Readiness check first — seconds, and it names any missing key or sandbox
@@ -167,17 +219,33 @@ skillevaluator doctor --agents codex --env-mode docker
 
 # 2. Generate eval tasks (writes evals/evals.json; --no-llm for a keyless template)
 skillevaluator create-eval-dataset ./my-skill --full
+skillevaluator create-eval-dataset ./my-skill --full --refine
 
 # 3. Run the with-skill vs. without-skill evaluation
-skillevaluator evaluate ./my-skill --agents codex --env-mode docker
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=gpt-4.1-mini
 
 # 4. Read the results
 skillevaluator view ./my-skill      # HTML report
 skillevaluator compare ./my-skill   # side-by-side comparison
 ```
 
+Results are written under `evals/results` by default. Use `--results-dir` or
+`SKILLEVALUATOR_RESULTS_DIR` to place them elsewhere. The `--refine` option
+uses existing or collected agent trajectories to improve generated cases.
+
 Custom graders, Harbor-format tasks, and agent credential setup:
 [Tier 3 guide](docs/TIER3_LIVE_EVALUATION.md).
+
+## Expert tier aliases
+
+Tier-prefixed commands call the same implementations as the primary commands:
+
+```bash
+skillevaluator tier1 validate ./my-skill --no-dedup
+skillevaluator tier2 similarity-check ./skills
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
+```
 
 ## Installation options
 

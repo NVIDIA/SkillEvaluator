@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="se-logo-title se-logo-description" focusable="false">
+  <title id="se-logo-title">SkillEvaluator logo</title>
+  <desc id="se-logo-description">Three concentric evaluation levels surrounding a verified core.</desc>
+  <style>
+    .se-logo-panel { fill: #f2f7ec; stroke: #d7e5cc; }
+    .se-logo-ring-outer { stroke: #b8d3a5; }
+    .se-logo-ring-middle { stroke: #83aa66; }
+    .se-logo-ring-inner { stroke: #315b25; }
+    .se-logo-core { fill: #76b900; stroke: #3e6500; }
+    .se-logo-check { stroke: #fff; }
+
+    @media (prefers-color-scheme: dark) {
+      .se-logo-panel { fill: #152117; stroke: #304631; }
+      .se-logo-ring-outer { stroke: #39523a; }
+      .se-logo-ring-middle { stroke: #6f9264; }
+      .se-logo-ring-inner { stroke: #dbe8d6; }
+      .se-logo-core { fill: #76b900; stroke: #9bdb34; }
+    }
+  </style>
+
+  <g aria-hidden="true">
+    <rect class="se-logo-panel" x="10.5" y="10.5" width="107" height="107" rx="53.5" stroke-width="1"/>
+    <circle class="se-logo-ring-outer" cx="64" cy="64" r="42" fill="none" stroke-width="5"/>
+    <circle class="se-logo-ring-middle" cx="64" cy="64" r="30" fill="none" stroke-width="5"/>
+    <circle class="se-logo-ring-inner" cx="64" cy="64" r="18" fill="none" stroke-width="5"/>
+    <circle class="se-logo-core" cx="64" cy="64" r="12" stroke-width="1.8"/>
+    <path class="se-logo-check" d="m57.5 64 4.4 4.6 8.8-9.3" fill="none" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="se-logo-core" cx="97" cy="38" r="5" stroke-width="1.4"/>
+    <circle class="se-logo-core" cx="34" cy="82" r="5" stroke-width="1.4"/>
+  </g>
+</svg>

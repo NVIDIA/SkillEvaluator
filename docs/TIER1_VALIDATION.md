@@ -1,17 +1,53 @@
 # Tier 1: Static and Security Validation
 
-Tier 1 is the deterministic quality gate: schema, quality, security, PII,
-license, secrets, code-integrity, Unicode-safety, and script checks that run
+Tier 1 is the deterministic quality gate for skills: schema, quality, security,
+PII, license, secrets, code-integrity, Unicode-safety, and script checks that run
 offline after the scanner binaries are installed. No API key is needed for the
-deterministic stages. The only LLM-backed
-pieces of Tier 1 are `rubric-eval` (LLM required) and the optional
-`--llm`/`--llm-verify` flags — those need a configured provider
-(see [CONFIGURATION.md](CONFIGURATION.md)).
+deterministic stages. The only LLM-backed pieces of Tier 1 are `rubric-eval`
+(LLM required) and the optional `--llm`/`--llm-verify` flags — those need a
+configured provider (see [CONFIGURATION.md](CONFIGURATION.md)).
+
+## Table of Contents
+
+- [Commands](#commands)
+- [Skill Detection and Selection](#skill-detection-and-selection)
+- [Validation Profiles](#validation-profiles)
+- [Checks](#checks)
+  - [Selecting checks](#selecting-checks)
+  - [schema](#schema-repository-governance)
+  - [security](#security-vulnerability-scanning)
+  - [pii](#pii-detection)
+  - [license](#license-compliance)
+  - [code-integrity](#code-integrity)
+  - [dependency](#dependency-cve-audit-opt-in)
+  - [unicode](#unicode-smuggling-detection)
+  - [quality](#quality-scoring)
+  - [Rubric evaluation](#rubric-evaluation-llm-as-judge)
+  - [lint](#lint-script-linting-advisory)
+  - [version](#version-check-opt-in)
+- [LLM Verification](#llm-verification)
+- [Reports](#reports)
+- [Using validate in CI](#using-validate-in-ci)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [Skill Content Summary](#skill-content-summary)
+- [See Also](#see-also)
 
 ## Commands
 
+Tier 1 is exposed through one umbrella command and five standalone commands:
+
+| Command | Purpose |
+| --- | --- |
+| `validate` | Run the selected Tier 1 checks, Tier 2 deduplication by default, and optional advisory Tier 3 evaluation |
+| `quality-check` | Score skill quality across four weighted categories |
+| `rubric-eval` | Run the nine-criterion LLM-as-judge rubric |
+| `security-scan` | Run SkillSpector static scanning and optional LLM analysis |
+| `pii-scan` | Detect PII, credentials, secrets, and local identifiers |
+| `lint-scripts` | Run advisory AST-based checks on Python scripts |
+
 ```bash
-skillevaluator validate ./my-skill            # full Tier 1 + Tier 2 dedup
+skillevaluator validate ./my-skill            # default Tier 1 suite + Tier 2 dedup
 skillevaluator validate ./my-skill --no-dedup # Tier 1 only, no key needed
 skillevaluator quality-check ./my-skill       # quality score only
 skillevaluator security-scan ./my-skill       # security checks only
@@ -23,28 +59,176 @@ skillevaluator rubric-eval ./my-skill         # LLM-as-judge rubric scoring
 skillevaluator validate ./my-skill --llm      # + LLM security analysis
 ```
 
-`validate` is the umbrella command: Tier 1 checks gate the exit code
-(non-zero on failure or incomplete required scanner evidence — safe to use as
-a CI gate), Tier 2 dedup runs by
+`validate` is the umbrella command: Tier 1 checks gate the exit code (non-zero
+on failure or incomplete required scanner evidence), Tier 2 dedup runs by
 default and degrades gracefully without embedding access, and Tier 3 can be
 attached with `--agent-eval` as an advisory pass.
 
-## Selecting checks
+## Skill Detection and Selection
+
+Pass either a skill directory containing `SKILL.md` or a collection containing
+skills under `skills/` or `team-skills/`. Folder-level validation discovers each
+live `SKILL.md` below the target while excluding configured names such as
+`evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and
+`__pycache__`.
+
+`validate` auto-detects skill targets. Use `--type skill` when the path is
+ambiguous:
+
+```bash
+skillevaluator validate ./skills/my-skill --type skill
+skillevaluator validate ./skills --type skill --continue-on-failure
+```
+
+`--fail-fast` stops after the first failed check. `--continue-on-failure`
+overrides it, records the full pipeline, and keeps scanning a collection after
+a critical finding.
+
+## Validation Profiles
+
+The bundled `external` profile is the default public-publication policy. It
+requires a well-formed `metadata.author` value but does not restrict the email
+domain. Missing or malformed author attribution is HIGH severity. Blocked
+license findings are CRITICAL; missing or unknown licenses are reported for
+review.
+
+```bash
+skillevaluator validate ./my-skill                         # default = external
+skillevaluator validate ./my-skill --profile external      # explicit public profile
+skillevaluator validate ./my-skill --external              # alias for --profile external
+skillevaluator validate ./my-skill --policy ./policy.yaml  # custom overlay
+SKILLEVALUATOR_PROFILE=external skillevaluator validate ./my-skill
+```
+
+Precedence, highest to lowest, is `--policy` overlay, `--profile` flag,
+`SKILLEVALUATOR_PROFILE` environment variable, then the bundled `external`
+default.
+
+A custom policy overlays the external profile. It can narrow the accepted
+author domain and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
+
+```yaml
+profile: community-strict
+identity:
+  author_email_regex: '<[^>]+@example\.org>'
+severity_overrides:
+  SCHEMA.author_missing: critical
+  LICENSE.*: critical
+```
+
+The active profile is included in the terminal banner and saved reports so
+reviewers can see which gate was applied.
+
+## Checks
+
+### Selecting checks
 
 `--checks` takes a comma-separated subset of the Tier 1 checks:
 
 | Check | What it covers |
 | --- | --- |
-| `schema` | SKILL.md frontmatter, repository governance, naming |
-| `security` | SkillSpector static scan; `--llm` adds enrichment without replacing static findings |
-| `pii` | Personally identifiable information |
-| `license` | License compliance |
-| `code-integrity` | Bandit, packaged-rule Semgrep, external Gitleaks, and dead-link/dependency-file/static-test-discovery hygiene |
-| `unicode` | Unicode smuggling detection |
-| `quality` | Quality score (skill-only; threshold via `--min-score`, default 70) |
-| `lint` | Script linting (skill-only) |
-| `version` | Opt-in: version checks (not run by default) |
-| `dependency` | Opt-in: dependency vulnerability audit (not run by default) |
+| `schema` | `SKILL.md` frontmatter, repository governance, and naming |
+| `security` | SkillSpector static scan; `--llm` adds analysis without replacing static findings |
+| `pii` | Personally identifiable information, credentials, and local identifiers |
+| `license` | License evidence and compliance |
+| `code-integrity` | Bandit, packaged-policy Semgrep, external Gitleaks, dead links, dependency-file hygiene, and static test discovery |
+| `unicode` | Unicode smuggling and invisible-character detection |
+| `quality` | Four-category quality score; threshold via `--min-score` (default 70) |
+| `lint` | Advisory Python script linting |
+| `version` | Opt-in three-part numeric version check |
+| `dependency` | Opt-in dependency vulnerability audit |
+
+The default set is `schema`, `security`, `pii`, `license`, `code-integrity`,
+`unicode`, `quality`, and `lint`. `version` and `dependency` run only when
+selected explicitly.
+
+```bash
+skillevaluator validate ./my-skill --checks schema,pii
+skillevaluator validate ./my-skill --checks schema,security,quality,lint
+skillevaluator validate ./my-skill --checks dependency
+```
+
+Accepted aliases include `code`/`code-risk` for `code-integrity`,
+`scripts`/`script-lint` for `lint`, `dependencies`/`deps`/`dependency-audit` for
+`dependency`, and `licence`/`license-check` for `license`.
+
+### schema (repository governance)
+
+The `schema` check validates `SKILL.md` frontmatter and repository placement:
+
+- YAML frontmatter must parse and satisfy the skill schema.
+- `name` and `description` are required. Names are 1–64 characters and
+  descriptions are 1–1024 characters.
+- Names use kebab-case, start with a letter, and cannot have trailing or
+  consecutive hyphens. The directory name must match the frontmatter `name`.
+- `alwaysApply` and `globs` are forbidden skill fields.
+- Optional fields include `license`, `compatibility`, `metadata`, and
+  `allowed-tools`.
+- The standard hierarchy is `skills/<skill-name>/` or
+  `team-skills/<team>/<skill-name>/`. A nonstandard standalone location is
+  reported as an advisory finding.
+- `SKILL.md` should remain at or below 500 lines; larger files receive an
+  advisory finding.
+- The default profile expects `metadata.author` in `Name <email@host>` form but
+  does not require a particular email domain.
+
+### security (vulnerability scanning)
+
+`security-scan`, and the `security` check inside `validate`, run SkillSpector.
+Static scanning covers common patterns in four broad areas:
+
+- **Prompt injection** — instruction override, hidden instructions, prompt
+  disclosure, role manipulation, and context-reset attempts.
+- **Data exfiltration** — external transmission, environment-variable
+  harvesting, file-system enumeration, and clipboard access.
+- **Privilege escalation** — elevated execution, credential-file access, and
+  system-configuration modification.
+- **Supply chain** — unpinned dependencies, external script fetching, and code
+  obfuscation.
+
+```bash
+skillevaluator security-scan ./my-skill
+skillevaluator security-scan ./my-skill --llm
+skillevaluator security-scan ./my-skill --llm --llm-verify
+```
+
+The LLM pass requires a configured provider. It enriches the static result but
+does not replace static findings or make missing scanner evidence pass.
+
+### pii (detection)
+
+`pii-scan`, and the `pii` check inside `validate`, use configurable regex
+patterns to detect sensitive values.
+
+| Group | Examples | Notes |
+| --- | --- | --- |
+| Personal information | Personal paths, non-placeholder email addresses, phone numbers, SSNs, GPS coordinates, MAC addresses | Personal macOS/Windows paths are flagged; SSNs are CRITICAL |
+| Credentials and secrets | Database connection strings, hardcoded API keys, cloud keys, GitHub tokens, private keys, JWTs, webhook URLs | Most credential findings are CRITICAL |
+| Network and financial | Public IPs, credit-card numbers, cryptocurrency wallet addresses | Private RFC1918 addresses are excluded |
+
+Common placeholders such as `YOUR_API_KEY_HERE`, `example`, `test`, `dummy`,
+and `placeholder`, along with `@example.com` and `@test.com`, are excluded.
+Configured allowed paths are also excluded.
+
+### license (compliance)
+
+The `license` check looks for license evidence in frontmatter, common license
+files, and SPDX headers. It normalizes detected identifiers and applies the
+packaged permissive allowlist and restrictive blocklist. Missing or unknown
+licenses are reported for review; blocked licenses fail according to the active
+profile.
+
+### code-integrity
+
+The `code-integrity` check combines three validation groups:
+
+- **Code risk (Bandit and Semgrep)** — SQL or command injection, hardcoded
+  passwords, insecure cryptography, unsafe deserialization, `shell=True`,
+  `eval()`/`exec()`, CWE patterns, and language-specific anti-patterns.
+- **Secrets (Gitleaks)** — API keys, tokens, passwords, private keys, database
+  credentials, and other high-confidence secret patterns.
+- **Hygiene** — dead relative Markdown links, banned or unpinned dependency
+  declarations, and static discovery of conventional Python test filenames.
 
 Default Tier 1 does not import or execute target-controlled Python code. The
 `test_discovery` result is filename evidence only: it counts regular, in-tree,
@@ -58,41 +242,147 @@ Bandit, Semgrep, Gitleaks, or SkillSpector run as `INCOMPLETE`: terminal and
 saved reports are non-green and `validate` exits non-zero. Install
 `skillevaluator[security]` for the bundled Python scanners and install Gitleaks
 separately (`brew install gitleaks` or
-`go install github.com/gitleaks/gitleaks/v8@latest`).
+download a binary from the official
+[Gitleaks releases](https://github.com/gitleaks/gitleaks/releases)).
 
-Semgrep uses `skillevaluator/config/semgrep_rules.yaml` from the installed
-package, with metrics and version checks disabled; Tier 1 never fetches a
-Semgrep registry policy at runtime. Bundled scanners resolve next to the
-SkillEvaluator interpreter before PATH. Intentional replacements require an
-auditable absolute executable path in `SKILLEVALUATOR_BANDIT_PATH`,
-`SKILLEVALUATOR_SEMGREP_PATH`, or `SKILLEVALUATOR_SKILLSPECTOR_PATH`; relative,
-missing, and non-executable overrides fail closed.
+Semgrep uses a policy packaged with the installed distribution, with metrics
+and version checks disabled; Tier 1 never fetches a registry policy at runtime.
+Bundled scanners resolve next to the SkillEvaluator interpreter before PATH.
+Intentional replacements require an auditable absolute executable path in
+`SKILLEVALUATOR_BANDIT_PATH`, `SKILLEVALUATOR_SEMGREP_PATH`, or
+`SKILLEVALUATOR_SKILLSPECTOR_PATH`; relative, missing, and non-executable
+overrides fail closed.
 
-`rubric-eval` derives each criterion verdict locally: scores of 7/10 or higher
-pass, and lower scores fail regardless of the model-provided pass flag. The
-overall score is an importance-weighted mean, and the rubric passes only when
-that score meets `--min-score` and every criterion passes.
+### dependency (CVE audit, opt-in)
 
-Other useful flags: `--fail-fast` stops at the first failing check,
-`--continue-on-failure` records everything without stopping, `--llm` enables
-LLM-backed security analysis (requires a provider; add `--llm-verify` for a
-false-positive suppression pass), and `--profile external` (the default)
-validates for public publication. A custom policy YAML can be overlaid with
-`--policy`.
+The opt-in `dependency` check scans `requirements*.txt` for known Python package
+vulnerabilities. When `pyproject.toml` is present, `pip-audit --local` audits the
+active Python environment rather than resolving the dependencies declared in
+that file. `pip-audit` is the primary scanner; Safety supplies secondary
+coverage for requirements files when installed separately. The audit may use
+network-backed vulnerability databases.
 
-## Content types
+```bash
+skillevaluator validate ./my-skill --checks dependency
+```
 
-`validate` auto-detects what it is looking at; force it with `--type`:
+### unicode (smuggling detection)
 
-| Type | Detected from |
-| --- | --- |
-| `skill` | `SKILL.md` in `skills/` or `team-skills/` |
-| `rules` | `.mdc` files in `team-rules/` |
-| `workflows` | `workflow-rules.mdc` in a workflow directory |
-| `plugin` | `agent_plugin.yaml`/`.yml` or `.claude-plugin/plugin.json` manifest |
+The `unicode` check detects invisible Unicode characters associated with ASCII
+smuggling, hidden-data encoding, and trojan-source attacks.
 
-Quality, lint, and version checks are skill-only and are skipped for the
-other types.
+| Category | Range | Default severity |
+| --- | --- | --- |
+| Unicode Tags (ASCII smuggling) | `U+E0000..U+E007F` | CRITICAL; decodes the hidden ASCII payload |
+| BiDi overrides (trojan source) | `U+202A..U+202E`, `U+2066..U+2069`, `U+200E/F`, `U+061C` | HIGH |
+| Zero-width characters | `U+200B/C/D`, `U+034F`, `U+180E`, `U+2060`, `U+FEFF` | MEDIUM or LOW |
+| Invisible operators and deprecated controls | `U+2061..U+2064`, `U+206A..U+206F` | MEDIUM |
+| Variation selectors | `U+FE00..U+FE0F`, `U+E0100..U+E01EF` | LOW |
+
+Severity increases with suspicious run length. A BOM (`U+FEFF`) at byte zero
+is downgraded to INFO, and binary files are skipped using MIME and null-byte
+detection.
+
+### quality (scoring)
+
+`quality-check`, and the `quality` check inside `validate`, produce a 0–100
+composite score across four weighted categories.
+
+| Category | Weight | What it evaluates |
+| --- | --- | --- |
+| Correctness | 35% | Frontmatter, naming, examples, paths, and skill-type-specific structure |
+| Discoverability | 25% | Description quality, trigger wording, purpose, scope, and naming |
+| Reliability | 25% | Error handling, prerequisites, limitations, troubleshooting, and implementation safeguards |
+| Efficiency | 15% | Token budget, body length, repetition, instruction clarity, and reference use |
+
+Grades are A for scores of at least 90, B for at least 80, C for at least 70,
+D for at least 60, and F below 60. The default `--min-score` is 70.
+
+The checker detects five skill shapes and applies relevant checks:
+
+- **script-based** — Python or shell files under `scripts/`.
+- **lib-based** — a Python module containing `__init__.py`.
+- **resource-based** — assets, templates, design-system content, or resources.
+- **guide-only** — documentation without executable or resource content.
+- **hybrid** — scripts plus library or resource content.
+
+### Rubric evaluation (LLM-as-Judge)
+
+`rubric-eval` sends bounded skill documentation and selected supplementary
+content to a configured LLM provider. It scores nine criteria:
+
+1. Description clarity and when to use the skill.
+2. Instruction clarity and actionable steps.
+3. Example quality and query variation.
+4. Documentation completeness.
+5. Scope definition.
+6. Professional tone and formatting.
+7. Trigger simulation against positive and negative queries.
+8. End-to-end completeness.
+9. Actionable error handling.
+
+Each criterion is scored from 0 to 10. The local evaluator, not the model's
+boolean, treats 7 or higher as passing. The overall score is an
+importance-weighted mean, and the rubric passes only when that score reaches
+`--min-score` and every criterion passes.
+
+```bash
+skillevaluator rubric-eval ./my-skill --min-score 70
+```
+
+### lint (script linting, advisory)
+
+`lint-scripts`, and the `lint` check inside `validate`, parse Python scripts
+under `scripts/` and report advisory findings. These findings do not make the
+Tier 1 gate fail.
+
+| Check | Severity | Detects |
+| --- | --- | --- |
+| `flat_script` | MEDIUM | No function definitions |
+| `deep_nesting` | MEDIUM | Control-flow nesting deeper than 6 |
+| `magic_numbers` | LOW | Raw numeric constants outside the safe constant set |
+| `missing_shebang` | LOW | No leading shebang (`#!`) |
+| `no_input_validation` | LOW | No `argparse`, `click`, `typer`, or explicit raise pattern |
+
+### version check (opt-in)
+
+The opt-in `version` check validates `metadata.version` as a three-part numeric
+value in `major.minor.patch` form:
+
+```yaml
+metadata:
+  version: "1.2.3"
+```
+
+When `SKILLEVALUATOR_PREVIOUS_VERSION` is set, the current version must be
+numerically greater than the previous value. A missing version remains valid;
+the skill then relies on commit history.
+
+```bash
+SKILLEVALUATOR_PREVIOUS_VERSION=1.2.2 \
+  skillevaluator validate ./my-skill --checks schema,version
+```
+
+## LLM Verification
+
+`validate`, `security-scan`, and `pii-scan` accept `--llm-verify` for a
+second-pass review of static findings:
+
+1. Static analysis produces the initial findings.
+2. Each finding is sent to the configured provider for contextual review.
+3. Confirmed findings remain at their original severity. High-confidence false
+   positives remain visible, are downgraded to INFO, and carry verification
+   metadata explaining the review.
+
+```bash
+skillevaluator security-scan ./my-skill --llm --llm-verify
+skillevaluator pii-scan ./my-skill --llm-verify
+skillevaluator validate ./my-skill --llm-verify
+```
+
+Static scanning still runs first. If a requested LLM stage is unavailable or
+returns unusable evidence, the run does not silently turn green. See
+[CONFIGURATION.md](CONFIGURATION.md) for supported public providers.
 
 ## Reports
 
@@ -102,9 +392,9 @@ destination (default `reports/`):
 | Format | Output |
 | --- | --- |
 | `cli` | Rich terminal table (default) |
-| `json` | `skillevaluator-output-<timestamp>.json` |
-| `html` | Standalone `skillevaluator-output-<timestamp>.html` |
-| `markdown` | `skillevaluator-output-<timestamp>.md`, ready for PR comments |
+| `json` | `validate` writes `skillevaluator-output-<timestamp>.json`; standalone commands use command-specific basenames |
+| `html` | `validate` writes standalone `skillevaluator-output-<timestamp>.html`; standalone commands use command-specific basenames |
+| `markdown` | `validate` writes `skillevaluator-output-<timestamp>.md`; standalone commands use command-specific basenames |
 
 For skill targets, `validate` also writes `BENCHMARK.md` regardless of the `-r`
 selection. It records `INCOMPLETE` and never recommends publication when
@@ -117,7 +407,7 @@ skillevaluator validate ./my-skill -r cli,json,html -o reports/
 ## Using validate in CI
 
 `validate` returns a non-zero exit code when a Tier 1 gate fails, and the
-markdown report drops straight into a PR comment:
+Markdown report can be posted directly as a PR comment:
 
 ```yaml
 - name: Validate skill
@@ -125,13 +415,63 @@ markdown report drops straight into a PR comment:
     skillevaluator validate ./my-skill --no-llm --no-dedup -r cli,markdown -o reports
 ```
 
-Run it with `--no-llm --no-dedup` for a hermetic, key-free gate, or configure
-a provider secret and drop those flags for full coverage.
+Run with `--no-llm --no-dedup` for a hermetic, key-free gate. For LLM-enriched
+default validation coverage, configure a provider, replace `--no-llm` with
+`--llm`, and remove `--no-dedup`. The opt-in `version` and `dependency` checks
+and standalone `rubric-eval` remain separate choices.
 
-## More commands
+## Configuration
 
-- `skillevaluator tier1|tier2|tier3 <command>` — expert alias groups. The
-  Tier 3-only members (`tier3 validate`, `tier3 harbor-view`) are covered in
-  the [live evaluation guide](TIER3_LIVE_EVALUATION.md).
-- `skillevaluator health-check` and `doctor` probe Tier 3 agent/backend
-  readiness; they are not Tier 1 validation commands.
+Public Tier 1 configuration ships inside the package under
+`skillevaluator/config/`:
+
+- `pii_patterns.yaml` — PII categories, severities, suggestions, and
+  exceptions.
+- `unicode_smuggle_patterns.yaml` — invisible-character categories, severity
+  thresholds, and exceptions.
+- `license_config.yaml` — permissive-license allowlist and restrictive-license
+  blocklist.
+- `profiles/external.yaml` — the default public validation profile.
+
+Semgrep's static policy is also packaged with the distribution. Provider and
+credential configuration is documented in [CONFIGURATION.md](CONFIGURATION.md).
+
+## Troubleshooting
+
+- **Gitleaks is not installed** — install it with `brew install gitleaks` or
+  download a binary from the official
+  [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
+- **A Python scanner is missing** — install the security extra with
+  `skillevaluator[security]`. Required scanner failures remain `INCOMPLETE`
+  until the scanner is installed and returns valid evidence.
+- **An LLM-backed stage fails immediately** — configure a supported provider or
+  omit `--llm`/`--llm-verify`. Use `--no-dedup` when a fully key-free Tier 1 run
+  is required.
+- **No scannable files are found** — confirm that the skill contains supported
+  text or code extensions such as `.py`, `.sh`, `.yaml`, `.yml`, `.json`, `.md`,
+  or `.txt`.
+- **An executable override is rejected** — use an existing, executable absolute
+  path for the relevant `SKILLEVALUATOR_*_PATH` variable.
+
+## Skill Content Summary
+
+| Aspect | Skill requirement |
+| --- | --- |
+| Manifest | `SKILL.md` |
+| Standard location | `skills/<skill-name>/` or `team-skills/<team>/<skill-name>/` |
+| Required frontmatter | `name`, `description`, and profile-governed `metadata.author` |
+| Optional frontmatter | `license`, `compatibility`, `metadata`, `allowed-tools` |
+| Forbidden frontmatter | `alwaysApply`, `globs` |
+| Naming | Kebab-case; directory name matches frontmatter `name` |
+| Recommended maximum | 500 lines in `SKILL.md` |
+| Default supporting directories | `references/`, `scripts/`, `assets/`, `evals/`, `tools/`, `config/` |
+
+## See Also
+
+- [Installation](INSTALLATION.md) — install the base package and optional extras.
+- [Configuration](CONFIGURATION.md) — providers, credentials, and offline modes.
+- [Tier 2 Deduplication](TIER2_DEDUPLICATION.md) — semantic overlap and local
+  catalog checks.
+- [Tier 3 Live Evaluation](TIER3_LIVE_EVALUATION.md) — advisory live agent
+  evaluation.
+- [Developer Guide](DEVELOPER_GUIDE.md) — local development and testing.

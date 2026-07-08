@@ -52,8 +52,10 @@ Navigation order, page titles, and slugs are defined in
    `[text](url)` link.
 
 5. **Links**:
-   - Between pages in this folder, link by slug (`configuration`,
-     `tier1-validation#anchor`) — matches how Fern serves them.
+   - Between pages in this folder, link with the relative `.mdx` file path
+     (`configuration.mdx`, `tier1-validation.mdx#anchor`). Fern resolves these
+     to the published slug, and they also work when browsing the source on
+     GitHub — a bare slug (`configuration`) 404s on GitHub.
    - To files outside `docs/`, use a relative repo path kept as `.md`
      (`../README.md`, `../THIRD_PARTY_NOTICES.md`) — those are not Fern pages.
    - When renaming a page, grep the whole repo and fix references in the sibling

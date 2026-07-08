@@ -33,7 +33,7 @@ class TestIntraSkillValidatorProperties:
 
         Eagerly substituting SIMILARITY_DEFAULT_MODEL here overrides
         SKILL_EVAL_EMBEDDING_MODEL inside EmbeddingClient and breaks every
-        non-NVIDIA embedding endpoint (docs/CONFIGURATION.md contract).
+        non-NVIDIA embedding endpoint (docs/configuration.mdx contract).
         """
         assert IntraSkillValidator()._embedding_model is None
         assert IntraSkillValidator(embedding_model="custom-model")._embedding_model == "custom-model"

@@ -185,7 +185,7 @@ class TestEmbed:
     def test_env_embedding_model_is_honored_without_explicit_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SKILL_EVAL_EMBEDDING_MODEL wins when no explicit model is given.
 
-        This is the documented contract in docs/CONFIGURATION.md and what
+        This is the documented contract in docs/configuration.mdx and what
         makes custom OpenAI-compatible endpoints (including local servers)
         usable for Tier 2.
         """

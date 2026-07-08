@@ -38,7 +38,7 @@ PUBLIC_REQUIRED_FILES = (
     ".github/workflows/ci.yml",
     ".github/workflows/security.yml",
 )
-PUBLIC_TEXT_SUFFIXES = {"", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yml", ".yaml", ".j2"}
+PUBLIC_TEXT_SUFFIXES = {"", ".json", ".md", ".mdx", ".py", ".sh", ".toml", ".txt", ".yml", ".yaml", ".j2"}
 PACKAGED_NVIDIA_BUILD_RUNTIME_FILES = {
     "skillevaluator/tier3/harbor/local_agents.py",
     "skillevaluator/tier3/harbor/nvidia_build_bridge.py",
@@ -407,7 +407,7 @@ def test_public_cli_exposes_both_tier_two_workflows_without_a_service() -> None:
 
 def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    guide = (REPO_ROOT / "docs" / "TIER2_DEDUPLICATION.md").read_text(encoding="utf-8")
+    guide = (REPO_ROOT / "docs" / "tier2-deduplication.mdx").read_text(encoding="utf-8")
     public_docs = f"{readme}\n{guide}"
 
     assert "similarity-check ./skills" in public_docs

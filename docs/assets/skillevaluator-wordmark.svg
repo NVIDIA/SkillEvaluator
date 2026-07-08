@@ -8,8 +8,8 @@
     .se-ring-inner { stroke: #315b25; }
     .se-core { fill: #76b900; stroke: #3e6500; }
     .se-check { stroke: #fff; }
-    .se-skill { fill: #183a10; }
-    .se-evaluator { fill: #3e6500; }
+    .se-skill { fill: #fff; paint-order: stroke fill; stroke: #183a10; stroke-width: 1.1px; stroke-linejoin: round; }
+    .se-evaluator { fill: #76b900; }
 
     @media (prefers-color-scheme: dark) {
       .se-panel { fill: #152117; stroke: #304631; }
@@ -17,8 +17,6 @@
       .se-ring-middle { stroke: #6f9264; }
       .se-ring-inner { stroke: #dbe8d6; }
       .se-core { fill: #76b900; stroke: #9bdb34; }
-      .se-skill { fill: #f4f7f2; }
-      .se-evaluator { fill: #8fd018; }
     }
   </style>
 

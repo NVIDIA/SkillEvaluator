@@ -1,4 +1,7 @@
-# Tier 3: Skill Evaluation with Live Agents
+---
+title: "Tier 3: Live Agent Evaluation"
+description: "Measure whether a skill makes an agent better — generate eval datasets and run with-skill vs. without-skill comparisons in Harbor sandboxes."
+---
 
 Live evaluation answers one question: **does your skill actually make an agent
 better at the task?** Skill Evaluator runs a real agent (such as `codex`,
@@ -117,7 +120,7 @@ cannot replace, alias, or reroute provider/agent/backend credentials through
 
 | Credential | Used for | How to set |
 | --- | --- | --- |
-| Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key; see [CONFIGURATION.md](CONFIGURATION.md) |
+| Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key; see [CONFIGURATION.md](configuration.mdx) |
 | Live agent credential | The agent actually performing the task | Export the agent's credential in the host environment before `doctor`/`evaluate` |
 
 Public NVIDIA Build at [build.nvidia.com](https://build.nvidia.com/) uses the
@@ -578,7 +581,7 @@ required by the selected agent and environment.
 
 ## See Also
 
-- [Configuration](CONFIGURATION.md) — provider, embedding, credential, and telemetry setup.
-- [Installation](INSTALLATION.md) — extras and system requirements.
-- [Tier 1 validation](TIER1_VALIDATION.md) — deterministic and security checks.
-- [Tier 2 deduplication](TIER2_DEDUPLICATION.md) — semantic overlap checks.
+- [Configuration](configuration.mdx) — provider, embedding, credential, and telemetry setup.
+- [Installation](installation.mdx) — extras and system requirements.
+- [Tier 1 validation](tier1-validation.mdx) — deterministic and security checks.
+- [Tier 2 deduplication](tier2-deduplication.mdx) — semantic overlap checks.

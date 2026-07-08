@@ -1,4 +1,7 @@
-# Tier 2: Semantic Deduplication
+---
+title: "Tier 2: Semantic Deduplication"
+description: "Detect redundant content within one skill and overlapping skills across a collection using embedding similarity."
+---
 
 Tier 2 detects duplicate and overlapping skill content with embedding-based
 similarity analysis and, for intra-skill candidates, chat-LLM verification. It
@@ -19,8 +22,8 @@ is required.
 Tier 2 needs a configured embeddings provider. Intra-skill analysis also needs
 a configured chat LLM. If the selected chat provider does not offer embeddings,
 configure an embeddings provider separately. See
-[`CONFIGURATION.md`](CONFIGURATION.md), including the
-[fully local recipe](CONFIGURATION.md#fully-local-tier-2-no-external-calls).
+[`CONFIGURATION.md`](configuration.mdx), including the
+[fully local recipe](configuration.mdx#fully-local-tier-2-no-external-calls).
 
 ## Table of Contents
 
@@ -235,7 +238,7 @@ command name was invoked.
 - Catalog files are read and written locally; SkillEvaluator does not upload them
   to a catalog service.
 
-Use the [fully local provider recipe](CONFIGURATION.md#fully-local-tier-2-no-external-calls)
+Use the [fully local provider recipe](configuration.mdx#fully-local-tier-2-no-external-calls)
 when skill content must not leave the machine. Review the provider's own data
 handling terms before sending confidential skill content to a hosted endpoint.
 
@@ -250,7 +253,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 
 Provider endpoints and default models are intentionally documented in
-[`CONFIGURATION.md`](CONFIGURATION.md) instead of duplicated here.
+[`CONFIGURATION.md`](configuration.mdx) instead of duplicated here.
 
 ## Reports and Exit Behavior
 
@@ -309,7 +312,7 @@ scanning an unbounded directory tree.
 
 ## See Also
 
-- [`CONFIGURATION.md`](CONFIGURATION.md) — provider setup and fully local Tier 2.
-- [`TIER1_VALIDATION.md`](TIER1_VALIDATION.md) — static, security, and quality validation.
-- [`TIER3_LIVE_EVALUATION.md`](TIER3_LIVE_EVALUATION.md) — live skill evaluation.
+- [`CONFIGURATION.md`](configuration.mdx) — provider setup and fully local Tier 2.
+- [`TIER1_VALIDATION.md`](tier1-validation.mdx) — static, security, and quality validation.
+- [`TIER3_LIVE_EVALUATION.md`](tier3-live-evaluation.mdx) — live skill evaluation.
 - [`README.md`](../README.md) — installation and end-to-end examples.

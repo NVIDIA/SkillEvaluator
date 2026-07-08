@@ -26,7 +26,7 @@ Each tier is an independent entry point — run any command directly; nothing
 requires running the earlier tiers first. With no keys configured and the Tier
 1 scanners installed, `validate` runs without an API credential (its dedup pass
 skips gracefully); the
-[credential map](docs/CONFIGURATION.md#what-needs-credentials-and-what-runs-offline)
+[credential map](docs/configuration.mdx#what-needs-credentials-and-what-runs-offline)
 lists exactly what each command needs.
 
 ## Quickstart
@@ -65,7 +65,7 @@ On other platforms, install a binary from the official
 [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
 
 For a smaller Tier 1-only environment, install the `security` extra instead of
-`all`; see [installation options](docs/INSTALLATION.md#choosing-extras).
+`all`; see [installation options](docs/installation.mdx#choosing-extras).
 
 If the shell can't find `skillevaluator` after installing, run
 `uv tool update-shell` and open a new terminal (uv installs tools to
@@ -121,7 +121,7 @@ analysis and can suppress false positives.
 Check selection (`--checks`), report formats (`-r cli,json,html,markdown`), the
 automatically generated `BENCHMARK.md`, skill discovery, the optional
 `--llm`/`--llm-verify` deepening, and a CI recipe:
-[Tier 1 guide](docs/TIER1_VALIDATION.md).
+[Tier 1 guide](docs/tier1-validation.mdx).
 
 ## Configure a provider (for the LLM-backed parts)
 
@@ -144,14 +144,14 @@ model. Use `doctor` and a live Tier 3 evaluation for runtime and end-to-end
 verification.
 
 OpenAI, Anthropic, Bedrock, any OpenAI-compatible endpoint, and fully local
-servers work too: [configuration guide](docs/CONFIGURATION.md).
+servers work too: [configuration guide](docs/configuration.mdx).
 
 The external publication profile is the default. `--external` is shorthand
 for `--profile external`, and `--policy` can overlay a custom policy file.
 
 Telemetry is disabled by default. To opt in, install the `telemetry` extra
 (included in `all`), set `SKILLEVALUATOR_TELEMETRY_ENABLED=true`, and configure
-an OpenTelemetry endpoint; see the [configuration guide](docs/CONFIGURATION.md#telemetry).
+an OpenTelemetry endpoint; see the [configuration guide](docs/configuration.mdx#telemetry).
 
 ## Tier 2: Semantic Deduplication
 
@@ -180,7 +180,7 @@ The catalog is a versioned JSON file containing embeddings and skill metadata,
 not credentials. It stays local unless you choose to share it; no external
 vector database or catalog service is involved. Thresholds, reports, catalog
 validation, and exactly where the chat LLM comes in:
-[Tier 2 guide](docs/TIER2_DEDUPLICATION.md).
+[Tier 2 guide](docs/tier2-deduplication.mdx).
 
 ## Tier 3: Live Agent Evaluation
 
@@ -281,7 +281,7 @@ default. Add `--harbor-keep-jobs` to retain them; the final **Artifacts** panel
 then prints the canonical `skillevaluator tier3 harbor-view <JOBS_DIR>` command.
 
 Custom graders, Harbor-format tasks, and agent credential setup:
-[Tier 3 guide](docs/TIER3_LIVE_EVALUATION.md).
+[Tier 3 guide](docs/tier3-live-evaluation.mdx).
 
 ## Expert tier aliases
 
@@ -296,7 +296,7 @@ skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
 ## Installation options
 
 The quickstart one-liner installs everything. For per-tier extras, plain pip,
-or Docker, see [installation](docs/INSTALLATION.md). Contributors work from a
+or Docker, see [installation](docs/installation.mdx). Contributors work from a
 source checkout:
 
 ```bash
@@ -307,12 +307,12 @@ uv sync --python 3.13 --all-extras
 
 ## Documentation
 
-- [Installation](docs/INSTALLATION.md) — extras, pip, Docker, requirements
-- [Tier 1 guide](docs/TIER1_VALIDATION.md) — checks, flags, reports, CI recipe
-- [Tier 2 guide](docs/TIER2_DEDUPLICATION.md) — dedup commands and thresholds
-- [Tier 3 guide](docs/TIER3_LIVE_EVALUATION.md) — skill evaluation with live agents, in depth
-- [Configuration](docs/CONFIGURATION.md) — credential map, providers, embeddings, telemetry
-- [Developer guide](docs/DEVELOPER_GUIDE.md) — contributor setup
+- [Installation](docs/installation.mdx) — extras, pip, Docker, requirements
+- [Tier 1 guide](docs/tier1-validation.mdx) — checks, flags, reports, CI recipe
+- [Tier 2 guide](docs/tier2-deduplication.mdx) — dedup commands and thresholds
+- [Tier 3 guide](docs/tier3-live-evaluation.mdx) — skill evaluation with live agents, in depth
+- [Configuration](docs/configuration.mdx) — credential map, providers, embeddings, telemetry
+- [Developer guide](docs/developer-guide.mdx) — contributor setup
 - Related: [SkillSpector](https://github.com/NVIDIA/SkillSpector) (skill
   security scanner used by the `security` extra),
   [Agent Skills specification](https://agentskills.io/),

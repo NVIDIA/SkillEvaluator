@@ -1,11 +1,14 @@
-# Tier 1: Static and Security Validation
+---
+title: "Tier 1: Static and Security Validation"
+description: "Deterministic quality gates for skills — schema, quality, security, PII, license, code-integrity, Unicode, and script checks, plus optional LLM judging."
+---
 
 Tier 1 is the deterministic quality gate for skills: schema, quality, security,
 PII, license, secrets, code-integrity, Unicode-safety, and script checks that run
 offline after the scanner binaries are installed. No API key is needed for the
 deterministic stages. The only LLM-backed pieces of Tier 1 are `rubric-eval`
 (LLM required) and the optional `--llm`/`--llm-verify` flags — those need a
-configured provider (see [CONFIGURATION.md](CONFIGURATION.md)).
+configured provider (see [CONFIGURATION.md](configuration.mdx)).
 
 ## Table of Contents
 
@@ -382,7 +385,7 @@ skillevaluator validate ./my-skill --llm-verify
 
 Static scanning still runs first. If a requested LLM stage is unavailable or
 returns unusable evidence, the run does not silently turn green. See
-[CONFIGURATION.md](CONFIGURATION.md) for supported public providers.
+[CONFIGURATION.md](configuration.mdx) for supported public providers.
 
 ## Reports
 
@@ -434,7 +437,7 @@ Public Tier 1 configuration ships inside the package under
 - `profiles/external.yaml` — the default public validation profile.
 
 Semgrep's static policy is also packaged with the distribution. Provider and
-credential configuration is documented in [CONFIGURATION.md](CONFIGURATION.md).
+credential configuration is documented in [CONFIGURATION.md](configuration.mdx).
 
 ## Troubleshooting
 
@@ -468,10 +471,10 @@ credential configuration is documented in [CONFIGURATION.md](CONFIGURATION.md).
 
 ## See Also
 
-- [Installation](INSTALLATION.md) — install the base package and optional extras.
-- [Configuration](CONFIGURATION.md) — providers, credentials, and offline modes.
-- [Tier 2 Deduplication](TIER2_DEDUPLICATION.md) — semantic overlap and local
+- [Installation](installation.mdx) — install the base package and optional extras.
+- [Configuration](configuration.mdx) — providers, credentials, and offline modes.
+- [Tier 2 Deduplication](tier2-deduplication.mdx) — semantic overlap and local
   catalog checks.
-- [Tier 3 Live Evaluation](TIER3_LIVE_EVALUATION.md) — advisory live agent
+- [Tier 3 Live Evaluation](tier3-live-evaluation.mdx) — advisory live agent
   evaluation.
-- [Developer Guide](DEVELOPER_GUIDE.md) — local development and testing.
+- [Developer Guide](developer-guide.mdx) — local development and testing.

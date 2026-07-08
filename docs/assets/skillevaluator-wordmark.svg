@@ -1,24 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="440" height="128" viewBox="0 0 440 128" role="img" aria-labelledby="se-title se-description" focusable="false">
   <title id="se-title">SkillEvaluator</title>
-  <desc id="se-description">A progressive evaluation core paired with the SkillEvaluator name.</desc>
+  <desc id="se-description">A progressive evaluation core paired with the SkillEvaluator name on a dark background.</desc>
   <style>
-    .se-panel { fill: #f2f7ec; stroke: #d7e5cc; }
-    .se-ring-outer { stroke: #b8d3a5; }
-    .se-ring-middle { stroke: #83aa66; }
-    .se-ring-inner { stroke: #315b25; }
-    .se-core { fill: #76b900; stroke: #3e6500; }
+    .se-background { fill: #0d1117; stroke: #273129; }
+    .se-panel { fill: #152117; stroke: #304631; }
+    .se-ring-outer { stroke: #39523a; }
+    .se-ring-middle { stroke: #6f9264; }
+    .se-ring-inner { stroke: #dbe8d6; }
+    .se-core { fill: #76b900; stroke: #9bdb34; }
     .se-check { stroke: #fff; }
-    .se-skill { fill: #fff; paint-order: stroke fill; stroke: #183a10; stroke-width: 1.1px; stroke-linejoin: round; }
+    .se-skill { fill: #fff; }
     .se-evaluator { fill: #76b900; }
-
-    @media (prefers-color-scheme: dark) {
-      .se-panel { fill: #152117; stroke: #304631; }
-      .se-ring-outer { stroke: #39523a; }
-      .se-ring-middle { stroke: #6f9264; }
-      .se-ring-inner { stroke: #dbe8d6; }
-      .se-core { fill: #76b900; stroke: #9bdb34; }
-    }
   </style>
+
+  <rect class="se-background" x=".5" y=".5" width="439" height="127" rx="20" stroke-width="1"/>
 
   <g aria-hidden="true" transform="translate(16 16) scale(.75)">
     <rect class="se-panel" x="10.5" y="10.5" width="107" height="107" rx="53.5" stroke-width="1"/>

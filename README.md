@@ -1,6 +1,6 @@
 # SkillEvaluator
 
-![SkillEvaluator](docs/assets/skillevaluator-wordmark.svg)
+![SkillEvaluator wordmark](docs/assets/skillevaluator-wordmark.svg)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13-blue.svg)](https://www.python.org/)

@@ -10,6 +10,9 @@ All notable changes to Skill Evaluator are documented in this file.
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.
+- Fern documentation site published to `docs.nvidia.com/skillevaluator`,
+  building the `docs/` guides (installation, configuration, and the three
+  evaluation tiers) as MDX pages.
 
 ### Security
 

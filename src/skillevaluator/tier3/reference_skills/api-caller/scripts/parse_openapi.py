@@ -133,7 +133,8 @@ def main():
                     "example": "parse_openapi.py https://api.weather.gov/openapi.json points",
                 },
                 indent=2,
-            )
+            ),
+            file=sys.stderr,
         )
         sys.exit(1)
 
@@ -143,7 +144,7 @@ def main():
     # Fetch the spec
     spec = fetch_spec(spec_url)
     if "error" in spec:
-        print(json.dumps(spec, indent=2))
+        print(json.dumps(spec, indent=2), file=sys.stderr)
         sys.exit(1)
 
     # Parse and return operations

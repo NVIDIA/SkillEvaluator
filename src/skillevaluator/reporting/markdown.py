@@ -18,7 +18,7 @@ import html
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from skillevaluator.reporting.base import ReporterBase
+from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -97,8 +97,9 @@ class MarkdownReporter(ReporterBase):
         lines.append("")
 
         # Overall status
-        all_passed = all(r.passed for r in results)
+        all_passed = all(passes_required_gate(r) for r in results)
         has_incomplete = any(r.is_incomplete for r in results)
+        advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         status = "⚠️ INCOMPLETE" if has_incomplete else "✅ PASSED" if all_passed else "❌ FAILED"
         lines.append(f"**Status:** {status}")
 
@@ -112,10 +113,14 @@ class MarkdownReporter(ReporterBase):
         lines.append("")
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
-        lines.append(f"| Validators Run | {len(results)} |")
+        lines.append(f"| Validator Results | {len(results)} |")
         lines.append(f"| ✅ Passed | {sum(1 for r in results if r.status == 'passed')} |")
-        lines.append(f"| ❌ Failed | {sum(1 for r in results if r.status == 'failed')} |")
+        lines.append(
+            f"| ❌ Failed | {sum(1 for r in results if r.status == 'failed' and not is_advisory_agent_eval_skip(r))} |"
+        )
         lines.append(f"| ⚠️ Incomplete | {sum(1 for r in results if r.is_incomplete)} |")
+        if advisory_skip_count:
+            lines.append(f"| ⏭️ Advisory skips | {advisory_skip_count} |")
 
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
@@ -263,9 +268,12 @@ class MarkdownReporter(ReporterBase):
         """Render a single validation result."""
         qs = result.metadata.get("quality_scores")
 
+        advisory_skip = is_advisory_agent_eval_skip(result)
         if result.is_incomplete:
             status_emoji = "⚠️ INCOMPLETE"
             lines.append(f"### {status_emoji} {result.validator_name}")
+        elif advisory_skip:
+            lines.append(f"### ⏭️ SKIPPED {result.validator_name}")
         elif qs and qs.get("grade"):
             grade = qs["grade"]
             status_emoji = "✅" if result.passed else "❌"
@@ -293,6 +301,11 @@ class MarkdownReporter(ReporterBase):
 
         if result.is_incomplete:
             self._render_incomplete(result, lines)
+        elif advisory_skip:
+            payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
+            provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
+            message = provenance.get("message") if isinstance(provenance, dict) else None
+            lines.append(f"- {message or 'Live evaluation did not run.'}")
         elif result.passed:
             self._render_success(result, lines)
             if result.findings:

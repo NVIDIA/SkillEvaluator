@@ -459,10 +459,11 @@ def main():
 
     raw_args = shlex.join(arg_parts)
     result = handle_operation(raw_args)
-    print(result)
-
-    if "Error:" in result:
+    if result.startswith("Error:"):
+        print(result, file=sys.stderr)
         sys.exit(1)
+
+    print(result)
 
 
 if __name__ == "__main__":

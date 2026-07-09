@@ -118,6 +118,82 @@ def test_combined_evaluate_keeps_exit_advisory_but_result_false_for_empty_engine
     assert "empty result" in result.metadata["agent_eval"]["execution_errors"][0]
 
 
+def test_combined_evaluate_converts_normalization_error_to_advisory_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation import tier3_report
+
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda _self, _options: {"execution_status": "succeeded", "execution_errors": []},
+        raising=True,
+    )
+
+    def _raise_normalizer(*_args, **_kwargs):
+        raise ValueError("corrupt Harbor artifact")
+
+    monkeypatch.setattr(tier3_report, "agent_eval_result_from_run", _raise_normalizer, raising=True)
+
+    result = cli_module._run_agent_eval_or_skip(
+        FIXTURE,
+        agents="codex",
+        env_mode="docker",
+        skip_baseline=True,
+        n_concurrent=1,
+        max_agents=1,
+    )
+
+    assert result.passed is False
+    payload = result.metadata["agent_eval"]
+    assert payload["execution_status"] == "skipped"
+    assert "Tier 3 result normalization failed: corrupt Harbor artifact" in payload["execution_errors"]
+
+
+def test_combined_evaluate_forwards_results_dir_to_normalizer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation import tier3_report
+    from skillevaluator.models.result import ValidationResult
+
+    engine_result = {"execution_status": "succeeded", "execution_errors": []}
+    expected = ValidationResult(validator_name="AGENT_EVAL")
+    expected.add_success("agent_eval", "ok")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda _self, _options: engine_result,
+        raising=True,
+    )
+
+    def _normalize(_skill_path: Path, **kwargs) -> ValidationResult:
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(tier3_report, "agent_eval_result_from_run", _normalize, raising=True)
+    results_root = tmp_path / "external-results"
+
+    actual = cli_module._run_agent_eval_or_skip(
+        FIXTURE,
+        agents="codex",
+        env_mode="docker",
+        skip_baseline=True,
+        n_concurrent=1,
+        max_agents=1,
+        results_dir=results_root,
+    )
+
+    assert actual is expected
+    assert captured["results_dir"] == results_root
+    assert captured["engine_result"] is engine_result
+    assert captured["env_mode"] == "docker"
+
+
 def test_report_discovery_handles_timestamped_results(tmp_path: Path) -> None:
     results_root = tmp_path / "results"
     skill = tmp_path / "myskill"

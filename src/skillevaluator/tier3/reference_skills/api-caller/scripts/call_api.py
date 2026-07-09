@@ -28,6 +28,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
+_UNSET = object()
+
 
 def _validate_http_url(url: str) -> str:
     """Reject local-file and custom URL schemes before making a request."""
@@ -38,7 +40,7 @@ def _validate_http_url(url: str) -> str:
 
 
 def make_request(
-    url: str, method: str = "GET", data: dict | None = None, headers: dict | None = None, timeout: int = 30
+    url: str, method: str = "GET", data: object = _UNSET, headers: dict | None = None, timeout: int = 30
 ) -> dict:
     """Make an HTTP request and return the response."""
 
@@ -64,7 +66,7 @@ def make_request(
 
         # Prepare body
         body = None
-        if data:
+        if data is not _UNSET:
             body = json.dumps(data).encode("utf-8")
             req_headers["Content-Type"] = "application/json"
 
@@ -157,6 +159,22 @@ def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
     return url
 
 
+def _parse_json_argument(value: str | None, label: str, expected_type: type | None = None) -> object | None:
+    """Parse and type-check a JSON command-line argument."""
+    if value is None:
+        return None
+
+    parsed = json.loads(value)
+    if expected_type is not None and not isinstance(parsed, expected_type):
+        raise ValueError(f"{label} must be a JSON {expected_type.__name__}")
+    return parsed
+
+
+def _print_json(value: dict, *, file=None) -> None:
+    """Print a stable, human-readable JSON object."""
+    print(json.dumps(value, indent=2, default=str), file=file)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generic API Caller")
     parser.add_argument("--url", help="Direct API endpoint URL")
@@ -173,9 +191,15 @@ def main():
     args = parser.parse_args()
 
     # Parse JSON arguments
-    data = json.loads(args.data) if args.data else None
-    headers = json.loads(args.headers) if args.headers else None
-    params = json.loads(args.params) if args.params else {}
+    try:
+        data = _UNSET if args.data is None else _parse_json_argument(args.data, "--data")
+        headers = _parse_json_argument(args.headers, "--headers", dict)
+        params = _parse_json_argument(args.params, "--params", dict) or {}
+        if headers and not all(isinstance(value, str) for value in headers.values()):
+            raise ValueError("--headers must map header names to string values")
+    except (json.JSONDecodeError, ValueError) as exc:
+        _print_json({"success": False, "error": f"Invalid input: {exc}"}, file=sys.stderr)
+        sys.exit(1)
 
     # Determine URL and method
     url = args.url
@@ -193,7 +217,9 @@ def main():
     if args.spec and args.operation:
         spec = fetch_openapi_spec(args.spec)
         if not spec:
-            print(json.dumps({"success": False, "error": f"Failed to fetch OpenAPI spec from {args.spec}"}, indent=2))
+            _print_json(
+                {"success": False, "error": f"Failed to fetch OpenAPI spec from {args.spec}"}, file=sys.stderr
+            )
             sys.exit(1)
 
         path, spec_method, _operation = find_operation(spec, args.operation)
@@ -205,36 +231,32 @@ def main():
                     if "operationId" in details:
                         available.append(f"{m.upper()} {p} ({details['operationId']})")
 
-            print(
-                json.dumps(
-                    {
-                        "success": False,
-                        "error": f"Operation '{args.operation}' not found in spec",
-                        "available_operations": available[:20],  # Show first 20
-                    },
-                    indent=2,
-                )
+            _print_json(
+                {
+                    "success": False,
+                    "error": f"Operation '{args.operation}' not found in spec",
+                    "available_operations": available[:20],  # Show first 20
+                },
+                file=sys.stderr,
             )
             sys.exit(1)
 
         url = build_url_from_spec(spec, path, params)
         method = spec_method
 
-        print("# Resolved from OpenAPI spec:")
-        print(f"# {method} {url}")
-        print()
+        print(f"Resolved OpenAPI operation: {method} {url}", file=sys.stderr)
 
     if not url:
-        print(
-            json.dumps({"success": False, "error": "No URL provided. Use --url or --spec with --operation"}, indent=2)
+        _print_json(
+            {"success": False, "error": "No URL provided. Use --url or --spec with --operation"}, file=sys.stderr
         )
         sys.exit(1)
 
     # Make the request
     result = make_request(url, method, data, headers, args.timeout)
 
-    # Pretty print result
-    print(json.dumps(result, indent=2, default=str))
+    # Pretty print successful results to stdout and handled failures to stderr.
+    _print_json(result, file=None if result["success"] else sys.stderr)
 
     # Exit with appropriate code
     sys.exit(0 if result["success"] else 1)

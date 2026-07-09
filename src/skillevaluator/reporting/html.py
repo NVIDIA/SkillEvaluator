@@ -31,7 +31,7 @@ from jinja2 import BaseLoader, Environment
 
 from skillevaluator import __version__
 from skillevaluator.constants import TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
-from skillevaluator.reporting.base import ReporterBase
+from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 
 if TYPE_CHECKING:
@@ -768,13 +768,15 @@ class HTMLReporter(ReporterBase):
     def _compute_tier_summary(results: list[ValidationResult]) -> dict[str, Any]:
         """Compact stats for a single tier — what the hero chip displays.
 
-        Returns ``passed`` (boolean), ``passed_count`` / ``total`` (validator
-        counts), ``issue_count`` (sum of findings), and per-severity totals.
+        Returns ``passed`` (boolean), executed/pass/skip counts,
+        ``issue_count`` (sum of findings), and per-severity totals.
         ``total == 0`` lets the template hide the chip entirely without an
         extra "did this tier run?" predicate.
         """
         total = len(results)
         passed_count = sum(1 for r in results if r.passed)
+        advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
+        failed_count = sum(1 for r in results if not passes_required_gate(r))
         issue_count = 0
         critical = high = medium = low = 0
         for r in results:
@@ -792,9 +794,10 @@ class HTMLReporter(ReporterBase):
         return {
             "total": total,
             "passed_count": passed_count,
-            "failed_count": total - passed_count,
+            "advisory_skipped_count": advisory_skipped_count,
+            "failed_count": failed_count,
             "issue_count": issue_count,
-            "all_passed": total > 0 and passed_count == total,
+            "all_passed": total > 0 and failed_count == 0,
             "incomplete_count": sum(1 for r in results if r.is_incomplete),
             "critical": critical,
             "high": high,
@@ -809,7 +812,7 @@ class HTMLReporter(ReporterBase):
                 "validator_name": result.validator_name,
                 "validator_description": result.validator_description,
                 "passed": result.passed,
-                "status": result.status,
+                "status": "skipped" if is_advisory_agent_eval_skip(result) else result.status,
                 "incomplete_scans": result.incomplete_scans,
                 "summary": {
                     "files_scanned": result.summary.files_scanned,
@@ -853,20 +856,67 @@ class HTMLReporter(ReporterBase):
             output.append(result_dict)
         return output
 
+    @staticmethod
+    def _tier3_report_data(results: list[ValidationResult]) -> dict[str, Any] | None:
+        """Return canonical Tier 3 data, with a visible fallback for bare results."""
+        for result in results:
+            payload = result.metadata.get("agent_eval") if result.metadata else None
+            if isinstance(payload, dict) and payload:
+                return normalize_agent_eval_harbor_links(payload)
+
+        if not results:
+            return None
+
+        # A validator failure should remain visible even if normalization
+        # failed before canonical ``agent_eval`` metadata could be attached.
+        result = results[0]
+        verdict = "pass" if result.passed else "fail"
+        execution_status = "succeeded" if result.passed else "failed"
+        messages = [*result.errors, *result.warnings, *result.messages]
+        message = messages[0] if messages else "Tier 3 did not provide canonical evaluation details."
+        return {
+            "schema_version": "2.0",
+            "summary": {
+                "schema_version": "2.0",
+                "verdict": verdict,
+                "execution_status": execution_status,
+                "execution_errors": list(result.errors),
+            },
+            "skill_name": "",
+            "verdict": verdict,
+            "overall_score": None,
+            "overall_lift": None,
+            "execution_status": execution_status,
+            "execution_errors": list(result.errors),
+            "agents_run": [],
+            "agents": {},
+            "dimensions": [],
+            "evaluators": {},
+            "evaluator_cards": [],
+            "cases": [],
+            "suggestions": messages,
+            "metric_ids": [],
+            "metric_labels": {},
+            "dataset": [],
+            "provenance": {"source": "validation_result", "message": message},
+        }
+
     def render(self, result: ValidationResult) -> str:
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
-        all_passed = all(r.passed for r in results)
+        all_passed = all(passes_required_gate(r) for r in results)
         has_incomplete = any(r.is_incomplete for r in results)
         overall_status = "incomplete" if has_incomplete else "passed" if all_passed else "failed"
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
         passed_count = sum(1 for r in results if r.passed)
-        failed_count = len(results) - passed_count
+        advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
+        failed_count = sum(1 for r in results if not passes_required_gate(r))
         total_issues = total_errors + total_warnings
         total_validators = len(results)
-        pass_percentage = round((passed_count / total_validators * 100) if total_validators > 0 else 0, 1)
+        executed_count = total_validators - advisory_skipped_count
+        pass_percentage = round((passed_count / executed_count * 100) if executed_count > 0 else 0, 1)
 
         timestamp = ""
         if self.include_timestamp:
@@ -918,10 +968,12 @@ class HTMLReporter(ReporterBase):
         tier1_summary = self._compute_tier_summary(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results)
         tier3_summary = self._compute_tier_summary(tier3_results)
+        tier3_data = self._tier3_report_data(tier3_results)
 
-        # Preserve the existing Tier 3 presentation while excluding every
-        # Tier 2 validator from Tier 1's skill- and validator-centric views.
-        tier1_display_results = [result for result in results if not is_tier2_validator_name(result.validator_name)]
+        # Keep the Tier 1 dashboard scoped to Tier 1. Tier 2 and Tier 3 have
+        # dedicated tabs; including an advisory Tier 3 skip here would make
+        # the dashboard report a failure even though it does not gate Tier 1.
+        tier1_display_results = tier1_results
         tier1_skills = self._reorganize_by_skill(tier1_display_results)
         tier1_top_issues = self._compute_top_issues(tier1_skills)
         tier1_contributors = self._extract_contributors(tier1_skills, tier1_display_results)
@@ -1008,14 +1060,6 @@ class HTMLReporter(ReporterBase):
             first_key = next(iter(skills_by_name))
             skills_by_name[first_key]["quality"] = single_qs
 
-        # Extract Tier 3 agent evaluation data if present
-        tier3_data: dict[str, Any] | None = None
-        for r in results:
-            ae = r.metadata.get("agent_eval") if r.metadata else None
-            if ae:
-                tier3_data = normalize_agent_eval_harbor_links(ae)
-                break
-
         report_data = {
             "title": self.title,
             "timestamp": timestamp,
@@ -1028,6 +1072,7 @@ class HTMLReporter(ReporterBase):
                 "incomplete_scans": list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans)),
                 "total_validators": total_validators,
                 "passed_count": passed_count,
+                "advisory_skipped_count": advisory_skipped_count,
                 "failed_count": failed_count,
                 "total_issues": total_issues,
                 "pass_percentage": pass_percentage,

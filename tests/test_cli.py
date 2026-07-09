@@ -485,16 +485,61 @@ def test_live_eval_help_uses_skill_evaluator_runtime_and_grading_names() -> None
     assert "harbor-environment" not in evaluate.output
     assert "k8s-sandbox" not in evaluate.output
     assert "local" not in evaluate.output
+    assert "--autopilot" in evaluate.output
+    assert "--progress [auto|rich|plain|off]" in evaluate.output
 
     grader = runner.invoke(cli, ["init-custom-grader", "--help"])
     assert grader.exit_code == 0
     assert "default_plus_custom" in grader.output
 
 
-def test_harbor_view_command_uses_the_upstream_harbor_cli() -> None:
+def test_live_eval_progress_is_presentation_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.tier3.harbor.progress import PlainProgressReporter
+
+    captured: dict[str, object] = {}
+
+    def _fake_evaluate(self, options, *, progress_reporter=None):
+        captured["options"] = options
+        captured["reporter"] = progress_reporter
+        return {"execution_status": "succeeded", "execution_errors": []}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
+    result = CliRunner().invoke(
+        cli,
+        ["evaluate", str(Path(__file__).parent / "fixtures" / "skills" / "simple"), "--progress", "plain"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert isinstance(captured["reporter"], PlainProgressReporter)
+    assert "progress" not in captured["options"].engine_kwargs()
+
+
+def test_harbor_view_command_uses_the_skillevaluator_wrapper() -> None:
     command = format_harbor_view_command("/tmp/jobs")
 
-    assert command == "harbor view /tmp/jobs"
+    assert command == "skillevaluator tier3 harbor-view /tmp/jobs"
+
+
+def test_harbor_view_command_shell_quotes_paths() -> None:
+    command = format_harbor_view_command("/tmp/jobs with spaces")
+
+    assert command == "skillevaluator tier3 harbor-view '/tmp/jobs with spaces'"
+
+
+def test_harbor_view_is_available_as_a_top_level_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3 import commands
+
+    captured: list[Path] = []
+    monkeypatch.setattr(commands, "harbor_view", lambda jobs_dir: captured.append(jobs_dir) or 0)
+
+    result = CliRunner().invoke(cli, ["harbor-view", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured == [tmp_path]
 
 
 def test_validate_help_is_detailed() -> None:

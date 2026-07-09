@@ -17,16 +17,24 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions
+    from skillevaluator.tier3.harbor.progress import ProgressReporter
 
 
 class EvaluationService:
     """Facade over the native Tier 3 engine used by both the CLI and the API."""
 
-    def evaluate(self, options: EvaluationOptions) -> dict[str, Any]:
+    def evaluate(
+        self,
+        options: EvaluationOptions,
+        *,
+        progress_reporter: ProgressReporter | None = None,
+    ) -> dict[str, Any]:
         """Run a live agent evaluation and return the engine results mapping."""
         from skillevaluator.tier3.commands import evaluate as _evaluate
+        from skillevaluator.tier3.harbor.progress import NullProgressReporter
 
-        return _evaluate(options.skill_path, **options.engine_kwargs())
+        reporter = progress_reporter or NullProgressReporter()
+        return _evaluate(options.skill_path, progress_reporter=reporter, **options.engine_kwargs())
 
     @staticmethod
     def failure_reason(result: object) -> str | None:
@@ -63,6 +71,12 @@ class EvaluationService:
         from skillevaluator.tier3.commands import create_dataset as _create_dataset
 
         _create_dataset(options.skill_path, **options.engine_kwargs())
+
+    def create_autopilot_dataset(self, skill_path: Path, *, use_llm: bool) -> Path:
+        """Create one missing eval case for the CLI autopilot workflow."""
+        from skillevaluator.tier3.generate_dataset import generate_one_case
+
+        return generate_one_case(skill_path, use_llm=use_llm)
 
     def discover_latest_results(self, skill_path: Path, results_dir: Path | None = None) -> Path | None:
         """Return the latest results directory for a skill, or None if absent.

@@ -28,7 +28,7 @@ class TestLLMClientInit:
 
         client = LLMClient()
 
-        assert client.model == "meta/llama-3.1-8b-instruct"
+        assert client.model == "openai/gpt-oss-120b"
         assert client._client is None
 
     def test_custom_params(self) -> None:

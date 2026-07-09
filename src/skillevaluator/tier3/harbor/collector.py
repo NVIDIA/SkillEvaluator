@@ -20,6 +20,7 @@ from skillevaluator.telemetry import record_agent_trial, redact_sensitive_data, 
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    LEGACY_METRICS,
     average_custom_metrics,
     average_metrics,
     dimension_scores,
@@ -411,6 +412,36 @@ def _extract_trial_failures(job_dir: Path) -> list[dict[str, str]]:
         if reason:
             failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
     return failures
+
+
+def _can_preserve_partial_rewards(job_dir: Path, trial_failures: list[dict[str, str]]) -> bool:
+    """Return whether every aggregate job error maps to a concrete failed trial."""
+    result = _read_json(job_dir / "result.json")
+    stats = result.get("stats") if isinstance(result, dict) else None
+    if not isinstance(stats, dict):
+        return False
+
+    current_schema = "n_errored_trials" in stats
+    errors = stats.get("n_errored_trials" if current_schema else "n_errors")
+    completed = stats.get("n_completed_trials" if current_schema else "n_trials")
+    total = result.get("n_total_trials")
+    if (
+        not isinstance(errors, int)
+        or isinstance(errors, bool)
+        or errors <= 0
+        or not isinstance(completed, int)
+        or isinstance(completed, bool)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or completed != total
+    ):
+        return False
+    if current_schema and any(stats.get(key) for key in ("n_running_trials", "n_pending_trials", "n_cancelled_trials")):
+        return False
+
+    failed_trials = {str(failure.get("trial") or "") for failure in trial_failures}
+    failed_trials.discard("")
+    return len(failed_trials) >= errors
 
 
 def _extract_agent_runtime_failures(job_dir: Path) -> list[dict[str, str]]:
@@ -977,8 +1008,32 @@ def _entry_id_from_harbor_result(result: dict[str, Any]) -> str:
     return ""
 
 
-def _overall_score(reward: dict[str, Any]) -> float:
+def _overall_score(reward: dict[str, Any]) -> float | None:
     return overall_score(reward)
+
+
+def _partition_scoreable_rewards(
+    rewards: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Separate complete finite rewards from diagnostic-only reward artifacts."""
+    scoreable: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    failed_trials: set[str] = set()
+    for reward in rewards:
+        if overall_score(reward) is not None:
+            scoreable.append(reward)
+            continue
+        trial = str(reward.get("_trial_name") or reward.get("_trial_root_name") or "unknown trial")
+        if trial in failed_trials:
+            continue
+        failed_trials.add(trial)
+        failures.append(
+            {
+                "trial": trial,
+                "reason": "Reward metrics are incomplete or non-finite; trial was not scored",
+            }
+        )
+    return scoreable, failures
 
 
 def _strip_attempt_suffix(value: str) -> str:
@@ -1045,14 +1100,18 @@ def _pass_summary(
     for entry_id in case_order:
         attempts = grouped.get(entry_id, [])
         attempt_rows = []
-        best_score = 0.0
+        best_score: float | None = None
         first_pass_attempt: int | None = None
+        scored_attempts = 0
         for idx, reward in enumerate(sorted(attempts, key=_attempt_sort_key), start=1):
-            score = round(_overall_score(reward), 4)
-            passed = score >= pass_threshold
+            raw_score = _overall_score(reward)
+            score = round(raw_score, 4) if raw_score is not None else None
+            passed = score is not None and score >= pass_threshold
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
-            best_score = max(best_score, score)
+            if score is not None:
+                scored_attempts += 1
+                best_score = score if best_score is None else max(best_score, score)
             attempt_rows.append(
                 {
                     "attempt": idx,
@@ -1067,15 +1126,15 @@ def _pass_summary(
         if case_passed and is_expected_case:
             passed_cases += 1
         if is_expected_case:
-            attempts_used += len(attempts)
-        missing = max(0, n_attempts - len(attempts))
+            attempts_used += scored_attempts
+        missing = max(0, n_attempts - scored_attempts)
 
         cases[entry_id] = {
             "passed": case_passed,
             "first_pass_attempt": first_pass_attempt,
-            "attempts_used": len(attempts),
+            "attempts_used": scored_attempts,
             "attempts_missing": missing,
-            "best_score": round(best_score, 4),
+            "best_score": round(best_score, 4) if best_score is not None else None,
             "attempts": attempt_rows,
         }
         if not is_expected_case:
@@ -1111,12 +1170,10 @@ def _compute_lift(
 ) -> dict[str, Any]:
     """Compute skill lift (with-skill minus without-skill) per metric."""
     lift: dict[str, Any] = {}
-    metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores or m in without_scores)
-    if not metrics:
-        metrics = DISPLAY_METRICS
+    metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores and m in without_scores)
     for metric in metrics:
-        w = with_scores.get(metric, 0.0)
-        wo = without_scores.get(metric, 0.0)
+        w = with_scores[metric]
+        wo = without_scores[metric]
         delta = round(w - wo, 4)
         lift[metric] = {
             "with_skill": w,
@@ -1124,21 +1181,23 @@ def _compute_lift(
             "delta": delta,
             "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
         }
-    overall_with = sum(with_scores.get(m, 0.0) for m in metrics) / len(metrics)
-    overall_without = sum(without_scores.get(m, 0.0) for m in metrics) / len(metrics)
-    lift["overall"] = {
-        "with_skill": round(overall_with, 4),
-        "without_skill": round(overall_without, 4),
-        "delta": round(overall_with - overall_without, 4),
-    }
+    if metrics in {DISPLAY_METRICS, LEGACY_METRICS}:
+        overall_with = sum(with_scores[m] for m in metrics) / len(metrics)
+        overall_without = sum(without_scores[m] for m in metrics) / len(metrics)
+        lift["overall"] = {
+            "with_skill": round(overall_with, 4),
+            "without_skill": round(overall_without, 4),
+            "delta": round(overall_with - overall_without, 4),
+        }
     return lift
 
 
-def _average_overall(rewards: list[dict[str, Any]]) -> float:
+def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
     """Average the pass/lift overall score across reward payloads."""
-    if not rewards:
-        return 0.0
-    return round(sum(overall_score(reward) for reward in rewards) / len(rewards), 4)
+    values = [overall_score(reward) for reward in rewards]
+    if not values or any(value is None for value in values):
+        return None
+    return round(sum(value for value in values if value is not None) / len(values), 4)
 
 
 def _compute_custom_lift(
@@ -1155,17 +1214,18 @@ def _compute_custom_lift(
     if include_overall:
         w = _average_overall(with_rewards)
         wo = _average_overall(without_rewards)
-        delta = round(w - wo, 4)
-        lift["overall"] = {
-            "with_skill": w,
-            "without_skill": wo,
-            "delta": delta,
-            "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
-        }
+        if w is not None and wo is not None:
+            delta = round(w - wo, 4)
+            lift["overall"] = {
+                "with_skill": w,
+                "without_skill": wo,
+                "delta": delta,
+                "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
+            }
 
-    for metric in sorted(set(with_custom_scores) | set(without_custom_scores)):
-        w = with_custom_scores.get(metric, 0.0)
-        wo = without_custom_scores.get(metric, 0.0)
+    for metric in sorted(set(with_custom_scores) & set(without_custom_scores)):
+        w = with_custom_scores[metric]
+        wo = without_custom_scores[metric]
         delta = round(w - wo, 4)
         lift[metric] = {
             "with_skill": w,
@@ -1448,6 +1508,9 @@ def _condition_execution_summary(
         if not case_id or case_id == "unknown":
             errors.append(f"Scored trial {root!r} has no case identifier")
             continue
+        if overall_score(reward) is None:
+            errors.append(f"Scored trial {root!r} has incomplete or non-finite reward metrics")
+            continue
         existing = roots.get(root)
         if existing is None:
             roots[root] = (case_id, {step_name} if step_name else set())
@@ -1569,7 +1632,10 @@ def collect_harbor_results(
             )
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
             with_trial_failures = _extract_trial_failures(with_job_dir)
-            with_rewards = _extract_rewards(with_job_dir) if with_job_ok else []
+            preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
+            with_rewards = _extract_rewards(with_job_dir) if with_job_ok or preserve_partial else []
+            with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_rewards)
+            with_trial_failures.extend(invalid_score_failures)
             with_scores, with_metric_set, with_metrics = average_metrics(with_rewards)
             all_results["metric_set"] = with_metric_set
             all_results["metrics"] = list(with_metrics)
@@ -1705,7 +1771,10 @@ def collect_harbor_results(
                 )
                 without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
                 without_trial_failures = _extract_trial_failures(without_job_dir)
-                without_rewards = _extract_rewards(without_job_dir) if without_job_ok else []
+                preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
+                without_rewards = _extract_rewards(without_job_dir) if without_job_ok or preserve_partial else []
+                without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_rewards)
+                without_trial_failures.extend(invalid_score_failures)
                 without_scores, without_metric_set, without_metrics = average_metrics(without_rewards)
                 without_custom_scores = average_custom_metrics(without_rewards)
                 without_pass = _pass_summary(

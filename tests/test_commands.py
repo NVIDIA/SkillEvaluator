@@ -6,11 +6,43 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
+from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_agents
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "simple"
+
+
+def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
+    assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
+
+
+def test_claude_alias_model_override_uses_canonical_agent_name() -> None:
+    assert parse_agent_model_overrides(("claude=anthropic/claude-sonnet",)) == {
+        "claude-code": ["anthropic/claude-sonnet"]
+    }
+
+
+def test_claude_alias_and_canonical_model_overrides_are_rejected() -> None:
+    with pytest.raises(ValueError, match=r"claude.*claude-code.*same agent"):
+        parse_agent_model_overrides(
+            (
+                "claude=anthropic/claude-sonnet",
+                "claude-code=anthropic/claude-opus",
+            )
+        )
+
+
+def test_repeated_canonical_model_overrides_are_rejected() -> None:
+    with pytest.raises(ValueError, match=r"claude-code.*claude-code.*one model"):
+        parse_agent_model_overrides(
+            (
+                "claude-code=anthropic/claude-sonnet",
+                "claude-code=anthropic/claude-opus",
+            )
+        )
 
 
 def test_validate_fixture_no_llm() -> None:

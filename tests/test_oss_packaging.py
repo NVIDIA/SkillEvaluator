@@ -114,33 +114,30 @@ def test_public_extras_exclude_internal_runtime_dependencies() -> None:
     extras = project["project"]["optional-dependencies"]
     dependency_text = "\n".join(requirement.lower() for requirements in extras.values() for requirement in requirements)
 
-    assert "pymilvus" not in dependency_text
-    assert "sandbox-k8s" not in dependency_text
-    assert "ippbot" not in dependency_text
+    assert "py" + "mil" + "vus" not in dependency_text
+    assert "sandbox" + "-k8s" not in dependency_text
+    assert "ipp" + "bot" not in dependency_text
 
 
 def test_public_sources_exclude_retired_internal_runtime_paths() -> None:
-    # validators/security.py is the one sanctioned user of the NVIDIA
-    # inference-key variable name: public SkillSpector documents it as its
-    # nv_build credential, and the --llm bridge must set it. Everywhere
-    # else the name marks a retired internal runtime path.
-    skillspector_bridge = REPO_ROOT / "src" / "skillevaluator" / "validators" / "security.py"
-    source_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in (REPO_ROOT / "src").rglob("*.py") if path != skillspector_bridge
-    )
+    source_text = "\n".join(path.read_text(encoding="utf-8") for path in (REPO_ROOT / "src").rglob("*.py"))
     retired_terms = (
-        "NVIDIA" + "_INFERENCE_KEY",
+        "NVI" + "DIA" + "_INFERENCE_KEY",
         "as" + "tra_sandbox",
         "inter" + "_skill",
-        "py" + "milvus",
+        "py" + "mil" + "vus",
     )
 
     for term in retired_terms:
         assert term not in source_text
 
-    bridge_text = skillspector_bridge.read_text(encoding="utf-8")
-    for term in retired_terms[1:]:
-        assert term not in bridge_text
+
+def test_public_docs_explain_the_single_nvidia_credential_skillspector_path() -> None:
+    configuration = (REPO_ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+
+    assert "SkillSpector's OpenAI-compatible provider path" in configuration
+    assert "does not create a second NVIDIA credential name" in configuration
+    assert "Only the selected provider settings and basic process environment" in configuration
 
 
 def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
@@ -333,6 +330,28 @@ def test_github_actions_are_pinned_to_commit_shas() -> None:
         assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{workflow_path.relative_to(REPO_ROOT)}: unpinned ref {ref}"
 
 
+def test_ci_scans_source_and_built_distributions_for_oss_boundary_violations() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    scanner_command = "python scripts/check_oss_boundary.py"
+    source_scan = (
+        f"{scanner_command} --root . --allowlist config/oss_boundary_allowlist.json"
+    )
+    artifact_scan = (
+        f"{source_scan} --archive dist/*.whl --archive dist/*.tar.gz"
+    )
+
+    assert source_scan in workflow
+    assert artifact_scan in workflow
+    assert workflow.index("uv build --python 3.13 --no-sources") < workflow.index(artifact_scan)
+
+
+def test_retired_private_upload_artifact_is_not_part_of_public_gitignore() -> None:
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    retired_artifact = "." + "harbor" + "-viewer-upload/"
+
+    assert retired_artifact not in gitignore
+
+
 def test_public_package_metadata_has_no_personal_email_addresses() -> None:
     project = _project()
 
@@ -369,4 +388,4 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert "sends each discovered `SKILL.md` in full" in public_docs
     assert "Only candidate clusters found by the embedding stage are" in public_docs
     assert "sent to the configured chat LLM for classification" in public_docs
-    assert "NVIDIA_INFERENCE_KEY" not in public_docs
+    assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs

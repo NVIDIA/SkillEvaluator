@@ -7,6 +7,7 @@ Tests ExternalTool, parse_json_output, create_temp_config, cvss_to_severity,
 and Tools registry with mocked subprocess and filesystem where appropriate.
 """
 
+import os
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
@@ -316,6 +317,19 @@ class TestExternalTool:
         passed_env = mock_run.call_args.kwargs["env"]
         assert passed_env["SKILLEVALUATOR_TEST_EXTRA"] == "1"
         assert "PATH" in passed_env
+
+    def test_run_can_replace_ambient_environment(self):
+        """Sensitive subprocesses can opt into an exact invocation environment."""
+        mock_proc = CompletedProcess(args=["true"], returncode=0, stdout="", stderr="")
+        with (
+            patch.dict(os.environ, {"UNRELATED_PARENT_SECRET": "must-not-leak"}, clear=False),
+            patch("shutil.which", return_value="/usr/bin/true"),
+            patch("skillevaluator.utils.tool_runner.subprocess.run", return_value=mock_proc) as mock_run,
+        ):
+            tool = ExternalTool("True", "true")
+            tool.run([], log_command=False, env={"PATH": "/usr/bin", "SELECTED_KEY": "selected"}, replace_env=True)
+
+        assert mock_run.call_args.kwargs["env"] == {"PATH": "/usr/bin", "SELECTED_KEY": "selected"}
 
     def test_run_without_env_leaves_subprocess_default(self):
         """No env argument means subprocess inherits the parent environment."""

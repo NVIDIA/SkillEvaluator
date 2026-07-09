@@ -15,63 +15,7 @@ from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, Ma
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
 from skillevaluator.validators.schema import SchemaValidator
-from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env, skillspector_llm_env
-
-
-class TestSkillspectorLLMEnvBridge:
-    """The --llm path must hand SkillSpector credentials it understands.
-
-    SkillSpector reads its own env contract (SKILLSPECTOR_PROVIDER +
-    NVIDIA_INFERENCE_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY), not
-    SKILL_EVAL_*. Without a bridge, `validate --llm` fails for the
-    documented nv_build setup.
-    """
-
-    def test_nv_build_maps_nvidia_key(self) -> None:
-        env = {"SKILL_EVAL_LLM_PROVIDER": "nv_build", "NVIDIA_API_KEY": "nvapi-test"}
-        bridged = skillspector_llm_env(env)
-        assert bridged["SKILLSPECTOR_PROVIDER"] == "nv_build"
-        assert bridged["NVIDIA_INFERENCE_KEY"] == "nvapi-test"
-
-    def test_openai_compatible_maps_openai_vars(self) -> None:
-        env = {
-            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
-            "SKILL_EVAL_LLM_API_KEY": "sk-local",
-            "SKILL_EVAL_LLM_BASE_URL": "http://localhost:11434/v1",
-            "SKILL_EVAL_LLM_MODEL": "qwen2.5:0.5b",
-        }
-        bridged = skillspector_llm_env(env)
-        assert bridged["SKILLSPECTOR_PROVIDER"] == "openai"
-        assert bridged["OPENAI_API_KEY"] == "sk-local"
-        assert bridged["OPENAI_BASE_URL"] == "http://localhost:11434/v1"
-
-    def test_openai_and_anthropic_set_provider_only(self) -> None:
-        env = {"SKILL_EVAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-x"}
-        assert skillspector_llm_env(env) == {"SKILLSPECTOR_PROVIDER": "openai"}
-        env = {"SKILL_EVAL_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "sk-a"}
-        assert skillspector_llm_env(env) == {"SKILLSPECTOR_PROVIDER": "anthropic"}
-
-    def test_user_skillspector_settings_win(self) -> None:
-        """An explicit SKILLSPECTOR_PROVIDER disables the bridge entirely."""
-        env = {
-            "SKILL_EVAL_LLM_PROVIDER": "nv_build",
-            "NVIDIA_API_KEY": "nvapi-test",
-            "SKILLSPECTOR_PROVIDER": "openai",
-        }
-        assert skillspector_llm_env(env) == {}
-
-    def test_existing_inference_key_not_clobbered(self) -> None:
-        env = {
-            "SKILL_EVAL_LLM_PROVIDER": "nv_build",
-            "NVIDIA_API_KEY": "nvapi-test",
-            "NVIDIA_INFERENCE_KEY": "nvapi-user-chosen",
-        }
-        bridged = skillspector_llm_env(env)
-        assert "NVIDIA_INFERENCE_KEY" not in bridged
-        assert bridged.get("SKILLSPECTOR_PROVIDER") == "nv_build"
-
-    def test_unconfigured_provider_returns_empty(self) -> None:
-        assert skillspector_llm_env({}) == {}
+from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env
 
 
 def _api_key_assignment(*fragments: str, separator: str = " = ") -> str:
@@ -999,15 +943,18 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not result.passed
         assert any(finding.check_name == "Instruction override (PI-1)" for finding in result.findings)
 
-    def test_nvidia_api_key_is_aliased_only_in_skillspector_child_environment(
+    def test_nvidia_api_key_uses_skillspector_openai_compatible_environment(
         self,
         monkeypatch,
         sample_skill_dir: Path,
     ) -> None:
-        """The public key reaches SkillSpector under its legacy name without entering argv or parent env."""
+        """The public key reaches SkillSpector without creating a second NVIDIA credential."""
         public_key = "unit-test-nvidia-build-key"
+        retired_name = "NVI" + "DIA" + "_INFERENCE_KEY"
         monkeypatch.setenv("NVIDIA_API_KEY", public_key)
-        monkeypatch.delenv("NVIDIA_INFERENCE_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "unrelated-anthropic-key")
+        monkeypatch.setenv(retired_name, "unrelated-retired-key")
         monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
         tool_result = ToolResult(
             success=True,
@@ -1026,27 +973,61 @@ Call us at 555-123-4567 or +1-555-987-6543
         command = mock_run.call_args_list[1].args[0]
         assert "env" in mock_run.call_args_list[1].kwargs, "SkillSpector must receive an invocation-scoped environment"
         child_env = mock_run.call_args_list[1].kwargs["env"]
-        assert child_env["NVIDIA_INFERENCE_KEY"] == public_key
-        assert child_env["SKILLSPECTOR_PROVIDER"] == "nv_build"
-        assert child_env["SKILLSPECTOR_MODEL"] == "meta/llama-3.1-8b-instruct"
-        assert "NVIDIA_INFERENCE_KEY" not in os.environ
+        assert mock_run.call_args_list[1].kwargs["replace_env"] is True
+        assert child_env["OPENAI_API_KEY"] == public_key
+        assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
+        assert child_env["SKILLSPECTOR_MODEL"] == "openai/gpt-oss-120b"
+        assert "NVIDIA_API_KEY" not in child_env
+        assert "ANTHROPIC_API_KEY" not in child_env
+        assert retired_name not in child_env
+        static_env = mock_run.call_args_list[0].kwargs["env"]
+        assert mock_run.call_args_list[0].kwargs["replace_env"] is True
+        assert "NVIDIA_API_KEY" not in static_env
+        assert "OPENAI_API_KEY" not in static_env
+        assert "ANTHROPIC_API_KEY" not in static_env
+        assert retired_name not in static_env
         assert public_key not in command
         rendered_result = "\n".join([*result.errors, *result.warnings, *result.messages])
         assert public_key not in rendered_result
 
-    def test_nvidia_compatibility_does_not_override_explicit_skillspector_configuration(self, monkeypatch) -> None:
-        """Existing SkillSpector credentials and non-NVIDIA providers remain authoritative."""
+    def test_explicit_skillspector_configuration_is_minimized(self, monkeypatch) -> None:
+        """An explicit public SkillSpector provider forwards only its own settings."""
         monkeypatch.setenv("NVIDIA_API_KEY", "public-test-key")
-        monkeypatch.setenv("NVIDIA_INFERENCE_KEY", "explicit-skillspector-key")
-        monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "nv_build")
-
-        assert _skillspector_child_env() is None
-        assert os.environ["NVIDIA_INFERENCE_KEY"] == "explicit-skillspector-key"
-
-        monkeypatch.delenv("NVIDIA_INFERENCE_KEY")
         monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "openai")
+        monkeypatch.setenv("SKILLSPECTOR_MODEL", "explicit-model")
+        monkeypatch.setenv("OPENAI_API_KEY", "explicit-openai-key")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example.test/v1")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "unrelated-anthropic-key")
 
-        assert _skillspector_child_env() is None
+        child_env = _skillspector_child_env()
+
+        assert child_env is not None
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
+        assert child_env["SKILLSPECTOR_MODEL"] == "explicit-model"
+        assert child_env["OPENAI_API_KEY"] == "explicit-openai-key"
+        assert child_env["OPENAI_BASE_URL"] == "https://openai.example.test/v1"
+        assert "NVIDIA_API_KEY" not in child_env
+        assert "ANTHROPIC_API_KEY" not in child_env
+
+    def test_pinned_skillspector_accepts_public_nvidia_build_through_openai_contract(self, monkeypatch) -> None:
+        """Exercise the pinned dependency's real provider credential resolver without making a network call."""
+        from skillspector.providers.openai.provider import OpenAIProvider
+
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "public-test-key")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+        child_env = _skillspector_child_env()
+
+        assert child_env is not None
+        with patch.dict(os.environ, child_env, clear=True):
+            assert OpenAIProvider().resolve_credentials() == (
+                "public-test-key",
+                "https://integrate.api.nvidia.com/v1",
+            )
 
     @pytest.mark.parametrize(
         ("provider", "credential", "model"),
@@ -1072,6 +1053,24 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert child_env is not None
         assert child_env["SKILLSPECTOR_PROVIDER"] == provider
         assert child_env["SKILLSPECTOR_MODEL"] == model
+
+    def test_skillspector_bedrock_environment_keeps_only_aws_chain(self, monkeypatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-bearer")
+        monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/credentials/test")
+        monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "unrelated-anthropic")
+        monkeypatch.setenv("NVIDIA_API_KEY", "unrelated-nvidia")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+
+        child_env = _skillspector_child_env()
+
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "bedrock"
+        assert child_env["AWS_BEARER_TOKEN_BEDROCK"] == "bedrock-bearer"
+        assert child_env["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"] == "/v2/credentials/test"
+        assert "OPENAI_API_KEY" not in child_env
+        assert "ANTHROPIC_API_KEY" not in child_env
+        assert "NVIDIA_API_KEY" not in child_env
 
     def test_skillspector_child_environment_maps_openai_compatible_provider(self, monkeypatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")

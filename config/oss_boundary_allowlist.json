@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "allowlist": [
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-runtime-dependency",
+      "line": 117,
+      "reason": "Negative dependency boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-runtime-dependency",
+      "line": 118,
+      "reason": "Negative dependency boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-product-name",
+      "line": 119,
+      "reason": "Negative product boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-nvidia-credential",
+      "line": 125,
+      "reason": "Negative credential boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "execution-service-integration",
+      "line": 126,
+      "reason": "Negative execution boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-runtime-dependency",
+      "line": 128,
+      "reason": "Negative dependency boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "harbor-upload-integration",
+      "line": 350,
+      "reason": "Negative upload boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-nvidia-credential",
+      "line": 391,
+      "reason": "Negative documentation boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_provider_config.py",
+      "rule": "internal-nvidia-credential",
+      "line": 72,
+      "reason": "Negative provider credential assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/validators/test_security.py",
+      "rule": "internal-nvidia-credential",
+      "line": 953,
+      "reason": "Negative subprocess credential assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    }
+  ]
+}

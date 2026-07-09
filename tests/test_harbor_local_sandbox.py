@@ -7,9 +7,11 @@ import contextlib
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,7 @@ class TestDetect:
         def boom(*args: object, **kwargs: object) -> None:
             raise AssertionError("off mode must not probe the host")
 
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
         monkeypatch.setattr(local_sandbox.shutil, "which", boom)
         sandbox = local_sandbox.detect("off")
         assert sandbox.plan.backend == "none"
@@ -86,10 +89,27 @@ class TestDetect:
         with pytest.raises(local_sandbox.SandboxUnavailable, match="sandbox-exec"):
             local_sandbox.detect("require")
 
-    def test_unsupported_platform_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("mode", local_sandbox.SANDBOX_MODES)
+    def test_native_windows_local_mode_fails_closed_for_every_sandbox_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+    ) -> None:
         monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Windows")
-        with pytest.raises(local_sandbox.SandboxUnavailable):
-            local_sandbox.detect("require")
+        with pytest.raises(local_sandbox.SandboxUnavailable, match="Native Windows local mode is unsupported"):
+            local_sandbox.detect(mode)
+
+    @pytest.mark.parametrize("system", ["FreeBSD", "CYGWIN_NT-10.0", "MSYS_NT-10.0"])
+    @pytest.mark.parametrize("mode", local_sandbox.SANDBOX_MODES)
+    def test_other_unsupported_platforms_fail_closed_for_every_sandbox_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        system: str,
+        mode: str,
+    ) -> None:
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: system)
+        with pytest.raises(local_sandbox.SandboxUnavailable, match="Local mode is unsupported on platform"):
+            local_sandbox.detect(mode)
 
     def test_invalid_mode_rejected(self) -> None:
         with pytest.raises(ValueError):
@@ -109,6 +129,13 @@ class TestDetect:
         argv = local_sandbox._bwrap_smoke_argv("bwrap")
         for flag in ("--die-with-parent", "--new-session", "--proc", "--dev", "--tmpfs"):
             assert flag in argv
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="requires a native Windows runner")
+@pytest.mark.parametrize("mode", local_sandbox.SANDBOX_MODES)
+def test_actual_native_windows_host_rejects_local_mode(mode: str) -> None:
+    with pytest.raises(local_sandbox.SandboxUnavailable, match="Native Windows local mode is unsupported"):
+        local_sandbox.detect(mode)
 
 
 class TestResolveModeAndFlags:
@@ -145,6 +172,41 @@ class TestResolveModeAndFlags:
 
 
 class TestBwrapArgv:
+    @staticmethod
+    def _option_operands(argv: list[str], option: str, count: int = 2) -> set[tuple[str, ...]]:
+        return {
+            tuple(argv[index + 1 : index + count + 1])
+            for index, value in enumerate(argv)
+            if value == option
+        }
+
+    @staticmethod
+    def _pretend_absolute_paths_exist(
+        monkeypatch: pytest.MonkeyPatch,
+        *paths: Path,
+    ) -> None:
+        """Model Linux runtime layouts that must not be created on the test host."""
+        simulated = {path.absolute() for path in paths}
+        real_resolve = Path.resolve
+        real_exists = Path.exists
+        real_is_symlink = Path.is_symlink
+
+        def resolve(path: Path, strict: bool = False) -> Path:
+            absolute = path.absolute()
+            if absolute in simulated:
+                return absolute
+            return real_resolve(path, strict=strict)
+
+        def exists(path: Path) -> bool:
+            return path.absolute() in simulated or real_exists(path)
+
+        def is_symlink(path: Path) -> bool:
+            return False if path.absolute() in simulated else real_is_symlink(path)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        monkeypatch.setattr(Path, "exists", exists)
+        monkeypatch.setattr(Path, "is_symlink", is_symlink)
+
     def _argv(
         self,
         tmp_path: Path,
@@ -284,6 +346,105 @@ class TestBwrapArgv:
         assert f"--dir {command.parent}" in joined
         assert f"--ro-bind {command} {command}" in joined
 
+    def test_strict_exact_usr_local_runtime_is_published_without_broad_usr_mount(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = Path("/usr/local/bin/opencode")
+        self._pretend_absolute_paths_exist(monkeypatch, runtime.parent, runtime)
+        monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: ())
+
+        argv = self._argv(tmp_path, extra_ro=[runtime], strict_reads=True)
+
+        ro_bind_try = self._option_operands(argv, "--ro-bind-try")
+        ro_bind = self._option_operands(argv, "--ro-bind")
+        directories = self._option_operands(argv, "--dir", count=1)
+        assert ("/usr", "/usr") not in ro_bind_try
+        assert ("/opt", "/opt") not in ro_bind_try
+        assert ("/usr/local",) in directories
+        assert ("/usr/local/bin",) in directories
+        assert (str(runtime), str(runtime)) in ro_bind
+        assert ("/usr/local", "/usr/local") not in ro_bind
+        assert ("/usr/local/bin", "/usr/local/bin") not in ro_bind
+
+    def test_strict_usr_local_style_npm_symlink_keeps_alias_and_package_exact(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        prefix = tmp_path / "host" / "usr" / "local"
+        package = prefix / "lib" / "node_modules" / "opencode-ai"
+        target = package / "bin" / "opencode"
+        target.parent.mkdir(parents=True)
+        target.write_text("binary", encoding="utf-8")
+        command = prefix / "bin" / "opencode"
+        command.parent.mkdir(parents=True)
+        command.symlink_to(Path("../lib/node_modules/opencode-ai/bin/opencode"))
+        monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: ())
+
+        argv = self._argv(
+            tmp_path,
+            extra_ro=[command.absolute(), package.resolve()],
+            strict_reads=True,
+        )
+
+        symlinks = self._option_operands(argv, "--symlink")
+        ro_bind = self._option_operands(argv, "--ro-bind")
+        assert (str(target.resolve()), str(command)) in symlinks
+        assert (str(package), str(package)) in ro_bind
+        assert (str(prefix), str(prefix)) not in ro_bind
+        assert (str(command.parent), str(command.parent)) not in ro_bind
+
+    def test_strict_exact_opt_venv_creates_parents_without_broad_opt_mount(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        interpreter = Path("/opt/se-venv/bin/python")
+        self._pretend_absolute_paths_exist(monkeypatch, interpreter.parent, interpreter)
+        monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: ())
+
+        argv = self._argv(tmp_path, extra_ro=[interpreter], strict_reads=True)
+
+        ro_bind_try = self._option_operands(argv, "--ro-bind-try")
+        ro_bind = self._option_operands(argv, "--ro-bind")
+        directories = self._option_operands(argv, "--dir", count=1)
+        assert ("/opt", "/opt") not in ro_bind_try
+        assert ("/opt",) in directories
+        assert ("/opt/se-venv",) in directories
+        assert ("/opt/se-venv/bin",) in directories
+        assert (str(interpreter), str(interpreter)) in ro_bind
+        assert ("/opt/se-venv", "/opt/se-venv") not in ro_bind
+        assert ("/opt/se-venv/bin", "/opt/se-venv/bin") not in ro_bind
+
+    def test_non_strict_system_mounts_cover_usr_local_runtime_and_opt_venv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = Path("/usr/local/bin/opencode")
+        interpreter = Path("/opt/se-venv/bin/python")
+        self._pretend_absolute_paths_exist(
+            monkeypatch,
+            runtime.parent,
+            runtime,
+            interpreter.parent,
+            interpreter,
+        )
+
+        argv = self._argv(tmp_path, extra_ro=[runtime, interpreter])
+
+        ro_bind_try = self._option_operands(argv, "--ro-bind-try")
+        ro_bind = self._option_operands(argv, "--ro-bind")
+        directories = self._option_operands(argv, "--dir", count=1)
+        assert ("/usr", "/usr") in ro_bind_try
+        assert ("/opt", "/opt") in ro_bind_try
+        assert (str(runtime), str(runtime)) not in ro_bind
+        assert (str(interpreter), str(interpreter)) not in ro_bind
+        assert ("/usr/local",) not in directories
+        assert ("/opt/se-venv",) not in directories
+
     def test_exact_bind_creates_descendants_below_tmp_anchor(
         self,
         tmp_path: Path,
@@ -352,7 +513,12 @@ class TestSeatbeltArgv:
 
     def test_network_denied_by_default_and_opt_in(self, tmp_path: Path) -> None:
         assert "(deny network*)" in self._profile(tmp_path)
-        assert "(allow network*)" in self._profile(tmp_path, allow_net=True)
+        enabled = self._profile(tmp_path, allow_net=True)
+        assert "(allow network*)" not in enabled
+        assert "(deny network-inbound)" in enabled
+        assert "(deny network-bind)" in enabled
+        assert "remote unix-socket" in enabled
+        assert "/private/var/run/mDNSResponder" in enabled
 
     @pytest.mark.skipif(os.name == "nt", reason="Seatbelt profiles are macOS-specific")
     def test_strict_reads_use_granular_usr_roots(self, tmp_path: Path) -> None:
@@ -534,6 +700,112 @@ class TestSandboxWrap:
                 strict_reads=True,
             )
 
+    @pytest.mark.parametrize(
+        "broad_root",
+        [
+            "/",
+            "/usr",
+            "/usr/local",
+            "/opt",
+            "/tmp",
+            "/private/tmp",
+            "/var/tmp",
+            "/var",
+            "/private",
+            "/private/var",
+            "/etc",
+            "/home",
+            "/Users",
+            "/root",
+        ],
+    )
+    def test_strict_reads_filter_shared_tree_roots_but_keep_narrow_descendants(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        broad_root: str,
+    ) -> None:
+        monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: ())
+        broad = Path(broad_root)
+        narrow = broad / "selected-runtime" / "lib" / "node_modules" / "opencode-ai"
+
+        roots = local_sandbox._validated_strict_read_roots([broad, narrow])
+
+        assert broad not in roots
+        assert narrow in roots
+
+    def test_strict_reads_filter_alias_to_shared_tree_but_allow_alias_to_narrow_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        broad_alias = tmp_path / "broad-alias"
+        broad_alias.symlink_to(Path("/usr/local"), target_is_directory=True)
+        narrow_target = tmp_path / "selected" / "venv"
+        narrow_target.mkdir(parents=True)
+        narrow_alias = tmp_path / "narrow-alias"
+        narrow_alias.symlink_to(narrow_target, target_is_directory=True)
+        monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: ())
+
+        roots = local_sandbox._validated_strict_read_roots([broad_alias, narrow_alias])
+
+        assert broad_alias not in roots
+        assert narrow_alias in roots
+
+    def test_strict_reads_allow_home_descendant_but_reject_home_ancestor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host_home = tmp_path / "host-home"
+        narrow_venv = host_home / ".local" / "venvs" / "skill-evaluator"
+        monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: (host_home.resolve(),))
+
+        assert local_sandbox._validated_strict_read_roots([narrow_venv]) == [narrow_venv.absolute()]
+        with pytest.raises(ValueError, match="host home"):
+            local_sandbox._validated_strict_read_roots([host_home.parent])
+
+    @pytest.mark.parametrize("backend", ["bubblewrap", "seatbelt"])
+    def test_strict_filter_is_shared_by_kernel_wrappers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backend: str,
+    ) -> None:
+        shared_tmp = Path(tempfile.mkdtemp(prefix="skillevaluator-strict-shared-", dir="/tmp"))
+        runtime = shared_tmp / "venv"
+        runtime.mkdir()
+        run_root = tmp_path / "run"
+        (run_root / "workspace").mkdir(parents=True)
+        (run_root / "home").mkdir()
+        (run_root / "tmp").mkdir()
+        monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: ())
+        sandbox = local_sandbox.Sandbox(_plan(backend, "kernel-macos" if backend == "seatbelt" else "kernel"))
+
+        try:
+            wrapped = sandbox.wrap(
+                ["/bin/true"],
+                workdir=run_root / "workspace",
+                write_roots=[run_root],
+                home=run_root / "home",
+                tmp=run_root / "tmp",
+                allow_net=False,
+                extra_ro=[Path("/tmp"), runtime],
+                strict_reads=True,
+            )
+        finally:
+            shutil.rmtree(shared_tmp, ignore_errors=True)
+
+        canonical_tmp = Path("/tmp").resolve()
+        canonical_runtime = runtime.resolve()
+        if backend == "bubblewrap":
+            ro_binds = TestBwrapArgv._option_operands(wrapped, "--ro-bind")
+            assert (str(canonical_tmp), "/tmp") not in ro_binds
+            assert (str(canonical_runtime), str(canonical_runtime)) in ro_binds
+        else:
+            profile = wrapped[2]
+            assert f'(require-not (subpath "{local_sandbox._sbpl_quote(canonical_tmp)}"))' not in profile
+            assert f'(require-not (subpath "{local_sandbox._sbpl_quote(canonical_runtime)}"))' in profile
+
 
 class TestRlimits:
     def test_local_sandbox_import_survives_missing_resource_module(self) -> None:
@@ -583,6 +855,7 @@ _ON_MACOS_WITH_SEATBELT = platform.system() == "Darwin" and Path("/usr/bin/sandb
 # python lives under ~/.local, outside the system allowlist), mirroring what
 # _runtime_ro_binds() supplies in the real exec() path.
 _PY_RO = [Path(sys.prefix), Path(sys.base_prefix), Path(sys.executable).resolve().parent.parent]
+_CANONICAL_PYTHON = str(Path(sys.executable).resolve())
 
 
 @pytest.mark.skipif(not _ON_MACOS_WITH_SEATBELT, reason="requires macOS Seatbelt")
@@ -706,13 +979,50 @@ class TestSeatbeltLive:
         run_root, runtime_root, _auth_file = fake_home_tree
 
         result = self._run(
-            [sys.executable, "-B", "-c", "print('interpreter-ok')"],
+            [_CANONICAL_PYTHON, "-B", "-c", "print('interpreter-ok')"],
             run_root,
             extra_ro=[runtime_root, *_PY_RO],
         )
 
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "interpreter-ok"
+
+    def test_disposable_home_allows_git_to_traverse_to_run_root(
+        self,
+        fake_home_tree: tuple[Path, Path, Path],
+    ) -> None:
+        run_root, runtime_root, _auth_file = fake_home_tree
+
+        result = self._run(
+            ["/usr/bin/git", "-C", str(run_root), "init", "-q"],
+            run_root,
+            extra_ro=[runtime_root, *_PY_RO],
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert (run_root / ".git").is_dir()
+
+    def test_disposable_home_traversal_does_not_expose_sibling_metadata_or_entries(
+        self,
+        fake_home_tree: tuple[Path, Path, Path],
+    ) -> None:
+        run_root, runtime_root, auth_file = fake_home_tree
+
+        listing = self._run(
+            ["/bin/ls", str(auth_file.parent)],
+            run_root,
+            extra_ro=[runtime_root, *_PY_RO],
+        )
+        metadata = self._run(
+            ["/usr/bin/stat", str(auth_file)],
+            run_root,
+            extra_ro=[runtime_root, *_PY_RO],
+        )
+
+        assert listing.returncode != 0
+        assert auth_file.name not in listing.stdout
+        assert metadata.returncode != 0
+        assert auth_file.name not in metadata.stdout
 
     def test_relative_path_helper_cannot_override_absolute_interpreter(
         self,
@@ -917,9 +1227,14 @@ class TestSeatbeltLive:
 
     def test_python_write_outside_run_root_blocked(self, run_root: Path, tmp_path: Path) -> None:
         escape = tmp_path / "escape.txt"
-        code = f"open({str(escape)!r}, 'w').write('pwned')"
-        result = self._run([sys.executable, "-B", "-c", code], run_root)
+        started = run_root / "python-started.txt"
+        code = (
+            f"open({str(started)!r}, 'w').write('started'); "
+            f"open({str(escape)!r}, 'w').write('pwned')"
+        )
+        result = self._run([_CANONICAL_PYTHON, "-B", "-c", code], run_root)
         assert result.returncode != 0
+        assert started.read_text(encoding="utf-8") == "started"
         assert not escape.exists()
 
     def test_read_of_host_home_secret_blocked(self, run_root: Path) -> None:
@@ -965,6 +1280,39 @@ class TestSeatbeltLive:
         finally:
             shutil.rmtree(probe_dir, ignore_errors=True)
 
+    def test_network_enabled_still_blocks_host_unix_socket(self, run_root: Path) -> None:
+        socket_dir = Path(tempfile.mkdtemp(prefix=".se-ipc-", dir="/tmp"))
+        socket_path = socket_dir / "s"
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(socket_path))
+        server.listen(1)
+        accepted: list[socket.socket] = []
+
+        def accept_once() -> None:
+            with contextlib.suppress(OSError):
+                connection, _ = server.accept()
+                accepted.append(connection)
+
+        thread = threading.Thread(target=accept_once, daemon=True)
+        thread.start()
+        code = "import socket,sys;s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1])"
+        try:
+            result = self._run(["/usr/bin/python3", "-B", "-c", code, str(socket_path)], run_root, allow_net=True)
+            assert result.returncode != 0
+            assert not accepted
+        finally:
+            server.close()
+            for connection in accepted:
+                connection.close()
+            shutil.rmtree(socket_dir, ignore_errors=True)
+
+    def test_network_enabled_keeps_system_dns_available(self, run_root: Path) -> None:
+        code = "import socket; print(socket.getaddrinfo('integrate.api.nvidia.com', 443)[0][4][0])"
+        result = self._run(["/usr/bin/python3", "-B", "-c", code], run_root, allow_net=True)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip()
+
     def test_strict_reads_allow_selected_symlinked_runtime(self, run_root: Path, tmp_path: Path) -> None:
         target = tmp_path / "runtime" / "agent"
         target.parent.mkdir()
@@ -986,16 +1334,20 @@ class TestSeatbeltLive:
             (run_root / "home").mkdir()
             output = run_root / "output with spaces.txt"
             code = f"from pathlib import Path; Path({str(output)!r}).write_text('ok', encoding='utf-8')"
-            result = self._run([sys.executable, "-B", "-c", code], run_root)
+            result = self._run([_CANONICAL_PYTHON, "-B", "-c", code], run_root)
             assert result.returncode == 0, result.stderr
             assert output.read_text(encoding="utf-8") == "ok"
         finally:
             shutil.rmtree(run_root, ignore_errors=True)
 
     def test_network_blocked_by_default(self, run_root: Path) -> None:
-        code = "import socket; s=socket.socket(); s.settimeout(3); s.connect(('1.1.1.1', 80))"
-        result = self._run([sys.executable, "-B", "-c", code], run_root)
+        code = (
+            "import socket,sys; print('network-probe-started', file=sys.stderr); "
+            "s=socket.socket(); s.settimeout(3); s.connect(('1.1.1.1', 80))"
+        )
+        result = self._run([_CANONICAL_PYTHON, "-B", "-c", code], run_root)
         assert result.returncode != 0
+        assert "network-probe-started" in result.stderr
         assert "not permitted" in result.stderr.lower() or "denied" in result.stderr.lower()
 
     def test_detect_smoke_passes_on_this_host(self) -> None:

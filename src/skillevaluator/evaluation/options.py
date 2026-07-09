@@ -40,6 +40,7 @@ class EvaluationOptions:
     grading_mode: str | None = None
     results_dir: Path | None = None
     harbor_keep_jobs: bool = False
+    agent_runtime_preflight: bool = True
     timeout_multiplier: float | None = None
     override_cpus: int | None = None
     override_memory_mb: int | None = None

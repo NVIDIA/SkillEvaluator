@@ -92,10 +92,11 @@ _SECRET_ENV_NAME_RE = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)",
 _SHELL_WRITE_REDIRECT_RE = re.compile(r"(?:^|\s)(?:\d?>{1,2}|&>)\s*([^\s;&|]+)")
 _SHELL_WRITE_COMMAND_RE = re.compile(r"(?:^|[;&|]\s*)(?:tee|touch|mkdir|cp|mv)\b(?P<args>[^;&|]*)")
 _BACKGROUND_AMPERSAND_RE = re.compile(r"(?<![&>])&(?![&>])")
-_WAIT_COMMAND_RE = re.compile(r"(?:^|[;&|\n])\s*wait(?:\s|[;&|]|$)")
 _DETACHED_PROCESS_COMMANDS = frozenset({"setsid", "nohup", "daemon", "disown"})
 _SHELL_COMMANDS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
 _COMMAND_PREFIXES = frozenset({"command", "do", "elif", "env", "exec", "if", "then", "until", "while"})
+_REAP_TERM_SECONDS = 1.0
+_REAP_KILL_SECONDS = 1.0
 _PATH_START_BOUNDARY_RE = r"(?<![A-Za-z0-9_.-])"
 _PATH_BOUNDARY_RE = r"(?=$|[\s'\";&|<>])"
 _HOST_HOME_PREFIX_RE = r"(?:~|\$HOME|\$\{HOME\}|/Users/[^\s/;'\"&|<>]+|/home/[^\s/;'\"&|<>]+|/root)"
@@ -181,6 +182,21 @@ def _contains_detached_process_launcher(command: str, *, _depth: int = 0) -> boo
             continue
 
         name = Path(token).name
+        if name == "env":
+            index += 1
+            while index < len(tokens) and (
+                tokens[index].startswith("-")
+                or ("=" in tokens[index] and not tokens[index].startswith(("/", "./", "../")))
+            ):
+                index += 1
+            continue
+        if name == "nice":
+            index += 1
+            if index < len(tokens) and tokens[index] in {"-n", "--adjustment"}:
+                index += 2
+            elif index < len(tokens) and tokens[index].startswith("-"):
+                index += 1
+            continue
         if name in _COMMAND_PREFIXES or ("=" in token and not token.startswith(("/", "./", "../"))):
             index += 1
             continue
@@ -205,6 +221,70 @@ def _contains_detached_process_launcher(command: str, *, _depth: int = 0) -> boo
                 if is_command_option and _contains_detached_process_launcher(
                     tokens[offset + 1], _depth=_depth + 1
                 ):
+                    return True
+        command_position = False
+        index += 1
+    return False
+
+
+def _contains_background_command(command: str, *, _depth: int = 0) -> bool:
+    """Detect background operators in direct and nested shell command strings."""
+    if _BACKGROUND_AMPERSAND_RE.search(_unquoted_shell_text(command)):
+        return True
+    if _depth > 3:
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+
+    command_position = True
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token and set(token) <= set(";&|()"):
+            command_position = True
+            index += 1
+            continue
+        if not command_position:
+            index += 1
+            continue
+        name = Path(token).name
+        if name == "env":
+            index += 1
+            while index < len(tokens) and (
+                tokens[index].startswith("-")
+                or ("=" in tokens[index] and not tokens[index].startswith(("/", "./", "../")))
+            ):
+                index += 1
+            continue
+        if name == "nice":
+            index += 1
+            if index < len(tokens) and tokens[index] in {"-n", "--adjustment"}:
+                index += 2
+            elif index < len(tokens) and tokens[index].startswith("-"):
+                index += 1
+            continue
+        if name in _COMMAND_PREFIXES or ("=" in token and not token.startswith(("/", "./", "../"))):
+            index += 1
+            continue
+        if name in _SHELL_COMMANDS:
+            segment_end = next(
+                (
+                    offset
+                    for offset in range(index + 1, len(tokens))
+                    if tokens[offset] and set(tokens[offset]) <= set(";&|()")
+                ),
+                len(tokens),
+            )
+            for offset in range(index + 1, segment_end - 1):
+                option = tokens[offset]
+                is_command_option = option == "-c" or (
+                    option.startswith("-") and not option.startswith("--") and "c" in option[1:]
+                )
+                if is_command_option and _contains_background_command(tokens[offset + 1], _depth=_depth + 1):
                     return True
         command_position = False
         index += 1
@@ -253,6 +333,10 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         )
         self._strict_reads = local_sandbox.coerce_flag(strict_reads, env_var=local_sandbox.STRICT_READS_ENV)
         self._sandbox: local_sandbox.Sandbox | None = None
+        self._active_processes: dict[
+            asyncio.subprocess.Process,
+            asyncio.Task[tuple[bytes, bytes]] | None,
+        ] = {}
         super().__init__(*args, **kwargs)
         base_dir = self._working_dir_override or (self.trial_paths.trial_dir / "local-environment")
         self._root = base_dir.resolve()
@@ -314,6 +398,9 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             self.logger.warning("local mode is NOT kernel-sandboxed; advisory guardrails only: %s", plan.reason)
 
     async def stop(self, delete: bool) -> None:
+        for proc, communication in tuple(self._active_processes.items()):
+            await self._terminate_process_tree(proc, communication)
+        self._active_processes.clear()
         if delete and self._root.exists():
             shutil.rmtree(self._root, ignore_errors=True)
 
@@ -411,8 +498,16 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         #
         # The strict profile includes visible runtime aliases and can be
         # selected explicitly.
+        bootstrap_interpreter = Path(sys.executable)
+        if sandbox.plan.backend == "seatbelt":
+            # sandbox-exec can reject relocatable or symlinked venv launchers
+            # while they resolve their own path, even when the profile permits
+            # the venv and its target. This bootstrap imports only stdlib
+            # modules before execing bash, so launch the canonical base
+            # interpreter instead of broadening the profile's read roots.
+            bootstrap_interpreter = bootstrap_interpreter.resolve()
         argv = sandbox.wrap(
-            [sys.executable, "-I", "-c", _INNER_ENV_BOOTSTRAP, "bash", "-c", rewritten],
+            [str(bootstrap_interpreter), "-I", "-c", _INNER_ENV_BOOTSTRAP, "bash", "-c", rewritten],
             workdir=workdir,
             write_roots=self._allowed_write_roots(),
             home=self._home,
@@ -441,29 +536,35 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             proc = await creation
             await self._terminate_process_tree(proc)
             raise
+        self._active_processes[proc] = None
         communication = asyncio.create_task(proc.communicate(input=env_payload))
+        self._active_processes[proc] = communication
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                asyncio.shield(communication),
-                timeout=timeout_sec,
-            )
-        except TimeoutError:
-            stdout_b, stderr_b = await self._terminate_process_tree(proc, communication)
-            stdout = self._redact_output(stdout_b.decode(errors="replace"), exec_env)
-            stderr = self._redact_output(stderr_b.decode(errors="replace"), exec_env)
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    asyncio.shield(communication),
+                    timeout=timeout_sec,
+                )
+            except TimeoutError:
+                stdout_b, stderr_b = await self._terminate_process_tree(proc, communication)
+                stdout = self._redact_output(stdout_b.decode(errors="replace"), exec_env)
+                stderr = self._redact_output(stderr_b.decode(errors="replace"), exec_env)
+                return ExecResult(
+                    stdout=stdout,
+                    stderr=(stderr + "\nTimed out").strip(),
+                    return_code=124,
+                )
+            except asyncio.CancelledError:
+                await self._terminate_process_tree(proc, communication)
+                raise
+
             return ExecResult(
-                stdout=stdout,
-                stderr=(stderr + "\nTimed out").strip(),
-                return_code=124,
+                stdout=self._redact_output(stdout_b.decode(errors="replace"), exec_env),
+                stderr=self._redact_output(stderr_b.decode(errors="replace"), exec_env),
+                return_code=int(proc.returncode or 0),
             )
-        except asyncio.CancelledError:
-            await self._terminate_process_tree(proc, communication)
-            raise
-        return ExecResult(
-            stdout=self._redact_output(stdout_b.decode(errors="replace"), exec_env),
-            stderr=self._redact_output(stderr_b.decode(errors="replace"), exec_env),
-            return_code=int(proc.returncode or 0),
-        )
+        finally:
+            self._active_processes.pop(proc, None)
 
     @staticmethod
     async def _terminate_process_tree(
@@ -472,12 +573,34 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
     ) -> tuple[bytes, bytes]:
         if communication is None:
             communication = asyncio.create_task(proc.communicate())
-        if os.name == "posix":
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-        elif proc.returncode is None:
-            proc.kill()
-        return await communication
+
+        def send(sig: signal.Signals) -> None:
+            if os.name == "posix":
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, sig)
+            elif proc.returncode is None:
+                if sig == signal.SIGTERM:
+                    proc.terminate()
+                else:
+                    proc.kill()
+
+        async def bounded_wait(seconds: float) -> tuple[bytes, bytes] | None:
+            try:
+                return await asyncio.wait_for(asyncio.shield(communication), timeout=seconds)
+            except TimeoutError:
+                return None
+
+        send(signal.SIGTERM)
+        if output := await bounded_wait(_REAP_TERM_SECONDS):
+            return output
+        send(signal.SIGKILL)
+        if output := await bounded_wait(_REAP_KILL_SECONDS):
+            return output
+
+        communication.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await communication
+        return b"", b""
 
     def _launcher_env(self) -> dict[str, str]:
         """Return the minimal environment visible before confinement starts."""
@@ -569,28 +692,53 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
     def _runtime_ro_binds(self) -> list[Path]:
         """Read-only mounts the sandbox needs: managed agent CLIs + evaluator python.
 
-        We bind several roots rather than guessing one install prefix: sys.prefix
-        and sys.base_prefix cover normal venvs; the interpreter's own parent(s)
-        cover layouts where python isn't at <prefix>/bin/python (symlinked bins,
-        PEX/zipapp); site-packages dirs cover the evaluator's own modules so
-        imports work inside the sandbox.
+        Strict mode publishes the visible and canonical interpreter files plus
+        Python's stdlib/site-library roots; it must not expose an entire prefix
+        or bin directory. Compatibility mode keeps the broader historical
+        prefix/parent/site roots for unusual interpreter layouts.
         """
-        import site
+        strict_reads = getattr(self, "_strict_reads", False)
+        visible_executable = Path(sys.executable).expanduser().absolute()
+        executable = visible_executable.resolve()
+        if strict_reads:
+            import sysconfig
 
-        executable = Path(sys.executable).resolve()
-        candidates: list[Path] = [
-            Path(sys.prefix),
-            Path(sys.exec_prefix),
-            Path(sys.base_prefix),
-            Path(sys.base_exec_prefix),
-            executable.parent,  # the bin/ dir
-            executable.parent.parent,  # the usual install prefix
-        ]
+            python_paths = sysconfig.get_paths()
+            candidates = [visible_executable, executable]
+            candidates.extend(
+                Path(path)
+                for name in ("stdlib", "platstdlib", "purelib", "platlib")
+                if (path := python_paths.get(name))
+            )
+            library_dir = sysconfig.get_config_var("LIBDIR")
+            library_name = sysconfig.get_config_var("LDLIBRARY")
+            if library_dir and library_name:
+                candidates.append(Path(library_dir) / library_name)
+            # A Homebrew framework launcher links this exact image outside the
+            # stdlib tree.  Publish the image, never its Cellar/prefix parent.
+            framework_version = next(
+                (parent for parent in executable.parents if parent.parent.name == "Versions"),
+                None,
+            )
+            if framework_version is not None:
+                candidates.append(framework_version / "Python")
+                candidates.append(framework_version / "lib" / f"python{framework_version.name}")
+        else:
+            import site
+
+            candidates = [
+                Path(sys.prefix),
+                Path(sys.exec_prefix),
+                Path(sys.base_prefix),
+                Path(sys.base_exec_prefix),
+                executable.parent,  # the bin/ dir
+                executable.parent.parent,  # the usual install prefix
+            ]
+            with contextlib.suppress(Exception):
+                candidates.extend(Path(p) for p in site.getsitepackages())
+            with contextlib.suppress(Exception):
+                candidates.append(Path(site.getusersitepackages()))
         candidates.extend(runtime_command_roots([self._runtime_agent], runtime_root=self._runtime_root))
-        with contextlib.suppress(Exception):
-            candidates.extend(Path(p) for p in site.getsitepackages())
-        with contextlib.suppress(Exception):
-            candidates.append(Path(site.getusersitepackages()))
         binds: list[Path] = []
         seen: set[Path] = set()
         for candidate in candidates:
@@ -650,8 +798,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
 
     @staticmethod
     def _background_command(command: str) -> bool:
-        unquoted = _unquoted_shell_text(command)
-        return bool(_BACKGROUND_AMPERSAND_RE.search(unquoted)) and not _WAIT_COMMAND_RE.search(unquoted)
+        return _contains_background_command(command)
 
     def _unsafe_write_target(self, command: str, *, exec_env: dict[str, str]) -> Path | None:
         for token in self._shell_write_redirect_targets(command):

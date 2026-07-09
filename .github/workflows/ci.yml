@@ -26,6 +26,9 @@ jobs:
         with:
           version: "0.11.27"
       - run: uv sync --all-extras --locked --python "${{ matrix.python-version }}"
+      - name: Scan OSS source boundary
+        if: matrix.python-version == '3.12'
+        run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
       - if: matrix.python-version == '3.12'
         run: uv run ruff check .
       - run: uv run pytest -q
@@ -45,6 +48,8 @@ jobs:
         run: |
           rm -rf dist
           uv build --python 3.13 --no-sources
+      - name: Scan OSS source and built distributions
+        run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json --archive dist/*.whl --archive dist/*.tar.gz
       - name: Validate distribution metadata
         run: uvx --from twine==6.2.0 twine check --strict dist/*
       - name: Install and smoke-test the wheel
@@ -60,6 +65,30 @@ jobs:
           "$venv/bin/python" -c 'from importlib.resources import files; assert files("skillevaluator.tier3.harbor").joinpath("templates/eval.py").is_file()'
           "$venv/bin/skillevaluator" --version
           "$venv/bin/skillevaluator" --help >/dev/null
+          SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
+            "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
+          "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'
+
+  tier3-macos:
+    name: Tier 3 macOS contract and progress
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
+      - run: uv sync --all-extras --locked
+      - run: >-
+          uv run pytest -q
+          tests/test_harbor_local_sandbox.py
+          tests/test_harbor_local_mode.py
+          tests/test_local_mode_contract.py
+          tests/test_tier3_progress.py
+          tests/test_tier3_result_display.py
+          tests/test_harbor_runtime_preflight.py
 
   tier2-cross-platform:
     name: Tier 2 (${{ matrix.os }})
@@ -85,3 +114,43 @@ jobs:
           tests/reporting
           tests/test_cli.py
           tests/test_oss_packaging.py
+
+  native-windows-local-mode:
+    name: Native Windows local mode fails closed
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - run: uv sync --all-extras --locked
+      - run: >-
+          uv run pytest -q
+          tests/test_harbor_local_sandbox.py
+          tests/test_harbor_local_mode.py
+          -k native_windows
+      - name: Verify the public CLI rejects native Windows local mode
+        shell: pwsh
+        env:
+          COLUMNS: "200"
+          SKILL_EVAL_LLM_PROVIDER: nv_build
+          NVIDIA_API_KEY: nvapi-ci-placeholder
+        run: |
+          foreach ($mode in @("require", "prefer", "off")) {
+            $env:SKILLEVALUATOR_LOCAL_SANDBOX = $mode
+            $lines = & uv run skillevaluator doctor --agents opencode --env-mode local 2>&1
+            $exitCode = $LASTEXITCODE
+            $text = $lines -join [Environment]::NewLine
+            $text | Write-Host
+            if ($exitCode -eq 0) {
+              throw "Native Windows local mode incorrectly passed with sandbox mode '$mode'."
+            }
+            if ($text -notmatch "Native Windows" -or $text -notmatch "unsupported") {
+              throw "Missing native-Windows unsupported diagnostic for sandbox mode '$mode'."
+            }
+            if ($text -notmatch "WSL2" -or $text -notmatch "docker") {
+              throw "Missing WSL2/Docker remediation for sandbox mode '$mode'."
+            }
+          }
+          exit 0

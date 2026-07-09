@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,7 @@ def _local_environment(
     environment._allow_net = False
     environment._inherit_agent_keys = False
     environment._strict_reads = False
+    environment._active_processes = {}
     environment._persistent_env = persistent_env or {}
     environment._sandbox = local_sandbox.Sandbox(local_sandbox.SandboxPlan("none", "advisory-only", "test"))
     environment.trial_paths = type(
@@ -123,12 +125,11 @@ def test_build_command_wires_strict_read_policy(monkeypatch: pytest.MonkeyPatch)
     assert "strict_reads=true" in " ".join(cmd)
 
 
-def test_build_command_native_mode_still_uses_env_flag() -> None:
+def test_build_command_docker_mode_uses_secure_import_path() -> None:
     cmd = build_harbor_run_command(dataset_path="/tmp/ds", agent="codex", job_name="j", env_mode="docker")
-    assert "--env" in cmd
-    assert cmd[cmd.index("--env") + 1] == "docker"
     assert "-a" in cmd and cmd[cmd.index("-a") + 1] == "codex"
-    assert "--environment-import-path" not in cmd
+    assert "--env" not in cmd
+    assert "--environment-import-path" in cmd
 
 
 def test_local_agent_credentials_map_provider_to_agent_env() -> None:
@@ -239,6 +240,10 @@ def test_background_server_is_rejected_even_with_declared_ports(tmp_path: Path) 
         "setsid sh -c 'curl https://example.com &'",
         "bash -c 'setsid sleep 60'",
         "bash -lc 'nohup sleep 60'",
+        "env -i setsid sleep 60",
+        "env -i SAFE=1 nohup sleep 60",
+        "nice -n 5 setsid sleep 60",
+        "nice nohup sleep 60",
     ],
 )
 def test_detached_setsid_process_is_rejected_before_launch(tmp_path: Path, command: str) -> None:
@@ -270,13 +275,37 @@ def test_quoted_url_ampersand_is_not_treated_as_background_operator(tmp_path: Pa
     assert reason == ""
 
 
-def test_background_command_cannot_bypass_guard_with_wait_argument(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "command",
+    (
+        "sleep 30 & printf wait",
+        "sleep 30 & wait",
+        "bash -c '(sleep 30) >/dev/null 2>&1 &'",
+        "sh -lc 'sleep 30 & wait'",
+    ),
+)
+def test_background_command_cannot_bypass_guard_with_wait_argument(tmp_path: Path, command: str) -> None:
     environment = _local_environment(tmp_path)
-    command = "sleep 30 & printf wait"
 
     reason = environment._local_command_guardrail_reason(command, command, {})
 
     assert "unsupported in local mode" in reason
+
+
+def test_nested_background_shell_is_blocked_before_process_survives(tmp_path: Path) -> None:
+    environment = _local_environment(tmp_path)
+    marker = environment._workspace / "nested-background-survived"
+    command = "bash -c '(sleep .2; printf survived > nested-background-survived) >/dev/null 2>&1 &'"
+
+    async def run_probe() -> object:
+        result = await environment.exec(command)
+        await asyncio.sleep(0.3)
+        return result
+
+    result = asyncio.run(run_probe())
+
+    assert result.return_code == 126
+    assert not marker.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -337,6 +366,115 @@ def test_exec_forwards_strict_read_policy_to_sandbox(tmp_path: Path) -> None:
     assert captured["strict_reads"] is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("strict_reads", [False, True])
+def test_seatbelt_exec_uses_canonical_interpreter_for_sandbox_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strict_reads: bool,
+) -> None:
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(Path(sys.executable).resolve())
+    monkeypatch.setattr(sys, "executable", str(venv_python))
+    environment = _local_environment(tmp_path)
+    environment._strict_reads = strict_reads
+    captured: dict[str, object] = {}
+
+    class CaptureSandbox:
+        plan = local_sandbox.SandboxPlan("seatbelt", "kernel-macos", "capture")
+
+        @staticmethod
+        def wrap(argv: list[str], **_kwargs: object) -> list[str]:
+            captured["argv"] = argv
+            return argv
+
+    environment._sandbox = CaptureSandbox()
+
+    result = asyncio.run(environment.exec("printf ok"))
+
+    assert result.return_code == 0, result.stderr
+    wrapped_argv = captured["argv"]
+    assert isinstance(wrapped_argv, list)
+    assert wrapped_argv[0] == str(Path(sys.executable).resolve())
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize(
+    ("backend", "strength", "strict_reads"),
+    [
+        ("bubblewrap", "kernel", True),
+        ("none", "advisory-only", True),
+    ],
+)
+def test_other_sandbox_modes_preserve_venv_interpreter_for_bootstrap(
+    tmp_path: Path,
+    backend: str,
+    strength: str,
+    strict_reads: bool,
+) -> None:
+    environment = _local_environment(tmp_path)
+    environment._strict_reads = strict_reads
+    captured: dict[str, object] = {}
+
+    class CaptureSandbox:
+        plan = local_sandbox.SandboxPlan(backend, strength, "capture")
+
+        @staticmethod
+        def wrap(argv: list[str], **_kwargs: object) -> list[str]:
+            captured["argv"] = argv
+            return argv
+
+    environment._sandbox = CaptureSandbox()
+
+    result = asyncio.run(environment.exec("printf ok"))
+
+    assert result.return_code == 0, result.stderr
+    wrapped_argv = captured["argv"]
+    assert isinstance(wrapped_argv, list)
+    assert wrapped_argv[0] == sys.executable
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(),
+    reason="requires macOS Seatbelt",
+)
+def test_strict_exec_bootstrap_runs_from_fresh_private_tmp_venv_under_real_seatbelt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_interpreter = next(
+        (
+            candidate
+            for prefix in (Path("/opt/homebrew/bin"), Path("/usr/local/bin"))
+            for version in ("3.13", "3.12")
+            if (candidate := prefix / f"python{version}").exists()
+        ),
+        None,
+    )
+    if base_interpreter is None:
+        pytest.skip("requires a Homebrew Python that creates a symlinked venv interpreter")
+
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-seatbelt-venv-", dir="/private/tmp") as temp_dir:
+        venv_root = Path(temp_dir) / "venv"
+        subprocess.run([str(base_interpreter), "-m", "venv", str(venv_root)], check=True, timeout=60)
+        venv_python = venv_root / "bin" / "python"
+
+        environment = _local_environment(tmp_path)
+        environment._sandbox_mode = "require"
+        environment._strict_reads = True
+        environment._sandbox = local_sandbox.detect("require")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "executable", str(venv_python))
+            patch.setattr(sys, "prefix", str(venv_root))
+            patch.setattr(sys, "exec_prefix", str(venv_root))
+            result = asyncio.run(environment.exec("printf strict-bootstrap-ok"))
+
+    assert result.return_code == 0, result.stderr
+    assert result.stdout == "strict-bootstrap-ok"
+
+
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_exec_timeout_terminates_background_descendants(tmp_path: Path) -> None:
     environment = _local_environment(tmp_path)
@@ -347,6 +485,7 @@ def test_exec_timeout_terminates_background_descendants(tmp_path: Path) -> None:
         "printf started > timeout-child-started; "
         "(sleep 0.5; printf survived > timeout-child-survived) & wait"
     )
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
 
     async def run_timeout() -> object:
         result = await environment.exec(command, timeout_sec=0.2)
@@ -374,6 +513,7 @@ def test_exec_cancellation_terminates_background_descendants(tmp_path: Path) -> 
         "printf survived > cancel-child-survived) & "
         "printf '%s' \"$!\" > cancel-child-pid; wait"
     )
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
 
     def process_exists(pid: int) -> bool:
         try:
@@ -413,6 +553,49 @@ def test_exec_cancellation_terminates_background_descendants(tmp_path: Path) -> 
     asyncio.run(run_cancelled())
 
     assert not marker.exists(), "a background descendant wrote after command cancellation"
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_process_tree_cleanup_is_bounded_and_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    signals: list[signal.Signals] = []
+    monkeypatch.setattr(local_environment, "_REAP_TERM_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_KILL_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment.os, "killpg", lambda _pid, value: signals.append(value))
+
+    class FakeProcess:
+        pid = 4242
+        returncode = None
+
+    async def run_cleanup() -> tuple[bytes, bytes]:
+        communication: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+        return await asyncio.wait_for(
+            SkillEvaluatorLocalEnvironment._terminate_process_tree(FakeProcess(), communication),  # type: ignore[arg-type]
+            timeout=0.2,
+        )
+
+    assert asyncio.run(run_cleanup()) == (b"", b"")
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_stop_reaps_all_tracked_processes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    environment = _local_environment(tmp_path)
+    first = object()
+    second = object()
+    environment._active_processes.update({first: None, second: None})  # type: ignore[dict-item]
+    reaped: list[object] = []
+
+    async def reap(proc: object, _communication: object = None) -> tuple[bytes, bytes]:
+        reaped.append(proc)
+        return b"", b""
+
+    monkeypatch.setattr(environment, "_terminate_process_tree", reap)
+
+    asyncio.run(environment.stop(delete=False))
+
+    assert set(reaped) == {first, second}
+    assert environment._active_processes == {}
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -478,7 +661,12 @@ def test_exec_cancellation_during_process_creation_terminates_descendants(
 def test_runtime_injection_env_is_blocked_before_launcher(name: str, tmp_path: Path) -> None:
     environment = _local_environment(tmp_path)
 
-    result = asyncio.run(environment.exec("true", env={name: "attacker-controlled"}))
+    async def unexpected_launch(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("loader-controlled task environment reached the host launcher")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(asyncio, "create_subprocess_exec", unexpected_launch)
+        result = asyncio.run(environment.exec("true", env={name: "attacker-controlled"}))
 
     assert result.return_code == 126
     assert name in (result.stderr or "")
@@ -1312,6 +1500,151 @@ def test_runtime_ro_binds_preserve_exact_selected_agent_symlink(
     assert command.parent.resolve() not in binds
 
 
+def test_strict_runtime_ro_binds_use_exact_interpreter_and_python_library_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sysconfig
+
+    from skillevaluator.tier3.harbor import local_environment
+
+    target = tmp_path / "python-install" / "bin" / "python3.12"
+    target.parent.mkdir(parents=True)
+    target.write_text("binary", encoding="utf-8")
+    interpreter = tmp_path / "venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(target)
+    library_roots = {
+        name: tmp_path / "python-install" / "lib" / name
+        for name in ("stdlib", "platstdlib", "purelib", "platlib")
+    }
+    for path in library_roots.values():
+        path.mkdir(parents=True)
+
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(sys, "exec_prefix", "/usr/local")
+    monkeypatch.setattr(sys, "base_prefix", "/opt")
+    monkeypatch.setattr(sys, "base_exec_prefix", "/usr")
+    monkeypatch.setattr(sysconfig, "get_paths", lambda: {name: str(path) for name, path in library_roots.items()})
+    monkeypatch.setattr(sysconfig, "get_config_var", lambda _name: None)
+    monkeypatch.setattr(local_environment, "runtime_command_roots", lambda *_args, **_kwargs: [])
+    environment = object.__new__(SkillEvaluatorLocalEnvironment)
+    environment._runtime_root = tmp_path / "managed"
+    environment._runtime_agent = "opencode"
+    environment._strict_reads = True
+
+    binds = environment._runtime_ro_binds()
+
+    assert interpreter.absolute() in binds
+    assert target.resolve() in binds
+    assert set(library_roots.values()).issubset(binds)
+    assert interpreter.parent.resolve() not in binds
+    assert Path(sys.prefix).resolve() not in binds
+    assert Path(sys.exec_prefix).resolve() not in binds
+    assert Path(sys.base_prefix).resolve() not in binds
+    assert Path(sys.base_exec_prefix).resolve() not in binds
+
+
+def test_non_strict_runtime_ro_binds_keep_prefix_and_interpreter_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    prefix = tmp_path / "venv"
+    interpreter = prefix / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("binary", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.setattr(sys, "exec_prefix", str(prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(prefix))
+    monkeypatch.setattr(sys, "base_exec_prefix", str(prefix))
+    monkeypatch.setattr(local_environment, "runtime_command_roots", lambda *_args, **_kwargs: [])
+    environment = object.__new__(SkillEvaluatorLocalEnvironment)
+    environment._runtime_root = tmp_path / "managed"
+    environment._runtime_agent = "opencode"
+    environment._strict_reads = False
+
+    binds = environment._runtime_ro_binds()
+
+    assert prefix.resolve() in binds
+    assert interpreter.parent.resolve() in binds
+
+
+def test_strict_exec_filters_broad_prefixes_and_publishes_selected_npm_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sysconfig
+
+    from skillevaluator.tier3.harbor import local_runtime
+
+    package = tmp_path / "host" / "usr" / "local" / "lib" / "node_modules" / "opencode-ai"
+    target = package / "bin" / "opencode"
+    target.parent.mkdir(parents=True)
+    target.write_text("binary", encoding="utf-8")
+    command = tmp_path / "host" / "usr" / "local" / "bin" / "opencode"
+    command.parent.mkdir(parents=True)
+    command.symlink_to(Path("../lib/node_modules/opencode-ai/bin/opencode"))
+    narrow_site_packages = tmp_path / "host" / "opt" / "venv" / "lib" / "python" / "site-packages"
+    narrow_site_packages.mkdir(parents=True)
+
+    monkeypatch.setattr(local_runtime, "find_runtime_command", lambda *_args, **_kwargs: str(command))
+    monkeypatch.setattr(sys, "prefix", "/usr")
+    monkeypatch.setattr(sys, "exec_prefix", "/usr/local")
+    monkeypatch.setattr(sys, "base_prefix", "/opt")
+    monkeypatch.setattr(sys, "base_exec_prefix", "/tmp")
+    monkeypatch.setattr(
+        sysconfig,
+        "get_paths",
+        lambda: {
+            "stdlib": str(narrow_site_packages.parent / "stdlib"),
+            "platstdlib": str(narrow_site_packages.parent / "platstdlib"),
+            "purelib": str(narrow_site_packages),
+            "platlib": str(narrow_site_packages),
+        },
+    )
+    monkeypatch.setattr(sysconfig, "get_config_var", lambda _name: None)
+    (narrow_site_packages.parent / "stdlib").mkdir()
+    (narrow_site_packages.parent / "platstdlib").mkdir()
+    monkeypatch.setattr(local_sandbox, "_safe_host_homes", lambda: (Path.home().resolve(),))
+
+    environment = _local_environment(tmp_path)
+    environment._strict_reads = True
+    captured: dict[str, object] = {}
+    real_sandbox = local_sandbox.Sandbox(local_sandbox.SandboxPlan("bubblewrap", "kernel", "capture"))
+
+    class CaptureSandbox:
+        plan = real_sandbox.plan
+
+        @staticmethod
+        def wrap(argv: list[str], **kwargs: object) -> list[str]:
+            captured["extra_ro"] = kwargs["extra_ro"]
+            captured["wrapped"] = real_sandbox.wrap(argv, **kwargs)  # type: ignore[arg-type]
+            return argv
+
+    environment._sandbox = CaptureSandbox()
+
+    result = asyncio.run(environment.exec("printf ok"))
+
+    assert result.return_code == 0, result.stderr
+    assert result.stdout == "ok"
+    wrapped = captured["wrapped"]
+    extra_ro = captured["extra_ro"]
+    assert isinstance(wrapped, list)
+    assert isinstance(extra_ro, list)
+    ro_binds = {tuple(wrapped[index + 1 : index + 3]) for index, value in enumerate(wrapped) if value == "--ro-bind"}
+    symlinks = {tuple(wrapped[index + 1 : index + 3]) for index, value in enumerate(wrapped) if value == "--symlink"}
+    broad_roots = {"/", "/usr", "/usr/local", "/opt", "/tmp", "/private/tmp", "/var/tmp", str(Path.home())}
+    assert not any(destination in broad_roots for _source, destination in ro_binds | symlinks)
+    assert (str(target.resolve()), str(command.absolute())) in symlinks
+    assert (str(package.resolve()), str(package.resolve())) in ro_binds
+    assert (str(narrow_site_packages.resolve()), str(narrow_site_packages.resolve())) in ro_binds
+    assert Path(sys.executable).parent.resolve() not in extra_ro
+
+
 def test_runtime_ro_binds_do_not_expose_whole_managed_agent_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1517,6 +1850,59 @@ def test_local_prerequisite_probes_runtime_inside_detected_sandbox(monkeypatch: 
     assert captured["strict_reads"] is True
 
 
+@pytest.mark.parametrize("mode", local_sandbox.SANDBOX_MODES)
+def test_local_prerequisite_rejects_native_windows_for_every_sandbox_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    from skillevaluator.tier3.harbor import local_runtime, runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Windows")
+    monkeypatch.setenv(local_sandbox.SANDBOX_MODE_ENV, mode)
+    monkeypatch.setattr(
+        local_runtime,
+        "ensure_local_runtimes",
+        lambda *_args, **_kwargs: pytest.fail("native Windows must fail before runtime probing"),
+    )
+
+    errors = _check_prerequisites(env_mode="local", agents=["opencode"])
+
+    assert len(errors) == 1
+    assert "Native Windows local mode is unsupported" in errors[0]
+    assert "WSL2" in errors[0]
+    assert "--env-mode docker" in errors[0]
+
+
+def test_run_harbor_eval_rejects_native_windows_before_provider_or_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        runner,
+        "resolve_llm_provider",
+        lambda: pytest.fail("native Windows must fail before provider resolution"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: pytest.fail("native Windows must fail before config loading"),
+    )
+
+    result = runner.run_harbor_eval(tmp_path, ["opencode"], env_mode="local")
+
+    assert result == {
+        "error": [
+            "Native Windows local mode is unsupported, including with "
+            "SKILLEVALUATOR_LOCAL_SANDBOX=prefer or off. "
+            "Use WSL2 for Linux local mode or --env-mode docker."
+        ]
+    }
+
+
 def test_local_prerequisite_reports_missing_host_home_as_readiness_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1591,7 +1977,7 @@ def test_doctor_rejects_nvidia_only_credentials_for_claude(
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().out
 
 
-def test_doctor_accepts_available_independent_codex_credential_and_defers_skill_model(
+def test_doctor_accepts_available_independent_codex_credential_and_explicit_model(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1610,10 +1996,13 @@ def test_doctor_accepts_available_independent_codex_credential_and_defers_skill_
     monkeypatch.setenv("OPENAI_API_KEY", "independent-openai-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-    assert tier3_commands.doctor(agents="codex", env_mode="local") == 0
+    assert tier3_commands.doctor(
+        agents="codex",
+        env_mode="local",
+        agent_model=("codex=gpt-5",),
+    ) == 0
     output = capsys.readouterr().out
-    assert "host credential compatibility checks passed" in " ".join(output.split())
-    assert "validated by evaluate" in " ".join(output.split())
+    assert "operator credential and model plan resolved" in " ".join(output.split())
 
 
 def test_doctor_preserves_docker_rejection_for_mixed_agents(
@@ -1633,12 +2022,17 @@ def test_doctor_preserves_docker_rejection_for_mixed_agents(
     )
     monkeypatch.setattr(tier3_commands, "_check_prerequisites", lambda **_kwargs: [])
     monkeypatch.setenv("OPENAI_API_KEY", "independent-openai-key")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
 
-    assert tier3_commands.doctor(agents="codex,opencode", env_mode="docker") == 1
+    assert tier3_commands.doctor(
+        agents="codex,opencode",
+        env_mode="docker",
+        agent_model=("codex=gpt-5",),
+    ) == 1
     output = capsys.readouterr().out
     assert "Agent runtime credential" in output
-    assert "agent container" in output
+    assert "OPENAI_API_KEY + OPENAI_BASE_URL" in " ".join(output.split())
 
 
 def test_harbor_preflight_system_exit_becomes_a_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:

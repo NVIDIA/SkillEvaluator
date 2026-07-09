@@ -988,8 +988,19 @@ def dedup_scan(
 
 @cli.command()
 @_skill_argument
-@click.option("-a", "--agents", default="codex", show_default=True, help="Comma-separated Harbor agents.")
+@click.option(
+    "-a",
+    "--agents",
+    default="codex",
+    show_default=True,
+    help="Comma-separated Harbor agents (claude is an alias for claude-code).",
+)
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option(
+    "--autopilot",
+    is_flag=True,
+    help="Create one eval case when no dataset/task source exists, then evaluate.",
+)
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
@@ -1004,14 +1015,28 @@ def dedup_scan(
 @click.option("--grading-mode", type=GRADING_MODE_CHOICE, default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 @click.option("--harbor-keep-jobs", is_flag=True)
+@click.option(
+    "--agent-runtime-preflight/--no-agent-runtime-preflight",
+    default=True,
+    show_default=True,
+    help="Run one real agent smoke task before the full evaluation matrix.",
+)
 @click.option("--timeout-multiplier", type=float, default=None)
 @click.option("--override-cpus", type=int, default=None)
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
+@click.option(
+    "--progress",
+    type=click.Choice(["auto", "rich", "plain", "off"]),
+    default="auto",
+    show_default=True,
+    help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
+)
 def evaluate(
     skill_path: Path,
     agents: str,
     env_mode: str,
+    autopilot: bool,
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
@@ -1026,13 +1051,57 @@ def evaluate(
     grading_mode: str | None,
     results_dir: Path | None,
     harbor_keep_jobs: bool,
+    agent_runtime_preflight: bool,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    progress: str,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
+    from skillevaluator.tier3.harbor.progress import create_progress_reporter
+
+    service = EvaluationService()
+    if autopilot:
+        try:
+            from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+            from skillevaluator.tier3.harbor.adapter import find_evals_file
+
+            def eval_source_exists() -> bool:
+                return find_evals_file(skill_path) is not None or (skill_path / "evals" / "harbor").exists()
+
+            if eval_source_exists():
+                click.echo("Autopilot: reusing the existing evaluation source unchanged.")
+            else:
+                try:
+                    provider = resolve_llm_provider()
+                except ProviderConfigurationError:
+                    no_llm = True
+                    click.echo("Autopilot: no public provider key is configured; generating one deterministic case.")
+                else:
+                    no_llm = False
+                    click.echo(f"Autopilot: generating one case with the configured {provider.provider} provider.")
+
+                try:
+                    service.create_autopilot_dataset(skill_path, use_llm=not no_llm)
+                except FileExistsError:
+                    click.echo("Autopilot: an evaluation source appeared concurrently; reusing it unchanged.")
+                except Exception:
+                    if no_llm:
+                        raise
+                    click.echo(
+                        "Warning: Autopilot LLM generation failed; falling back to one deterministic case.",
+                        err=True,
+                    )
+                    if not eval_source_exists():
+                        service.create_autopilot_dataset(skill_path, use_llm=False)
+                if not eval_source_exists():
+                    raise click.ClickException("Autopilot dataset generation did not produce an evaluation source.")
+        except click.ClickException:
+            raise
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
 
     options = EvaluationOptions(
         skill_path=skill_path,
@@ -1052,17 +1121,49 @@ def evaluate(
         grading_mode=grading_mode,
         results_dir=results_dir,
         harbor_keep_jobs=harbor_keep_jobs,
+        agent_runtime_preflight=agent_runtime_preflight,
         timeout_multiplier=timeout_multiplier,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
     )
     try:
-        service = EvaluationService()
-        engine_result = service.evaluate(options)
-        if failure := service.failure_reason(engine_result):
-            raise click.ClickException(failure)
-    except click.ClickException:
+        if env_mode == "local":
+            from rich.panel import Panel
+            from rich.text import Text
+
+            console.print(
+                Panel(
+                    Text(
+                        "Intended for trusted skills and workspaces. Local execution uses host OS safeguards; "
+                        "use Docker when you need stronger isolation for untrusted code.",
+                        style="yellow",
+                    ),
+                    title=Text("Local mode · Experimental", style="bold cyan"),
+                    border_style="yellow",
+                    padding=(0, 1),
+                )
+            )
+        progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
+        engine_result = service.evaluate(options, progress_reporter=progress_reporter)
+        failure = service.failure_reason(engine_result)
+        display_result = engine_result
+        if failure and (
+            not isinstance(engine_result, dict)
+            or not (engine_result.get("error") or engine_result.get("execution_errors"))
+        ):
+            display_result = {
+                **(engine_result if isinstance(engine_result, dict) else {}),
+                "execution_status": "failed",
+                "execution_errors": [failure],
+            }
+        if isinstance(display_result, dict):
+            from skillevaluator.tier3.result_display import render_evaluation_result
+
+            render_evaluation_result(display_result, console=console)
+        if failure:
+            raise click.exceptions.Exit(1)
+    except (click.ClickException, click.exceptions.Exit):
         raise
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1189,10 +1290,17 @@ def view(skill_path: Path, results_dir: Path | None) -> None:
 
 
 @cli.command()
-@click.option("-a", "--agents", default="codex", show_default=True)
+@click.option(
+    "-a",
+    "--agents",
+    default="codex",
+    show_default=True,
+    help="Comma-separated Harbor agents (claude is an alias for claude-code).",
+)
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
 @click.option("--verify-models", is_flag=True, help="Show the configured public provider model.")
-def doctor(agents: str, env_mode: str, verify_models: bool) -> None:
+def doctor(agents: str, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
@@ -1201,6 +1309,7 @@ def doctor(agents: str, env_mode: str, verify_models: bool) -> None:
             agents=agents,
             env_mode=env_mode,
             verify_models=verify_models,
+            agent_model=agent_model,
         )
     )
 
@@ -1212,7 +1321,7 @@ def health_check(agents: str, env_mode: str) -> None:
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
-    raise SystemExit(tier3_doctor(agents=agents, env_mode=env_mode, verify_models=False))
+    raise SystemExit(tier3_doctor(agents=agents, env_mode=env_mode, verify_models=False, agent_model=()))
 
 
 @tier3.command("validate")
@@ -1255,6 +1364,7 @@ tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
 tier3.add_command(doctor, "doctor")
+cli.add_command(harbor_view, "harbor-view")
 
 
 if __name__ == "__main__":

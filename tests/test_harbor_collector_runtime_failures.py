@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.html_report import generate_html_report
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
 
 
 def _write_complete_job_result(job_dir: Path, trial_names: list[str]) -> None:
@@ -173,6 +175,123 @@ def test_errored_job_stats_suppress_rewards_without_trial_exception(tmp_path: Pa
     assert opencode["job_failures"]["with_skill"] == "Harbor job did not complete successfully: 1 errored"
 
 
+def test_partially_errored_job_preserves_only_completed_trial_coverage(tmp_path: Path) -> None:
+    """Known failed trials are excluded without hiding the other completed attempts."""
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    case_ids = ["case-001", "case-002", "case-003", "case-004"]
+    trial_names = [f"{case_id}__attempt" for case_id in case_ids]
+    job_dir.mkdir(parents=True)
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": 4,
+                "stats": {
+                    "n_completed_trials": 4,
+                    "n_errored_trials": 1,
+                    "n_running_trials": 0,
+                    "n_pending_trials": 0,
+                    "n_cancelled_trials": 0,
+                    "n_retries": 0,
+                    "evals": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for index, (case_id, trial_name) in enumerate(zip(case_ids, trial_names, strict=True), start=1):
+        trial_dir = job_dir / trial_name
+        (trial_dir / "verifier").mkdir(parents=True)
+        result: dict[str, object] = {"trial_name": trial_name}
+        if case_id == "case-002":
+            result["exception_info"] = {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out after 300.0 seconds",
+            }
+        (trial_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        (trial_dir / "verifier" / "reward.json").write_text(
+            json.dumps({"entry_id": case_id, "overall": index / 10}),
+            encoding="utf-8",
+        )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=4,
+        expected_case_ids=case_ids,
+        expected_trials=4,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert results["expected_attempts"] == 4
+    assert results["scored_attempts"] == 3
+    assert opencode["num_trials_with"] == 3
+    assert opencode["conditions"]["with_skill"]["scored_attempts"] == 3
+    assert opencode["trial_failures"]["with_skill"] == [
+        {
+            "trial": "case-002__attempt",
+            "reason": "AgentTimeoutError: Agent execution timed out after 300.0 seconds",
+        }
+    ]
+    assert any("Scored attempt coverage is 3/4" in error for error in results["execution_errors"])
+
+
+def test_partial_rewards_stay_suppressed_when_not_every_job_error_maps_to_a_trial(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    job_dir.mkdir(parents=True)
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": 2,
+                "stats": {
+                    "n_completed_trials": 2,
+                    "n_errored_trials": 2,
+                    "n_running_trials": 0,
+                    "n_pending_trials": 0,
+                    "n_cancelled_trials": 0,
+                    "n_retries": 0,
+                    "evals": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for case_id in ("case-001", "case-002"):
+        trial_dir = job_dir / f"{case_id}__attempt"
+        (trial_dir / "verifier").mkdir(parents=True)
+        result: dict[str, object] = {"trial_name": trial_dir.name}
+        if case_id == "case-001":
+            result["exception_info"] = {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out",
+            }
+        (trial_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        (trial_dir / "verifier" / "reward.json").write_text(
+            json.dumps({"entry_id": case_id, "overall": 1.0}),
+            encoding="utf-8",
+        )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=2,
+        expected_case_ids=["case-001", "case-002"],
+        expected_trials=2,
+    )
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    assert results["agents"]["opencode"]["num_trials_with"] == 0
+
+
 def test_complete_low_score_is_execution_success(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"
@@ -206,6 +325,51 @@ def test_complete_low_score_is_execution_success(tmp_path: Path) -> None:
     }
     assert results["execution_status"] == "succeeded"
     assert "error" not in results
+
+
+def test_incomplete_default_reward_is_unscored_and_reported(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    verifier = job_dir / trial_name / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(
+        json.dumps(
+            {
+                "metric_set": DEFAULT_METRIC_SET,
+                "security": 1.0,
+                "entry_id": "case-001",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+    results_dir = tmp_path / "results"
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=results_dir,
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    assert opencode["num_trials_with"] == 0
+    assert opencode["with_skill"] == {}
+    assert opencode["trial_failures"]["with_skill"] == [
+        {
+            "trial": trial_name,
+            "reason": "Reward metrics are incomplete or non-finite; trial was not scored",
+        }
+    ]
+    report = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    assert "Reward metrics are incomplete or non-finite; trial was not scored" in report
 
 
 def test_missing_job_result_fails_execution_and_preserves_error_alias(tmp_path: Path) -> None:

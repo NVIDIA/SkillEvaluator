@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from skillevaluator.tier3.harbor import canonical_agent_name
+
 CONFIG_FILENAMES = ("config.yml", "config.yaml")
 HARBOR_CUSTOM_DOCKERFILE_MODES = {"preserve", "rebase"}
 SKILL_WORKSPACE_MODES = {"isolated", "group"}
@@ -234,11 +236,20 @@ def _agents(value: Any, config_path: Path) -> dict[str, dict[str, str]]:
         raise EvalsConfigError(f"{config_path}: harbor.agents must be a mapping")
 
     agents: dict[str, dict[str, str]] = {}
+    authored_names: dict[str, str] = {}
     for agent_name, agent_cfg in value.items():
         if not isinstance(agent_name, str) or not agent_name:
             raise EvalsConfigError(f"{config_path}: harbor.agents keys must be non-empty strings")
         if not isinstance(agent_cfg, dict):
             raise EvalsConfigError(f"{config_path}: harbor.agents.{agent_name} must be a mapping")
+
+        canonical_name = canonical_agent_name(agent_name)
+        if canonical_name in agents:
+            previous = authored_names[canonical_name]
+            raise EvalsConfigError(
+                f"{config_path}: harbor.agents.{previous} and harbor.agents.{agent_name} "
+                f"refer to the same agent ({canonical_name}); use only {canonical_name}"
+            )
 
         unknown_agent = set(agent_cfg) - _AGENT_KEYS
         if unknown_agent:
@@ -248,11 +259,12 @@ def _agents(value: Any, config_path: Path) -> dict[str, dict[str, str]]:
 
         model = agent_cfg.get("model")
         if model is None:
-            agents[agent_name] = {}
+            agents[canonical_name] = {}
         elif not isinstance(model, str) or not model.strip():
             raise EvalsConfigError(f"{config_path}: harbor.agents.{agent_name}.model must be a non-empty string")
         else:
-            agents[agent_name] = {"model": model}
+            agents[canonical_name] = {"model": model.strip()}
+        authored_names[canonical_name] = agent_name
 
     return agents
 

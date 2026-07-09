@@ -275,6 +275,15 @@
           "param_type": "option"
         },
         {
+          "multiple": true,
+          "name": "agent_model",
+          "opts": [
+            "--agent-model"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "verify_models",
@@ -332,6 +341,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "autopilot",
+          "opts": [
+            "--autopilot"
+          ],
+          "param_type": "option",
+          "type": "boolean"
         },
         {
           "default": "False",
@@ -464,6 +483,19 @@
           "type": "boolean"
         },
         {
+          "default": "True",
+          "is_flag": true,
+          "name": "agent_runtime_preflight",
+          "opts": [
+            "--agent-runtime-preflight"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
           "name": "timeout_multiplier",
           "opts": [
             "--timeout-multiplier"
@@ -494,6 +526,33 @@
           ],
           "param_type": "option",
           "type": "integer"
+        },
+        {
+          "choices": [
+            "auto",
+            "rich",
+            "plain",
+            "off"
+          ],
+          "default": "auto",
+          "name": "progress",
+          "opts": [
+            "--progress"
+          ],
+          "param_type": "option"
+        }
+      ]
+    },
+    "harbor-view": {
+      "params": [
+        {
+          "name": "jobs_dir",
+          "opts": [
+            "jobs_dir"
+          ],
+          "param_type": "argument",
+          "required": true,
+          "type": "directory"
         }
       ]
     },
@@ -1980,6 +2039,15 @@
               "param_type": "option"
             },
             {
+              "multiple": true,
+              "name": "agent_model",
+              "opts": [
+                "--agent-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "verify_models",
@@ -2037,6 +2105,16 @@
                 "--env-mode"
               ],
               "param_type": "option"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "autopilot",
+              "opts": [
+                "--autopilot"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             },
             {
               "default": "False",
@@ -2169,6 +2247,19 @@
               "type": "boolean"
             },
             {
+              "default": "True",
+              "is_flag": true,
+              "name": "agent_runtime_preflight",
+              "opts": [
+                "--agent-runtime-preflight"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-agent-runtime-preflight"
+              ],
+              "type": "boolean"
+            },
+            {
               "name": "timeout_multiplier",
               "opts": [
                 "--timeout-multiplier"
@@ -2199,6 +2290,20 @@
               ],
               "param_type": "option",
               "type": "integer"
+            },
+            {
+              "choices": [
+                "auto",
+                "rich",
+                "plain",
+                "off"
+              ],
+              "default": "auto",
+              "name": "progress",
+              "opts": [
+                "--progress"
+              ],
+              "param_type": "option"
             }
           ]
         },

@@ -1,0 +1,11 @@
+title = "SkillEvaluator Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic OpenAI token used by Tier 3 redaction tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^sk-AbCdEf1234567890$''']
+paths = ['''^tests/test_tier3_(progress|result_display)\.py$''']

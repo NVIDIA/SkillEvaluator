@@ -192,6 +192,24 @@ def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
+    conditions = agent_info.get("conditions")
+    data = conditions.get(condition) if isinstance(conditions, dict) else None
+    return str(data.get("execution_status") or "unknown") if isinstance(data, dict) else "unknown"
+
+
+def _both_conditions_succeeded(agent_info: dict[str, Any]) -> bool:
+    return all(_condition_status(agent_info, condition) == "succeeded" for condition in ("with_skill", "without_skill"))
+
+
+def _grading_mode(run_config: dict[str, Any]) -> str:
+    grading = run_config.get("grading")
+    mode = grading.get("mode") if isinstance(grading, dict) else None
+    if isinstance(mode, dict):
+        mode = mode.get("value")
+    return str(mode or "").strip()
+
+
 def _load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
     agents: dict[str, dict[str, Any]] = {}
     for agent_dir in sorted(results_dir.iterdir()):
@@ -320,6 +338,39 @@ def _load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
                     ),
                 }
             )
+            # A failed/unknown condition may leave partial or legacy score
+            # artifacts on disk. Keep its failure and coverage metadata, but
+            # remove every quality-bearing payload before any report surface
+            # can interpret those incomplete values as valid scores.
+            condition_quality_fields = {
+                "with_skill": (
+                    "with_skill",
+                    "custom_with_skill",
+                    "dimensions_with_skill",
+                    "pass_with_skill",
+                    "rewards",
+                ),
+                "without_skill": (
+                    "without_skill",
+                    "custom_without_skill",
+                    "dimensions_without_skill",
+                    "pass_without_skill",
+                    "rewards_baseline",
+                ),
+            }
+            for condition, fields in condition_quality_fields.items():
+                condition_status = _condition_status(agent_info, condition)
+                if condition_status == "succeeded":
+                    continue
+                condition_info = condition_execution.get(condition, {})
+                for field in fields:
+                    if field.startswith("pass_") and condition_status in {"failed", "unknown"}:
+                        agent_info[field] = {
+                            "attempts_used": _nonnegative_counter(condition_info.get("scored_attempts")),
+                            "max_attempts_possible": _nonnegative_counter(condition_info.get("expected_attempts")),
+                        }
+                    else:
+                        agent_info[field] = [] if field.startswith("rewards") else {}
             agents[agent_name] = agent_info
     return agents
 
@@ -370,6 +421,11 @@ def _metric_evidence_keys(metric: str) -> set[str]:
 def _build_agent_findings(agent_info: dict[str, Any]) -> str:
     rewards = agent_info.get("rewards", [])
     if not rewards:
+        if _condition_status(agent_info, "with_skill") != "succeeded":
+            return (
+                "<p class='subtle'>No valid with-skill score is available because execution did not complete "
+                "successfully. Review Failure Details above.</p>"
+            )
         return "<p class='subtle'>No trial data available.</p>"
 
     cards: list[str] = []
@@ -565,15 +621,24 @@ def _load_dataset(skill_path: Path | None) -> list[dict[str, Any]]:
 
 def _load_staged_harbor_dataset(results_dir: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
     tasks_dir = results_dir / "_harbor-tasks"
     if not tasks_dir.exists():
         return entries
-    for entry_file in sorted(tasks_dir.glob("*/tests/entry.json")):
+    # Real runs stage tasks below <agent>/<condition>/<case>, while older
+    # artifacts used a flat <case> layout. Read both and collapse the duplicate
+    # with-skill/baseline copies by dataset entry id.
+    for entry_file in sorted(tasks_dir.rglob("tests/entry.json")):
         try:
             entry = json.loads(entry_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         if isinstance(entry, dict):
+            entry_id = entry.get("id")
+            identity = f"id:{entry_id}" if entry_id is not None else f"payload:{json.dumps(entry, sort_keys=True)}"
+            if identity in seen:
+                continue
+            seen.add(identity)
             entries.append(entry)
     return entries
 
@@ -618,6 +683,13 @@ def _build_suggestions_html(skill_name: str, agents: dict[str, dict[str, Any]]) 
 
     def suggestion_items(suggestions: list[str]) -> str:
         return "".join(f"<li>{_format_suggestion_item(s)}</li>" for s in suggestions)
+
+    if any(agent.get("execution_status") != "succeeded" for agent in agents.values()):
+        return (
+            '<div class="sug-box sug-warn"><h3>&#9888; Resolve Execution Failures</h3>'
+            "<p>Resolve the execution failures shown in Failure Details, then rerun the evaluation before "
+            "interpreting scores or quality suggestions.</p></div>"
+        )
 
     try:
         from skillevaluator.tier3.harbor.report import (
@@ -823,25 +895,25 @@ def generate_html_report(
         formatted_time = timestamp
 
     agent_names = sorted(agents.keys())
-    has_lift = any("lift" in agents[a] for a in agent_names)
-    has_custom_lift = any("custom_lift" in agents[a] for a in agent_names)
+    has_lift = any("lift" in agents[a] and _both_conditions_succeeded(agents[a]) for a in agent_names)
+    has_custom_lift = any("custom_lift" in agents[a] and _both_conditions_succeeded(agents[a]) for a in agent_names)
     display_metrics = _metrics_for_agents(agents)
     metric_count = len(display_metrics)
-    score_definition_text = (
-        f"Overall score is the mean of the {metric_count} evaluator metrics shown in this report."
-        if metric_count
-        else "Overall score is the user-provided reward overall."
-    )
-    metrics_label = (
-        f"{metric_count} evaluator checks (deterministic + LLM judge)"
-        if metric_count
-        else "custom-only user reward overall"
-    )
-    heatmap_text = (
-        f"Overall score per eval case per agent (average of {metric_count} evaluator metrics)."
-        if metric_count
-        else "Overall score per eval case per agent (user-provided reward overall)."
-    )
+    custom_only = _grading_mode(run_config) == "custom_only"
+    if metric_count:
+        score_definition_text = (
+            f"Overall score is the mean of the {metric_count} evaluator metrics shown in this report."
+        )
+        metrics_label = f"{metric_count} evaluator checks (deterministic + LLM judge)"
+        heatmap_text = f"Overall score per eval case per agent (average of {metric_count} evaluator metrics)."
+    elif custom_only:
+        score_definition_text = "Overall score is the user-provided reward overall."
+        metrics_label = "custom-only user reward overall"
+        heatmap_text = "Overall score per eval case per agent (user-provided reward overall)."
+    else:
+        score_definition_text = "No scored evaluator metrics are available for this run."
+        metrics_label = "no valid scored metrics"
+        heatmap_text = "No per-case score data is available."
 
     # --- Data for JS ---
     radar_labels = json.dumps([_METRIC_DISPLAY.get(m, m) for m in display_metrics])
@@ -849,7 +921,13 @@ def generate_html_report(
     for i, name in enumerate(agent_names):
         color = _agent_color(name, i)
         scores = agents[name].get("with_skill", {})
-        data = [round(scores.get(m, 0.0), 4) for m in display_metrics]
+        with_skill_succeeded = _condition_status(agents[name], "with_skill") == "succeeded"
+        data = []
+        for metric in display_metrics:
+            value = scores.get(metric) if isinstance(scores, dict) and with_skill_succeeded else None
+            data.append(
+                round(float(value), 4) if isinstance(value, int | float) and not isinstance(value, bool) else None
+            )
         radar_datasets.append(
             f'{{label:{json.dumps(name)},data:{json.dumps(data)},borderColor:"{color}",backgroundColor:"{color}20",pointBackgroundColor:"{color}",borderWidth:2,pointRadius:4}}'
         )
@@ -860,7 +938,13 @@ def generate_html_report(
     for i, name in enumerate(agent_names):
         color = _agent_color(name, i)
         scores = agents[name].get("with_skill", {})
-        data = [round(scores.get(m, 0.0), 4) for m in display_metrics]
+        with_skill_succeeded = _condition_status(agents[name], "with_skill") == "succeeded"
+        data = []
+        for metric in display_metrics:
+            value = scores.get(metric) if isinstance(scores, dict) and with_skill_succeeded else None
+            data.append(
+                round(float(value), 4) if isinstance(value, int | float) and not isinstance(value, bool) else None
+            )
         bar_datasets.append(
             f'{{label:{json.dumps(name)},data:{json.dumps(data)},backgroundColor:"{color}cc",borderRadius:4}}'
         )
@@ -871,29 +955,45 @@ def generate_html_report(
     for name in agent_names:
         avg = _agent_overall(agents[name], display_metrics)
         trials = agents[name].get("num_trials", 0)
+        with_skill_status = _condition_status(agents[name], "with_skill")
+        baseline_status = _condition_status(agents[name], "without_skill")
+        expected_attempts = _nonnegative_counter(agents[name].get("expected_attempts"))
+        scored_attempts = _nonnegative_counter(agents[name].get("scored_attempts"))
         color = _agent_color(name, agent_names.index(name))
         lift_str = ""
-        if "lift" in agents[name]:
+        if "lift" in agents[name] and _both_conditions_succeeded(agents[name]):
             ld = agents[name]["lift"].get("overall", {}).get("delta", 0.0)
             lcolor = "#22c55e" if ld > 0 else ("#ef4444" if ld < 0 else "#94a3b8")
             lsign = "+" if ld > 0 else ""
             lift_str = f'<div class="lift-chip" style="color:{lcolor}">{lsign}{ld:.2f} lift</div>'
-        elif "custom_lift" in agents[name]:
+        elif "custom_lift" in agents[name] and _both_conditions_succeeded(agents[name]):
             ld = agents[name]["custom_lift"].get("overall", {}).get("delta", 0.0)
             lcolor = "#22c55e" if ld > 0 else ("#ef4444" if ld < 0 else "#94a3b8")
             lsign = "+" if ld > 0 else ""
             lift_str = f'<div class="lift-chip" style="color:{lcolor}">{lsign}{ld:.2f} custom lift</div>'
-        if trials == 0:
+        if with_skill_status != "succeeded":
+            coverage = (
+                f"<br>{scored_attempts} of {expected_attempts} expected attempts scored" if expected_attempts else ""
+            )
+            overall_cards += f"""<div class="agent-card" style="border-top:3px solid #ef4444;opacity:.6">
+  <div class="agent-name" style="color:{color}">{escape(name)}</div>
+  <div class="agent-score" style="color:#ef4444">NO SCORE</div>
+  <div class="subtle">No valid with-skill score{coverage}</div>
+</div>"""
+        elif trials == 0:
             overall_cards += f"""<div class="agent-card" style="border-top:3px solid #ef4444;opacity:.6">
   <div class="agent-name" style="color:{color}">{escape(name)}</div>
   <div class="agent-score" style="color:#ef4444">FAIL</div>
   <div class="subtle">0 trials — agent did not produce results</div>
 </div>"""
         else:
+            baseline_failure_note = (
+                "<br>Baseline execution failed; lift unavailable" if baseline_status in {"failed", "unknown"} else ""
+            )
             overall_cards += f"""<div class="agent-card" style="border-top:3px solid {color}">
   <div class="agent-name" style="color:{color}">{escape(name)}</div>
   <div class="agent-score" style="color:{_sc(avg)}">{avg:.2f}</div>
-  <div class="subtle">{trials} trial(s)</div>{lift_str}
+  <div class="subtle">{trials} trial(s){baseline_failure_note}</div>{lift_str}
 </div>"""
 
     run_config_html = ""
@@ -1042,11 +1142,20 @@ def generate_html_report(
             condition: str,
             summary: dict[str, Any],
             lift_cell: str = "",
+            *,
+            valid: bool,
         ) -> str:
+            scored, max_possible, not_scored = _summary_counts(summary)
+            if not valid:
+                return (
+                    f"<tr><td>{escape(agent_name)}</td><td>{escape(condition)}</td>"
+                    '<td class="subtle">NO SCORE</td><td>--</td>'
+                    f"<td>{scored} of {max_possible} scored</td><td>--</td>"
+                    f'<td class="subtle">{not_scored} not scored</td>{lift_cell}</tr>'
+                )
             rate = float(summary.get("rate", 0.0) or 0.0)
             passed = int(summary.get("passed_cases", 0) or 0)
             total = int(summary.get("total_cases", 0) or 0)
-            scored, max_possible, not_scored = _summary_counts(summary)
             avg_scored = scored / total if total else 0.0
             unscored_text = f"{not_scored} not scored"
             return (
@@ -1063,20 +1172,42 @@ def generate_html_report(
             with_pass = agents[name].get("pass_with_skill", {})
             without_pass = agents[name].get("pass_without_skill", {})
             pass_lift = agents[name].get("pass_lift", {})
+            with_status = _condition_status(agents[name], "with_skill")
+            without_status = _condition_status(agents[name], "without_skill")
+            valid_lift = _both_conditions_succeeded(agents[name])
 
             lift_cell = ""
-            if has_lift and without_pass:
-                delta = float(pass_lift.get("delta", 0.0) or 0.0)
+            delta_value = pass_lift.get("delta") if isinstance(pass_lift, dict) else None
+            if (
+                has_lift
+                and without_pass
+                and valid_lift
+                and isinstance(delta_value, int | float)
+                and not isinstance(delta_value, bool)
+            ):
+                delta = float(delta_value)
                 dc = "#22c55e" if delta > 0 else ("#ef4444" if delta < 0 else "#94a3b8")
                 ds = f"+{delta:.0%}" if delta > 0 else f"{delta:.0%}"
                 lift_cell = f'<td style="color:{dc};font-weight:700">{ds}</td>'
             elif has_lift:
                 lift_cell = "<td>--</td>"
-            pass_rows += _summary_row(name, "With skill", with_pass, lift_cell)
+            pass_rows += _summary_row(
+                name,
+                "With skill",
+                with_pass,
+                lift_cell,
+                valid=with_status == "succeeded" and bool(with_pass),
+            )
 
             if without_pass:
-                baseline_lift = "<td>baseline</td>" if has_lift else ""
-                pass_rows += _summary_row(name, "Without skill", without_pass, baseline_lift)
+                baseline_lift = "<td>baseline</td>" if has_lift and valid_lift else ("<td>--</td>" if has_lift else "")
+                pass_rows += _summary_row(
+                    name,
+                    "Without skill",
+                    without_pass,
+                    baseline_lift,
+                    valid=without_status == "succeeded",
+                )
 
         lift_col = "<th>Lift</th>" if has_lift else ""
         pass_summary_html = f"""<h3>Pass@{max_attempts} Summary</h3>
@@ -1092,7 +1223,7 @@ def generate_html_report(
         for name in agent_names:
             w = agents[name].get("with_skill", {}).get(metric)
             if (
-                agents[name].get("execution_status") != "succeeded"
+                _condition_status(agents[name], "with_skill") != "succeeded"
                 or not isinstance(w, int | float)
                 or isinstance(w, bool)
             ):
@@ -1107,7 +1238,8 @@ def generate_html_report(
         dimension_names = ["security", "correctness", "discoverability", "effectiveness", "efficiency"]
         dimension_rows = ""
         show_dimension_lift = any(
-            isinstance(agents[name].get("dimensions_without_skill", {}).get(dimension, {}), dict)
+            _both_conditions_succeeded(agents[name])
+            and isinstance(agents[name].get("dimensions_without_skill", {}).get(dimension, {}), dict)
             and "score" in agents[name].get("dimensions_without_skill", {}).get(dimension, {})
             for name in agent_names
             for dimension in dimension_names
@@ -1118,7 +1250,7 @@ def generate_html_report(
             for name in agent_names:
                 dim = agents[name].get("dimensions_with_skill", {}).get(dimension, {})
                 score = dim.get("score") if isinstance(dim, dict) else None
-                if isinstance(score, int | float):
+                if _condition_status(agents[name], "with_skill") == "succeeded" and isinstance(score, int | float):
                     any_score = True
                     if show_dimension_lift:
                         baseline_dim = agents[name].get("dimensions_without_skill", {}).get(dimension, {})
@@ -1167,7 +1299,7 @@ def generate_html_report(
             cells = ""
             for name in agent_names:
                 value = agents[name].get("custom_with_skill", {}).get(metric)
-                if isinstance(value, int | float):
+                if _condition_status(agents[name], "with_skill") == "succeeded" and isinstance(value, int | float):
                     cells += f'<td><span class="val" style="color:{_sc(float(value))}">{float(value):.2f}</span></td>'
                 else:
                     cells += '<td class="subtle">--</td>'
@@ -1197,11 +1329,14 @@ def generate_html_report(
             any_metric_score = False
             for name in agent_names:
                 ld = agents[name].get("custom_lift", {}).get(metric)
-                if isinstance(ld, dict):
+                values = (
+                    [ld.get(key) for key in ("with_skill", "without_skill", "delta")] if isinstance(ld, dict) else []
+                )
+                if _both_conditions_succeeded(agents[name]) and all(
+                    isinstance(value, int | float) and not isinstance(value, bool) for value in values
+                ):
                     any_metric_score = True
-                    w = float(ld.get("with_skill", 0.0) or 0.0)
-                    wo = float(ld.get("without_skill", 0.0) or 0.0)
-                    delta = float(ld.get("delta", 0.0) or 0.0)
+                    w, wo, delta = (float(value) for value in values)
                     dc = "#22c55e" if delta > 0 else ("#ef4444" if delta < 0 else "#94a3b8")
                     ds = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
                     cells += f'<td><span class="subtle">{wo:.2f}</span> &rarr; {w:.2f} <span style="color:{dc};font-weight:600">({ds})</span></td>'
@@ -1238,13 +1373,21 @@ def generate_html_report(
         )
 
     custom_only_note_html = ""
-    if not display_metrics:
+    if not display_metrics and custom_only:
         custom_only_note_html = (
             '<div class="info-box">'
             "<h3>Custom Reward Mode</h3>"
             '<p class="subtle">This report is from BYOT <code>custom_only</code> grading. '
             "Default evaluator metric charts and dimensions are hidden because the user grader owns the scoring contract. "
             "Pass@k uses the user-provided overall reward.</p>"
+            "</div>"
+        )
+    elif not display_metrics:
+        custom_only_note_html = (
+            '<div class="info-box">'
+            "<h3>No Scored Metrics</h3>"
+            '<p class="subtle">No scored evaluator metrics are available. Review Failure Details and rerun '
+            "the evaluation before interpreting quality.</p>"
             "</div>"
         )
 
@@ -1257,9 +1400,15 @@ def generate_html_report(
             cells = ""
             for name in agent_names:
                 ld = agents[name].get("lift", {}).get(metric, {})
-                w = ld.get("with_skill", agents[name].get("with_skill", {}).get(metric, 0.0))
-                wo = ld.get("without_skill", 0.0)
-                delta = ld.get("delta", 0.0)
+                values = (
+                    [ld.get(key) for key in ("with_skill", "without_skill", "delta")] if isinstance(ld, dict) else []
+                )
+                if not _both_conditions_succeeded(agents[name]) or not all(
+                    isinstance(value, int | float) and not isinstance(value, bool) for value in values
+                ):
+                    cells += '<td class="subtle">--</td>'
+                    continue
+                w, wo, delta = (float(value) for value in values)
                 dc = "#22c55e" if delta > 0 else ("#ef4444" if delta < 0 else "#94a3b8")
                 ds = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
                 cells += f'<td><span class="subtle">{wo:.2f}</span> &rarr; {w:.2f} <span style="color:{dc};font-weight:600">({ds})</span></td>'
@@ -1378,8 +1527,13 @@ def generate_html_report(
     if has_er_data:
         er_html = f"""<h3>Error Recovery</h3><p class="subtle">Trials where commands failed and were retried, with fault attribution.</p>
 <div class="table-wrap"><table><thead><tr><th>Agent</th><th>Case</th><th>First Attempt</th><th>Faults</th><th>Details</th></tr></thead><tbody>{er_rows}</tbody></table></div>"""
-    else:
+    elif all(agents[name].get("execution_status") == "succeeded" for name in agent_names):
         er_html = '<h3>Error Recovery</h3><p class="subtle">All commands succeeded on first attempt across all trials. No error-retry patterns detected.</p>'
+    else:
+        er_html = (
+            '<h3>Error Recovery</h3><p class="subtle">Error-recovery analysis is incomplete because execution '
+            "did not succeed for every agent. Review Failure Details.</p>"
+        )
 
     attempt_detail_html = ""
     if show_attempt_policy:
@@ -1513,7 +1667,7 @@ def generate_html_report(
     best_agent = ""
     best_score: float | None = None
     for name in agent_names:
-        if agents[name].get("execution_status") != "succeeded" or agents[name].get("num_trials", 0) == 0:
+        if _condition_status(agents[name], "with_skill") != "succeeded" or agents[name].get("num_trials", 0) == 0:
             continue
         avg = _agent_overall(agents[name], display_metrics)
         if best_score is None or avg > best_score:

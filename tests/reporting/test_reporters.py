@@ -989,6 +989,7 @@ class TestHTMLReporter:
                         "behavior_check",
                     ],
                     "num_trials": 1,
+                    "execution_status": "succeeded",
                 }
             ),
             encoding="utf-8",
@@ -1025,6 +1026,7 @@ class TestHTMLReporter:
         assert "SkillEvaluator" not in output
         assert "?tab=analysis" in output
         assert "?step=9" in output
+        assert "All commands succeeded on first attempt across all trials" in output
 
     def test_standalone_failed_harbor_report_shows_failure_without_score(self, tmp_path: Path) -> None:
         from skillevaluator.tier3.harbor.html_report import generate_html_report

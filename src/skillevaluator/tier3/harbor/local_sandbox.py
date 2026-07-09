@@ -4,10 +4,11 @@
 """OS-level confinement for Harbor local mode commands.
 
 Strategy layer around kernel sandbox launchers. Bubblewrap on Linux provides
-namespace isolation, loopback-only network, a read-only system view, and
-run-dir-only writes. macOS Seatbelt provides a labelled semi-trusted backend:
-it confines reads, writes, network, process metadata, and signals, but has no
-PID namespace and cannot guarantee cleanup of detached descendants.
+namespace isolation, a read-only system view, and run-dir-only writes; network
+is isolated when airgapped and shared for model egress. macOS Seatbelt provides
+a labelled semi-trusted backend: it confines reads, writes, network, process
+metadata, and signals, but has no PID namespace and cannot guarantee cleanup of
+detached descendants.
 ``Sandbox.wrap()`` turns a command argv into a confined argv.
 
 This module deliberately has no skillevaluator imports so it stays portable to
@@ -42,8 +43,9 @@ STRICT_READS_ENV = "SKILLEVALUATOR_LOCAL_STRICT_READS"
 
 #: require = fail closed when no kernel backend is usable (default);
 #: prefer = degrade to advisory-only guardrails with a loud warning;
-#: off = trusted mode, skip probing entirely.
+#: off = trusted mode on supported hosts, skip backend probing entirely.
 SANDBOX_MODES = ("require", "prefer", "off")
+SUPPORTED_LOCAL_SYSTEMS = frozenset({"Darwin", "Linux"})
 
 RLIMIT_CPU_SECONDS = 900
 RLIMIT_NOFILE = 4096
@@ -92,6 +94,27 @@ _STRICT_SYSTEM_RO_PATHS = (
     *(path for path in _SYSTEM_RO_PATHS if path not in {"/usr", "/opt"}),
 )
 
+# Exact roots that are too broad for an explicit strict-mode exception.  A
+# selected executable, venv, keg, or package below any of these roots remains
+# valid; only mounting the entire shared tree is filtered.  Include both macOS
+# temp spellings because /tmp and /var are normally symlink/firmlink aliases.
+_STRICT_SHARED_READ_ROOTS = (
+    Path("/"),
+    Path("/usr"),
+    Path("/usr/local"),
+    Path("/opt"),
+    Path("/tmp"),
+    Path("/private/tmp"),
+    Path("/var/tmp"),
+    Path("/var"),
+    Path("/private"),
+    Path("/private/var"),
+    Path("/etc"),
+    Path("/home"),
+    Path("/Users"),
+    Path("/root"),
+)
+
 # macOS Seatbelt denies the entire host HOME except for the canonical paths
 # required by the current run and selected runtime. Deny rules cannot be
 # overridden by allow rules, so the exceptions must be part of the deny filter
@@ -132,6 +155,22 @@ class SandboxPlan:
     backend: str  # "bubblewrap" | "seatbelt" | "none"
     strength: str  # "kernel" | "kernel-macos" | "advisory-only"
     reason: str  # human-readable, surfaced in run summaries
+
+
+def require_supported_platform() -> str:
+    """Return the supported host system or reject local mode before overrides."""
+    system = platform.system()
+    if system in SUPPORTED_LOCAL_SYSTEMS:
+        return system
+    if system == "Windows":
+        raise SandboxUnavailable(
+            "Native Windows local mode is unsupported, including with "
+            f"{SANDBOX_MODE_ENV}=prefer or off. Use WSL2 for Linux local mode or --env-mode docker."
+        )
+    raise SandboxUnavailable(
+        f"Local mode is unsupported on platform {system!r}. "
+        "Use Linux, macOS, WSL2, or --env-mode docker."
+    )
 
 
 class Sandbox:
@@ -214,14 +253,15 @@ def detect(mode: str = "require") -> Sandbox:
 
     ``require`` raises :class:`SandboxUnavailable` when only advisory-only
     confinement is possible; ``prefer`` degrades with the reason recorded in
-    the plan; ``off`` skips probing and returns advisory-only.
+    the plan; ``off`` skips backend probing and returns advisory-only. Native
+    Windows is unsupported and raises before any mode-specific escape hatch.
     """
     if mode not in SANDBOX_MODES:
         raise ValueError(f"invalid local sandbox mode {mode!r}; expected one of {', '.join(SANDBOX_MODES)}")
+    system = require_supported_platform()
     if mode == "off":
         return Sandbox(SandboxPlan("none", "advisory-only", "sandbox disabled by configuration (trusted local mode)"))
 
-    system = platform.system()
     if system == "Linux":
         bwrap = shutil.which("bwrap")
         if bwrap and _userns_enabled() and _bwrap_smoke_test(bwrap):
@@ -301,18 +341,32 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _validated_strict_read_roots(extra_ro: list[Path]) -> list[Path]:
-    """Reject strict read exceptions broad enough to reveal the host home."""
+def _is_shared_strict_read_root(visible: Path, resolved: Path) -> bool:
+    """Return whether a strict exception is exactly one shared host tree."""
+    for shared in _STRICT_SHARED_READ_ROOTS:
+        shared_visible = shared.absolute()
+        shared_resolved = shared_visible.resolve()
+        if visible in {shared_visible, shared_resolved} or resolved in {shared_visible, shared_resolved}:
+            return True
+    return False
+
+
+def _validated_strict_read_roots(extra_ro: Iterable[Path]) -> list[Path]:
+    """Filter shared trees and reject HOME-covering strict exceptions."""
     host_homes = _safe_host_homes()
     if host_homes is None:
         raise SandboxUnavailable("strict sandbox cannot determine existing host HOME roots")
     roots: list[Path] = []
     for path in extra_ro:
-        resolved = Path(path).resolve()
+        raw = Path(path).expanduser().absolute()
+        visible = raw.parent.resolve() / raw.name
+        resolved = visible.resolve()
+        if _is_shared_strict_read_root(visible, resolved):
+            continue
         contains_host_home = any(_is_within(host_home, resolved) for host_home in host_homes)
-        if resolved == Path("/") or contains_host_home:
+        if contains_host_home:
             raise ValueError(f"strict read root {resolved} contains the host home and is not allowed")
-        roots.append(resolved)
+        roots.append(raw)
     return roots
 
 
@@ -325,21 +379,24 @@ def _strict_read_root_variants(extra_ro: Iterable[Path]) -> list[Path]:
     valid runtime fail with ``EPERM``.  Keep both spellings, while applying the
     same host-home safety validation to each root.
     """
+    candidates = _validated_strict_read_roots(extra_ro)
     roots: list[Path] = []
     seen: set[Path] = set()
     host_homes = _safe_host_homes()
     if host_homes is None:
         raise SandboxUnavailable("strict sandbox cannot determine existing host HOME roots")
-    for candidate in extra_ro:
+    for candidate in candidates:
         raw = Path(candidate).expanduser().absolute()
         try:
             visible = raw.parent.resolve(strict=True) / raw.name
             resolved = visible.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise SandboxUnavailable(f"macOS local sandbox cannot resolve runtime exception: {candidate}") from exc
+        if _is_shared_strict_read_root(visible, resolved):
+            continue
         for root in (visible, resolved):
             root = root.resolve() if not root.is_symlink() else root
-            if root == Path("/") or any(_is_within(home, root) for home in host_homes):
+            if any(_is_within(home, root) for home in host_homes):
                 raise ValueError(f"strict read root {root} contains the host home and is not allowed")
             if root not in seen:
                 seen.add(root)
@@ -456,10 +513,10 @@ def _bwrap_argv(
         wrapper += ["--ro-bind-try", path, path]
 
     created_bind_dirs: set[Path] = set()
-    system_mount_roots = tuple(Path(path) for path in _SYSTEM_RO_PATHS)
-    mounted_subtree_roots = tuple(
-        Path(path) for path in ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt", "/etc", "/proc", "/dev")
-    )
+    # Skip exact binds and parent creation only below roots actually mounted by
+    # the selected policy. Strict mode deliberately omits broad /usr and /opt.
+    system_mount_roots = tuple(Path(path) for path in system_ro_paths)
+    mounted_subtree_roots = (*system_mount_roots, Path("/proc"), Path("/dev"))
     directory_anchors = (Path("/tmp"),)
 
     def ensure_bind_parents(path: Path) -> None:
@@ -613,17 +670,37 @@ def _seatbelt_home_read_rule(host_home: Path, read_roots: Iterable[Path]) -> str
             if _is_within(exception, home):
                 exceptions.append(exception)
 
-    filters = "\n".join(_seatbelt_path_filter(path) for path in _minimal_roots(exceptions))
-    if not filters:
-        return f'(deny file-read* (subpath "{_sbpl_quote(home)}"))\n'
-    return (
-        "(deny file-read*\n"
-        "  (require-all\n"
-        f'    (subpath "{_sbpl_quote(home)}")\n'
-        "    (require-not\n"
-        "      (require-any\n"
-        f"{filters}))))\n"
+    read_roots = _minimal_roots(exceptions)
+    filters = "\n".join(_seatbelt_path_filter(path) for path in read_roots)
+    if filters:
+        read_rule = (
+            "(deny file-read*\n"
+            "  (require-all\n"
+            f'    (subpath "{_sbpl_quote(home)}")\n'
+            "    (require-not\n"
+            "      (require-any\n"
+            f"{filters}))))\n"
+        )
+    else:
+        read_rule = f'(deny file-read* (subpath "{_sbpl_quote(home)}"))\n'
+
+    # Tools such as Apple Git canonicalize an allowed nested workspace one
+    # component at a time. Permit metadata-only traversal of those ancestor
+    # directories while the broad deny still blocks entries, xattrs, and file
+    # contents. Never promote an ancestor to a subpath exception.
+    traversal_roots = sorted(
+        {
+            ancestor
+            for read_root in read_roots
+            for ancestor in read_root.parents
+            if _is_within(ancestor, home)
+        },
+        key=lambda path: len(path.parts),
     )
+    traversal_allows = "\n".join(
+        f'(allow file-read-metadata (literal "{_sbpl_quote(path)}"))' for path in traversal_roots
+    )
+    return f"{read_rule}{traversal_allows}\n"
 
 
 def _seatbelt_argv(
@@ -689,7 +766,18 @@ def _seatbelt_argv(
         )
         read_policy = f"{home_read_rule}{absolute_read_denies}\n"
 
-    net_rule = "(allow network*)" if allow_net else "(deny network*)"
+    if allow_net:
+        # Keep the host IPC boundary while permitting model-serving traffic.
+        # macOS DNS uses this one system Unix socket; all other Unix sockets,
+        # listeners, and explicit binds remain denied.
+        net_rule = """(deny network-inbound)
+(deny network-bind)
+(deny network-outbound
+  (require-all
+    (remote unix-socket)
+    (require-not (remote unix-socket (path "/private/var/run/mDNSResponder")))))"""
+    else:
+        net_rule = "(deny network*)"
     # Deny cross-process introspection (pgrep/ps reading another same-user
     # process's argv/metadata) while still allowing the skill to inspect its own
     # process tree. Closes the Seatbelt process-metadata leak.

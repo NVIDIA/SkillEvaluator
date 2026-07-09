@@ -633,7 +633,7 @@ def _passing_skill_suggestions(
 
     suggestions.append(
         "Run with additional agents ('skillevaluator evaluate <skill> --agents "
-        "claude-code,codex,openhands --env-mode docker') to verify the skill works across "
+        "claude-code,codex,opencode --env-mode docker') to verify the skill works across "
         "different coding agents."
     )
 

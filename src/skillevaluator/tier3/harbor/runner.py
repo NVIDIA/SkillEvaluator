@@ -8,21 +8,40 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
+import time
+import tomllib
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
+from queue import Empty, SimpleQueue
+from types import MappingProxyType
 from typing import Any
 
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.telemetry import record_agent_eval_summary
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import find_evals_file, generate_harbor_tasks, stage_native_harbor_tasks
+from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle, RetentionOutcome
 from skillevaluator.tier3.harbor.collector import collect_harbor_results, validate_harbor_job_result
 from skillevaluator.tier3.harbor.html_report import generate_html_report
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
+from skillevaluator.tier3.harbor.progress import (
+    NullProgressReporter,
+    ProgressEvent,
+    ProgressReporter,
+    Tier3RunPlan,
+    redact_progress_detail,
+    safe_progress_reporter,
+    secret_values_from_environment,
+)
+from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
 from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
 
 logger = logging.getLogger(__name__)
@@ -164,9 +183,31 @@ _RUNTIME_ENV_HOST_CONTROL_PREFIXES = (
     "OTEL_",
     "PIP_",
     "PYTHON",
+    "SKILL_EVAL_",
     "SKILLEVALUATOR_",
     "UV_",
 )
+_OPERATOR_OWNED_AGENT_ENV = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "NVIDIA_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+    }
+)
+
+
+@dataclass(frozen=True)
+class AgentRuntimePlan:
+    """One agent's immutable model, credential, and Harbor environment plan."""
+
+    agent: str
+    model: str
+    provider: ProviderConfig
+    staged_env: Mapping[str, str]
+    subprocess_env: Mapping[str, str]
 
 
 def _harbor_bin() -> str:
@@ -182,8 +223,9 @@ def _harbor_supports_yes() -> bool:
 
 def format_harbor_view_command(jobs_dir: Path | str, *, multiline: bool = False) -> str:
     """Return the portable command for inspecting retained Harbor artifacts."""
-    path = str(jobs_dir)
-    return f"harbor view {path}" if not multiline else f"harbor view \\\n  {path}"
+    path = shlex.quote(str(jobs_dir))
+    command = "skillevaluator tier3 harbor-view"
+    return f"{command} {path}" if not multiline else f"{command} \\\n  {path}"
 
 
 def build_harbor_run_command(
@@ -255,6 +297,8 @@ def build_harbor_run_command(
                 f"inherit_agent_keys={str(local_sandbox.coerce_flag(None, env_var=local_sandbox.INHERIT_AGENT_KEYS_ENV)).lower()}",
             ]
         )
+    elif env_mode == "docker":
+        command.extend(["-a", agent, "--environment-import-path", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
         command.extend(["-a", agent, "--env", env_mode])
     if jobs_dir is not None:
@@ -324,18 +368,45 @@ def _validate_agent_provider_credentials(
     env_mode: str = DEFAULT_ENV_MODE,
 ) -> list[str]:
     """Reject provider-to-agent combinations that cannot use the selected API."""
-    if (
-        env_mode != ENV_MODE_LOCAL
-        and provider.provider == "nv_build"
-        and "opencode" in agents
-        and not agent_runtime_env.get("NVIDIA_API_KEY", "").strip()
-    ):
-        return [
-            "opencode with NVIDIA Build requires NVIDIA_API_KEY in harbor.runtime_env so the agent container "
-            "receives a credential."
-        ]
     if provider.provider != "nv_build":
+        supported_agents = {
+            "openai": {"codex", "opencode"},
+            "openai-compatible": {"codex", "opencode"},
+            "anthropic": {"claude-code", "opencode"},
+            "bedrock": {"claude-code"},
+        }.get(provider.provider, set())
+        unsupported = [agent for agent in agents if agent not in supported_agents]
+        if unsupported:
+            return [
+                f"{provider.provider} does not support live agent(s): {', '.join(unsupported)}. "
+                "Choose a compatible evaluator provider and agent."
+            ]
+        if env_mode == ENV_MODE_LOCAL and provider.provider == "anthropic" and "opencode" in agents:
+            return [
+                "anthropic with opencode does not support local mode; use Docker/cloud or select claude-code."
+            ]
+        if env_mode == ENV_MODE_LOCAL and provider.provider == "bedrock":
+            return ["bedrock live agents do not support local mode; use Docker or a supported cloud backend."]
+        if provider.provider == "bedrock" and "claude-code" in agents:
+            has_bearer = bool(agent_runtime_env.get("AWS_BEARER_TOKEN_BEDROCK", "").strip())
+            has_access_pair = bool(
+                agent_runtime_env.get("AWS_ACCESS_KEY_ID", "").strip()
+                and agent_runtime_env.get("AWS_SECRET_ACCESS_KEY", "").strip()
+            )
+            if not has_bearer and not has_access_pair:
+                return [
+                    "bedrock with claude-code requires an explicit AWS access-key pair or "
+                    "AWS_BEARER_TOKEN_BEDROCK for the agent environment."
+                ]
         return []
+
+    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode"}]
+    if unsupported:
+        return [
+            "nv_build does not support live agent(s): "
+            + ", ".join(unsupported)
+            + ". Choose opencode, claude-code, or codex."
+        ]
 
     if "claude-code" in agents:
         if not agent_runtime_env.get("ANTHROPIC_API_KEY", "").strip():
@@ -363,7 +434,7 @@ def _validate_agent_provider_credentials(
         return [
             "codex requires a full OpenAI Responses API credential — NVIDIA Build's /responses does not "
             "support codex's tool schema. Set OPENAI_API_KEY + OPENAI_BASE_URL to an OpenAI-compatible "
-            "Responses provider (e.g. https://api.openai.com/v1) in harbor.runtime_env for Codex."
+            "Responses provider (e.g. https://api.openai.com/v1) in the operator's host environment for Codex."
         ]
 
     model_source = (agent_model_sources or {}).get("codex", "public provider default")
@@ -382,6 +453,13 @@ def _check_prerequisites(
     """Check Harbor and the selected environment (built-in or local mode)."""
     if env_mode not in HARBOR_ENV_MODES:
         return [f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]
+    if env_mode == ENV_MODE_LOCAL:
+        from skillevaluator.tier3.harbor import local_sandbox
+
+        try:
+            local_sandbox.require_supported_platform()
+        except local_sandbox.SandboxUnavailable as exc:
+            return [str(exc)]
     executable = _harbor_bin()
     if executable == "harbor" and shutil.which(executable) is None:
         return [
@@ -447,17 +525,38 @@ def _check_prerequisites(
     return []
 
 
+def _is_operator_owned_runtime_name(name: str) -> bool:
+    normalized = name.upper()
+    return (
+        normalized in _RUNTIME_ENV_HOST_CONTROL_NAMES
+        or normalized in _OPERATOR_OWNED_AGENT_ENV
+        or normalized.startswith(_RUNTIME_ENV_HOST_CONTROL_PREFIXES)
+    )
+
+
 def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, str], list[str]]:
     resolved: dict[str, str] = {}
     errors: list[str] = []
     for name, template in (templates or {}).items():
-        normalized_name = name.upper()
-        if normalized_name in _RUNTIME_ENV_HOST_CONTROL_NAMES or normalized_name.startswith(
-            _RUNTIME_ENV_HOST_CONTROL_PREFIXES
-        ):
+        if _is_operator_owned_runtime_name(name):
             errors.append(f"harbor.runtime_env.{name} controls the host process and is not allowed")
             continue
-        value = os.path.expandvars(str(template))
+        template_value = str(template)
+        references = {
+            braced or plain
+            for braced, plain in re.findall(
+                r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                template_value,
+            )
+        }
+        owned_references = sorted(reference for reference in references if _is_operator_owned_runtime_name(reference))
+        if owned_references:
+            errors.append(
+                f"harbor.runtime_env.{name} references operator-owned credential(s): "
+                + ", ".join(owned_references)
+            )
+            continue
+        value = os.path.expandvars(template_value)
         if "$" in value:
             errors.append(f"harbor.runtime_env.{name} references an unset environment variable")
         else:
@@ -527,6 +626,173 @@ def _harbor_subprocess_environment(
     return environment
 
 
+def _agent_credentials(
+    *,
+    provider: ProviderConfig,
+    agent: str,
+    env_mode: str,
+) -> dict[str, str]:
+    """Resolve operator-owned credentials for exactly one agent runtime."""
+    if provider.provider == "nv_build":
+        if agent == "opencode":
+            if env_mode == ENV_MODE_LOCAL:
+                return _local_agent_credentials(provider)
+            return {"NVIDIA_API_KEY": provider.api_key or ""}
+        if agent == "claude-code":
+            return {
+                name: os.environ.get(name, "")
+                for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+                if os.environ.get(name)
+            }
+        if agent == "codex":
+            return {
+                name: os.environ.get(name, "")
+                for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL")
+                if os.environ.get(name)
+            }
+        return {}
+
+    if provider.provider == "anthropic" and agent in {"claude-code", "opencode"}:
+        return {
+            name: value
+            for name, value in {
+                "ANTHROPIC_API_KEY": provider.api_key or "",
+                "ANTHROPIC_BASE_URL": provider.base_url or "",
+            }.items()
+            if value
+        }
+    if provider.provider in {"openai", "openai-compatible"} and agent in {"codex", "opencode"}:
+        return {
+            name: value
+            for name, value in {
+                "OPENAI_API_KEY": provider.api_key or "",
+                "OPENAI_BASE_URL": provider.base_url or "",
+            }.items()
+            if value
+        }
+    if provider.provider == "bedrock" and agent == "claude-code":
+        credentials = {
+            name: value
+            for name, value in _provider_environment(provider).items()
+            if name.startswith("AWS_") and value
+        }
+        credentials["CLAUDE_CODE_USE_BEDROCK"] = "1"
+        return credentials
+    return {}
+
+
+def _agent_provider_config(
+    *,
+    evaluator_provider: ProviderConfig,
+    agent: str,
+    model: str,
+    credentials: Mapping[str, str],
+) -> ProviderConfig:
+    """Describe the API provider the selected agent will actually call."""
+    if evaluator_provider.provider == "nv_build" and agent == "claude-code":
+        resolved_model = model.removeprefix("anthropic/")
+        return ProviderConfig(
+            provider="anthropic",
+            model=resolved_model,
+            api_key=credentials.get("ANTHROPIC_API_KEY"),
+            base_url=credentials.get("ANTHROPIC_BASE_URL"),
+            litellm_model=f"anthropic/{resolved_model}",
+        )
+    if evaluator_provider.provider == "nv_build" and agent == "codex":
+        resolved_model = model.removeprefix("openai/")
+        return ProviderConfig(
+            provider="openai-compatible",
+            model=resolved_model,
+            api_key=credentials.get("OPENAI_API_KEY"),
+            base_url=credentials.get("OPENAI_BASE_URL"),
+            litellm_model=f"openai/{resolved_model}",
+        )
+    if agent == "opencode":
+        runtime_namespaces = {
+            "anthropic": "anthropic/",
+            "nv_build": "nvidia/",
+            "openai": "openai/",
+            "openai-compatible": "openai/",
+        }
+        resolved_model = model.removeprefix(runtime_namespaces.get(evaluator_provider.provider, ""))
+    else:
+        resolved_model = model
+    default_prefix = "anthropic" if evaluator_provider.provider == "anthropic" else evaluator_provider.provider
+    litellm_prefix = getattr(evaluator_provider, "litellm_model", f"{default_prefix}/{resolved_model}").partition("/")[0]
+    return ProviderConfig(
+        provider=evaluator_provider.provider,
+        model=resolved_model,
+        api_key=evaluator_provider.api_key,
+        base_url=evaluator_provider.base_url,
+        litellm_model=f"{litellm_prefix}/{resolved_model}",
+        region=getattr(evaluator_provider, "region", None),
+    )
+
+
+def _resolve_agent_runtime_plan(
+    *,
+    provider: ProviderConfig,
+    agents: list[str],
+    models: Mapping[str, str],
+    configured_runtime_env: Mapping[str, str],
+    env_mode: str,
+    model_sources: Mapping[str, str] | None = None,
+) -> dict[str, AgentRuntimePlan]:
+    """Resolve the single credential plan used by staging and execution.
+
+    Skill-owned configuration may add non-credential runtime values, but agent
+    and provider credentials always come from the operator's selected provider
+    or host environment. This prevents a skill from replacing a credential or
+    routing a trusted key to an attacker-controlled endpoint.
+    """
+    collisions = sorted(_OPERATOR_OWNED_AGENT_ENV.intersection(configured_runtime_env))
+    if collisions:
+        names = ", ".join(collisions)
+        raise ValueError(f"harbor.runtime_env contains operator-owned credential name(s): {names}")
+
+    provider_env = _provider_environment(provider)
+    plans: dict[str, AgentRuntimePlan] = {}
+    for agent in agents:
+        credentials = _agent_credentials(provider=provider, agent=agent, env_mode=env_mode)
+        validation_env = {**configured_runtime_env, **credentials}
+        credential_errors = _validate_agent_provider_credentials(
+            provider,
+            [agent],
+            validation_env,
+            dict(model_sources or {}),
+            env_mode=env_mode,
+        )
+        if credential_errors:
+            raise ValueError(credential_errors[0])
+
+        subprocess_env = _harbor_subprocess_environment(
+            env_mode=env_mode,
+            provider=provider,
+            configured_runtime_env=configured_runtime_env,
+            provider_env=provider_env,
+            agent=agent,
+            agent_model=models[agent],
+        )
+        subprocess_env.update(credentials)
+        staged = {
+            name: f"${{{name}}}"
+            for name in (*configured_runtime_env, *credentials)
+        }
+        plans[agent] = AgentRuntimePlan(
+            agent=agent,
+            model=models[agent],
+            provider=_agent_provider_config(
+                evaluator_provider=provider,
+                agent=agent,
+                model=models[agent],
+                credentials=credentials,
+            ),
+            staged_env=MappingProxyType(staged),
+            subprocess_env=MappingProxyType(subprocess_env),
+        )
+    return plans
+
+
 def _is_skill_dir(path: Path) -> bool:
     return path.is_dir() and (path / "SKILL.md").is_file()
 
@@ -555,6 +821,22 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> float | None:
+    """Return the largest staged agent timeout after applying Harbor scaling."""
+    timeouts: list[float] = []
+    for root in task_roots:
+        for task_file in root.glob("*/task.toml"):
+            try:
+                data = tomllib.loads(task_file.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            agent = data.get("agent") if isinstance(data, dict) else None
+            value = agent.get("timeout_sec") if isinstance(agent, dict) else None
+            if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
+                timeouts.append(float(value))
+    return round(max(timeouts) * timeout_multiplier, 3) if timeouts else None
+
+
 def _model_for_agent(
     agent: str,
     *,
@@ -563,14 +845,25 @@ def _model_for_agent(
     provider: ProviderConfig,
 ) -> tuple[str, str]:
     if cli_model:
-        return cli_model, "CLI"
-    configured = config_agents.get(agent, {}) if isinstance(config_agents, dict) else {}
-    if isinstance(configured, dict) and configured.get("model"):
-        return str(configured["model"]), "evals/config.yml"
-    selected = provider.model
-    if agent == "opencode" and provider.provider == "nv_build" and not selected.startswith("nvidia/"):
-        selected = f"nvidia/{selected}"
-    return selected, "public provider default"
+        selected, source = cli_model, "CLI"
+    else:
+        configured = config_agents.get(agent, {}) if isinstance(config_agents, dict) else {}
+        if isinstance(configured, dict) and configured.get("model"):
+            selected, source = str(configured["model"]), "evals/config.yml"
+        else:
+            selected, source = provider.model, "public provider default"
+    if agent == "opencode":
+        namespace = {
+            "anthropic": "anthropic",
+            "nv_build": "nvidia",
+            "openai": "openai",
+            "openai-compatible": "openai",
+        }.get(provider.provider)
+        if namespace and (
+            source == "public provider default" or not selected.startswith(f"{namespace}/")
+        ):
+            selected = f"{namespace}/{selected}"
+    return selected, source
 
 
 def _run_harbor(
@@ -617,7 +910,8 @@ def _run_harbor(
             expected_total_trials=expected_total_trials,
         )
     output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
-    return False, output[-2000:] or f"harbor run exited {result.returncode}"
+    detail = output[-2000:] or f"harbor run exited {result.returncode}"
+    return False, redact_progress_detail(detail, secret_values=set(run_env.values()))
 
 
 def _validate_harbor_job_result(
@@ -656,8 +950,19 @@ def _run_agent_pair(
     jobs = [("with", with_skill)]
     if baseline is not None:
         jobs.append(("without", baseline))
+    # The advertised concurrency is one per-agent trial budget. Split it
+    # across concurrently running conditions instead of multiplying it by two.
+    worker_count = min(len(jobs), n_concurrent)
+    if worker_count == len(jobs):
+        concurrency_per_job, extra_slots = divmod(n_concurrent, len(jobs))
+        job_concurrency = [
+            concurrency_per_job + (1 if index < extra_slots else 0)
+            for index in range(len(jobs))
+        ]
+    else:
+        job_concurrency = [1] * len(jobs)
     errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(
                 _run_harbor,
@@ -669,14 +974,14 @@ def _run_agent_pair(
                 jobs_dir=jobs_dir,
                 run_env=run_env,
                 n_attempts=n_attempts,
-                n_concurrent=n_concurrent,
+                n_concurrent=condition_concurrency,
                 timeout_multiplier=timeout_multiplier,
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 expected_trials=expected_trials,
             ): variant
-            for variant, dataset in jobs
+            for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
         }
         for future in as_completed(futures):
             ok, detail = future.result()
@@ -685,7 +990,129 @@ def _run_agent_pair(
     return errors
 
 
-def run_harbor_eval(
+class _RunProgressLifecycle:
+    """Track orchestrator stages and guarantee one terminal run event."""
+
+    def __init__(
+        self,
+        reporter: ProgressReporter,
+        *,
+        inherited_active_stages: tuple[str, ...] = (),
+    ) -> None:
+        self._reporter = reporter
+        self._active_stages = dict.fromkeys(inherited_active_stages)
+        self._run_finished = False
+        self._output_dir: str | None = None
+        self._result_path: str | None = None
+        self._report_path: str | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return self._reporter.is_active
+
+    @property
+    def output_dir(self) -> str | None:
+        return self._output_dir
+
+    def start(self, plan: Tier3RunPlan) -> None:
+        self._remember_artifacts(
+            output_dir=plan.output_dir,
+            result_path=plan.result_path,
+            report_path=plan.report_path,
+        )
+        self._reporter.start(plan)
+
+    def set_secret_values(self, values: list[str] | tuple[str, ...] | set[str]) -> None:
+        self._reporter.set_secret_values(values)
+
+    def emit(self, event: ProgressEvent) -> None:
+        self._remember_artifacts(
+            output_dir=event.output_dir,
+            result_path=event.result_path,
+            report_path=event.report_path,
+        )
+        if event.stage == "run-finished":
+            if self._run_finished:
+                return
+            self._run_finished = True
+        elif event.state == "running":
+            self._active_stages[event.stage] = None
+        else:
+            self._active_stages.pop(event.stage, None)
+        self._reporter.emit(event)
+
+    def heartbeat(self) -> None:
+        self._reporter.heartbeat()
+
+    def close(self) -> None:
+        self._reporter.close()
+
+    def fail_unfinished(self) -> None:
+        """Fail every open stage and finish the run without masking its error."""
+        for stage in tuple(self._active_stages):
+            self.emit(
+                ProgressEvent(
+                    stage=stage,
+                    state="failed",
+                    detail="unexpected failure interrupted this stage",
+                )
+            )
+        self.emit(
+            ProgressEvent(
+                stage="run-finished",
+                state="failed",
+                detail="Tier 3 evaluation failed unexpectedly",
+                output_dir=self._output_dir,
+                result_path=self._existing_file(self._result_path),
+                report_path=self._existing_file(self._report_path),
+            )
+        )
+
+    def finish_result(self, result: Mapping[str, Any]) -> None:
+        """Emit the terminal event for expected early-return failures too."""
+        if self._run_finished:
+            return
+        raw_errors = result.get("error") or result.get("execution_errors") or []
+        if isinstance(raw_errors, str):
+            errors = [raw_errors]
+        elif isinstance(raw_errors, list):
+            errors = [str(error) for error in raw_errors if str(error).strip()]
+        else:
+            errors = [str(raw_errors)] if raw_errors else []
+        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+        failed = bool(errors) or result.get("execution_status") not in {None, "succeeded"}
+        state = "failed" if failed else "degraded" if warnings else "complete"
+        detail = errors[0] if errors else str(warnings[0]) if warnings else "Tier 3 evaluation finished"
+        for stage in tuple(self._active_stages):
+            self.emit(ProgressEvent(stage=stage, state="failed" if failed else "complete", detail=detail))
+        self.emit(
+            ProgressEvent(
+                stage="run-finished",
+                state=state,
+                detail=detail,
+                output_dir=str(result.get("run_dir") or self._output_dir or "") or None,
+                result_path=self._existing_file(str(result.get("result_path") or self._result_path or "") or None),
+                report_path=self._existing_file(str(result.get("report_path") or self._report_path or "") or None),
+            )
+        )
+
+    def _remember_artifacts(
+        self,
+        *,
+        output_dir: str | None,
+        result_path: str | None,
+        report_path: str | None,
+    ) -> None:
+        self._output_dir = output_dir or self._output_dir
+        self._result_path = result_path or self._result_path
+        self._report_path = report_path or self._report_path
+
+    @staticmethod
+    def _existing_file(path: str | None) -> str | None:
+        return path if path is not None and Path(path).is_file() else None
+
+
+def _run_harbor_eval_impl(
     skill_path: Path,
     agents: list[str],
     *,
@@ -704,23 +1131,38 @@ def run_harbor_eval(
     reference_skills_dir: Path | None = None,
     output_dir: Path | None = None,
     keep_harbor_jobs: bool = False,
+    agent_runtime_preflight: bool = True,
     env_mode: str = DEFAULT_ENV_MODE,
     env_mode_source: str = "CLI",
     timeout_multiplier: float | None = None,
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
+    started_at = time.monotonic()
+    reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
     if env_mode not in HARBOR_ENV_MODES:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unsupported environment"))
         return {"error": [f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]}
     if not agents:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="no agents selected"))
         return {"error": ["At least one Harbor agent is required."]}
+    if env_mode == ENV_MODE_LOCAL:
+        from skillevaluator.tier3.harbor import local_sandbox
+
+        try:
+            local_sandbox.require_supported_platform()
+        except local_sandbox.SandboxUnavailable as exc:
+            reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
+            return {"error": [str(exc)]}
 
     try:
         provider = resolve_llm_provider()
         config, config_path = load_evals_config(skill_path)
     except (ProviderConfigurationError, EvalsConfigError) as exc:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
 
     harbor_config = config.get("harbor", {})
@@ -739,17 +1181,26 @@ def run_harbor_eval(
     task_source = harbor_config.get("task_source", "auto")
 
     if not isinstance(n_attempts, int) or n_attempts < 1:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid attempt count"))
         return {"error": ["n_attempts must be >= 1"]}
     if not isinstance(n_concurrent, int) or n_concurrent < 1:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid concurrency"))
         return {"error": ["n_concurrent must be >= 1"]}
     if not isinstance(max_agents, int) or max_agents < 1:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid agent concurrency"))
         return {"error": ["max_agents must be >= 1"]}
     if not isinstance(pass_threshold, (int, float)) or not 0 <= float(pass_threshold) <= 1:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid pass threshold"))
         return {"error": ["pass_threshold must be between 0.0 and 1.0"]}
     if grading_mode not in {"default", "default_plus_custom", "custom_only"}:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid grading mode"))
         return {"error": ["grading.mode must be default, default_plus_custom, or custom_only"]}
     if workspace_mode not in {"isolated", "group"}:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
+
+    reporter.emit(ProgressEvent(stage="configuration", state="ready", detail="evaluation config validated"))
+    reporter.emit(ProgressEvent(stage="model-resolution", state="running"))
 
     agent_models_config = harbor_config.get("agents", {})
     agent_models = agent_models or {}
@@ -766,33 +1217,69 @@ def run_harbor_eval(
         )
         model_resolution[agent] = {"agent": agent, "model": selected, "source": source}
 
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
-    if prereq_errors:
-        return {"error": prereq_errors}
-
     provider_env = _provider_environment(provider)
     configured_runtime_env, runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"))
-    if runtime_errors:
-        return {"error": runtime_errors}
-    credential_errors = _validate_agent_provider_credentials(
-        provider,
-        agents,
-        configured_runtime_env,
-        {agent: details["source"] for agent, details in model_resolution.items()},
-        env_mode=env_mode,
+    reporter.set_secret_values(
+        secret_values_from_environment(provider_env) | set(configured_runtime_env.values())
     )
-    if credential_errors:
-        return {"error": credential_errors}
+    reporter.emit(ProgressEvent(stage="model-resolution", state="complete", detail="agent models resolved"))
+    reporter.start(
+        Tier3RunPlan(
+            skill_name=skill_path.name,
+            environment=env_mode,
+            agents=tuple(agents),
+            agent_models=tuple((agent, model_resolution[agent]["model"]) for agent in agents),
+            provider=provider.provider,
+            attempts=n_attempts,
+            baseline=not skip_baseline,
+            concurrency=n_concurrent,
+            max_agents=max_agents,
+            timeout_multiplier=float(timeout_multiplier),
+        )
+    )
+
+    reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
+    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
+    if prereq_errors:
+        reporter.emit(
+            ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors))
+        )
+        return {"error": prereq_errors}
+    reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
+
+    reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
+    if runtime_errors:
+        reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail="; ".join(runtime_errors)))
+        return {"error": runtime_errors}
+    try:
+        runtime_plans = _resolve_agent_runtime_plan(
+            provider=provider,
+            agents=agents,
+            models={agent: details["model"] for agent, details in model_resolution.items()},
+            configured_runtime_env=configured_runtime_env,
+            env_mode=env_mode,
+            model_sources={agent: details["source"] for agent, details in model_resolution.items()},
+        )
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
+        return {"error": [str(exc)]}
+    reporter.set_secret_values(
+        set().union(
+            *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
+        )
+    )
+    reporter.emit(ProgressEvent(stage="credential-validation", state="complete", detail="credentials validated"))
     verifier_env = {**configured_runtime_env, **provider_env}
-    staged_runtime_env = {name: f"${{{name}}}" for name in configured_runtime_env}
     staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env}
 
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid included skills"))
         return {"error": ["include_skills requires skill_workspace.mode=group"]}
     try:
         workspace_skills = _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
     except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
 
     evals_exists = find_evals_file(skill_path) is not None
@@ -800,10 +1287,13 @@ def run_harbor_eval(
     if task_source == "auto":
         task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
     if task_source == "evals_json" and not evals_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
         return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
     if task_source == "native_harbor" and not native_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
         return {"error": ["No native Harbor task source found at evals/harbor."]}
     if task_source not in {"evals_json", "native_harbor"}:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
         return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
 
     root = output_dir or (skill_path / "evals" / "results")
@@ -811,102 +1301,279 @@ def run_harbor_eval(
     run_dir = root / run_id
     jobs_dir = run_dir / "_harbor-jobs"
     tasks_dir = run_dir / "_harbor-tasks"
-    baseline_dir = run_dir / "_harbor-tasks-baseline"
+    result_path = run_dir / "result.json"
+    report_path: Path | None = None
     jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    def _emit_run_finished(state: str, detail: str) -> None:
+        reporter.emit(
+            ProgressEvent(
+                stage="run-finished",
+                state=state,
+                detail=detail,
+                output_dir=str(run_dir),
+                result_path=str(result_path) if result_path.is_file() else None,
+                report_path=str(report_path) if report_path is not None and report_path.is_file() else None,
+            )
+        )
 
     emitter = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
     resource_config = harbor_config.get("resources", {})
-    try:
-        task_paths = emitter(
-            skill_path,
-            tasks_dir,
-            with_skill=True,
-            reference_skills_dir=reference_skills_dir,
-            workspace_skill_paths=workspace_skills,
-            workspace_mode=workspace_mode,
-            grading_mode=grading_mode,
-            custom_dockerfile_mode=dockerfile_mode,
-            copy_repo=copy_repo,
-            runtime_env=staged_runtime_env,
-            verifier_env=staged_verifier_env,
-            pre_agent_setup=harbor_config.get("pre_agent_setup", []),
-            task_resources=resource_config,
-            agent_workdir=harbor_config.get("agent_workdir"),
+    agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
+    expected_task_names: list[str] | None = None
+    reporter.emit(
+        ProgressEvent(
+            stage="with-skill-tasks",
+            state="running",
+            output_dir=str(run_dir),
+            result_path=str(result_path),
         )
-        if not skip_baseline:
-            emitter(
+    )
+    try:
+        for agent in agents:
+            with_dir = tasks_dir / agent / "with"
+            without_dir = None if skip_baseline else tasks_dir / agent / "without"
+            task_paths = emitter(
                 skill_path,
-                baseline_dir,
-                with_skill=False,
+                with_dir,
+                with_skill=True,
                 reference_skills_dir=reference_skills_dir,
                 workspace_skill_paths=workspace_skills,
                 workspace_mode=workspace_mode,
                 grading_mode=grading_mode,
                 custom_dockerfile_mode=dockerfile_mode,
                 copy_repo=copy_repo,
-                runtime_env=staged_runtime_env,
+                runtime_env=dict(runtime_plans[agent].staged_env),
                 verifier_env=staged_verifier_env,
                 pre_agent_setup=harbor_config.get("pre_agent_setup", []),
                 task_resources=resource_config,
                 agent_workdir=harbor_config.get("agent_workdir"),
             )
+            task_names = [task.name for task in task_paths]
+            if expected_task_names is None:
+                expected_task_names = task_names
+            elif task_names != expected_task_names:
+                raise ValueError(f"Generated task cases differ for agent {agent}")
+            agent_task_dirs[agent] = (with_dir, without_dir)
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
+        if not skip_baseline:
+            reporter.emit(ProgressEvent(stage="baseline-tasks", state="running"))
+        for agent in agents:
+            without_dir = agent_task_dirs[agent][1]
+            if without_dir is not None:
+                emitter(
+                    skill_path,
+                    without_dir,
+                    with_skill=False,
+                    reference_skills_dir=reference_skills_dir,
+                    workspace_skill_paths=workspace_skills,
+                    workspace_mode=workspace_mode,
+                    grading_mode=grading_mode,
+                    custom_dockerfile_mode=dockerfile_mode,
+                    copy_repo=copy_repo,
+                    runtime_env=dict(runtime_plans[agent].staged_env),
+                    verifier_env=staged_verifier_env,
+                    pre_agent_setup=harbor_config.get("pre_agent_setup", []),
+                    task_resources=resource_config,
+                    agent_workdir=harbor_config.get("agent_workdir"),
+                )
+        if not skip_baseline:
+            reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))
+        else:
+            reporter.emit(ProgressEvent(stage="baseline-tasks", state="skipped", detail="baseline disabled"))
     except (FileNotFoundError, ValueError) as exc:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)], "run_dir": str(run_dir)}
 
-    task_names = [task.name for task in task_paths]
+    task_names = expected_task_names or []
     expected_trials = len(task_names) * n_attempts
-    agent_run_envs = {
-        agent: _harbor_subprocess_environment(
-            env_mode=env_mode,
-            provider=provider,
-            configured_runtime_env=configured_runtime_env,
-            provider_env=provider_env,
-            agent=agent,
-            agent_model=model_resolution[agent]["model"],
+    variants = 1 if skip_baseline else 2
+    matrix_trials = expected_trials * len(agents) * variants
+    preflight_trials = len(agents) if agent_runtime_preflight else 0
+    task_timeout_seconds = _task_timeout_plan(
+        [paths[0] for paths in agent_task_dirs.values()],
+        float(timeout_multiplier),
+    )
+    reporter.start(
+        Tier3RunPlan(
+            skill_name=skill_path.name,
+            environment=env_mode,
+            agents=tuple(agents),
+            agent_models=tuple((agent, model_resolution[agent]["model"]) for agent in agents),
+            provider=provider.provider,
+            task_count=len(task_names),
+            case_count=len(task_names),
+            attempts=n_attempts,
+            baseline=not skip_baseline,
+            concurrency=n_concurrent,
+            max_agents=max_agents,
+            timeout_multiplier=float(timeout_multiplier),
+            matrix_trials=matrix_trials,
+            preflight_trials=preflight_trials,
+            total_containers=matrix_trials + preflight_trials,
+            task_timeout_seconds=task_timeout_seconds,
+            output_dir=str(run_dir),
+            result_path=str(result_path),
         )
-        for agent in agents
-    }
-    errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=min(max_agents, len(agents))) as executor:
-        futures = {
-            executor.submit(
-                _run_agent_pair,
-                skill_name=skill_path.name,
+    )
+    if env_mode == ENV_MODE_LOCAL:
+        reporter.emit(ProgressEvent(stage="docker-images", state="skipped", detail="local environment selected"))
+    else:
+        reporter.emit(
+            ProgressEvent(
+                stage="docker-images",
+                state="delegated",
+                detail="image preparation delegated to Harbor during task execution",
+            )
+        )
+    if agent_runtime_preflight:
+        from skillevaluator.tier3.harbor.runtime_preflight import run_agent_runtime_preflight
+
+        reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="running"))
+        preflight_errors: list[str] = []
+        for agent in agents:
+            preflight = run_agent_runtime_preflight(
+                dataset=agent_task_dirs[agent][0],
                 agent=agent,
                 model=model_resolution[agent]["model"],
                 env_mode=env_mode,
-                with_skill=tasks_dir,
-                baseline=None if skip_baseline else baseline_dir,
                 jobs_dir=jobs_dir,
-                run_env=agent_run_envs[agent],
-                n_attempts=n_attempts,
-                n_concurrent=n_concurrent,
+                run_env=runtime_plans[agent].subprocess_env,
                 timeout_multiplier=float(timeout_multiplier),
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
-                expected_trials=expected_trials,
-            ): agent
-            for agent in agents
-        }
-        for future in as_completed(futures):
-            errors.extend(future.result())
+            )
+            if not preflight.ok:
+                preflight_errors.append(f"{agent} runtime preflight failed: {preflight.detail}")
+        if preflight_errors:
+            detail = "; ".join(preflight_errors)
+            reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="failed", detail=detail))
+            failed_result: dict[str, Any] = {
+                "skill_name": skill_path.name,
+                "execution_status": "failed",
+                "execution_errors": preflight_errors,
+                "error": preflight_errors,
+                "run_id": run_id,
+                "run_dir": str(run_dir),
+                "harbor_jobs_dir": str(jobs_dir),
+                "harbor_jobs_retained": True,
+                "duration_seconds": round(time.monotonic() - started_at, 3),
+                "result_path": str(result_path),
+                "agents": {},
+            }
+            result_path.write_text(json.dumps(failed_result, indent=2), encoding="utf-8")
+            _emit_run_finished("failed", "agent runtime preflight failed")
+            return failed_result
+        reporter.emit(
+            ProgressEvent(
+                stage="agent-runtime-preflight",
+                state="complete",
+                detail=f"{len(agents)} agent runtime(s) started successfully",
+            )
+        )
+    else:
+        reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="skipped", detail="disabled by operator"))
+    errors: list[str] = []
+    started_agents: SimpleQueue[str] = SimpleQueue()
 
-    results = collect_harbor_results(
-        skill_name=skill_path.name,
-        agents=agents,
-        output_dir=run_dir,
-        jobs_dir=jobs_dir,
-        skip_baseline=skip_baseline,
-        n_attempts=n_attempts,
-        pass_threshold=float(pass_threshold),
-        expected_cases=len(task_names),
-        expected_case_ids=task_names,
-        expected_trials=expected_trials,
-        env_mode=env_mode,
-        agent_models=model_resolution,
-        launch_errors=errors,
-    )
+    def _execute_agent(agent: str) -> list[str]:
+        started_agents.put(agent)
+        return _run_agent_pair(
+            skill_name=skill_path.name,
+            agent=agent,
+            model=model_resolution[agent]["model"],
+            env_mode=env_mode,
+            with_skill=agent_task_dirs[agent][0],
+            baseline=agent_task_dirs[agent][1],
+            jobs_dir=jobs_dir,
+            run_env=dict(runtime_plans[agent].subprocess_env),
+            n_attempts=n_attempts,
+            n_concurrent=n_concurrent,
+            timeout_multiplier=float(timeout_multiplier),
+            override_cpus=override_cpus,
+            override_memory_mb=override_memory_mb,
+            override_storage_mb=override_storage_mb,
+            expected_trials=expected_trials,
+        )
+
+    active_agents: set[str] = set()
+    unexpected_worker_error: Exception | None = None
+
+    def _emit_started_agents() -> None:
+        while True:
+            try:
+                agent = started_agents.get_nowait()
+            except Empty:
+                return
+            active_agents.add(agent)
+            variants = "with-skill" if skip_baseline else "with-skill + baseline"
+            reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="running", detail=variants))
+
+    with ThreadPoolExecutor(max_workers=min(max_agents, len(agents))) as executor:
+        futures = {executor.submit(_execute_agent, agent): agent for agent in agents}
+        pending = set(futures)
+        while pending:
+            _emit_started_agents()
+            done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            _emit_started_agents()
+            for future in done:
+                agent = futures[future]
+                active_agents.discard(agent)
+                try:
+                    agent_errors = future.result()
+                except Exception as exc:
+                    reporter.emit(
+                        ProgressEvent(
+                            stage=f"agent:{agent}",
+                            state="failed",
+                            detail="agent worker failed unexpectedly",
+                        )
+                    )
+                    unexpected_worker_error = unexpected_worker_error or exc
+                    continue
+                errors.extend(agent_errors)
+                if agent_errors:
+                    reporter.emit(
+                        ProgressEvent(
+                            stage=f"agent:{agent}",
+                            state="failed",
+                            detail="one or more Harbor jobs failed; inspect retained artifacts",
+                        )
+                    )
+                else:
+                    reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
+
+    if unexpected_worker_error is not None:
+        for agent in sorted(active_agents):
+            reporter.emit(
+                ProgressEvent(stage=f"agent:{agent}", state="failed", detail="agent execution interrupted")
+            )
+        _emit_run_finished("failed", "agent execution failed")
+        raise unexpected_worker_error
+
+    reporter.emit(ProgressEvent(stage="collection", state="running"))
+    try:
+        results = collect_harbor_results(
+            skill_name=skill_path.name,
+            agents=agents,
+            output_dir=run_dir,
+            jobs_dir=jobs_dir,
+            skip_baseline=skip_baseline,
+            n_attempts=n_attempts,
+            pass_threshold=float(pass_threshold),
+            expected_cases=len(task_names),
+            expected_case_ids=task_names,
+            expected_trials=expected_trials,
+            env_mode=env_mode,
+            agent_models=model_resolution,
+            launch_errors=errors,
+        )
+    except Exception:
+        reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))
+        _emit_run_finished("failed", "result collection failed")
+        raise
+    reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
     run_config = {
         "config_file": str(config_path.relative_to(skill_path)) if config_path else "none",
         "harbor": {
@@ -923,8 +1590,10 @@ def run_harbor_eval(
     }
     results.update(
         {
+            "skill_name": skill_path.name,
             "run_id": run_id,
             "run_dir": str(run_dir),
+            "result_path": str(result_path),
             "harbor_jobs_dir": str(jobs_dir),
             "harbor_jobs_retained": keep_harbor_jobs,
             "run_config": run_config,
@@ -935,6 +1604,11 @@ def run_harbor_eval(
             },
         }
     )
+    _finalize_harbor_artifacts(
+        run_dir_value=run_dir,
+        keep_requested=keep_harbor_jobs,
+        result=results,
+    )
     if errors:
         execution_errors = list(
             dict.fromkeys([*(str(error) for error in results.get("execution_errors", [])), *errors])
@@ -942,12 +1616,41 @@ def run_harbor_eval(
         results["execution_status"] = "failed"
         results["execution_errors"] = execution_errors
         results["error"] = execution_errors
-    (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
+    reporter.emit(ProgressEvent(stage="report", state="running"))
     try:
-        generate_html_report(skill_path.name, run_dir, skill_path=skill_path)
+        (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
+    except Exception:
+        reporter.emit(ProgressEvent(stage="report", state="failed", detail="run configuration write failed"))
+        _emit_run_finished("failed", "report artifacts could not be written")
+        raise
+
+    report_warning: str | None = None
+    try:
+        candidate_report_path = generate_html_report(skill_path.name, run_dir, skill_path=skill_path)
+        if candidate_report_path.is_file():
+            report_path = candidate_report_path
+            results["report_path"] = str(report_path)
+        else:
+            report_warning = "HTML report was not generated: report file is missing"
     except Exception as exc:
-        results.setdefault("warnings", []).append(f"HTML report was not generated: {exc}")
-    (run_dir / "result.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+        report_warning = f"HTML report was not generated: {exc}"
+    if report_warning:
+        results.setdefault("warnings", []).append(report_warning)
+        results["report_status"] = "degraded"
+    else:
+        results["report_status"] = "complete"
+    results["duration_seconds"] = round(time.monotonic() - started_at, 3)
+
+    try:
+        result_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    except Exception:
+        reporter.emit(ProgressEvent(stage="report", state="failed", detail="result write failed"))
+        _emit_run_finished("failed", "report artifacts could not be written")
+        raise
+    if report_warning:
+        reporter.emit(ProgressEvent(stage="report", state="degraded", detail=report_warning))
+    else:
+        reporter.emit(ProgressEvent(stage="report", state="complete", detail="result and HTML reports written"))
 
     latest = root / "latest"
     try:
@@ -969,8 +1672,108 @@ def run_harbor_eval(
     except Exception:
         logger.debug("Telemetry summary skipped", exc_info=True)
 
-    if not keep_harbor_jobs:
-        shutil.rmtree(jobs_dir, ignore_errors=True)
-        shutil.rmtree(tasks_dir, ignore_errors=True)
-        shutil.rmtree(baseline_dir, ignore_errors=True)
     return results
+
+
+def _apply_retention_outcome(
+    result: dict[str, Any],
+    *,
+    outcome: RetentionOutcome,
+    jobs_dir: Path,
+) -> None:
+    """Apply actual artifact filesystem truth to the returned result."""
+    result["harbor_jobs_dir"] = str(jobs_dir)
+    result["harbor_jobs_retained"] = jobs_dir.is_dir()
+    result["harbor_jobs_retention_reason"] = outcome.reason
+    if outcome.warning:
+        warning = f"Harbor artifact cleanup failed: {outcome.warning}"
+        warnings = result.setdefault("warnings", [])
+        if isinstance(warnings, list) and warning not in warnings:
+            warnings.append(warning)
+    run_config = result.get("run_config")
+    harbor_config = run_config.get("harbor") if isinstance(run_config, dict) else None
+    if isinstance(harbor_config, dict):
+        harbor_config["jobs_retained"] = jobs_dir.is_dir()
+
+
+def _finalize_harbor_artifacts(
+    *,
+    run_dir_value: object,
+    keep_requested: bool,
+    result: dict[str, Any] | None,
+) -> None:
+    """Finalize transient paths and persist corrected metadata when available."""
+    if not run_dir_value:
+        return
+    run_dir = Path(str(run_dir_value))
+    if not run_dir.is_dir():
+        return
+    jobs_dir = run_dir / "_harbor-jobs"
+    tasks_dir = run_dir / "_harbor-tasks"
+    outcome = HarborArtifactLifecycle(
+        [jobs_dir, tasks_dir],
+        keep_requested=keep_requested,
+    ).finalize()
+    if result is None:
+        return
+
+    _apply_retention_outcome(result, outcome=outcome, jobs_dir=jobs_dir)
+    result_path_value = result.get("result_path")
+    result_path = Path(str(result_path_value)) if result_path_value else run_dir / "result.json"
+    if result_path.is_file():
+        result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    run_config = result.get("run_config")
+    run_config_path = run_dir / "run_config.json"
+    if isinstance(run_config, dict) and run_config_path.is_file():
+        run_config_path.write_text(json.dumps(run_config, indent=2), encoding="utf-8")
+
+
+@wraps(_run_harbor_eval_impl)
+def run_harbor_eval(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Run Tier 3 with protected, coordinator-owned progress lifecycle."""
+    reporter = safe_progress_reporter(kwargs.get("progress_reporter"))
+    started_here = not reporter.is_active
+    lifecycle = _RunProgressLifecycle(
+        reporter,
+        inherited_active_stages=() if started_here else ("configuration",),
+    )
+    kwargs["progress_reporter"] = lifecycle
+    try:
+        lifecycle.set_secret_values(secret_values_from_environment(os.environ))
+        if started_here:
+            lifecycle.start(
+                Tier3RunPlan(
+                    skill_name="pending",
+                    environment=kwargs.get("env_mode", DEFAULT_ENV_MODE),
+                    agents=(),
+                    baseline=not kwargs.get("skip_baseline", False),
+                    attempts=kwargs.get("n_attempts"),
+                    concurrency=kwargs.get("n_concurrent"),
+                    max_agents=kwargs.get("max_agents"),
+                    timeout_multiplier=kwargs.get("timeout_multiplier"),
+                )
+            )
+            lifecycle.emit(ProgressEvent(stage="configuration", state="running"))
+        result = _run_harbor_eval_impl(*args, **kwargs)
+        if "harbor_jobs_retention_reason" not in result:
+            _finalize_harbor_artifacts(
+                run_dir_value=result.get("run_dir") or lifecycle.output_dir,
+                keep_requested=bool(kwargs.get("keep_harbor_jobs", False)),
+                result=result,
+            )
+        lifecycle.finish_result(result)
+        return result
+    except BaseException:
+        _finalize_harbor_artifacts(
+            run_dir_value=lifecycle.output_dir,
+            keep_requested=bool(kwargs.get("keep_harbor_jobs", False)),
+            result=None,
+        )
+        try:
+            lifecycle.fail_unfinished()
+        except BaseException:
+            logger.debug("Tier 3 progress terminalization failed", exc_info=True)
+        raise
+    finally:
+        if started_here:
+            lifecycle.close()

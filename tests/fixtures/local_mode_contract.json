@@ -1,0 +1,15 @@
+{
+  "contract_version": "2026-07-08.1",
+  "supported_native_systems": ["Darwin", "Linux"],
+  "unsupported_native_systems": ["Windows", "CYGWIN_NT", "MSYS_NT", "FreeBSD"],
+  "sandbox_modes": ["require", "prefer", "off"],
+  "windows_guidance": ["WSL2", "docker"],
+  "linux_backend": "bubblewrap",
+  "linux_strength": "kernel",
+  "macos_backend": "seatbelt",
+  "macos_strength": "semi-trusted",
+  "strict_reads_env": "SKILLEVALUATOR_LOCAL_STRICT_READS",
+  "network_env": "SKILLEVALUATOR_LOCAL_ALLOW_NET",
+  "blocked_launchers": ["setsid", "nohup", "daemon", "disown"],
+  "residual_macos_limit": "native setsid descendants are not PID-namespace contained"
+}

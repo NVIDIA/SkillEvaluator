@@ -15,7 +15,7 @@ OPENAI_BASE_URL = "https://api.openai.com/v1"
 _CHAT_DEFAULT_MODELS = {
     "openai": "gpt-4.1-mini",
     "anthropic": "claude-sonnet-4-5",
-    "nv_build": "meta/llama-3.1-8b-instruct",
+    "nv_build": "openai/gpt-oss-120b",
     "bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
 }
 _EMBEDDING_DEFAULT_MODELS = {
@@ -39,6 +39,27 @@ class ProviderConfig:
     base_url: str | None
     litellm_model: str
     region: str | None = None
+    credential_env: str | None = None
+    base_url_env: str | None = None
+
+    def child_environment(self) -> dict[str, str]:
+        """Return this provider's public credential settings for a child process."""
+        environment: dict[str, str] = {}
+        if self.credential_env and self.api_key:
+            environment[self.credential_env] = self.api_key
+
+        if self.base_url_env and self.base_url:
+            environment[self.base_url_env] = self.base_url
+        elif self.provider == "openai" and self.base_url:
+            environment["OPENAI_BASE_URL"] = self.base_url
+        elif self.provider == "anthropic" and self.base_url:
+            environment["ANTHROPIC_BASE_URL"] = self.base_url
+        elif self.provider == "openai-compatible" and self.base_url:
+            environment["SKILL_EVAL_LLM_BASE_URL"] = self.base_url
+        elif self.provider == "bedrock" and self.region:
+            environment["AWS_REGION"] = self.region
+
+        return environment
 
 
 def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderConfig:
@@ -46,7 +67,13 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
     env = _environment(environ)
     provider = _selected_provider(env, "SKILL_EVAL_LLM_PROVIDER")
     _validate_provider(provider, variable="SKILL_EVAL_LLM_PROVIDER")
-    model = env.get("SKILL_EVAL_LLM_MODEL") or _default_chat_model(provider)
+    configured_model = env.get("SKILL_EVAL_LLM_MODEL")
+    if configured_model is None:
+        model = _default_chat_model(provider)
+    else:
+        model = configured_model.strip()
+        if not model:
+            raise ProviderConfigurationError("SKILL_EVAL_LLM_MODEL must be a non-empty string when set.")
 
     if provider == "openai":
         return ProviderConfig(
@@ -55,6 +82,8 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             api_key=_required(env, "OPENAI_API_KEY"),
             base_url=(env.get("SKILL_EVAL_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/"),
             litellm_model=f"openai/{model}",
+            credential_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL",
         )
     if provider == "anthropic":
         return ProviderConfig(
@@ -63,14 +92,17 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             api_key=_required(env, "ANTHROPIC_API_KEY"),
             base_url=(env.get("SKILL_EVAL_LLM_BASE_URL") or env.get("ANTHROPIC_BASE_URL") or None),
             litellm_model=f"anthropic/{model}",
+            credential_env="ANTHROPIC_API_KEY",
+            base_url_env="ANTHROPIC_BASE_URL",
         )
     if provider == "nv_build":
         return ProviderConfig(
             provider=provider,
             model=model,
             api_key=_required(env, "NVIDIA_API_KEY"),
-            base_url=(env.get("SKILL_EVAL_LLM_BASE_URL") or PUBLIC_NVIDIA_BUILD_BASE_URL).rstrip("/"),
+            base_url=PUBLIC_NVIDIA_BUILD_BASE_URL,
             litellm_model=f"openai/{model}",
+            credential_env="NVIDIA_API_KEY",
         )
     if provider == "bedrock":
         return ProviderConfig(
@@ -84,10 +116,12 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
 
     return ProviderConfig(
         provider=provider,
-        model=_required(env, "SKILL_EVAL_LLM_MODEL"),
+        model=model,
         api_key=_required(env, "SKILL_EVAL_LLM_API_KEY"),
         base_url=_required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/"),
-        litellm_model=f"openai/{_required(env, 'SKILL_EVAL_LLM_MODEL')}",
+        litellm_model=f"openai/{model}",
+        credential_env="SKILL_EVAL_LLM_API_KEY",
+        base_url_env="SKILL_EVAL_LLM_BASE_URL",
     )
 
 
@@ -114,14 +148,17 @@ def resolve_embedding_provider(environ: Mapping[str, str] | None = None) -> Prov
                 "/"
             ),
             litellm_model=f"openai/{env.get('SKILL_EVAL_EMBEDDING_MODEL') or _EMBEDDING_DEFAULT_MODELS[provider]}",
+            credential_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL",
         )
     if provider == "nv_build":
         return ProviderConfig(
             provider=provider,
             model=env.get("SKILL_EVAL_EMBEDDING_MODEL") or _EMBEDDING_DEFAULT_MODELS[provider],
             api_key=_required(env, "NVIDIA_API_KEY"),
-            base_url=(env.get("SKILL_EVAL_EMBEDDING_BASE_URL") or PUBLIC_NVIDIA_BUILD_BASE_URL).rstrip("/"),
+            base_url=PUBLIC_NVIDIA_BUILD_BASE_URL,
             litellm_model=f"openai/{env.get('SKILL_EVAL_EMBEDDING_MODEL') or _EMBEDDING_DEFAULT_MODELS[provider]}",
+            credential_env="NVIDIA_API_KEY",
         )
 
     model = env.get("SKILL_EVAL_EMBEDDING_MODEL")
@@ -133,6 +170,12 @@ def resolve_embedding_provider(environ: Mapping[str, str] | None = None) -> Prov
         api_key=env.get("SKILL_EVAL_EMBEDDING_API_KEY") or _required(env, "SKILL_EVAL_LLM_API_KEY"),
         base_url=(env.get("SKILL_EVAL_EMBEDDING_BASE_URL") or _required(env, "SKILL_EVAL_LLM_BASE_URL")).rstrip("/"),
         litellm_model=f"openai/{model}",
+        credential_env=(
+            "SKILL_EVAL_EMBEDDING_API_KEY"
+            if env.get("SKILL_EVAL_EMBEDDING_API_KEY", "").strip()
+            else "SKILL_EVAL_LLM_API_KEY"
+        ),
+        base_url_env="SKILL_EVAL_EMBEDDING_BASE_URL",
     )
 
 

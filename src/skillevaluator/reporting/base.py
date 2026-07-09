@@ -341,6 +341,22 @@ def _write_report_atomically(output_path: Path, payload: bytes) -> None:
         _write_report_checked(absolute, payload)
 
 
+def is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
+    """Return whether a Tier 3 result records a non-blocking skipped run."""
+    if result.validator_name != "AGENT_EVAL":
+        return False
+    payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
+    provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
+    return bool(
+        isinstance(provenance, dict) and provenance.get("advisory") and provenance.get("reason") == "skipped"
+    )
+
+
+def passes_required_gate(result: ValidationResult) -> bool:
+    """Return whether *result* permits the required validation gate to pass."""
+    return result.passed or is_advisory_agent_eval_skip(result)
+
+
 class ReporterBase(ABC):
     """Abstract base class for validation result reporters.
 

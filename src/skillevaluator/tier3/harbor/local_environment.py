@@ -848,11 +848,24 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return rewritten
 
     def _rewrite_raw_paths(self, value: str) -> str:
-        rewritten = value
-        for remote, local in self._path_map():
-            rewritten = rewritten.replace(f"{remote}/", f"{local}{os.sep}")
-            rewritten = rewritten.replace(remote, str(local))
-        return rewritten
+        path_map = dict(self._path_map())
+        if not path_map:
+            return value
+
+        # Match all container roots in one pass so a container-looking segment
+        # in a generated local path is not rewritten a second time. Longer
+        # roots must win (for example, /logs/agent before /logs).
+        remote_roots = sorted(path_map, key=len, reverse=True)
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_.\-/])(?P<root>{'|'.join(re.escape(root) for root in remote_roots)})"
+            r"(?P<separator>/|(?=$|[^A-Za-z0-9_.-]))"
+        )
+
+        def replace(match: re.Match[str]) -> str:
+            separator = os.sep if match.group("separator") else ""
+            return f"{path_map[match.group('root')]}{separator}"
+
+        return pattern.sub(replace, value)
 
     @staticmethod
     def _replace_shell_path(command: str, remote: str, local: Path) -> str:

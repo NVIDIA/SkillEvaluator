@@ -1227,6 +1227,11 @@
 </head>
 <body>
     {% set has_tier3 = tier3 is defined and tier3 %}
+    {% set tier3_summary_data = (tier3.get('summary') or {}) if has_tier3 else {} %}
+    {% set tier3_provenance_data = (tier3.get('provenance') or {}) if has_tier3 else {} %}
+    {% set tier3_execution_status = (tier3.get('execution_status') or tier3_summary_data.get('execution_status')) if has_tier3 else none %}
+    {% set tier3_is_skipped = tier3_execution_status == 'skipped' or (tier3_provenance_data.get('advisory') and tier3_provenance_data.get('reason') == 'skipped') %}
+    {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
     <div class="main-header">
         <div class="header-content">
             <div class="logo-section">
@@ -1296,6 +1301,15 @@
                 -#}
                 {% if has_tier3 %}
                 {% set tier3_environment = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
+                {% if tier3_is_skipped %}
+                <div>
+                    <div class="agent-hero-score score-warn">SKIPPED</div>
+                    <div class="agent-hero-detail">
+                        <div><strong>Reason:</strong> {{ tier3_skip_message }}</div>
+                        <div>Tier 3 is advisory and does not block required validation.</div>
+                    </div>
+                </div>
+                {% else %}
                 <div>
                     <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</div>
                     <div class="agent-hero-detail">
@@ -1306,6 +1320,7 @@
                         {% if tier3.get('overall_lift') is not none %}<div><strong>Overall lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
                     </div>
                 </div>
+                {% endif %}
                 {% else %}
                 <div>
                     <div class="agent-hero-score {{ 'score-pass' if all_passed else 'score-fail' }}">{{ pass_percentage }}%</div>
@@ -1386,7 +1401,8 @@
                 {% endif %}
                 {% if has_tier3 %}
                 {% set tier3_verdict = (tier3.verdict or 'unknown') | lower %}
-                {% set t3_class = 'pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn') %}
+                {% set tier3_display_verdict = 'SKIPPED' if tier3_is_skipped else tier3_verdict | upper %}
+                {% set t3_class = 'skipped' if tier3_is_skipped else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn')) %}
                 <div class="tier-card {{ t3_class }}{% if initial_tab == 'tier3' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1397,13 +1413,17 @@
                      title="Open Tier 3: Live Agent Evaluation">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 3</span>
-                        <span class="tier-card-verdict">{{ tier3_verdict | upper }}</span>
+                        <span class="tier-card-verdict">{{ tier3_display_verdict }}</span>
                     </div>
                     <h3 class="tier-card-title">Live Agent Evaluation</h3>
                     <div class="tier-card-stats">
+                        {% if tier3_is_skipped %}
+                        <span>{{ tier3_skip_message }}</span>
+                        {% else %}
                         <span>score <strong>{{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}</strong></span>
                         {% if tier3.get('overall_lift') is not none %}<span>lift <strong>{{ "%+.2f" | format(tier3.get('overall_lift')) }}</strong></span>{% endif %}
                         {% if hero_trials %}<span><strong>{{ hero_trials }}</strong> trial(s)</span>{% endif %}
+                        {% endif %}
                     </div>
                     {% if hero_harbor_job_url or hero_harbor_analysis_url %}
                     <div class="tier-card-links" onclick="event.stopPropagation()">
@@ -2239,11 +2259,16 @@
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview">
             <div class="t3-overview-lead">
+                {% if tier3_is_skipped %}
+                <strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
+                Tier 3 is advisory and does not block required validation.
+                {% else %}
                 <strong>Verdict at a glance:</strong>
                 {{ (tier3.verdict or 'unknown') | upper }} with an overall score of
                 {{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}.
                 {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>{% else %}No successfully scored agent is available{% endif %}
                 {% if tier3.get('overall_lift') is not none %} with {{ "%+.2f" | format(tier3.get('overall_lift')) }} skill lift{% endif %}.
+                {% endif %}
             </div>
             {% if t3_harbor_job_url or t3_harbor_analysis_url %}
             <div class="t3-harbor-panel">
@@ -2260,7 +2285,7 @@
             <div class="dashboard">
                 <div class="dashboard-card {{ 'success' if tier3.verdict == 'pass' else ('danger' if tier3.verdict == 'fail' else '') }}">
                     <h3 class="dashboard-card-title">Verdict</h3>
-                    <p class="dashboard-card-value">{{ (tier3.verdict or 'unknown') | upper }}</p>
+                    <p class="dashboard-card-value">{{ 'SKIPPED' if tier3_is_skipped else (tier3.verdict or 'unknown') | upper }}</p>
                     <p class="dashboard-card-subtitle">Evaluation outcome</p>
                 </div>
                 <div class="dashboard-card">

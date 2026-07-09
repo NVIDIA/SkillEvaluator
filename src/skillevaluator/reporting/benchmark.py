@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator.constants import DIMENSION_HINTS, DIMENSION_MAPPING
-from skillevaluator.reporting.base import ReporterBase
+from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -130,6 +130,8 @@ class BenchmarkReporter(ReporterBase):
             verdict = ae.get("verdict") or summary.get("verdict")
             combined = _combined_verdict(results, verdict)
             lines.append(f"- Overall verdict: {combined}")
+            if skip_message := _advisory_agent_eval_skip_message(results):
+                lines.append(f"- Tier 3 live evaluation: SKIPPED — {skip_message}")
             if combined == "INCOMPLETE":
                 _render_incomplete_benchmark_notes(lines, results)
             elif combined == "FAIL":
@@ -338,12 +340,19 @@ class BenchmarkReporter(ReporterBase):
 
         lines.append("## Publication Recommendation")
         lines.append("")
-        lines.append(
-            "The skill is suitable to proceed toward Skill Evaluator publication "
-            "based on this benchmark. Skill owners should keep this file with the "
-            "skill and refresh it when the evaluation dataset, skill behavior, or "
-            "target agents materially change."
-        )
+        if _advisory_agent_eval_skip_message(results):
+            lines.append(
+                "Tier 3 live evaluation was skipped and does not block required validation. "
+                "Publication suitability in this report is based on the completed required-tier "
+                "results; rerun Tier 3 when the live evaluation runtime is available."
+            )
+        else:
+            lines.append(
+                "The skill is suitable to proceed toward Skill Evaluator publication "
+                "based on this benchmark. Skill owners should keep this file with the "
+                "skill and refresh it when the evaluation dataset, skill behavior, or "
+                "target agents materially change."
+            )
         lines.append("")
 
     def get_file_extension(self) -> str:
@@ -366,11 +375,22 @@ def _render_failed_benchmark_notes(lines: list[str]) -> None:
     )
 
 
+def _advisory_agent_eval_skip_message(results: list[ValidationResult]) -> str | None:
+    for result in results:
+        if not is_advisory_agent_eval_skip(result):
+            continue
+        payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
+        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
+        message = provenance.get("message") if isinstance(provenance, dict) else None
+        return str(message or "Live evaluation did not run.")
+    return None
+
+
 def _combined_verdict(results: list[ValidationResult], tier3_verdict: object) -> str:
     """Return one report verdict with incomplete evidence taking precedence."""
     if any(result.is_incomplete for result in results):
         return "INCOMPLETE"
-    if not all(result.passed for result in results) or str(tier3_verdict or "pass").lower() == "fail":
+    if not all(passes_required_gate(result) for result in results) or str(tier3_verdict or "pass").lower() == "fail":
         return "FAIL"
     return "PASS"
 

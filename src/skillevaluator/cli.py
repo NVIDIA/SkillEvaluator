@@ -360,11 +360,18 @@ def _run_agent_eval_or_skip(
             skill_name=target_path.name,
         )
 
-    result = agent_eval_result_from_run(
-        target_path,
-        env_mode=env_mode,
-        engine_result=engine_result if isinstance(engine_result, dict) else None,
-    )
+    try:
+        result = agent_eval_result_from_run(
+            target_path,
+            results_dir=results_dir,
+            env_mode=env_mode,
+            engine_result=engine_result if isinstance(engine_result, dict) else None,
+        )
+    except Exception as exc:
+        return advisory_skip_result(
+            f"Tier 3 result normalization failed: {exc}",
+            skill_name=target_path.name,
+        )
     if result is None:
         return advisory_skip_result(
             "Tier 3 live evaluation produced no parseable results.",

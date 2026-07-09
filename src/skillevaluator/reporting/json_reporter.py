@@ -18,7 +18,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.reporting.base import ReporterBase
+from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -60,7 +60,8 @@ class JSONReporter(ReporterBase):
         """Render all results to JSON with overall summary."""
         from skillevaluator.reporting.html import HTMLReporter
 
-        all_passed = all(r.passed for r in results)
+        all_passed = all(passes_required_gate(r) for r in results)
+        advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         incomplete_scans = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
         overall_status = "incomplete" if incomplete_scans else "passed" if all_passed else "failed"
         total_errors = sum(r.summary.errors for r in results)
@@ -89,6 +90,7 @@ class JSONReporter(ReporterBase):
             "overall_status": overall_status,
             "incomplete_scans": incomplete_scans,
             "total_validators": len(results),
+            "total_advisory_skipped": advisory_skip_count,
             "total_errors": total_errors,
             "total_warnings": total_warnings,
             "severity_counts": {
@@ -130,7 +132,7 @@ class JSONReporter(ReporterBase):
             "validator": result.validator_name,
             "description": result.validator_description,
             "passed": result.passed,
-            "status": result.status,
+            "status": "skipped" if is_advisory_agent_eval_skip(result) else result.status,
             "incomplete_scans": result.incomplete_scans,
             "summary": {
                 "files_scanned": result.summary.files_scanned,

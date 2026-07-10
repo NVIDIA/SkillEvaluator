@@ -346,6 +346,28 @@ def test_metric_evidence_does_not_scan_rewards_after_global_budget_is_exhausted(
     assert budget.omitted["evidence_entries"] == 50_000
 
 
+def test_metric_evidence_bounds_work_after_per_card_output_is_full() -> None:
+    class BoundedRewards:
+        def __len__(self) -> int:
+            return 50_000
+
+        def __iter__(self):
+            for index in range(64):
+                yield {
+                    "entry_id": f"case-{index}",
+                    "goal_accuracy": 1.0,
+                    "details": {"goal_accuracy": {"reason": f"evidence-{index}"}},
+                }
+            raise AssertionError("per-card evidence processing must have a finite scan budget")
+
+    budget = _ReportBudget(evidence_remaining=256)
+
+    evidence = _metric_evidence("goal_accuracy", BoundedRewards(), budget)  # type: ignore[arg-type]
+
+    assert len(evidence) == 16
+    assert budget.omitted["evidence_entries"] == 50_000 - len(evidence)
+
+
 def test_canonical_payload_bounds_high_cardinality_custom_report_details() -> None:
     metric_count = 100
     trial_count = 100

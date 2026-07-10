@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -56,6 +57,7 @@ _TIER3_FEEDBACK_FIELDS = ("conclusions", "recommendations", "suggestions", "sugg
 # full Harbor artifacts remain available under ``provenance.run_dir``.
 _MAX_EVALUATOR_CARDS_TOTAL = 64
 _MAX_EVIDENCE_PER_CARD = 16
+_MAX_EVIDENCE_SCAN_PER_CARD = 64
 _MAX_EVIDENCE_ENTRIES_TOTAL = 256
 _MAX_RAW_TRIAL_REWARDS_TOTAL = 256
 _MAX_RAW_METRICS_PER_REWARD = 64
@@ -90,6 +92,7 @@ class _ReportBudget:
             "limits": {
                 "evaluator_cards": _MAX_EVALUATOR_CARDS_TOTAL,
                 "evidence_per_card": _MAX_EVIDENCE_PER_CARD,
+                "evidence_scanned_per_card": _MAX_EVIDENCE_SCAN_PER_CARD,
                 "evidence_entries": _MAX_EVIDENCE_ENTRIES_TOTAL,
                 "raw_trial_rewards": _MAX_RAW_TRIAL_REWARDS_TOTAL,
                 "raw_metrics_per_reward": _MAX_RAW_METRICS_PER_REWARD,
@@ -1060,9 +1063,11 @@ def _metric_evidence(
 
     evidence: list[dict[str, Any]] = []
     by_fingerprint: dict[str, dict[str, Any]] = {}
-    for reward_index, reward in enumerate(rewards):
+    total_rewards = len(rewards)
+    scan_limit = min(total_rewards, _MAX_EVIDENCE_SCAN_PER_CARD)
+    for reward_index, reward in enumerate(islice(rewards, scan_limit)):
         if report_budget.evidence_remaining <= 0:
-            report_budget.omit("evidence_entries", len(rewards) - reward_index)
+            report_budget.omit("evidence_entries", total_rewards - reward_index)
             break
         if not isinstance(reward, dict):
             continue
@@ -1123,6 +1128,8 @@ def _metric_evidence(
         evidence.append(entry)
         by_fingerprint[fingerprint] = entry
         report_budget.evidence_remaining -= 1
+    else:
+        report_budget.omit("evidence_entries", total_rewards - scan_limit)
     return evidence
 
 

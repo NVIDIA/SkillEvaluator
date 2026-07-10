@@ -38,13 +38,7 @@ import pytest
 from skillevaluator.tier3.eval_core import llm_judge
 
 _TEMPLATE = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "skillevaluator"
-    / "tier3"
-    / "harbor"
-    / "templates"
-    / "eval.py"
+    Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
 )
 
 
@@ -155,9 +149,7 @@ def test_behavior_judge_treats_list_payload_as_unparseable(monkeypatch):
     # A bare array is valid JSON but not a judge object; old code raised
     # AttributeError on parsed.get -- now it takes the diagnostic-zero path.
     calls: list[dict] = []
-    monkeypatch.setattr(
-        llm_judge, "call_public_llm", _scripted_hub(["[1, 2, 3]", "[1, 2, 3]"], calls)
-    )
+    monkeypatch.setattr(llm_judge, "call_public_llm", _scripted_hub(["[1, 2, 3]", "[1, 2, 3]"], calls))
 
     result = llm_judge.judge_behavior_check("conversation", ["b1"])
 
@@ -319,9 +311,9 @@ def test_template_extract_json_matches_eval_core_on_rejected_shapes(text):
 
 
 def test_template_salvage_matches_eval_core():
-    assert eval_template._salvage_behavior_results(
+    assert eval_template._salvage_behavior_results(TRUNCATED_RESULTS_RESPONSE) == llm_judge._salvage_behavior_results(
         TRUNCATED_RESULTS_RESPONSE
-    ) == llm_judge._salvage_behavior_results(TRUNCATED_RESULTS_RESPONSE)
+    )
 
 
 @pytest.mark.parametrize(

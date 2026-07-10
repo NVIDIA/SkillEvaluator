@@ -18,12 +18,8 @@ from skillevaluator.tier3.harbor.local_agents import (
 
 
 def test_local_codex_uses_per_trial_codex_home() -> None:
-    assert str(SkillEvaluatorLocalCodex._REMOTE_CODEX_HOME).startswith(
-        EnvironmentPaths.agent_dir.as_posix()
-    )
-    assert str(SkillEvaluatorLocalCodex._REMOTE_CODEX_SECRETS_DIR).startswith(
-        EnvironmentPaths.agent_dir.as_posix()
-    )
+    assert str(SkillEvaluatorLocalCodex._REMOTE_CODEX_HOME).startswith(EnvironmentPaths.agent_dir.as_posix())
+    assert str(SkillEvaluatorLocalCodex._REMOTE_CODEX_SECRETS_DIR).startswith(EnvironmentPaths.agent_dir.as_posix())
     assert str(SkillEvaluatorLocalCodex._REMOTE_CODEX_HOME) != "/tmp/codex-home"
     assert str(SkillEvaluatorLocalCodex._REMOTE_CODEX_SECRETS_DIR) != "/tmp/codex-secrets"
 
@@ -186,8 +182,7 @@ def test_local_codex_preserves_instruction_text_during_launcher_rewrites(monkeyp
     asyncio.run(
         agent.exec_as_agent(
             object(),
-            "codex exec --model gpt-5.4 --json -- "
-            "'say --model gpt-5.4 and /tmp/codex-secrets literally'",
+            "codex exec --model gpt-5.4 --json -- 'say --model gpt-5.4 and /tmp/codex-secrets literally'",
             env={"OPENAI_BASE_URL": "https://provider.example/v1"},
         )
     )
@@ -267,8 +262,7 @@ def test_local_opencode_removes_docker_only_stdbuf(monkeypatch, tmp_path) -> Non
     asyncio.run(
         agent.exec_as_agent(
             object(),
-            "opencode run --dangerously-skip-permissions "
-            "2>&1 </dev/null | stdbuf -oL tee /logs/agent/opencode.txt",
+            "opencode run --dangerously-skip-permissions 2>&1 </dev/null | stdbuf -oL tee /logs/agent/opencode.txt",
             env={"OPENAI_API_KEY": "test"},
         )
     )

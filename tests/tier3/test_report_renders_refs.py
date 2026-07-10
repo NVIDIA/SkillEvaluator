@@ -7,13 +7,25 @@ from skillevaluator.tier3.harbor import report
 def _reward():
     return {
         "entry_id": "evaluator-plugin-002",
-        "security": 1.0, "skill_execution": 1.0, "skill_efficiency": 1.0,
-        "accuracy": 1.0, "goal_accuracy": 0.1, "behavior_check": 1.0,
-        "details": {"goal_accuracy": {
-            "reason": "results file not produced",
-            "evidence_refs": [{"source": "trajectory.json", "json_pointer": "/steps/14",
-                               "kind": "tool_call", "label": "bash: nemo evaluator submit"}],
-        }},
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "goal_accuracy": 0.1,
+        "behavior_check": 1.0,
+        "details": {
+            "goal_accuracy": {
+                "reason": "results file not produced",
+                "evidence_refs": [
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/14",
+                        "kind": "tool_call",
+                        "label": "bash: nemo evaluator submit",
+                    }
+                ],
+            }
+        },
     }
 
 
@@ -21,20 +33,26 @@ def _reward_with_dict_refs():
     """Reward whose evidence_refs are the new dict shape."""
     return {
         "entry_id": "evaluator-plugin-099",
-        "security": 1.0, "skill_execution": 1.0, "skill_efficiency": 1.0,
-        "accuracy": 1.0, "goal_accuracy": 0.2, "behavior_check": 1.0,
-        "details": {"goal_accuracy": {
-            "reason": "results file not produced",
-            "evidence_refs": [
-                {
-                    "source": "trajectory.json",
-                    "json_pointer": "/steps/14",
-                    "kind": "tool_call",
-                    "path": "steps[14].tool_use",
-                    "excerpt": "submit command",
-                }
-            ],
-        }},
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "goal_accuracy": 0.2,
+        "behavior_check": 1.0,
+        "details": {
+            "goal_accuracy": {
+                "reason": "results file not produced",
+                "evidence_refs": [
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/14",
+                        "kind": "tool_call",
+                        "path": "steps[14].tool_use",
+                        "excerpt": "submit command",
+                    }
+                ],
+            }
+        },
     }
 
 
@@ -77,6 +95,7 @@ def test_cli_findings_include_custom_metric_details():
 
 # --- New renderer backward-compat tests ---
 
+
 def test_cli_renders_dict_ref_as_compact_string(monkeypatch):
     """CLI renderer must show source+json_pointer when fed a dict ref from suggestions_v2."""
     monkeypatch.setattr(
@@ -100,14 +119,16 @@ def test_cli_renders_dict_ref_as_compact_string(monkeypatch):
 def test_cli_renders_legacy_string_ref_without_error():
     """CLI renderer must tolerate legacy string refs in findings (backward compat)."""
     # Simulate a legacy artifact where evidence_refs is a list of strings
-    findings_with_string_refs = [{
-        "metric": "goal_accuracy",
-        "label": "GOAL ACCURACY",
-        "severity": "warning",
-        "score": 0.5,
-        "reasons": ["something failed"],
-        "evidence_refs": ["trajectory.json#/steps/14"],  # legacy string format
-    }]
+    findings_with_string_refs = [
+        {
+            "metric": "goal_accuracy",
+            "label": "GOAL ACCURACY",
+            "severity": "warning",
+            "score": 0.5,
+            "reasons": ["something failed"],
+            "evidence_refs": ["trajectory.json#/steps/14"],  # legacy string format
+        }
+    ]
     # Should not raise; string refs are rendered defensively
     text = report._render_findings_body(findings_with_string_refs).plain
     # The ref won't be rendered as a dict, but the function should not crash

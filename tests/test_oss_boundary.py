@@ -75,9 +75,7 @@ def test_every_denied_boundary_mutation_produces_a_path_rule_and_line(rule: str,
 
     findings = scanner.scan_text("src/mutated.py", f"public line\n{mutation}\n")
 
-    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [
-        ("src/mutated.py", rule, 2)
-    ]
+    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [("src/mutated.py", rule, 2)]
 
 
 def test_mutations_cover_every_scanner_rule() -> None:
@@ -430,9 +428,7 @@ def test_scanner_reconstructs_shell_adjacent_quotes(path: str, source: str, expe
 
     findings = scanner.scan_text(path, source)
 
-    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [
-        (path, expected_rule, 1)
-    ]
+    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [(path, expected_rule, 1)]
 
 
 @pytest.mark.parametrize("quote", ("'", '"'))
@@ -563,7 +559,7 @@ def test_scanner_fails_closed_when_bash_ansi_c_decode_limit_is_exceeded(monkeypa
             "private-repository-host",
         ),
         (
-            _joined('command = "credential=NVI$', r"'\\x44IA", '_INFERENCE_KEY\'"'),
+            _joined('command = "credential=NVI$', r"'\\x44IA", "_INFERENCE_KEY'\""),
             "internal-nvidia-credential",
         ),
     ),
@@ -573,9 +569,7 @@ def test_scanner_shell_normalizes_reconstructed_python_constants(source: str, ex
 
     findings = scanner.scan_text("src/config.py", source)
 
-    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [
-        ("src/config.py", expected_rule, 1)
-    ]
+    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [("src/config.py", expected_rule, 1)]
 
 
 @pytest.mark.parametrize(

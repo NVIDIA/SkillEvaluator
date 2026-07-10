@@ -296,14 +296,9 @@ def _static_string(node: ast.AST, *, depth: int = 0) -> str | None:
         for part in node.values:
             if isinstance(part, ast.Constant) and isinstance(part.value, str):
                 value = part.value
-            elif (
-                isinstance(part, ast.FormattedValue)
-                and part.conversion in {-1, ord("s")}
-            ):
+            elif isinstance(part, ast.FormattedValue) and part.conversion in {-1, ord("s")}:
                 value = _static_string(part.value, depth=depth + 1)
-                format_spec = (
-                    "" if part.format_spec is None else _static_string(part.format_spec, depth=depth + 1)
-                )
+                format_spec = "" if part.format_spec is None else _static_string(part.format_spec, depth=depth + 1)
                 if format_spec not in {"", "s"}:
                     return None
             else:
@@ -607,8 +602,7 @@ def load_allowlist(path: Path | None) -> tuple[BoundaryAllowance, ...]:
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or set(entry) != required:
             raise ValueError(
-                f"allowlist entry {index} must contain exactly "
-                "path, rule, line, reason, expires, and review_owner"
+                f"allowlist entry {index} must contain exactly path, rule, line, reason, expires, and review_owner"
             )
         if (
             not isinstance(entry["path"], str)
@@ -626,11 +620,15 @@ def load_allowlist(path: Path | None) -> tuple[BoundaryAllowance, ...]:
             or not entry["review_owner"].strip()
         ):
             raise ValueError(
-                f"allowlist entry {index} must contain valid "
-                "path, rule, line, reason, expires, and review_owner values"
+                f"allowlist entry {index} must contain valid path, rule, line, reason, expires, and review_owner values"
             )
         allow_path = PurePosixPath(entry["path"])
-        if allow_path.is_absolute() or ".." in allow_path.parts or not allow_path.parts or allow_path.parts[0] != "tests":
+        if (
+            allow_path.is_absolute()
+            or ".." in allow_path.parts
+            or not allow_path.parts
+            or allow_path.parts[0] != "tests"
+        ):
             raise ValueError(f"allowlist entry {index} is restricted to exact negative test paths")
         try:
             expires = date.fromisoformat(entry["expires"])
@@ -678,11 +676,7 @@ def _tracked_paths(root: Path) -> list[str] | None:
 def _repository_paths(root: Path) -> Iterator[tuple[str, Path]]:
     tracked = _tracked_paths(root)
     if tracked is None:
-        candidates = (
-            path.relative_to(root).as_posix()
-            for path in root.rglob("*")
-            if path.is_file()
-        )
+        candidates = (path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
     else:
         candidates = iter(tracked)
     for relative in sorted(candidates):
@@ -755,9 +749,7 @@ def _validated_archive_member_path(member_name: str, *, expected_root: str | Non
     if expected_root is None:
         return member.as_posix()
     if raw_parts[0] != expected_root:
-        raise ValueError(
-            f"archive member {member_name} is outside expected source distribution root {expected_root}"
-        )
+        raise ValueError(f"archive member {member_name} is outside expected source distribution root {expected_root}")
     return PurePosixPath(*raw_parts[1:]).as_posix() if len(raw_parts) > 1 else ""
 
 

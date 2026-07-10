@@ -140,10 +140,7 @@ def metric_set_for_reward(reward: dict[str, Any]) -> tuple[str, tuple[str, ...]]
 
 def metric_set_for_rewards(rewards: list[dict[str, Any]]) -> tuple[str, tuple[str, ...]]:
     """Return the metric set for a collection, preferring the new SkillEvaluator set."""
-    declared = {
-        str(reward.get("metric_set") or reward.get("metric_set_version") or "")
-        for reward in rewards
-    }
+    declared = {str(reward.get("metric_set") or reward.get("metric_set_version") or "") for reward in rewards}
     if DEFAULT_METRIC_SET in declared:
         return DEFAULT_METRIC_SET, DEFAULT_METRICS
     if LEGACY_METRIC_SET in declared:

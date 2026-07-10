@@ -50,9 +50,7 @@ def test_generated_tasks_stage_only_names_and_placeholders(
     )[0]
 
     staged_text = "\n".join(
-        path.read_text(encoding="utf-8", errors="replace")
-        for path in task.rglob("*")
-        if path.is_file()
+        path.read_text(encoding="utf-8", errors="replace") for path in task.rglob("*") if path.is_file()
     )
     assert _SENTINEL not in staged_text
     assert 'NVIDIA_API_KEY = "${NVIDIA_API_KEY}"' in staged_text
@@ -120,9 +118,7 @@ def test_exec_uses_name_only_argv_and_subprocess_override(tmp_path: Path) -> Non
 
 def test_all_values_use_subprocess_env_including_empty_and_special_values() -> None:
     special = "spaces = quotes ' \" and $shell"
-    arguments, child_environment = _secure_exec_arguments(
-        {"DATABASE_URL": _SENTINEL, "EMPTY": "", "SPECIAL": special}
-    )
+    arguments, child_environment = _secure_exec_arguments({"DATABASE_URL": _SENTINEL, "EMPTY": "", "SPECIAL": special})
 
     assert arguments == ["-e", "DATABASE_URL", "-e", "EMPTY", "-e", "SPECIAL"]
     assert _SENTINEL not in " ".join(arguments)

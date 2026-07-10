@@ -384,7 +384,11 @@ class RichProgressReporter(PlainProgressReporter):
             "skipped": "dim",
         }
         for stage, (event, finished_at) in self._live_events.items():
-            label = f"Agent {stage.removeprefix('agent:')}" if stage.startswith("agent:") else stage.replace("-", " ").title()
+            label = (
+                f"Agent {stage.removeprefix('agent:')}"
+                if stage.startswith("agent:")
+                else stage.replace("-", " ").title()
+            )
             state = (
                 Spinner("dots", text=Text("running", style="cyan"))
                 if event.state == "running"

@@ -51,6 +51,7 @@ def canonical_agent_name(agent: str) -> str:
     """Return the Harbor agent identifier for a public CLI/config name."""
     return AGENT_ALIASES.get(agent, agent)
 
+
 __all__ = [
     "AGENT_ALIASES",
     "DEFAULT_ENV_MODE",

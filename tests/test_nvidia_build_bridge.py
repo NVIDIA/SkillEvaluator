@@ -358,6 +358,22 @@ def test_test_transport_rejects_a_production_api_key_before_binding() -> None:
         bridge.serve(config)
 
 
+def test_bridge_rejects_a_request_budget_above_the_fixed_security_limit() -> None:
+    config = bridge.BridgeConfig(
+        api_key="test-budget-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        host="127.0.0.1",
+        port=-1,
+        log_path=Path("nvidia-build-bridge.log"),
+        readiness_token="test-readiness-token",
+        request_transport=_local_test_transport,
+        max_requests=bridge.MAX_REQUESTS_PER_BRIDGE + 1,
+    )
+
+    with pytest.raises(ValueError, match="max_requests"):
+        bridge.serve(config)
+
+
 @pytest.fixture
 def bridge_services(tmp_path: Path) -> _BridgeServices:
     build = ThreadingHTTPServer(("127.0.0.1", 0), _FakeBuildHandler)
@@ -473,6 +489,8 @@ def test_host_bridge_requires_the_per_run_client_token_before_forwarding(tmp_pat
         readiness_token="host-readiness-token",
         request_transport=transport,
         client_token=client_token,
+        allowed_model="nvidia/model",
+        max_requests=10,
     )
     started = Event()
     servers: list[ThreadingHTTPServer] = []
@@ -513,6 +531,16 @@ def test_host_bridge_requires_the_per_run_client_token_before_forwarding(tmp_pat
         assert (
             _request(
                 f"{origin}/v1/responses",
+                {"model": "nvidia/alternate-model", "input": "Hello"},
+                headers={"Authorization": f"Bearer {client_token}"},
+            )[0]
+            == 403
+        )
+        assert backend_requests == []
+
+        assert (
+            _request(
+                f"{origin}/v1/responses",
                 responses_payload,
                 headers={"Authorization": f"Bearer {client_token}"},
             )[0]
@@ -534,6 +562,63 @@ def test_host_bridge_requires_the_per_run_client_token_before_forwarding(tmp_pat
             )[0]
             == 200
         )
+        assert len(backend_requests) == 2
+    finally:
+        servers[0].shutdown()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
+def test_bridge_rejects_authenticated_requests_after_per_run_budget_is_exhausted(tmp_path: Path) -> None:
+    backend_requests: list[dict[str, object]] = []
+
+    def transport(_endpoint: str, body: bytes) -> bytes:
+        backend_requests.append(json.loads(body))
+        return json.dumps(CHAT_TEXT_RESPONSE).encode("utf-8")
+
+    client_token = "per-run-client-token"
+    config = bridge.BridgeConfig(
+        api_key="test-budget-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        host="127.0.0.1",
+        port=0,
+        log_path=tmp_path / "budget-bridge.log",
+        readiness_token="budget-readiness-token",
+        request_transport=transport,
+        client_token=client_token,
+        allowed_model="nvidia/model",
+        max_requests=2,
+    )
+    started = Event()
+    servers: list[ThreadingHTTPServer] = []
+
+    def on_server_ready(server: ThreadingHTTPServer) -> None:
+        servers.append(server)
+        started.set()
+
+    thread = Thread(
+        target=bridge.serve,
+        args=(config,),
+        kwargs={"on_server_ready": on_server_ready},
+        daemon=True,
+    )
+    thread.start()
+    assert started.wait(timeout=1)
+    origin = f"http://127.0.0.1:{servers[0].server_port}"
+    headers = {"Authorization": f"Bearer {client_token}"}
+    payload = {"model": "nvidia/model", "input": "Hello"}
+    try:
+        assert _request(f"{origin}/v1/responses", payload, headers=headers)[0] == 200
+        assert _request(f"{origin}/v1/responses", payload, headers=headers)[0] == 200
+        status, _response_headers, body = _request(f"{origin}/v1/responses", payload, headers=headers)
+
+        assert status == 429
+        assert json.loads(body) == {
+            "error": {
+                "type": "rate_limit",
+                "message": "bridge request budget exhausted",
+            }
+        }
         assert len(backend_requests) == 2
     finally:
         servers[0].shutdown()
@@ -657,6 +742,10 @@ def test_dynamic_bridge_ignores_prebound_old_port_and_checker_authenticates_heal
     attacker_thread.start()
     key_file = tmp_path / "nvidia-build-api-key"
     key_file.write_text("nvapi-test-secret", encoding="utf-8")
+    key_file.chmod(0o600)
+    client_token_file = tmp_path / "nvidia-build-client-token"
+    client_token_file.write_text("per-run-client-token", encoding="utf-8")
+    client_token_file.chmod(0o600)
     ready_file = tmp_path / "nvidia-build-bridge.ready"
     log_path = tmp_path / "nvidia-build-bridge.log"
     process: subprocess.Popen[str] | None = None
@@ -669,6 +758,10 @@ def test_dynamic_bridge_ignores_prebound_old_port_and_checker_authenticates_heal
                 bridge.PRODUCTION_BUILD_BASE_URL,
                 "--api-key-file",
                 str(key_file),
+                "--client-token-file",
+                str(client_token_file),
+                "--allowed-model",
+                "nvidia/model",
                 "--port",
                 "0",
                 "--ready-file",
@@ -712,6 +805,7 @@ def test_dynamic_bridge_ignores_prebound_old_port_and_checker_authenticates_heal
         assert readiness_token not in checked.stdout
         assert readiness_token not in checked.stderr
         assert not key_file.exists()
+        assert not client_token_file.exists()
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
@@ -733,6 +827,10 @@ def test_bridge_ready_file_creation_refuses_symlinks(tmp_path: Path) -> None:
     key_file = tmp_path / "nvidia-build-api-key"
     api_key = "nvapi-must-not-appear-in-diagnostics"
     key_file.write_text(api_key, encoding="utf-8")
+    key_file.chmod(0o600)
+    client_token_file = tmp_path / "nvidia-build-client-token"
+    client_token_file.write_text("per-run-client-token", encoding="utf-8")
+    client_token_file.chmod(0o600)
     log_path = tmp_path / "nvidia-build-bridge.log"
 
     result = subprocess.run(
@@ -743,6 +841,10 @@ def test_bridge_ready_file_creation_refuses_symlinks(tmp_path: Path) -> None:
             bridge.PRODUCTION_BUILD_BASE_URL,
             "--api-key-file",
             str(key_file),
+            "--client-token-file",
+            str(client_token_file),
+            "--allowed-model",
+            "nvidia/model",
             "--port",
             "0",
             "--ready-file",
@@ -758,6 +860,7 @@ def test_bridge_ready_file_creation_refuses_symlinks(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert not key_file.exists()
+    assert not client_token_file.exists()
     assert ready_file.is_symlink()
     assert target.read_text(encoding="utf-8") == "do-not-overwrite"
     assert api_key not in result.stdout
@@ -2096,6 +2199,10 @@ def test_redact_log_text_masks_public_and_generic_api_key_values(text: str, expe
 def test_bridge_main_consumes_api_key_file_before_serving(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     key_file = tmp_path / "nvidia-build-api-key"
     key_file.write_text("nvapi-test-secret", encoding="utf-8")
+    key_file.chmod(0o600)
+    client_token_file = tmp_path / "nvidia-build-client-token"
+    client_token_file.write_text("per-run-client-token", encoding="utf-8")
+    client_token_file.chmod(0o600)
     ready_file = tmp_path / "nvidia-build-bridge.ready"
     observed: dict[str, object] = {}
 
@@ -2104,8 +2211,12 @@ def test_bridge_main_consumes_api_key_file_before_serving(monkeypatch: pytest.Mo
         observed["base_url"] = config.build_base_url
         observed["port"] = config.port
         observed["has_readiness_token"] = bool(config.readiness_token)
+        observed["client_token"] = config.client_token
+        observed["allowed_model"] = config.allowed_model
+        observed["max_requests"] = config.max_requests
         observed["ready_file"] = ready_file
         observed["key_file_exists"] = key_file.exists()
+        observed["client_token_file_exists"] = client_token_file.exists()
 
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     monkeypatch.setattr(bridge, "serve", fake_serve)
@@ -2116,6 +2227,12 @@ def test_bridge_main_consumes_api_key_file_before_serving(monkeypatch: pytest.Mo
             "https://integrate.api.nvidia.com/v1",
             "--api-key-file",
             str(key_file),
+            "--client-token-file",
+            str(client_token_file),
+            "--allowed-model",
+            "nvidia/test-model",
+            "--max-requests",
+            "17",
             "--port",
             "0",
             "--ready-file",
@@ -2129,6 +2246,10 @@ def test_bridge_main_consumes_api_key_file_before_serving(monkeypatch: pytest.Mo
         "base_url": "https://integrate.api.nvidia.com/v1",
         "port": 0,
         "has_readiness_token": True,
+        "client_token": "per-run-client-token",
+        "allowed_model": "nvidia/test-model",
+        "max_requests": 17,
         "ready_file": ready_file,
         "key_file_exists": False,
+        "client_token_file_exists": False,
     }

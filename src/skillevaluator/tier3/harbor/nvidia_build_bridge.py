@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import BoundedSemaphore, Condition, Thread
+from threading import BoundedSemaphore, Condition, Lock, Thread
 from typing import Any, ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -38,6 +38,8 @@ REQUEST_READ_TIMEOUT_SECONDS = 10.0
 REQUEST_HEADER_TIMEOUT_SECONDS = 10.0
 BACKEND_CONNECT_TIMEOUT_SECONDS = 120.0
 MAX_WORKERS = 16
+MAX_REQUESTS_PER_BRIDGE = 256
+MAX_SECRET_FILE_BYTES = 16_384
 IN_PROCESS_START_TIMEOUT_SECONDS = 5.0
 MAX_CHAT_TOOL_NAME_LENGTH = 64
 DROPPED_RESPONSES_SERVER_TOOL_TYPES = {"web_search", "web_search_preview"}
@@ -78,6 +80,8 @@ class BridgeConfig:
     readiness_token: str
     request_transport: BuildRequestTransport | None = None
     client_token: str | None = None
+    allowed_model: str | None = None
+    max_requests: int = MAX_REQUESTS_PER_BRIDGE
 
 
 @dataclass
@@ -157,6 +161,10 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
             self._send_error(403, "forbidden", "invalid bridge client credential")
             self._log(403, route, "forbidden")
             return
+        if not self._bridge_server().claim_request():
+            self._send_error(429, "rate_limit", "bridge request budget exhausted")
+            self._log(429, route, "request_budget_exhausted")
+            return
         try:
             payload = self._read_json()
             if route == COUNT_TOKENS_PATH:
@@ -165,6 +173,7 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
                 return
             if route == RESPONSES_PATH:
                 chat_request, custom_tool_names, namespace_tools = _responses_to_chat_request(payload)
+                _enforce_allowed_model(self.bridge_config, chat_request)
                 events = _translate_backend(
                     _request_build(self.bridge_config, chat_request),
                     chat_completion_to_responses_events,
@@ -173,11 +182,17 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
                 )
             elif route == MESSAGES_PATH:
                 chat_request = anthropic_to_chat_request(payload)
+                _enforce_allowed_model(self.bridge_config, chat_request)
                 events = _translate_backend(
                     _request_build(self.bridge_config, chat_request), chat_completion_to_anthropic_events
                 )
         except BridgePayloadError as error:
-            error_type = {408: "request_timeout", 413: "request_too_large"}.get(error.status_code, "invalid_request")
+            error_type = {
+                403: "forbidden",
+                408: "request_timeout",
+                413: "request_too_large",
+                429: "rate_limit",
+            }.get(error.status_code, "invalid_request")
             self._send_error(error.status_code, error_type, str(error))
             self._log(error.status_code, route, error_type)
             return
@@ -201,6 +216,11 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
         if api_key:
             supplied.append(api_key)
         return any(hmac.compare_digest(candidate, expected) for candidate in supplied)
+
+    def _bridge_server(self) -> _BridgeHTTPServer:
+        if not isinstance(self.server, _BridgeHTTPServer):
+            raise RuntimeError("bridge handler requires a bounded bridge server")
+        return self.server
 
     def _read_json(self) -> Any:
         raw_content_length = self.headers.get("Content-Length")
@@ -289,6 +309,12 @@ def _build_endpoint(config: BridgeConfig) -> str:
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or port is None:
         raise ValueError("test transport requires an explicit 127.0.0.1 http build_base_url")
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")) + BUILD_CHAT_COMPLETIONS_PATH
+
+
+def _enforce_allowed_model(config: BridgeConfig, payload: dict[str, Any]) -> None:
+    """Prevent an authenticated trial from turning the bridge into a general credential proxy."""
+    if config.allowed_model is not None and payload.get("model") != config.allowed_model:
+        raise BridgePayloadError("requested model is not allowed", 403)
 
 
 def _request_build(config: BridgeConfig, payload: dict[str, Any]) -> Any:
@@ -458,6 +484,7 @@ def start_in_process_bridge(
     build_base_url: str,
     log_path: Path,
     request_transport: BuildRequestTransport | None = None,
+    allowed_model: str | None = None,
 ) -> RunningBridge:
     """Start one authenticated loopback bridge in a managed daemon thread."""
     readiness_token = secrets.token_urlsafe(32)
@@ -471,6 +498,7 @@ def start_in_process_bridge(
         readiness_token=readiness_token,
         request_transport=request_transport,
         client_token=client_token,
+        allowed_model=allowed_model,
     )
     server = _create_bridge_server(config)
 
@@ -538,14 +566,32 @@ def _create_bridge_server(config: BridgeConfig) -> _BridgeHTTPServer:
         raise ValueError("client_token must not be empty when configured")
     if config.client_token is not None and ("\r" in config.client_token or "\n" in config.client_token):
         raise ValueError("client_token must not contain CR or LF")
+    if config.allowed_model is not None and not config.allowed_model:
+        raise ValueError("allowed_model must not be empty when configured")
+    if config.allowed_model is not None and ("\r" in config.allowed_model or "\n" in config.allowed_model):
+        raise ValueError("allowed_model must not contain CR or LF")
+    if (
+        isinstance(config.max_requests, bool)
+        or not isinstance(config.max_requests, int)
+        or not 1 <= config.max_requests <= MAX_REQUESTS_PER_BRIDGE
+    ):
+        raise ValueError(f"max_requests must be between 1 and {MAX_REQUESTS_PER_BRIDGE}")
     if config.host != "127.0.0.1":
         raise ValueError("bridge host must be 127.0.0.1")
     _build_endpoint(config)
+    if config.request_transport is None and config.client_token is None:
+        raise ValueError("production bridge requires a client_token")
+    if config.request_transport is None and config.allowed_model is None:
+        raise ValueError("production bridge requires an allowed_model")
     if config.port != 0:
         raise ValueError("bridge port must be 0 for dynamic loopback binding")
     config.log_path.parent.mkdir(parents=True, exist_ok=True)
     config.log_path.touch(exist_ok=True)
-    server = _BridgeHTTPServer((config.host, config.port), _handler_for(config))
+    server = _BridgeHTTPServer(
+        (config.host, config.port),
+        _handler_for(config),
+        max_requests=config.max_requests,
+    )
     server.daemon_threads = True
     return server
 
@@ -554,11 +600,21 @@ class _BridgeHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = MAX_WORKERS
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, max_requests: int, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._worker_slots = BoundedSemaphore(MAX_WORKERS)
         self._worker_condition = Condition()
         self._active_workers = 0
+        self._request_budget_lock = Lock()
+        self._remaining_requests = max_requests
+
+    def claim_request(self) -> bool:
+        """Atomically consume one authenticated request from this bridge's finite budget."""
+        with self._request_budget_lock:
+            if self._remaining_requests <= 0:
+                return False
+            self._remaining_requests -= 1
+            return True
 
     @property
     def active_workers(self) -> int:
@@ -598,6 +654,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="NVIDIA Build compatibility bridge")
     parser.add_argument("--build-base-url")
     parser.add_argument("--api-key-file", type=Path)
+    parser.add_argument("--client-token-file", type=Path)
+    parser.add_argument("--allowed-model")
+    parser.add_argument("--max-requests", type=int, default=MAX_REQUESTS_PER_BRIDGE)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--ready-file", type=Path)
     parser.add_argument("--check-ready-file", type=Path)
@@ -611,22 +670,37 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(f"{origin}\n")
         sys.stdout.flush()
         return 0
+    api_key = ""
+    client_token = ""
+    credential_error: OSError | RuntimeError | None = None
+    try:
+        if arguments.api_key_file is not None:
+            api_key = _consume_private_text_file(arguments.api_key_file, "NVIDIA API key")
+        else:
+            api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+        if arguments.client_token_file is not None:
+            client_token = _consume_private_text_file(arguments.client_token_file, "bridge client token")
+    except (OSError, RuntimeError) as exc:
+        credential_error = exc
+    finally:
+        if arguments.api_key_file is not None:
+            arguments.api_key_file.unlink(missing_ok=True)
+        if arguments.client_token_file is not None:
+            arguments.client_token_file.unlink(missing_ok=True)
     if arguments.build_base_url is None:
         parser.error("--build-base-url is required when serving")
     if arguments.ready_file is None:
         parser.error("--ready-file is required when serving")
-    api_key = ""
-    if arguments.api_key_file is not None:
-        try:
-            api_key = arguments.api_key_file.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            parser.error(f"cannot read NVIDIA API key file: {exc}")
-        finally:
-            arguments.api_key_file.unlink(missing_ok=True)
-    else:
-        api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if arguments.client_token_file is None:
+        parser.error("--client-token-file is required when serving")
+    if not (arguments.allowed_model or "").strip():
+        parser.error("--allowed-model is required when serving")
+    if credential_error is not None:
+        parser.error(f"cannot read private bridge credential file: {credential_error}")
     if not api_key:
         parser.error("NVIDIA API key is required")
+    if not client_token:
+        parser.error("bridge client token is required")
     serve(
         BridgeConfig(
             api_key=api_key,
@@ -635,10 +709,40 @@ def main(argv: list[str] | None = None) -> int:
             port=arguments.port,
             log_path=arguments.log_path,
             readiness_token=secrets.token_urlsafe(32),
+            client_token=client_token,
+            allowed_model=arguments.allowed_model.strip(),
+            max_requests=arguments.max_requests,
         ),
         ready_file=arguments.ready_file,
     )
     return 0
+
+
+def _consume_private_text_file(path: Path, label: str) -> str:
+    """Read a small owner-only regular file without following links, then remove it."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise RuntimeError(f"secure {label} reading requires O_NOFOLLOW")
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"{label} file must be a regular file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise RuntimeError(f"{label} file must have mode 0600")
+        if metadata.st_uid != os.geteuid():
+            raise RuntimeError(f"{label} file must be owned by the current user")
+        with os.fdopen(descriptor, encoding="utf-8") as secret_stream:
+            descriptor = -1
+            value = secret_stream.read(MAX_SECRET_FILE_BYTES + 1)
+        if len(value) > MAX_SECRET_FILE_BYTES:
+            raise RuntimeError(f"{label} file is too large")
+        return value.strip()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        path.unlink(missing_ok=True)
 
 
 def responses_to_chat_request(payload: Any) -> dict[str, Any]:

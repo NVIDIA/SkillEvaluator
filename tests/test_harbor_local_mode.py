@@ -430,18 +430,28 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     asyncio.run(agent.run("test", Environment(), None))
 
     assert any(destination.endswith("nvidia-build-bridge.py") for destination, _, _ in uploads)
-    key_upload = next(upload for upload in uploads if "skillevaluator-nvidia-build-" in upload[0])
+    key_upload = next(upload for upload in uploads if upload[0].endswith(".key"))
+    client_token_upload = next(upload for upload in uploads if upload[0].endswith(".token"))
     assert key_upload[1] == "nvidia-secret"
     assert key_upload[2] == 0o600
     assert key_upload[0].startswith("/tmp/")
     assert "/logs/" not in key_upload[0]
+    assert client_token_upload[1] not in {"", "nvidia-secret", "nvidia-build-loopback"}
+    assert len(client_token_upload[1]) >= 32
+    assert client_token_upload[2] == 0o600
+    assert client_token_upload[0].startswith("/tmp/")
+    assert "/logs/" not in client_token_upload[0]
     bridge_start = next(
         (command, env) for command, env in root_calls if "nvidia-build-bridge.py" in command and "&" in command
     )
     assert bridge_start[1] == {}
     assert "--api-key-file" in bridge_start[0]
+    assert "--client-token-file" in bridge_start[0]
+    assert "--allowed-model nvidia/meta/llama-3.1-8b-instruct" in bridge_start[0]
+    assert "--max-requests" in bridge_start[0]
     assert "skillevaluator-nvidia-build-" in bridge_start[0]
     assert "nvidia-secret" not in bridge_start[0]
+    assert client_token_upload[1] not in bridge_start[0]
     assert "--port 0" in bridge_start[0]
     assert "--ready-file" in bridge_start[0]
     assert "18080" not in bridge_start[0]
@@ -457,7 +467,7 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     assert "openai_base_url" not in setup_command
     assert all("openai_base_url" not in command for command, _ in calls)
     assert "nvidia-secret" not in setup_command
-    assert setup_env["OPENAI_API_KEY"] == "nvidia-build-loopback"
+    assert setup_env["OPENAI_API_KEY"] == client_token_upload[1]
     assert "OPENAI_BASE_URL" not in setup_env
     client_command, client_env = next((command, env) for command, env in calls if "codex exec" in command)
     assert "NVIDIA_API_KEY" not in client_env
@@ -469,6 +479,94 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     assert "skillevaluator-nvidia-build-" in cleanup
     assert "nvidia-build-bridge.ready" in cleanup
     assert "nvidia-build-bridge.py" in cleanup
+    assert key_upload[0] in cleanup
+    assert client_token_upload[0] in cleanup
+
+
+@pytest.mark.parametrize(
+    "cancel_stage",
+    ["bridge-script-upload", "api-key-upload", "client-token-upload", "startup", "health-check"],
+)
+def test_nvidia_build_container_bridge_cancellation_cleans_all_private_state_uninterruptibly(
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_stage: str,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent.model_name = "nvidia/model"
+    stage_reached: asyncio.Event
+    cleanup_started: asyncio.Event
+    release_cleanup: asyncio.Event
+    cleanup_commands: list[str] = []
+
+    class Environment:
+        async def upload_file(self, _source: object, destination: object) -> None:
+            destination_text = str(destination)
+            stage = (
+                "bridge-script-upload"
+                if destination_text.endswith("nvidia-build-bridge.py")
+                else "api-key-upload"
+                if destination_text.endswith(".key")
+                else "client-token-upload"
+                if destination_text.endswith(".token")
+                else "unknown-upload"
+            )
+            if stage == cancel_stage:
+                stage_reached.set()
+                await asyncio.Future()
+
+    async def root_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        if 'kill "$(cat' in command:
+            cleanup_commands.append(command)
+            cleanup_started.set()
+            await release_cleanup.wait()
+            return SimpleNamespace(return_code=0, stdout="")
+        stage = "startup" if command.startswith("set -eu;") else "health-check"
+        if stage == cancel_stage:
+            stage_reached.set()
+            await asyncio.Future()
+        stdout = "http://127.0.0.1:43123\n" if stage == "health-check" else ""
+        return SimpleNamespace(return_code=0, stdout=stdout)
+
+    monkeypatch.setattr(Codex, "exec_as_root", root_exec)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-secret")
+
+    async def exercise() -> None:
+        nonlocal stage_reached, cleanup_started, release_cleanup
+        stage_reached = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        task = asyncio.create_task(agent._start_bridge(Environment()))
+        try:
+            await asyncio.wait_for(stage_reached.wait(), timeout=1)
+            task.cancel()
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            task.cancel()
+            release_cleanup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_cleanup.set()
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    asyncio.run(exercise())
+
+    assert len(cleanup_commands) == 1
+    assert ".key" in cleanup_commands[0]
+    assert ".token" in cleanup_commands[0]
+    assert agent._nvidia_build_bridge_started is False
+    assert agent._nvidia_build_bridge_key_file is None
+    assert agent._nvidia_build_bridge_client_token_file is None
+    assert agent._nvidia_build_bridge_client_token is None
 
 
 def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentinel(
@@ -478,6 +576,7 @@ def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentin
     from harbor.agents.installed.codex import Codex
 
     agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent.model_name = "nvidia/model"
     agent._nvidia_build_bridge_started = False
     agent._nvidia_build_bridge_key_file = None
     commands: list[str] = []

@@ -3060,7 +3060,11 @@
                             {% set evidence_totals.trials = evidence_totals.trials + (ev.occurrences or 1) %}
                         {% endfor %}
                         <details class="t3-eval-evidence">
+                            {% if card.evidence_sampling and card.evidence_sampling.truncated %}
+                            <summary>Per-trial evidence (&gt;={{ card.evidence_sampling.represented_cases }} cases, &gt;={{ card.evidence_sampling.represented_trials }} of {{ card.evidence_sampling.total_trials }} trials; sampled first {{ card.evidence_sampling.scanned_trials }})</summary>
+                            {% else %}
                             <summary>Per-trial evidence ({{ dedup_order | length }} cases, {{ evidence_totals.trials }} trials)</summary>
+                            {% endif %}
                             <ul>
                             {% for eid in dedup_order %}
                                 {% set ev = dedup_map[eid] %}

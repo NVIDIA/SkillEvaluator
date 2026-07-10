@@ -54,7 +54,7 @@ class JSONReporter(ReporterBase):
         data = self._result_to_dict(result)
         if self.include_timestamp:
             data["generated_at"] = datetime.now(tz=UTC).isoformat()
-        return json.dumps(data, indent=self.indent, default=str)
+        return json.dumps(data, indent=self.indent, default=str, allow_nan=False)
 
     def render_all(self, results: list[ValidationResult]) -> str:
         """Render all results to JSON with overall summary."""
@@ -124,7 +124,7 @@ class JSONReporter(ReporterBase):
         if self.include_timestamp:
             data["generated_at"] = datetime.now(tz=UTC).isoformat()
 
-        return json.dumps(data, indent=self.indent, default=str)
+        return json.dumps(data, indent=self.indent, default=str, allow_nan=False)
 
     def _result_to_dict(self, result: ValidationResult) -> dict[str, Any]:
         """Convert ValidationResult to serializable dictionary."""

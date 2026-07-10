@@ -4,19 +4,27 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import math
 import re
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.evaluation.tier3_report import (
+    _evaluator_cards,
     _metric_evidence,
+    _raw_trial_rewards,
     _ReportBudget,
     agent_eval_result_from_directory,
     build_agent_eval_payload,
     render_agent_eval_html_report,
 )
 from skillevaluator.models import ValidationResult
-from skillevaluator.reporting import HTMLReporter
+from skillevaluator.reporting import HTMLReporter, JSONReporter
+from skillevaluator.reporting import html as html_module
+from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 
@@ -67,6 +75,42 @@ def _embedded_tier3_payload(html: str) -> dict:
     if 'data-encoding="base64"' in match.group("attrs"):
         body = base64.b64decode(body).decode("utf-8")
     return json.loads(body)
+
+
+def test_package_loader_reads_template_resources_as_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    class TemplateResource:
+        def joinpath(self, _path: str) -> TemplateResource:
+            return self
+
+        def read_text(self, *, encoding: str) -> str:
+            assert encoding == "utf-8"
+            return "Per-trial evidence \u00d72"
+
+    monkeypatch.setattr(html_module.resources, "files", lambda _package: TemplateResource())
+
+    source, _, _ = PackageLoader("skillevaluator.reporting", "templates").get_source(
+        html_module.Environment(), "report.html.j2"
+    )
+
+    assert source == "Per-trial evidence \u00d72"
+
+
+def test_package_loader_fallback_reads_template_resources_as_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable_files(_package: str) -> None:
+        raise AttributeError
+
+    def open_utf8(_package: str, _path: str, *, encoding: str):
+        assert encoding == "utf-8"
+        return io.StringIO("Per-trial evidence \u00d72")
+
+    monkeypatch.setattr(html_module.resources, "files", unavailable_files)
+    monkeypatch.setattr(html_module.resources, "open_text", open_utf8)
+
+    source, _, _ = PackageLoader("skillevaluator.reporting", "templates").get_source(
+        html_module.Environment(), "report.html.j2"
+    )
+
+    assert source == "Per-trial evidence \u00d72"
 
 
 def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None:
@@ -368,6 +412,74 @@ def test_metric_evidence_bounds_work_after_per_card_output_is_full() -> None:
     assert budget.omitted["evidence_entries"] == 50_000 - len(evidence)
 
 
+def test_exhausted_card_and_raw_reward_budgets_do_not_iterate_rewards() -> None:
+    class NeverIteratedRewards:
+        def __len__(self) -> int:
+            return 50_000
+
+        def __iter__(self):
+            raise AssertionError("an exhausted report budget must not scan reward payloads")
+
+    rewards = NeverIteratedRewards()
+    card_budget = _ReportBudget(cards_remaining=0)
+    raw_budget = _ReportBudget(raw_rewards_remaining=0)
+
+    cards = _evaluator_cards(  # type: ignore[arg-type]
+        {},
+        rewards=rewards,
+        custom_with_skill={},
+        custom_without_skill={},
+        custom_lift={},
+        report_budget=card_budget,
+    )
+    raw = _raw_trial_rewards({"rewards": rewards}, raw_budget)
+
+    assert cards == []
+    assert raw == []
+    assert card_budget.omitted["custom_metric_discovery_trials"] == 50_000
+    assert raw_budget.omitted["raw_trial_rewards"] == 50_000
+
+
+def test_custom_metric_name_discovery_is_capped_before_sorting() -> None:
+    class ExplodingMetricMap(dict[str, float]):
+        def __iter__(self):
+            yield "metric-b"
+            yield "metric-a"
+            raise AssertionError("custom metric discovery must stop before a third key")
+
+    custom_scores = ExplodingMetricMap({"metric-a": 0.8, "metric-b": 0.9, "metric-c": 1.0})
+    budget = _ReportBudget(cards_remaining=1)
+
+    cards = _evaluator_cards(
+        {},
+        rewards=[],
+        custom_with_skill=custom_scores,
+        custom_without_skill={},
+        custom_lift={},
+        report_budget=budget,
+    )
+
+    assert len(cards) == 1
+    assert cards[0]["id"] == "metric-a"
+    assert budget.omitted["evaluator_cards"] == 2
+
+
+def test_raw_reward_projection_bulk_stops_when_field_budget_is_full() -> None:
+    class ExplodingReward(dict[str, float]):
+        def items(self):
+            for index in range(97):
+                yield f"field-{index:03d}", float(index)
+            raise AssertionError("raw reward projection must stop after detecting the exhausted field budget")
+
+    reward = ExplodingReward({f"field-{index:03d}": float(index) for index in range(200)})
+    budget = _ReportBudget(raw_rewards_remaining=1)
+
+    projected = _raw_trial_rewards({"rewards": [reward]}, budget)
+
+    assert len(projected[0]) == 96
+    assert budget.omitted["raw_reward_fields"] == 104
+
+
 def test_canonical_payload_bounds_high_cardinality_custom_report_details() -> None:
     metric_count = 100
     trial_count = 100
@@ -475,6 +587,147 @@ def test_global_report_budget_prioritizes_best_agent_details() -> None:
     assert payload["evaluator_cards"] == best_cards
     assert any(card["evidence"] for card in best_cards)
     assert payload["provenance"]["raw_trial_rewards"]["zzz"]
+
+
+def test_payload_prunes_oversized_non_best_conditions_before_best_evidence() -> None:
+    payload = build_agent_eval_payload(
+        "multi-agent-pruning",
+        {
+            "aaa": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 0.1},
+                "conditions": {"with_skill": {"diagnostic": "x" * (3 * 1024 * 1024)}},
+                "rewards": [{"entry_id": "low-case", "security": 0.1}],
+            },
+            "zzz": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 1.0},
+                "rewards": [
+                    {
+                        "entry_id": "best-case",
+                        "security": 1.0,
+                        "goal_accuracy": 1.0,
+                        "details": {"goal_accuracy": {"reason": "best-agent evidence"}},
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    best_cards = payload["agents"]["zzz"]["evaluator_cards"]
+    assert any(card["evidence"] for card in best_cards)
+    assert any(card["evidence"] for card in payload["evaluator_cards"])
+    assert payload["provenance"]["raw_trial_rewards"]["zzz"]
+    assert payload["agents"]["aaa"]["conditions"] == {}
+    assert payload["report_truncation"]["omitted"]["non_best_agent_details"] > 0
+
+
+def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None:
+    payload = build_agent_eval_payload(
+        "finite-json",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 0.5},
+                "custom_with_skill": {"unrepresentable": 10**10_000},
+                "lift": {"security": float("inf")},
+                "conditions": {"with_skill": {"score": float("-inf")}},
+                "rewards": [
+                    {
+                        "entry_id": "case-1",
+                        "security": 1.0,
+                        "goal_accuracy": float("nan"),
+                        "overall": float("inf"),
+                        "details": {"goal_accuracy": {"reason": "invalid score"}},
+                    }
+                ],
+            }
+        },
+        dataset=[{"id": "case-1", "score": float("inf")}],
+        comparison={"delta": float("nan")},
+        runtime_seconds=float("inf"),
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    encoded = json.dumps(payload, allow_nan=False)
+    assert "NaN" not in encoded
+    assert "Infinity" not in encoded
+    assert payload["runtime_seconds"] == 0.0
+    assert payload["dataset"][0]["score"] is None
+    assert payload["provenance"]["comparison"]["delta"] is None
+    goal_card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "goal_accuracy")
+    assert goal_card["evidence"][0]["score"] is None
+    assert not any(card["id"] == "unrepresentable" for card in payload["agents"]["codex"]["evaluator_cards"])
+    assert all(
+        not isinstance(value, float) or math.isfinite(value)
+        for value in (payload["overall_score"], payload["overall_lift"], payload["composite_lift"])
+    )
+
+    html = _render_agent_payload(payload)
+    assert _embedded_tier3_payload(html)["dataset"][0]["score"] is None
+
+
+def test_canonical_html_serializer_rejects_non_finite_numbers() -> None:
+    with pytest.raises(ValueError, match="Out of range float values"):
+        _compact_json({"score": float("nan")})
+
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = {"score": float("inf")}
+    with pytest.raises(ValueError, match="Out of range float values"):
+        JSONReporter(include_timestamp=False).render_all([result])
+
+
+def test_sampled_evidence_carries_lower_bound_metadata_and_honest_wording() -> None:
+    rewards = [
+        {
+            "entry_id": "case-1",
+            "security": 1.0,
+            "goal_accuracy": 0.5,
+            "details": {"goal_accuracy": {"reason": "same sampled evidence"}},
+        }
+        for _ in range(100)
+    ]
+    payload = build_agent_eval_payload(
+        "sampled-evidence",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 100,
+                "scored_attempts": 100,
+                "with_skill": {"security": 1.0, "goal_accuracy": 0.5},
+                "rewards": rewards,
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    goal_card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "goal_accuracy")
+    assert goal_card["evidence_sampling"] == {
+        "truncated": True,
+        "counts_are_lower_bounds": True,
+        "scanned_trials": 64,
+        "total_trials": 100,
+        "represented_cases": 1,
+        "represented_trials": 64,
+    }
+
+    agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
+    assert "&gt;=64 of 100 trials" in agents_html
+    assert "1 cases, 64 trials" not in agents_html
 
 
 def test_escape_heavy_payload_has_bounded_html_and_one_recoverable_canonical_copy() -> None:

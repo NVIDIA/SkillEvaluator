@@ -63,7 +63,7 @@ class _Tier3PreviewBudget:
 
 
 def _compact_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
 def _script_safe_json(value: object) -> str:
@@ -173,9 +173,9 @@ class PackageLoader(BaseLoader):
         """Load template source from package resources."""
         template_path = f"{self.path}/{template}"
         try:
-            source = resources.files(self.package).joinpath(template_path).read_text()
+            source = resources.files(self.package).joinpath(template_path).read_text(encoding="utf-8")
         except AttributeError:
-            with resources.open_text(self.package, template_path) as f:
+            with resources.open_text(self.package, template_path, encoding="utf-8") as f:
                 source = f.read()
         return source, template, lambda: True
 
@@ -1198,7 +1198,10 @@ class HTMLReporter(ReporterBase):
             "gating": gating,
         }
         report_json = (
-            json.dumps(report_data, indent=2).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+            json.dumps(report_data, indent=2, allow_nan=False)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
         )
 
         # Dynamically add Tier 3 tab when agent eval data is present

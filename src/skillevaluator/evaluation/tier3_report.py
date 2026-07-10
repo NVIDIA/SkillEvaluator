@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -63,6 +64,28 @@ _MAX_RAW_TRIAL_REWARDS_TOTAL = 256
 _MAX_RAW_METRICS_PER_REWARD = 64
 _MAX_RAW_REWARD_FIELDS = 96
 _MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
+
+
+def _finite_float(value: object) -> float | None:
+    """Return a JSON-safe finite number, rejecting booleans and non-finite floats."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _sanitize_json_numbers(value: Any) -> Any:
+    """Copy a canonical payload while replacing non-finite floats with JSON null."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _sanitize_json_numbers(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_sanitize_json_numbers(item) for item in value]
+    return value
 
 
 @dataclass
@@ -274,7 +297,7 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
     )
     result.metadata["agent_eval"] = payload
     best = payload.get("best_agent") or "n/a"
-    if payload.get("execution_status") == "succeeded" and isinstance(payload.get("overall_score"), int | float):
+    if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
         result.add_success(
             "agent_eval",
             f"Tier 3 evaluation complete: verdict {str(payload.get('verdict', 'neutral')).upper()}; best agent {best}",
@@ -398,14 +421,8 @@ def build_agent_eval_payload(
         execution_status = "skipped"
 
     raw_overall_score = best.get("with_skill")
-    overall_score = (
-        float(raw_overall_score)
-        if execution_status == "succeeded"
-        and isinstance(raw_overall_score, int | float)
-        and not isinstance(raw_overall_score, bool)
-        else None
-    )
-    overall_lift = best.get("lift")
+    overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
+    overall_lift = _finite_float(best.get("lift"))
     verdict = _verdict_from_lift(overall_lift) if overall_score is not None else VERDICT_NEUTRAL
 
     metric_ids = list(best.get("evaluators", {}).keys())
@@ -427,9 +444,9 @@ def build_agent_eval_payload(
         "best_agent": best_agent,
         "agents_run": list(agent_payloads.keys()),
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
-        "overall_lift": (round(overall_lift, 4) if isinstance(overall_lift, (int, float)) else None),
+        "overall_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "environment": env_mode,
-        "runtime_seconds": float(runtime_seconds or 0.0),
+        "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
         "expected_attempts": sum(
@@ -477,12 +494,12 @@ def build_agent_eval_payload(
         "environment": env_mode,
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
         "overall_lift": summary["overall_lift"],
-        "composite_lift": round(overall_lift, 4) if isinstance(overall_lift, (int, float)) else None,
+        "composite_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
         "expected_attempts": summary["expected_attempts"],
         "scored_attempts": summary["scored_attempts"],
-        "runtime_seconds": float(runtime_seconds or 0.0),
+        "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "agents": agent_payloads,
         "dimensions": best_dimensions,
         "dimension_hints": dict(DIMENSION_HINTS),
@@ -528,6 +545,7 @@ def build_agent_eval_payload(
             payload.get("suggestions_v2") or [],
             evidence_links,
         )
+    payload = _sanitize_json_numbers(payload)
     _enforce_report_payload_budget(payload, report_budget)
     return payload
 
@@ -613,23 +631,29 @@ _REWARD_HEAVY_KEYS = frozenset({"details", "custom_details"})
 
 def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> list[dict[str, Any]]:
     """Return compact raw Harbor reward dicts (internal + verbose keys stripped)."""
+    source_rewards = info.get("rewards") or []
+    total_rewards = len(source_rewards)
+    if report_budget.raw_rewards_remaining <= 0:
+        report_budget.omit("raw_trial_rewards", total_rewards)
+        return []
+
     rewards: list[dict[str, Any]] = []
-    for reward in info.get("rewards") or []:
-        if not isinstance(reward, dict):
-            continue
+    for reward_index, reward in enumerate(source_rewards):
         if report_budget.raw_rewards_remaining <= 0:
-            report_budget.omit("raw_trial_rewards")
+            report_budget.omit("raw_trial_rewards", total_rewards - reward_index)
+            break
+        if not isinstance(reward, dict):
             continue
 
         compact: dict[str, Any] = {}
         if "custom_details" in reward:
             report_budget.omit("raw_detail_fields")
-        for key, value in reward.items():
+        for field_index, (key, value) in enumerate(reward.items()):
             if key.startswith("_") or key in _REWARD_HEAVY_KEYS:
                 continue
             if len(compact) >= _MAX_RAW_REWARD_FIELDS:
-                report_budget.omit("raw_reward_fields")
-                continue
+                report_budget.omit("raw_reward_fields", len(reward) - field_index)
+                break
             if key in {"custom_metrics", "metrics"} and isinstance(value, dict):
                 value = _bounded_raw_metric_mapping(value, report_budget)
             compact[key] = value
@@ -642,16 +666,45 @@ def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> li
 def _bounded_raw_metric_mapping(value: dict[Any, Any], report_budget: _ReportBudget) -> dict[str, Any]:
     """Keep a deterministic representative slice of raw custom metric maps."""
     bounded: dict[str, Any] = {}
-    for raw_name in sorted(value, key=str):
+    candidates = list(islice(value.items(), _MAX_RAW_METRICS_PER_REWARD + 1))
+    for raw_name, raw_value in sorted(candidates, key=lambda item: str(item[0])):
         if len(bounded) >= _MAX_RAW_METRICS_PER_REWARD:
-            report_budget.omit("raw_metric_values")
-            continue
+            break
         name = str(raw_name)
         if len(name) > 256 or name in bounded:
-            report_budget.omit("raw_metric_values")
             continue
-        bounded[name] = value[raw_name]
+        bounded[name] = raw_value
+    report_budget.omit("raw_metric_values", max(0, len(value) - len(bounded)))
     return bounded
+
+
+def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Drop duplicated lower-priority details before touching best-agent evidence."""
+    best_agent = str(payload.get("best_agent") or "")
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        return
+
+    omitted = 0
+    provenance = payload.get("provenance")
+    raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
+    for name, agent in agents.items():
+        if name == best_agent or not isinstance(agent, dict):
+            continue
+        for key in ("evaluator_cards", "trials", "trials_baseline", "cases"):
+            items = agent.get(key)
+            if isinstance(items, list) and items:
+                omitted += len(items)
+                agent[key] = []
+        if agent.get("conditions"):
+            omitted += 1
+            agent["conditions"] = {}
+        if isinstance(raw_rewards, dict):
+            items = raw_rewards.get(name)
+            if isinstance(items, list) and items:
+                omitted += len(items)
+                raw_rewards[name] = []
+    report_budget.omit("non_best_agent_details", omitted)
 
 
 def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
@@ -680,6 +733,31 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
     refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        _prune_non_best_agent_details(payload, report_budget)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        omitted_items = 0
+        for key in ("dataset", "trials"):
+            items = payload.get(key)
+            if isinstance(items, list) and items:
+                omitted_items += len(items)
+                payload[key] = []
+        for agent in (payload.get("agents") or {}).values():
+            if not isinstance(agent, dict):
+                continue
+            for key in ("trials", "trials_baseline", "cases"):
+                items = agent.get(key)
+                if isinstance(items, list) and items:
+                    omitted_items += len(items)
+                    agent[key] = []
+            if agent.get("conditions"):
+                agent["conditions"] = {}
+                omitted_items += 1
+        report_budget.omit("dataset_and_trial_items", omitted_items)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
         raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
         if isinstance(raw_rewards, dict):
             omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
@@ -696,28 +774,10 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
                 if isinstance(card, dict) and isinstance(card.get("evidence"), list):
                     omitted_evidence += len(card["evidence"])
                     card["evidence"] = []
+        for card in payload.get("evaluator_cards") or []:
+            if isinstance(card, dict) and isinstance(card.get("evidence"), list):
+                card["evidence"] = []
         report_budget.omit("evidence_entries", omitted_evidence)
-        refresh_signal()
-
-    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
-        omitted_items = 0
-        for key in ("dataset", "trials"):
-            items = payload.get(key)
-            if isinstance(items, list):
-                omitted_items += len(items)
-                payload[key] = []
-        for agent in (payload.get("agents") or {}).values():
-            if not isinstance(agent, dict):
-                continue
-            for key in ("trials", "trials_baseline", "cases"):
-                items = agent.get(key)
-                if isinstance(items, list):
-                    omitted_items += len(items)
-                    agent[key] = []
-            if agent.get("conditions"):
-                agent["conditions"] = {}
-                omitted_items += 1
-        report_budget.omit("dataset_and_trial_items", omitted_items)
         refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
@@ -742,7 +802,7 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
 
 
 def _serialized_payload_size(payload: dict[str, Any]) -> int:
-    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
 
 def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
@@ -835,19 +895,15 @@ def _build_agent(
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
     )
-    overall_ws = _mean([d["with_skill"] for d in dimensions if isinstance(d.get("with_skill"), (int, float))])
-    overall_bl = _mean([d["baseline"] for d in dimensions if isinstance(d.get("baseline"), (int, float))])
+    overall_ws = _mean([d["with_skill"] for d in dimensions])
+    overall_bl = _mean([d["baseline"] for d in dimensions])
     if overall_ws is None and not metrics:
         overall_ws = _mean([reward.get("overall") for reward in info.get("rewards", []) if isinstance(reward, dict)])
     if overall_bl is None and not metrics:
         overall_bl = _mean(
             [reward.get("overall") for reward in info.get("rewards_baseline", []) if isinstance(reward, dict)]
         )
-    overall_lift = (
-        round(overall_ws - overall_bl, 4)
-        if isinstance(overall_ws, (int, float)) and isinstance(overall_bl, (int, float))
-        else None
-    )
+    overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
 
     trials = _normalize_trials(info.get("rewards") or [], metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)
@@ -916,16 +972,15 @@ def _build_evaluators(
 ) -> dict[str, dict[str, Any]]:
     evaluators: dict[str, dict[str, Any]] = {}
     for metric in metrics:
-        ws = with_scores.get(metric)
-        if not isinstance(ws, (int, float)) or isinstance(ws, bool):
+        ws = _finite_float(with_scores.get(metric))
+        if ws is None:
             continue
-        bl = without_scores.get(metric)
-        bl = float(bl) if isinstance(bl, (int, float)) and not isinstance(bl, bool) else None
+        bl = _finite_float(without_scores.get(metric))
         lift = _lift_value(metric, lift_data)
         if lift is None and bl is not None:
-            lift = round(float(ws) - bl, 4)
+            lift = round(ws - bl, 4)
         evaluators[metric] = {
-            "with_skill": float(ws),
+            "with_skill": ws,
             "baseline": bl,
             "lift": lift if lift is not None else 0.0,
         }
@@ -949,7 +1004,7 @@ def _build_dimensions(
             bl = _dimension_score(without_scores, cfg)
         if ws is None and bl is None:
             continue
-        lift = round(ws - bl, 4) if isinstance(ws, (int, float)) and isinstance(bl, (int, float)) else None
+        lift = round(ws - bl, 4) if ws is not None and bl is not None else None
         entry = precomputed_with.get(dim_id) if isinstance(precomputed_with.get(dim_id), dict) else {}
         # Signals (the evaluators that actually fed this dimension) populate the
         # "Signals" column; reasoning bullets and a deterministic verdict fill
@@ -963,9 +1018,9 @@ def _build_dimensions(
         dimensions.append(
             {
                 "id": dim_id,
-                "with_skill": round(ws, 4) if isinstance(ws, (int, float)) else None,
-                "score": round(ws, 4) if isinstance(ws, (int, float)) else None,
-                "baseline": round(bl, 4) if isinstance(bl, (int, float)) else None,
+                "with_skill": round(ws, 4) if ws is not None else None,
+                "score": round(ws, 4) if ws is not None else None,
+                "baseline": round(bl, 4) if bl is not None else None,
                 "lift": lift,
                 "explanation": explanation,
                 "verdict": verdict,
@@ -1009,12 +1064,12 @@ def _deterministic_reasoning(
 
     parts: list[str] = []
     for signal in signals:
-        value = with_scores.get(signal)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            parts.append(f"{signal}={float(value):.2f}")
+        value = _finite_float(with_scores.get(signal))
+        if value is not None:
+            parts.append(f"{signal}={value:.2f}")
     bullets = _human_reasoning_bullets(
-        with_skill=float(ws) if isinstance(ws, (int, float)) else 0.0,
-        baseline=bl if isinstance(bl, (int, float)) else None,
+        with_skill=_finite_float(ws) or 0.0,
+        baseline=_finite_float(bl),
         lift=lift,
         parts=parts,
     )
@@ -1023,11 +1078,12 @@ def _deterministic_reasoning(
 
 def _deterministic_verdict(ws: float | None) -> str | None:
     """Deterministic PASS/NEUTRAL/FAIL verdict for a dimension score."""
-    if not isinstance(ws, (int, float)):
+    numeric = _finite_float(ws)
+    if numeric is None:
         return None
     from skillevaluator.evaluation.dimension_judge import _verdict_for_score
 
-    return _verdict_for_score(float(ws))
+    return _verdict_for_score(numeric)
 
 
 def _compact_evidence_refs(raw_refs: object) -> list[str]:
@@ -1054,6 +1110,7 @@ def _metric_evidence(
     metric: str,
     rewards: list[dict[str, Any]],
     report_budget: _ReportBudget,
+    sampling: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
 
@@ -1065,10 +1122,13 @@ def _metric_evidence(
     by_fingerprint: dict[str, dict[str, Any]] = {}
     total_rewards = len(rewards)
     scan_limit = min(total_rewards, _MAX_EVIDENCE_SCAN_PER_CARD)
-    for reward_index, reward in enumerate(islice(rewards, scan_limit)):
+    scanned_trials = 0
+    output_truncated = False
+    for reward in islice(rewards, scan_limit):
         if report_budget.evidence_remaining <= 0:
-            report_budget.omit("evidence_entries", total_rewards - reward_index)
+            output_truncated = True
             break
+        scanned_trials += 1
         if not isinstance(reward, dict):
             continue
         details = reward.get("details")
@@ -1079,9 +1139,9 @@ def _metric_evidence(
         if not isinstance(detail, dict):
             continue
 
-        raw_score = reward.get(metric)
-        if not isinstance(raw_score, (int, float)) or isinstance(raw_score, bool):
-            raw_score = extract_custom_metrics(reward).get(metric)
+        raw_score = _finite_float(reward.get(metric))
+        if raw_score is None:
+            raw_score = _finite_float(extract_custom_metrics(reward).get(metric))
 
         notes: list[str] = []
         reason = detail.get("reason")
@@ -1107,15 +1167,19 @@ def _metric_evidence(
 
         entry = {
             "entry_id": str(reward.get("entry_id") or "trial")[:256],
-            "score": float(raw_score)
-            if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
-            else None,
+            "score": raw_score,
             "notes": notes,
             "failures": failures,
             "checks": checks,
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
-        fingerprint = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        fingerprint = json.dumps(
+            entry,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
         existing = by_fingerprint.get(fingerprint)
         if existing is not None:
             existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
@@ -1124,12 +1188,25 @@ def _metric_evidence(
 
         if len(evidence) >= _MAX_EVIDENCE_PER_CARD or report_budget.evidence_remaining <= 0:
             report_budget.omit("evidence_entries")
+            output_truncated = True
             continue
         evidence.append(entry)
         by_fingerprint[fingerprint] = entry
         report_budget.evidence_remaining -= 1
-    else:
-        report_budget.omit("evidence_entries", total_rewards - scan_limit)
+    unscanned_trials = max(0, total_rewards - scanned_trials)
+    report_budget.omit("evidence_entries", unscanned_trials)
+    if sampling is not None and (output_truncated or unscanned_trials):
+        represented_trials = sum(int(item.get("occurrences", 1)) for item in evidence)
+        sampling.update(
+            {
+                "truncated": True,
+                "counts_are_lower_bounds": True,
+                "scanned_trials": scanned_trials,
+                "total_trials": total_rewards,
+                "represented_cases": len({str(item.get("entry_id") or "trial") for item in evidence}),
+                "represented_trials": represented_trials,
+            }
+        )
     return evidence
 
 
@@ -1139,14 +1216,80 @@ def _custom_metric_score(metric: str, configured: dict[str, Any], rewards: list[
     value = configured.get(metric)
     if isinstance(value, dict):
         value = value.get("score")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+    configured_score = _finite_float(value)
+    if configured_score is not None:
+        return configured_score
     values = [
         metrics[metric]
         for reward in rewards
         if isinstance(reward, dict) and (metrics := extract_custom_metrics(reward)) and metric in metrics
     ]
     return _mean(values)
+
+
+def _discover_custom_metric_scores(
+    custom_with_skill: dict[str, Any],
+    rewards: list[dict[str, Any]],
+    excluded: set[str],
+    limit: int,
+    report_budget: _ReportBudget,
+) -> dict[str, float]:
+    """Discover at most ``limit`` custom names and aggregate reward scores once."""
+    from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
+
+    if limit <= 0:
+        report_budget.omit("evaluator_cards", len(custom_with_skill))
+        report_budget.omit("custom_metric_discovery_trials", len(rewards))
+        return {}
+
+    candidates: dict[str, None] = {}
+    for raw_name in islice(iter(custom_with_skill), limit + 1):
+        name = str(raw_name)
+        if name not in excluded and name not in candidates:
+            candidates[name] = None
+
+    configured_total = len(custom_with_skill)
+    if len(candidates) > limit:
+        selected = sorted(candidates)[:limit]
+        report_budget.omit("evaluator_cards", max(1, configured_total - len(selected)))
+        report_budget.omit("custom_metric_discovery_trials", len(rewards))
+        return {
+            name: score for name in selected if (score := _custom_metric_score(name, custom_with_skill, [])) is not None
+        }
+
+    sums: dict[str, float] = dict.fromkeys(candidates, 0.0)
+    counts: dict[str, int] = dict.fromkeys(candidates, 0)
+    omitted_name_seen = configured_total > len(candidates)
+    for reward in rewards:
+        if not isinstance(reward, dict):
+            continue
+        for raw_name, raw_value in extract_custom_metrics(reward).items():
+            name = str(raw_name)
+            if name in excluded:
+                continue
+            if name not in candidates:
+                if len(candidates) >= limit:
+                    omitted_name_seen = True
+                    continue
+                candidates[name] = None
+                sums[name] = 0.0
+                counts[name] = 0
+            numeric = _finite_float(raw_value)
+            if numeric is not None:
+                sums[name] += numeric
+                counts[name] += 1
+
+    if omitted_name_seen:
+        report_budget.omit("evaluator_cards", max(1, configured_total - len(candidates)))
+
+    scores: dict[str, float] = {}
+    for name in sorted(candidates):
+        configured = _custom_metric_score(name, custom_with_skill, [])
+        if configured is not None:
+            scores[name] = configured
+        elif counts.get(name, 0):
+            scores[name] = round(sums[name] / counts[name], 4)
+    return scores
 
 
 def _evaluator_card(
@@ -1158,15 +1301,19 @@ def _evaluator_card(
     report_budget: _ReportBudget,
 ) -> dict[str, Any]:
     ws = _as_float(scores.get("with_skill"))
-    return {
+    evidence_sampling: dict[str, Any] = {}
+    card = {
         "id": metric,
         "label": label,
         "with_skill": ws,
         "baseline": scores.get("baseline"),
         "lift": scores.get("lift"),
         "status": "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail"),
-        "evidence": _metric_evidence(metric, rewards, report_budget),
+        "evidence": _metric_evidence(metric, rewards, report_budget, evidence_sampling),
     }
+    if evidence_sampling:
+        card["evidence_sampling"] = evidence_sampling
+    return card
 
 
 def _evaluator_cards(
@@ -1178,13 +1325,14 @@ def _evaluator_cards(
     custom_lift: dict[str, Any],
     report_budget: _ReportBudget,
 ) -> list[dict[str, Any]]:
-    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, extract_custom_metrics
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY
 
     cards: list[dict[str, Any]] = []
-    for metric, scores in evaluators.items():
+    evaluator_items = list(evaluators.items())
+    for evaluator_index, (metric, scores) in enumerate(evaluator_items):
         if report_budget.cards_remaining <= 0:
-            report_budget.omit("evaluator_cards")
-            continue
+            report_budget.omit("evaluator_cards", len(evaluator_items) - evaluator_index)
+            break
         report_budget.cards_remaining -= 1
         cards.append(
             _evaluator_card(
@@ -1196,17 +1344,14 @@ def _evaluator_cards(
             )
         )
 
-    custom_names = set(custom_with_skill)
-    for reward in rewards:
-        if isinstance(reward, dict):
-            custom_names.update(extract_custom_metrics(reward))
-    for metric in sorted(custom_names.difference(evaluators)):
-        with_skill = _custom_metric_score(metric, custom_with_skill, rewards)
-        if with_skill is None:
-            continue
-        if report_budget.cards_remaining <= 0:
-            report_budget.omit("evaluator_cards")
-            continue
+    custom_scores = _discover_custom_metric_scores(
+        custom_with_skill,
+        rewards,
+        set(evaluators),
+        report_budget.cards_remaining,
+        report_budget,
+    )
+    for metric, with_skill in custom_scores.items():
         report_budget.cards_remaining -= 1
         baseline = _custom_metric_score(metric, custom_without_skill, [])
         lift = _lift_value(metric, custom_lift)
@@ -1256,16 +1401,12 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     for reward in rewards:
         if not isinstance(reward, dict):
             continue
-        scores = {
-            m: reward.get(m)
-            for m in metrics
-            if isinstance(reward.get(m), (int, float)) and not isinstance(reward.get(m), bool)
-        }
+        scores = {m: numeric for m in metrics if (numeric := _finite_float(reward.get(m))) is not None}
         trial: dict[str, Any] = {
             "trial_id": reward.get("trial_id"),
             "entry_id": reward.get("entry_id"),
             "scores": scores,
-            "overall": reward.get("overall"),
+            "overall": _finite_float(reward.get("overall")),
         }
         traj = reward.get("_traj")
         if isinstance(traj, dict):
@@ -1316,10 +1457,10 @@ def _attach_baseline_pairs(
         lift_scores: dict[str, float] = {}
         scores = trial.get("scores") or {}
         for metric in metrics:
-            score = scores.get(metric)
-            base = trial["baseline_scores"].get(metric)
-            if isinstance(score, (int, float)) and isinstance(base, (int, float)):
-                lift_scores[metric] = round(float(score) - float(base), 4)
+            score = _finite_float(scores.get(metric))
+            base = _finite_float(trial["baseline_scores"].get(metric))
+            if score is not None and base is not None:
+                lift_scores[metric] = round(score - base, 4)
         if lift_scores:
             trial["lift_scores"] = lift_scores
 
@@ -1609,8 +1750,8 @@ def _display_label_for_harbor_evidence(evidence: dict[str, Any]) -> str:
 
 
 def _trial_evidence_sort_key(trial: dict[str, Any]) -> tuple[int, str]:
-    overall = trial.get("overall")
-    if isinstance(overall, int | float) and not isinstance(overall, bool):
+    overall = _finite_float(trial.get("overall"))
+    if overall is not None:
         return (0 if overall < 0.8 else 1, f"{overall:.4f}")
     return (2, str(trial.get("entry_id") or trial.get("trial_id") or ""))
 
@@ -1726,22 +1867,20 @@ def _build_conclusions(
         best_name = _pick_best_agent(agents)
         if best_name:
             best = agents[best_name]
-            best_score = best.get("with_skill", 0.0)
-            if not isinstance(best_score, (int, float)):
-                best_score = 0.0
-            lift = best.get("lift")
+            best_score = _finite_float(best.get("with_skill")) or 0.0
+            lift = _finite_float(best.get("lift"))
             conclusions.append(
                 {
                     "severity": "pass" if best_score >= 0.7 else "warn",
                     "title": "Best performing agent",
                     "message": (
                         f"{best_name} leads with overall score {best_score:.2f}"
-                        + (f" and lift {lift:+.2f}." if isinstance(lift, (int, float)) else ".")
+                        + (f" and lift {lift:+.2f}." if lift is not None else ".")
                     ),
                 }
             )
 
-    numeric_dims = [d for d in dimensions if isinstance(d.get("score"), (int, float))]
+    numeric_dims = [d for d in dimensions if _finite_float(d.get("score")) is not None]
     if numeric_dims:
         weakest = min(numeric_dims, key=lambda d: d.get("score", 0.0))
         conclusions.append(
@@ -1758,8 +1897,8 @@ def _build_conclusions(
     failing_trials: list[str] = []
     for agent_name, agent in agents.items():
         for trial in agent.get("trials") or []:
-            overall = trial.get("overall")
-            if overall is None or (isinstance(overall, (int, float)) and overall < pass_threshold):
+            overall = _finite_float(trial.get("overall"))
+            if overall is None or overall < pass_threshold:
                 failing_trials.append(f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}")
     if failing_trials:
         conclusions.append(
@@ -1779,9 +1918,9 @@ def _suggestions_for_dimensions(dimensions: list[dict[str, Any]]) -> list[str]:
     """Default suggestions: target the weakest dimensions (Skill Evaluator parity)."""
     pending: list[tuple[float, str]] = []
     for dim in dimensions:
-        score = dim.get("with_skill", dim.get("score", 0.0))
-        if isinstance(score, (int, float)) and score < 0.7:
-            pending.append((float(score), dim.get("id", "")))
+        score = _finite_float(dim.get("with_skill", dim.get("score", 0.0)))
+        if score is not None and score < 0.7:
+            pending.append((score, dim.get("id", "")))
     pending.sort()
 
     if not pending:
@@ -1798,9 +1937,10 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
     if value is None:
         return 0.50
     try:
-        return float(value)
+        numeric = float(value)
     except (TypeError, ValueError):
         return 0.50
+    return numeric if math.isfinite(numeric) else 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -1819,19 +1959,18 @@ def _weighted(scores: dict[str, Any], evaluators: list[str], weights: list[float
     num = 0.0
     den = 0.0
     for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = scores.get(evaluator)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            num += float(value) * float(weight)
-            den += float(weight)
+        value = _finite_float(scores.get(evaluator))
+        finite_weight = _finite_float(weight)
+        if value is not None and finite_weight is not None:
+            num += value * finite_weight
+            den += finite_weight
     return (num / den) if den > 0 else None
 
 
 def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None:
     entry = precomputed.get(dim_id)
     if isinstance(entry, dict):
-        score = entry.get("score")
-        if isinstance(score, (int, float)) and not isinstance(score, bool):
-            return float(score)
+        return _finite_float(entry.get("score"))
     return None
 
 
@@ -1839,18 +1978,17 @@ def _lift_value(metric: str, lift_data: dict[str, Any]) -> float | None:
     entry = lift_data.get(metric)
     if isinstance(entry, dict):
         candidate = entry.get("delta", entry.get("lift"))
-        return float(candidate) if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) else None
-    if isinstance(entry, (int, float)) and not isinstance(entry, bool):
-        return float(entry)
-    return None
+        return _finite_float(candidate)
+    return _finite_float(entry)
 
 
 def _verdict_from_lift(lift: float | None) -> str:
-    if not isinstance(lift, (int, float)):
+    numeric = _finite_float(lift)
+    if numeric is None:
         return VERDICT_NEUTRAL
-    if lift >= _VERDICT_PASS_THRESHOLD:
+    if numeric >= _VERDICT_PASS_THRESHOLD:
         return VERDICT_PASS
-    if lift <= _VERDICT_FAIL_THRESHOLD:
+    if numeric <= _VERDICT_FAIL_THRESHOLD:
         return VERDICT_FAIL
     return VERDICT_NEUTRAL
 
@@ -1859,9 +1997,7 @@ def _pick_best_agent(agents: dict[str, dict[str, Any]]) -> str:
     eligible = {
         name: agent
         for name, agent in agents.items()
-        if agent.get("execution_status") == "succeeded"
-        and isinstance(agent.get("with_skill"), int | float)
-        and not isinstance(agent.get("with_skill"), bool)
+        if agent.get("execution_status") == "succeeded" and _finite_float(agent.get("with_skill")) is not None
     }
     if not eligible:
         return ""
@@ -1970,9 +2106,9 @@ def _runtime_seconds(engine_result: dict[str, Any] | None) -> float:
     if not isinstance(engine_result, dict):
         return 0.0
     for key in ("runtime_seconds", "elapsed", "duration_seconds", "total_runtime"):
-        value = engine_result.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+        value = _finite_float(engine_result.get(key))
+        if value is not None:
+            return value
     return 0.0
 
 
@@ -1986,12 +2122,12 @@ def _default_attempt_policy() -> dict[str, Any]:
 
 
 def _mean(values: list[float]) -> float | None:
-    numeric = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    numeric = [finite for value in values if (finite := _finite_float(value)) is not None]
     return round(sum(numeric) / len(numeric), 4) if numeric else None
 
 
 def _as_float(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    return _finite_float(value) or 0.0
 
 
 def _as_nonnegative_int(value: Any) -> int:

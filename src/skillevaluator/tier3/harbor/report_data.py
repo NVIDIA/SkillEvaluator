@@ -12,7 +12,10 @@ from __future__ import annotations
 import heapq
 import json
 import logging
-from collections.abc import Iterable
+import os
+import stat
+from collections.abc import Callable, Iterable
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +27,11 @@ _MAX_JSON_BYTES = 2 * 1024 * 1024
 _MAX_JSON_DEPTH = 64
 _MAX_JSON_NODES = 50_000
 _MAX_AGENTS = 64
+_MAX_AGENT_PATHS_SCANNED = 512
 _MAX_TRIALS_PER_CONDITION = 512
+_MAX_TRIAL_PATHS_SCANNED = 4096
 _MAX_STAGED_TASKS = 4096
+_MAX_STAGED_PATHS_SCANNED = 32_768
 _MAX_DATASET_RECORDS = 4096
 _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
@@ -43,6 +49,14 @@ class _JSONLimitError(ValueError):
         super().__init__(code)
         self.code = code
         self.limit = limit
+
+
+class _BoundedDataset(list[dict[str, Any]]):
+    """List-compatible dataset carrying bounded loader diagnostics."""
+
+    def __init__(self, entries: list[dict[str, Any]], diagnostics: list[dict[str, Any]]) -> None:
+        super().__init__(entries)
+        self._report_truncation = {"truncated": True, "reasons": [dict(reason) for reason in diagnostics]}
 
 
 def _record_truncation(
@@ -72,10 +86,62 @@ def _attach_truncation(target: dict[str, Any], diagnostics: list[dict[str, Any]]
     target["_report_truncation"] = {"truncated": True, "reasons": merged}
 
 
-def _bounded_smallest(paths: Iterable[Path], limit: int) -> tuple[list[Path], bool]:
-    """Select paths deterministically without materializing or sorting the full tree."""
-    selected = heapq.nsmallest(limit + 1, paths, key=lambda path: path.as_posix())
-    return selected[:limit], len(selected) > limit
+def _dataset_result(entries: list[dict[str, Any]], diagnostics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _BoundedDataset(entries, diagnostics) if diagnostics else entries
+
+
+def _bounded_smallest(
+    paths: Iterable[Path],
+    limit: int,
+    *,
+    scan_limit: int,
+    predicate: Callable[[Path], bool] | None = None,
+) -> tuple[list[Path], bool, bool]:
+    """Select deterministic paths while bounding both visits and retained paths."""
+    scanned = 0
+
+    def candidates() -> Iterable[Path]:
+        nonlocal scanned
+        for path in islice(paths, scan_limit + 1):
+            scanned += 1
+            if scanned > scan_limit:
+                break
+            if predicate is None or predicate(path):
+                yield path
+
+    selected = heapq.nsmallest(limit + 1, candidates(), key=lambda path: path.as_posix())
+    return selected[:limit], len(selected) > limit, scanned > scan_limit
+
+
+def _bounded_staged_entry_files(tasks_dir: Path) -> tuple[list[Path], bool, bool]:
+    """Find staged entry files without allowing ``rglob`` to hide unbounded visits."""
+    pending = [tasks_dir]
+    matches: list[Path] = []
+    visited = 0
+    scan_truncated = False
+    while pending and not scan_truncated:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as scanner:
+                children = []
+                for child in scanner:
+                    visited += 1
+                    if visited > _MAX_STAGED_PATHS_SCANNED:
+                        scan_truncated = True
+                        break
+                    children.append(child)
+        except OSError:
+            continue
+        for child in sorted(children, key=lambda entry: entry.name, reverse=True):
+            try:
+                if child.is_dir(follow_symlinks=False):
+                    pending.append(Path(child.path))
+                elif child.name == "entry.json" and directory.name == "tests" and child.is_file(follow_symlinks=False):
+                    matches.append(Path(child.path))
+            except OSError:
+                continue
+    selected = heapq.nsmallest(_MAX_STAGED_TASKS + 1, matches, key=lambda path: path.as_posix())
+    return selected[:_MAX_STAGED_TASKS], len(selected) > _MAX_STAGED_TASKS, scan_truncated
 
 
 def _validate_json_tree(value: Any) -> None:
@@ -103,16 +169,24 @@ def _read_bounded_bytes(
     *,
     artifact: str,
 ) -> bytes | None:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        if path.stat().st_size > _MAX_JSON_BYTES:
-            _record_truncation(
-                diagnostics,
-                code="json_bytes",
-                artifact=artifact,
-                limit=_MAX_JSON_BYTES,
-            )
-            return None
-        raw = path.read_bytes()
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                _record_truncation(diagnostics, code="json_file_type", artifact=artifact, limit=0)
+                return None
+            if metadata.st_size > _MAX_JSON_BYTES:
+                _record_truncation(
+                    diagnostics,
+                    code="json_bytes",
+                    artifact=artifact,
+                    limit=_MAX_JSON_BYTES,
+                )
+                return None
+            raw = stream.read(_MAX_JSON_BYTES + 1)
     except OSError:
         return None
     if len(raw) > _MAX_JSON_BYTES:
@@ -143,6 +217,7 @@ def _decode_bounded_json(
     diagnostics: list[dict[str, Any]],
     *,
     artifact: str,
+    strict_syntax: bool = False,
 ) -> Any:
     try:
         value = json.loads(raw)
@@ -158,7 +233,13 @@ def _decode_bounded_json(
     except _JSONLimitError as exc:
         _record_truncation(diagnostics, code=exc.code, artifact=artifact, limit=exc.limit)
         return _INVALID_JSON
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError:
+        if strict_syntax:
+            raise
+        return _INVALID_JSON
+    except UnicodeDecodeError:
+        if strict_syntax:
+            raise
         return _INVALID_JSON
     return value
 
@@ -196,7 +277,12 @@ def _load_bounded_jsonl(raw: bytes, diagnostics: list[dict[str, Any]]) -> list[A
     for line in raw.splitlines():
         if not line.strip():
             continue
-        value = _decode_bounded_json(line, diagnostics, artifact="dataset_record")
+        value = _decode_bounded_json(
+            line,
+            diagnostics,
+            artifact="dataset_record",
+            strict_syntax=True,
+        )
         if value is _INVALID_JSON:
             continue
         records.append(value)
@@ -257,9 +343,11 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
     agents: dict[str, dict[str, Any]] = {}
     selection_diagnostics: list[dict[str, Any]] = []
     try:
-        agent_dirs, agents_truncated = _bounded_smallest(
-            (path for path in results_dir.iterdir() if path.is_dir() and not path.name.startswith("_")),
+        agent_dirs, agents_truncated, agent_scan_truncated = _bounded_smallest(
+            results_dir.iterdir(),
             _MAX_AGENTS,
+            scan_limit=_MAX_AGENT_PATHS_SCANNED,
+            predicate=lambda path: path.is_dir() and not path.name.startswith("_"),
         )
     except OSError:
         return agents
@@ -269,6 +357,13 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
             code="agent_limit",
             artifact="agents",
             limit=_MAX_AGENTS,
+        )
+    if agent_scan_truncated:
+        _record_truncation(
+            selection_diagnostics,
+            code="agent_scan_limit",
+            artifact="agents",
+            limit=_MAX_AGENT_PATHS_SCANNED,
         )
 
     for agent_dir in agent_dirs:
@@ -344,18 +439,27 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
             trials_dir = agent_dir / variant_dir_name / "trials"
             if trials_dir.exists():
                 try:
-                    trial_dirs, trials_truncated = _bounded_smallest(
-                        (path for path in trials_dir.iterdir() if path.is_dir()),
+                    trial_dirs, trials_truncated, trial_scan_truncated = _bounded_smallest(
+                        trials_dir.iterdir(),
                         _MAX_TRIALS_PER_CONDITION,
+                        scan_limit=_MAX_TRIAL_PATHS_SCANNED,
+                        predicate=lambda path: path.is_dir(),
                     )
                 except OSError:
-                    trial_dirs, trials_truncated = [], False
+                    trial_dirs, trials_truncated, trial_scan_truncated = [], False, False
                 if trials_truncated:
                     _record_truncation(
                         agent_diagnostics,
                         code="trial_limit",
                         artifact=variant_dir_name,
                         limit=_MAX_TRIALS_PER_CONDITION,
+                    )
+                if trial_scan_truncated:
+                    _record_truncation(
+                        agent_diagnostics,
+                        code="trial_scan_limit",
+                        artifact=variant_dir_name,
+                        limit=_MAX_TRIAL_PATHS_SCANNED,
                     )
                 for trial_dir in trial_dirs:
                     reward_file = trial_dir / "reward.json"
@@ -478,11 +582,21 @@ def load_dataset(skill_path: Path | None) -> list[dict[str, Any]]:
                         import yaml
 
                         payload = yaml.safe_load(raw)
-                        _validate_json_tree(payload)
-                return normalize_dataset_entries(_bounded_dataset_payload(payload, diagnostics))
-            except (json.JSONDecodeError, OSError, RecursionError, ValueError):
+                        try:
+                            _validate_json_tree(payload)
+                        except _JSONLimitError as exc:
+                            _record_truncation(
+                                diagnostics,
+                                code=exc.code,
+                                artifact="dataset",
+                                limit=exc.limit,
+                            )
+                            continue
+                entries = normalize_dataset_entries(_bounded_dataset_payload(payload, diagnostics))
+                return _dataset_result(entries, diagnostics)
+            except (json.JSONDecodeError, OSError, RecursionError, UnicodeDecodeError, ValueError):
                 pass
-    return []
+    return _dataset_result([], diagnostics)
 
 
 def load_staged_harbor_dataset(results_dir: Path) -> list[dict[str, Any]]:
@@ -494,10 +608,7 @@ def load_staged_harbor_dataset(results_dir: Path) -> list[dict[str, Any]]:
     if not tasks_dir.exists():
         return entries
     try:
-        entry_files, tasks_truncated = _bounded_smallest(
-            tasks_dir.rglob("tests/entry.json"),
-            _MAX_STAGED_TASKS,
-        )
+        entry_files, tasks_truncated, task_scan_truncated = _bounded_staged_entry_files(tasks_dir)
     except OSError:
         return entries
     if tasks_truncated:
@@ -506,6 +617,13 @@ def load_staged_harbor_dataset(results_dir: Path) -> list[dict[str, Any]]:
             code="staged_task_limit",
             artifact="staged_tasks",
             limit=_MAX_STAGED_TASKS,
+        )
+    if task_scan_truncated:
+        _record_truncation(
+            diagnostics,
+            code="staged_task_scan_limit",
+            artifact="staged_tasks",
+            limit=_MAX_STAGED_PATHS_SCANNED,
         )
     for entry_file in entry_files:
         entry = _load_bounded_json(entry_file, diagnostics, artifact="staged_entry")
@@ -526,4 +644,4 @@ def load_staged_harbor_dataset(results_dir: Path) -> list[dict[str, Any]]:
                     limit=_MAX_DATASET_RECORDS,
                 )
             break
-    return entries
+    return _dataset_result(entries, diagnostics)

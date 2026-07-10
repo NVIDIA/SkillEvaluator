@@ -184,3 +184,97 @@ def test_staged_tasks_and_dataset_records_are_capped_deterministically(
     assert [entry["id"] for entry in dataset] == ["case-c", "case-a"]
     assert "staged_task_limit" in caplog.text
     assert "dataset_record_limit" in caplog.text
+
+
+def test_json_reader_does_not_use_unbounded_path_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text('{"ok": true}', encoding="utf-8")
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda _self: pytest.fail("bounded JSON loading must not call Path.read_bytes"),
+    )
+
+    diagnostics: list[dict] = []
+    loaded = report_data._load_bounded_json(artifact, diagnostics, artifact="test")
+
+    assert loaded == {"ok": True}
+    assert diagnostics == []
+
+
+def test_path_selection_stops_at_the_visit_budget() -> None:
+    visited: list[int] = []
+
+    def paths():
+        for index in range(100):
+            visited.append(index)
+            yield Path(f"item-{index:03d}")
+
+    selected, selection_truncated, scan_truncated = report_data._bounded_smallest(paths(), 2, scan_limit=3)
+
+    assert [path.name for path in selected] == ["item-000", "item-001"]
+    assert selection_truncated is True
+    assert scan_truncated is True
+    assert visited == [0, 1, 2, 3]
+
+
+def test_malformed_jsonl_rejects_the_entire_candidate(tmp_path: Path) -> None:
+    evals_dir = tmp_path / "skill" / "evals"
+    evals_dir.mkdir(parents=True)
+    (evals_dir / "evals.jsonl").write_text(
+        '{"id": "case-a"}\n{"id": broken}\n{"id": "case-b"}\n',
+        encoding="utf-8",
+    )
+
+    assert report_data.load_dataset(tmp_path / "skill") == []
+
+
+def test_yaml_json_shape_limit_emits_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(report_data, "_MAX_JSON_DEPTH", 2)
+    evals_dir = tmp_path / "skill" / "evals"
+    evals_dir.mkdir(parents=True)
+    (evals_dir / "evals.yaml").write_text(
+        "evals:\n  - id: case-a\n    nested:\n      deeper: value\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger=report_data.__name__):
+        dataset = report_data.load_dataset(tmp_path / "skill")
+
+    assert dataset == []
+    assert "json_depth" in caplog.text
+
+
+def test_loader_truncation_reaches_the_canonical_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+
+    monkeypatch.setattr(report_data, "_MAX_TRIALS_PER_CONDITION", 1)
+    monkeypatch.setattr(report_data, "_MAX_DATASET_RECORDS", 1)
+    agent_dir = tmp_path / "run" / "codex"
+    _write_summary(agent_dir)
+    _write_trial(agent_dir, "case-a", {"entry_id": "case-a", "accuracy": 1.0})
+    _write_trial(agent_dir, "case-b", {"entry_id": "case-b", "accuracy": 1.0})
+    evals_dir = tmp_path / "skill" / "evals"
+    evals_dir.mkdir(parents=True)
+    (evals_dir / "evals.json").write_text(
+        json.dumps([{"id": "case-a"}, {"id": "case-b"}]),
+        encoding="utf-8",
+    )
+
+    agents = report_data.load_agent_data(tmp_path / "run")
+    dataset = report_data.load_dataset(tmp_path / "skill")
+    payload = build_agent_eval_payload("skill", agents, dataset=dataset, use_llm_judge=False)
+
+    assert payload is not None
+    reasons = payload["report_truncation"]["artifact_loading"]
+    assert {reason["code"] for reason in reasons} == {"dataset_record_limit", "trial_limit"}

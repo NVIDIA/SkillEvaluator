@@ -95,6 +95,7 @@ class _ReportBudget:
     raw_rewards_remaining: int = _MAX_RAW_TRIAL_REWARDS_TOTAL
     omitted: dict[str, int] = field(default_factory=dict)
     deduplicated_evidence: int = 0
+    artifact_loading: list[dict[str, Any]] = field(default_factory=list)
 
     def omit(self, section: str, count: int = 1) -> None:
         if count > 0:
@@ -102,7 +103,7 @@ class _ReportBudget:
 
     @property
     def truncated(self) -> bool:
-        return bool(self.omitted)
+        return bool(self.omitted or self.artifact_loading)
 
     def signal(self) -> dict[str, Any]:
         signal: dict[str, Any] = {
@@ -124,7 +125,47 @@ class _ReportBudget:
         }
         if self.deduplicated_evidence:
             signal["deduplicated_evidence"] = self.deduplicated_evidence
+        if self.artifact_loading:
+            signal["artifact_loading"] = list(self.artifact_loading)
         return signal
+
+
+_MAX_ARTIFACT_LOADING_REASONS = 16
+
+
+def _artifact_loading_reasons(
+    agents: dict[str, dict[str, Any]],
+    dataset: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Collect only bounded, schema-checked loader diagnostics for the report."""
+    markers = [info.get("_report_truncation") for info in agents.values() if isinstance(info, dict)]
+    markers.append(getattr(dataset, "_report_truncation", None))
+    reasons: list[dict[str, Any]] = []
+    for marker in markers:
+        if not isinstance(marker, dict) or not isinstance(marker.get("reasons"), list):
+            continue
+        for candidate in marker["reasons"]:
+            if not isinstance(candidate, dict):
+                continue
+            code = candidate.get("code")
+            artifact = candidate.get("artifact")
+            limit = candidate.get("limit")
+            if (
+                not isinstance(code, str)
+                or not isinstance(artifact, str)
+                or not isinstance(limit, int)
+                or isinstance(limit, bool)
+                or limit < 0
+                or len(code) > 64
+                or len(artifact) > 64
+            ):
+                continue
+            reason = {"code": code, "artifact": artifact, "limit": limit}
+            if reason not in reasons:
+                reasons.append(reason)
+            if len(reasons) >= _MAX_ARTIFACT_LOADING_REASONS:
+                return reasons
+    return reasons
 
 
 def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None) -> dict[str, Any]:
@@ -385,7 +426,7 @@ def build_agent_eval_payload(
     from skillevaluator.tier3.harbor.report_data import metrics_for_agents
 
     metrics = metrics_for_agents(agents)
-    report_budget = _ReportBudget()
+    report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]

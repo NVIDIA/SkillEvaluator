@@ -216,6 +216,25 @@ class TestCLIReporter:
 
         assert "[/red]" in plain_output
 
+    def test_failed_tier2_scan_is_reported_as_an_error_not_a_duplicate(self, tmp_path: Path, monkeypatch) -> None:
+        from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+        from skillevaluator.deduplication.utils import skill_collector
+
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 2)
+        skill = tmp_path / "over-budget"
+        skill.mkdir()
+        for name in ("SKILL.md", "a.bin", "b.bin"):
+            (skill / name).write_text("content", encoding="utf-8")
+
+        result = IntraSkillValidator().validate(skill)
+        assert result.findings[0].check_name == "path_count_limit"
+
+        output = re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result]))
+
+        assert "Errors:" in output
+        assert "Skill tree contains more than 2 paths." in output
+        assert "duplicates found" not in output.lower()
+
     def test_render_escapes_markup_in_success_details(self) -> None:
         result = ValidationResult(
             validator_name="SIMILARITY",

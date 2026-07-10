@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -437,8 +437,43 @@ def _collect_files_anchored(
     candidates: list[_CandidateFile] = []
     declared_total_bytes = 0
 
+    def _raise_traversal_error(error: OSError) -> None:
+        raise error
+
+    def _iter_paths(root: Path) -> Iterator[Path]:
+        # Prune the excluded dirs DURING traversal, not just when filtering
+        # the discovered list: generated artifacts (evals/results snapshots)
+        # must not consume the path budget, or a well-used skill fails the
+        # path-count limit on content it was never going to scan.
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_traversal_error):
+            base = Path(dirpath)
+            kept: list[str] = []
+            for name in dirnames:
+                directory = base / name
+                rel_path = directory.relative_to(root).as_posix()
+                if name in excluded:
+                    logger.debug("Skipping excluded path: %s", rel_path)
+                    continue
+                # ``os.walk(..., followlinks=False)`` does not follow normal
+                # symlinks, but Windows directory junctions are separate
+                # reparse points and may still be traversed. Reject every
+                # retained redirect before allowing the walk to recurse.
+                if _is_link_or_reparse(directory, rel_path):
+                    raise SkillCollectionError(
+                        "unsafe_path",
+                        f"Refusing symbolic link or reparse point: {rel_path}",
+                        rel_path=rel_path,
+                        suggestion="Replace the link with a regular directory stored inside the skill directory.",
+                    )
+                kept.append(name)
+            dirnames[:] = kept
+            for name in kept:
+                yield base / name
+            for name in filenames:
+                yield base / name
+
     try:
-        discovered_paths = list(islice(skill_root.rglob("*"), CONTENT_DEDUP_MAX_DISCOVERED_PATHS + 1))
+        discovered_paths = list(islice(_iter_paths(skill_root), CONTENT_DEDUP_MAX_DISCOVERED_PATHS + 1))
     except OSError as e:
         raise SkillCollectionError(
             "path_access_error",

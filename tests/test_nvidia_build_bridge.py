@@ -738,6 +738,83 @@ def test_build_request_timeout_allows_slow_agent_models() -> None:
     assert bridge.BACKEND_CONNECT_TIMEOUT_SECONDS >= 120
 
 
+def test_backend_dns_resolution_obeys_deadline_without_late_request_or_resolver_growth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    backend_received = Event()
+    backend_authorizations: list[str | None] = []
+    resolver_calls = 0
+
+    class BuildHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            backend_authorizations.append(self.headers.get("Authorization"))
+            backend_received.set()
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BuildHandler)
+    backend_thread = Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+
+    def slow_resolution(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        time.sleep(0.5)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", backend.server_port),
+            )
+        ]
+
+    config = bridge.BridgeConfig(
+        api_key="credential-must-not-reach-backend",
+        build_base_url=bridge.PRODUCTION_BUILD_BASE_URL,
+        host="127.0.0.1",
+        port=0,
+        log_path=tmp_path / "backend-dns-deadline.log",
+        readiness_token="backend-dns-deadline-token",
+        client_token="client-token",
+        allowed_model="nvidia/model",
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_build_endpoint",
+        lambda _config: f"http://slow-resolver.example:{backend.server_port}{BUILD_CHAT_COMPLETIONS_PATH}",
+    )
+    monkeypatch.setattr(bridge, "BACKEND_CONNECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(bridge.socket, "getaddrinfo", slow_resolution)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+
+    elapsed: list[float] = []
+    try:
+        for _ in range(2):
+            started = time.monotonic()
+            with pytest.raises(bridge._BackendError) as caught:
+                bridge._request_build(config, {"model": "nvidia/model", "messages": []})
+            elapsed.append(time.monotonic() - started)
+            assert caught.value.category == "timeout"
+            assert caught.value.status_code == 504
+        time.sleep(0.55)
+    finally:
+        backend.shutdown()
+        backend.server_close()
+        backend_thread.join(timeout=2)
+
+    assert all(duration < 0.2 for duration in elapsed)
+    assert resolver_calls == 1, "a stuck resolver must not create an unbounded thread or work queue"
+    assert backend_received.is_set() is False
+    assert backend_authorizations == []
+
+
 def test_backend_slow_drip_obeys_an_absolute_deadline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class SlowBuildHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from queue import Empty, Queue
 from threading import BoundedSemaphore, Condition, Lock, Thread, Timer
 from typing import Any, ClassVar
 from urllib.error import HTTPError, URLError
@@ -48,6 +49,7 @@ MAX_REQUESTS_PER_BRIDGE = 256
 MAX_SECRET_FILE_BYTES = 16_384
 IN_PROCESS_START_TIMEOUT_SECONDS = 5.0
 MAX_CHAT_TOOL_NAME_LENGTH = 64
+_BACKEND_DNS_RESOLVER_SLOT = BoundedSemaphore(1)
 DROPPED_RESPONSES_SERVER_TOOL_TYPES = {"web_search", "web_search_preview"}
 DROPPED_CLAUDE_CODE_ORCHESTRATION_TOOLS = {
     "Agent",
@@ -527,11 +529,73 @@ class _DeadlineHTTPSHandler(HTTPSHandler):
         return _DeadlineHTTPSConnection(host, deadline=self._deadline, **kwargs)
 
 
-class _DeadlineHTTPConnection(HTTPConnection):
+def _resolve_backend_before_deadline(host: str, port: int, deadline: _BackendDeadline) -> list[tuple[Any, ...]]:
+    """Resolve one backend host without allowing DNS to outlive the request deadline."""
+    if not _BACKEND_DNS_RESOLVER_SLOT.acquire(timeout=deadline.remaining()):
+        raise TimeoutError("Build backend deadline expired")
+
+    outcome: Queue[Any] = Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            outcome.put_nowait(socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM))
+        except BaseException as error:
+            outcome.put_nowait(error)
+        finally:
+            _BACKEND_DNS_RESOLVER_SLOT.release()
+
+    worker = Thread(target=resolve, name="skillevaluator-build-backend-dns", daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        _BACKEND_DNS_RESOLVER_SLOT.release()
+        raise
+
+    try:
+        resolved = outcome.get(timeout=deadline.remaining())
+    except Empty:
+        raise TimeoutError("Build backend deadline expired") from None
+    if isinstance(resolved, BaseException):
+        raise resolved
+    return list(resolved)
+
+
+class _DeadlineConnectionMixin:
     def __init__(self, host: str, *, deadline: _BackendDeadline, **kwargs: Any) -> None:
         self._deadline = deadline
         super().__init__(host, **kwargs)
+        self._create_connection = self._create_connection_before_deadline
         deadline.register_connection(self)
+
+    def _create_connection_before_deadline(
+        self,
+        address: tuple[str, int],
+        _timeout: object,
+        source_address: tuple[str, int] | None,
+    ) -> socket.socket:
+        host, port = address
+        addresses = _resolve_backend_before_deadline(host, port, self._deadline)
+        self._deadline.remaining()
+        last_error: OSError | None = None
+        for family, socktype, proto, _canonname, socket_address in addresses:
+            self._deadline.remaining()
+            candidate: socket.socket | None = None
+            try:
+                candidate = socket.socket(family, socktype, proto)
+                candidate.settimeout(self._deadline.remaining())
+                if source_address:
+                    candidate.bind(source_address)
+                candidate.connect(socket_address)
+                candidate.settimeout(self._deadline.remaining())
+                return candidate
+            except OSError as error:
+                last_error = error
+                if candidate is not None:
+                    candidate.close()
+
+        if last_error is not None:
+            raise last_error
+        raise OSError("getaddrinfo returned no addresses")
 
     def connect(self) -> None:
         self.timeout = self._deadline.remaining()
@@ -540,17 +604,21 @@ class _DeadlineHTTPConnection(HTTPConnection):
             self.sock.settimeout(self._deadline.remaining())
 
 
-class _DeadlineHTTPSConnection(HTTPSConnection):
-    def __init__(self, host: str, *, deadline: _BackendDeadline, **kwargs: Any) -> None:
-        self._deadline = deadline
-        super().__init__(host, **kwargs)
-        deadline.register_connection(self)
+class _DeadlineHTTPConnection(_DeadlineConnectionMixin, HTTPConnection):
+    pass
 
+
+class _DeadlineHTTPSConnection(_DeadlineConnectionMixin, HTTPSConnection):
     def connect(self) -> None:
+        """Refresh the deadline between proxy tunneling and the TLS handshake."""
         self.timeout = self._deadline.remaining()
-        super().connect()
-        if self.sock is not None:
-            self.sock.settimeout(self._deadline.remaining())
+        HTTPConnection.connect(self)
+        if self.sock is None:
+            raise OSError("Build backend connection did not create a socket")
+        self.sock.settimeout(self._deadline.remaining())
+        server_hostname = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+        self.sock.settimeout(self._deadline.remaining())
 
 
 def _handler_for(config: BridgeConfig) -> type[NvidiaBuildBridgeHandler]:

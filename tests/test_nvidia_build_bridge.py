@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from http.client import RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
@@ -268,7 +269,13 @@ def _local_test_transport(endpoint: str, body: bytes) -> bytes:
 def _read_raw_http_response(client: socket.socket) -> str:
     chunks: list[bytes] = []
     client.settimeout(2)
-    while chunk := client.recv(4096):
+    while True:
+        try:
+            chunk = client.recv(4096)
+        except ConnectionResetError:
+            break
+        if not chunk:
+            break
         chunks.append(chunk)
     return b"".join(chunks).decode("utf-8")
 
@@ -372,6 +379,27 @@ def test_bridge_rejects_a_request_budget_above_the_fixed_security_limit() -> Non
 
     with pytest.raises(ValueError, match="max_requests"):
         bridge.serve(config)
+
+
+@pytest.mark.parametrize("value", [True, 0, bridge.MAX_OUTPUT_TOKENS_PER_REQUEST + 1])
+def test_bridge_rejects_an_invalid_configured_output_token_ceiling(value: object) -> None:
+    config = bridge.BridgeConfig(
+        api_key="test-token-ceiling-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        host="127.0.0.1",
+        port=0,
+        log_path=Path("nvidia-build-bridge.log"),
+        readiness_token="test-readiness-token",
+        request_transport=_local_test_transport,
+        max_output_tokens=value,  # type: ignore[arg-type]
+    )
+    server = None
+    try:
+        with pytest.raises(ValueError, match="max_output_tokens"):
+            server = bridge._create_bridge_server(config)
+    finally:
+        if server is not None:
+            server.server_close()
 
 
 @pytest.fixture
@@ -675,8 +703,148 @@ def test_in_process_bridges_use_distinct_capabilities_and_close_cleanly(tmp_path
             probe.bind(("127.0.0.1", port))
 
 
+def test_in_process_bridge_enforces_its_configured_output_token_ceiling(tmp_path: Path) -> None:
+    backend_requests: list[dict[str, object]] = []
+
+    def transport(_endpoint: str, body: bytes) -> bytes:
+        backend_requests.append(json.loads(body))
+        return json.dumps(CHAT_TEXT_RESPONSE).encode("utf-8")
+
+    running = bridge.start_in_process_bridge(
+        api_key="test-token-limit-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        log_path=tmp_path / "token-limit.log",
+        request_transport=transport,
+        max_output_tokens=8,
+    )
+    headers = {"Authorization": f"Bearer {running.client_token}"}
+    try:
+        for path, field, payload in (
+            ("/v1/responses", "max_output_tokens", {"model": "nvidia/model", "input": "Hello"}),
+            ("/v1/messages", "max_tokens", {"model": "nvidia/model", "messages": []}),
+        ):
+            rejected = {**payload, field: 9}
+            accepted = {**payload, field: 8}
+
+            assert _request(f"{running.origin}{path}", rejected, headers=headers)[0] == 400
+            assert _request(f"{running.origin}{path}", accepted, headers=headers)[0] == 200
+    finally:
+        running.close()
+
+    assert [request["max_tokens"] for request in backend_requests] == [8, 8]
+
+
 def test_build_request_timeout_allows_slow_agent_models() -> None:
     assert bridge.BACKEND_CONNECT_TIMEOUT_SECONDS >= 120
+
+
+def test_backend_slow_drip_obeys_an_absolute_deadline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class SlowBuildHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            body = b"null"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for index, byte in enumerate(body):
+                if index:
+                    time.sleep(0.03)
+                try:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                except OSError:
+                    break
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), SlowBuildHandler)
+    backend_thread = Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+    config = bridge.BridgeConfig(
+        api_key="test-backend-deadline-key",
+        build_base_url=bridge.PRODUCTION_BUILD_BASE_URL,
+        host="127.0.0.1",
+        port=0,
+        log_path=tmp_path / "backend-deadline.log",
+        readiness_token="backend-deadline-token",
+        client_token="client-token",
+        allowed_model="nvidia/model",
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_build_endpoint",
+        lambda _config: f"http://127.0.0.1:{backend.server_port}{BUILD_CHAT_COMPLETIONS_PATH}",
+    )
+    monkeypatch.setattr(bridge, "BACKEND_CONNECT_TIMEOUT_SECONDS", 0.05)
+    try:
+        with pytest.raises(bridge._BackendError) as caught:
+            bridge._request_build(config, {"model": "nvidia/model", "messages": []})
+    finally:
+        backend.shutdown()
+        backend.server_close()
+        backend_thread.join(timeout=2)
+
+    assert caught.value.category == "timeout"
+    assert caught.value.status_code == 504
+
+
+def test_backend_slow_drip_response_headers_are_interrupted_at_the_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class SlowBuildHeadersHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            response = b"".join(
+                (
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Slow: ",
+                    b"x" * 160,
+                    b"\r\nContent-Length: 4\r\n\r\nnull",
+                )
+            )
+            for byte in response:
+                try:
+                    self.connection.sendall(bytes([byte]))
+                except OSError:
+                    break
+                time.sleep(0.01)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), SlowBuildHeadersHandler)
+    backend_thread = Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+    config = bridge.BridgeConfig(
+        api_key="test-backend-header-deadline-key",
+        build_base_url=bridge.PRODUCTION_BUILD_BASE_URL,
+        host="127.0.0.1",
+        port=0,
+        log_path=tmp_path / "backend-header-deadline.log",
+        readiness_token="backend-header-deadline-token",
+        client_token="client-token",
+        allowed_model="nvidia/model",
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_build_endpoint",
+        lambda _config: f"http://127.0.0.1:{backend.server_port}{BUILD_CHAT_COMPLETIONS_PATH}",
+    )
+    monkeypatch.setattr(bridge, "BACKEND_CONNECT_TIMEOUT_SECONDS", 0.05)
+    started = time.monotonic()
+    try:
+        with pytest.raises(bridge._BackendError) as caught:
+            bridge._request_build(config, {"model": "nvidia/model", "messages": []})
+    finally:
+        elapsed = time.monotonic() - started
+        backend.shutdown()
+        backend.server_close()
+        backend_thread.join(timeout=2)
+
+    assert caught.value.category == "timeout"
+    assert caught.value.status_code == 504
+    assert elapsed < 0.5
 
 
 def test_in_process_close_waits_for_active_backend_request(tmp_path: Path) -> None:
@@ -696,15 +864,19 @@ def test_in_process_close_waits_for_active_backend_request(tmp_path: Path) -> No
         request_transport=transport,
     )
     request_result: list[int] = []
+    request_aborted = Event()
 
     def make_request() -> None:
-        request_result.append(
-            _request(
-                f"{running.origin}/v1/responses",
-                {"model": "nvidia/model", "input": "Hello"},
-                headers={"Authorization": f"Bearer {running.client_token}"},
-            )[0]
-        )
+        try:
+            request_result.append(
+                _request(
+                    f"{running.origin}/v1/responses",
+                    {"model": "nvidia/model", "input": "Hello"},
+                    headers={"Authorization": f"Bearer {running.client_token}"},
+                )[0]
+            )
+        except (OSError, RemoteDisconnected, urllib.error.URLError):
+            request_aborted.set()
 
     request_thread = Thread(target=make_request)
     close_thread = Thread(target=lambda: (running.close(), close_finished.set()))
@@ -718,10 +890,66 @@ def test_in_process_close_waits_for_active_backend_request(tmp_path: Path) -> No
     request_thread.join(timeout=2)
     close_thread.join(timeout=2)
 
-    assert request_result == [200]
+    assert request_result == []
+    assert request_aborted.is_set()
     assert close_finished.is_set()
     assert not request_thread.is_alive()
     assert not close_thread.is_alive()
+
+
+def test_in_process_close_force_drains_a_slow_header_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def transport(_endpoint: str, _body: bytes) -> bytes:
+        return json.dumps(CHAT_TEXT_RESPONSE).encode("utf-8")
+
+    running = bridge.start_in_process_bridge(
+        api_key="test-slow-header-close-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        log_path=tmp_path / "slow-header-close.log",
+        request_transport=transport,
+    )
+    port = int(urllib.parse.urlsplit(running.origin).port or 0)
+    monkeypatch.setattr(bridge, "REQUEST_HEADER_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(bridge, "BACKEND_CONNECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(bridge, "IN_PROCESS_START_TIMEOUT_SECONDS", 0.05)
+    stop_sending = Event()
+    client = socket.create_connection(("127.0.0.1", port), timeout=2)
+
+    def drip_headers() -> None:
+        while not stop_sending.is_set():
+            try:
+                client.sendall(b"P")
+            except OSError:
+                return
+            time.sleep(0.015)
+
+    sender = Thread(target=drip_headers)
+    sender.start()
+    close_error: BaseException | None = None
+    try:
+        deadline = time.monotonic() + 1
+        while running._server.active_workers == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert running._server.active_workers == 1
+        try:
+            running.close()
+        except BaseException as error:
+            close_error = error
+    finally:
+        stop_sending.set()
+        client.close()
+        sender.join(timeout=1)
+        assert not sender.is_alive()
+        if not running._closed:
+            running.close()
+
+    assert close_error is None
+    assert running._closed is True
+    assert running._server.active_workers == 0
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", port))
 
 
 def test_ready_file_records_dynamic_origin_and_is_private(bridge_services: _BridgeServices) -> None:
@@ -1230,6 +1458,29 @@ def test_oversized_request_is_a_structured_413(bridge_services: _BridgeServices)
     assert json.loads(body)["error"]["type"] == "request_too_large"
 
 
+def test_translated_request_expansion_is_rejected_before_build_credentials_are_used(
+    bridge_services: _BridgeServices,
+) -> None:
+    payload = {"model": "nvidia/model", "input": chr(0x1F600) * 249_900}
+    incoming_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    translated_body = json.dumps(responses_to_chat_request(payload), separators=(",", ":")).encode("utf-8")
+    assert len(incoming_body) <= bridge.MAX_REQUEST_BYTES
+    assert len(translated_body) > bridge.MAX_REQUEST_BYTES
+    request = urllib.request.Request(
+        f"{bridge_services.url}/v1/responses",
+        data=incoming_body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urllib.request.urlopen(request, timeout=2)
+
+    assert caught.value.code == 413
+    assert json.loads(caught.value.read())["error"]["type"] == "request_too_large"
+    assert bridge_services.build.requests == []  # type: ignore[attr-defined]
+
+
 def test_incomplete_request_body_times_out_with_a_structured_408(
     bridge_services: _BridgeServices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1243,6 +1494,28 @@ def test_incomplete_request_body_times_out_with_a_structured_408(
     status_line, body = response.split("\r\n\r\n", maxsplit=1)
     assert " 408 " in status_line
     assert json.loads(body)["error"]["type"] == "request_timeout"
+
+
+def test_slow_drip_request_body_obeys_an_absolute_deadline(
+    bridge_services: _BridgeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge, "REQUEST_READ_TIMEOUT_SECONDS", 0.05)
+    body = json.dumps({"model": "nvidia/model", "input": "Hello"}, separators=(",", ":")).encode("utf-8")
+    with socket.create_connection(("127.0.0.1", bridge_services.port), timeout=2) as client:
+        client.sendall(
+            f"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+        )
+        for byte in body:
+            try:
+                client.sendall(bytes([byte]))
+            except OSError:
+                break
+            time.sleep(0.015)
+        response = _read_raw_http_response(client)
+
+    status_line, response_body = response.split("\r\n\r\n", maxsplit=1)
+    assert " 408 " in status_line
+    assert json.loads(response_body)["error"]["type"] == "request_timeout"
 
 
 def test_partial_headers_time_out_without_exceeding_the_worker_bound(
@@ -1267,6 +1540,38 @@ def test_partial_headers_time_out_without_exceeding_the_worker_bound(
     finally:
         for client in clients:
             client.close()
+
+
+def test_slow_drip_request_line_and_headers_obey_an_absolute_deadline(
+    bridge_services: _BridgeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge, "REQUEST_HEADER_TIMEOUT_SECONDS", 0.05)
+    stop_sending = Event()
+    with socket.create_connection(("127.0.0.1", bridge_services.port), timeout=2) as client:
+
+        def drip_headers() -> None:
+            while not stop_sending.is_set():
+                try:
+                    client.sendall(b"P")
+                except OSError:
+                    return
+                time.sleep(0.015)
+
+        sender = Thread(target=drip_headers)
+        sender.start()
+        try:
+            deadline = time.monotonic() + 1
+            while bridge_services.bridge_server.active_workers == 0 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert bridge_services.bridge_server.active_workers == 1
+            deadline = time.monotonic() + 1
+            while bridge_services.bridge_server.active_workers and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert bridge_services.bridge_server.active_workers == 0
+        finally:
+            stop_sending.set()
+            sender.join(timeout=1)
+            assert not sender.is_alive()
 
 
 def test_oversized_backend_response_is_a_structured_502(bridge_services: _BridgeServices) -> None:
@@ -1303,6 +1608,22 @@ def test_backend_json_recursion_is_a_safe_structured_502(
 def test_routes_are_relative_to_build_base_url() -> None:
     assert BUILD_CHAT_COMPLETIONS_PATH == "/chat/completions"
     assert HEALTH_PATH == "/healthz"
+
+
+@pytest.mark.parametrize("protocol", ["responses", "anthropic"])
+@pytest.mark.parametrize("value", [True, False, None, "16", 1.5, 0, -1, 10**100])
+def test_protocol_translation_rejects_invalid_output_token_limits(protocol: str, value: object) -> None:
+    if protocol == "responses":
+        payload = {"model": "nvidia/model", "max_output_tokens": value}
+        translator = responses_to_chat_request
+        field = "max_output_tokens"
+    else:
+        payload = {"model": "nvidia/model", "messages": [], "max_tokens": value}
+        translator = anthropic_to_chat_request
+        field = "max_tokens"
+
+    with pytest.raises(BridgePayloadError, match=rf"^{field} must be an integer between 1 and "):
+        translator(payload)
 
 
 def test_unsupported_responses_tool_error_does_not_echo_client_fields() -> None:
@@ -2214,6 +2535,7 @@ def test_bridge_main_consumes_api_key_file_before_serving(monkeypatch: pytest.Mo
         observed["client_token"] = config.client_token
         observed["allowed_model"] = config.allowed_model
         observed["max_requests"] = config.max_requests
+        observed["max_output_tokens"] = config.max_output_tokens
         observed["ready_file"] = ready_file
         observed["key_file_exists"] = key_file.exists()
         observed["client_token_file_exists"] = client_token_file.exists()
@@ -2233,6 +2555,8 @@ def test_bridge_main_consumes_api_key_file_before_serving(monkeypatch: pytest.Mo
             "nvidia/test-model",
             "--max-requests",
             "17",
+            "--max-output-tokens",
+            "4096",
             "--port",
             "0",
             "--ready-file",
@@ -2249,6 +2573,7 @@ def test_bridge_main_consumes_api_key_file_before_serving(monkeypatch: pytest.Mo
         "client_token": "per-run-client-token",
         "allowed_model": "nvidia/test-model",
         "max_requests": 17,
+        "max_output_tokens": 4096,
         "ready_file": ready_file,
         "key_file_exists": False,
         "client_token_file_exists": False,

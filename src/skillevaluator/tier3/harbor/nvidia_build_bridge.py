@@ -11,18 +11,21 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
 import sys
 import time
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import BoundedSemaphore, Condition, Lock, Thread
+from threading import BoundedSemaphore, Condition, Lock, Thread, Timer
 from typing import Any, ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPHandler, HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 BUILD_CHAT_COMPLETIONS_PATH = "/chat/completions"
 HEALTH_PATH = "/healthz"
@@ -34,6 +37,9 @@ PRODUCTION_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 TEST_API_KEY_PREFIX = "test-"
 MAX_REQUEST_BYTES = 1_000_000
 MAX_BACKEND_RESPONSE_BYTES = 1_000_000
+# A trusted run may choose a lower limit; this generous fixed guard prevents
+# unbounded integer serialization while still allowing 128-Ki-token models.
+MAX_OUTPUT_TOKENS_PER_REQUEST = 128 * 1024
 REQUEST_READ_TIMEOUT_SECONDS = 10.0
 REQUEST_HEADER_TIMEOUT_SECONDS = 10.0
 BACKEND_CONNECT_TIMEOUT_SECONDS = 120.0
@@ -82,6 +88,7 @@ class BridgeConfig:
     client_token: str | None = None
     allowed_model: str | None = None
     max_requests: int = MAX_REQUESTS_PER_BRIDGE
+    max_output_tokens: int = MAX_OUTPUT_TOKENS_PER_REQUEST
 
 
 @dataclass
@@ -99,6 +106,7 @@ class RunningBridge:
             return
         if self._thread.is_alive():
             self._server.shutdown()
+        self._server.close_active_requests()
         self._thread.join(timeout=IN_PROCESS_START_TIMEOUT_SECONDS)
         if self._thread.is_alive():
             raise RuntimeError("NVIDIA Build bridge thread did not stop")
@@ -138,6 +146,7 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
     bridge_config: ClassVar[BridgeConfig]
 
     def do_GET(self) -> None:
+        self._bridge_server().finish_request_headers(self.connection)
         route = _known_route(self.path)
         if route == HEALTH_PATH:
             supplied_token = self.headers.get(READINESS_TOKEN_HEADER, "")
@@ -152,6 +161,7 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
         self._log(404, route, "not_found")
 
     def do_POST(self) -> None:
+        self._bridge_server().finish_request_headers(self.connection)
         route = _known_route(self.path)
         if route not in {RESPONSES_PATH, MESSAGES_PATH, COUNT_TOKENS_PATH}:
             self._send_error(404, "not_found", "unknown endpoint")
@@ -172,7 +182,9 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
                 self._log(200, route, "none")
                 return
             if route == RESPONSES_PATH:
-                chat_request, custom_tool_names, namespace_tools = _responses_to_chat_request(payload)
+                chat_request, custom_tool_names, namespace_tools = _responses_to_chat_request(
+                    payload, max_output_tokens=self.bridge_config.max_output_tokens
+                )
                 _enforce_allowed_model(self.bridge_config, chat_request)
                 events = _translate_backend(
                     _request_build(self.bridge_config, chat_request),
@@ -181,7 +193,9 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
                     namespace_tools,
                 )
             elif route == MESSAGES_PATH:
-                chat_request = anthropic_to_chat_request(payload)
+                chat_request = _anthropic_to_chat_request(
+                    payload, max_output_tokens=self.bridge_config.max_output_tokens
+                )
                 _enforce_allowed_model(self.bridge_config, chat_request)
                 events = _translate_backend(
                     _request_build(self.bridge_config, chat_request), chat_completion_to_anthropic_events
@@ -236,8 +250,20 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
             raise BridgePayloadError("request body is too large", 413)
         previous_timeout = self.connection.gettimeout()
         try:
-            self.connection.settimeout(REQUEST_READ_TIMEOUT_SECONDS)
-            body = self.rfile.read(content_length)
+            deadline = time.monotonic() + REQUEST_READ_TIMEOUT_SECONDS
+            body_parts: list[bytes] = []
+            remaining = content_length
+            while remaining:
+                seconds_left = deadline - time.monotonic()
+                if seconds_left <= 0:
+                    raise TimeoutError("request body deadline expired")
+                self.connection.settimeout(seconds_left)
+                chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                body_parts.append(chunk)
+                remaining -= len(chunk)
+            body = b"".join(body_parts)
         except (OSError, TimeoutError) as error:
             raise BridgePayloadError("request body read timed out", 408) from error
         finally:
@@ -320,6 +346,9 @@ def _enforce_allowed_model(config: BridgeConfig, payload: dict[str, Any]) -> Non
 def _request_build(config: BridgeConfig, payload: dict[str, Any]) -> Any:
     endpoint = _build_endpoint(config)
     request_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    if len(request_body) > MAX_REQUEST_BYTES:
+        raise BridgePayloadError("translated request body is too large", 413)
+    deadline_controller: _BackendDeadline | None = None
     try:
         if config.request_transport is not None:
             response_body = config.request_transport(endpoint, request_body)
@@ -330,20 +359,57 @@ def _request_build(config: BridgeConfig, payload: dict[str, Any]) -> Any:
                 headers={"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"},
                 method="POST",
             )
-            with build_opener(_NoRedirect()).open(request, timeout=BACKEND_CONNECT_TIMEOUT_SECONDS) as response:
-                response_body = response.read(MAX_BACKEND_RESPONSE_BYTES + 1)
+            deadline_controller = _BackendDeadline(BACKEND_CONNECT_TIMEOUT_SECONDS)
+            with deadline_controller:
+                opener = build_opener(
+                    _NoRedirect(),
+                    _DeadlineHTTPHandler(deadline_controller),
+                    _DeadlineHTTPSHandler(deadline_controller),
+                )
+                with opener.open(request, timeout=deadline_controller.remaining()) as response:
+                    deadline_controller.register_response(response)
+                    response_body = _read_backend_response(response, deadline_controller.deadline)
+                    if deadline_controller.timed_out:
+                        raise TimeoutError("Build backend deadline expired")
         if not isinstance(response_body, bytes) or len(response_body) > MAX_BACKEND_RESPONSE_BYTES:
             raise _BackendError("response_too_large")
         return json.loads(response_body.decode("utf-8"))
     except HTTPError as error:
-        raise _BackendError(
-            "timeout" if error.code in {408, 504} else "http_error", 504 if error.code in {408, 504} else 502
-        ) from error
-    except (OSError, TimeoutError, URLError) as error:
-        is_timeout = isinstance(error, TimeoutError) or "timed out" in str(getattr(error, "reason", error)).lower()
+        is_timeout = error.code in {408, 504} or (deadline_controller is not None and deadline_controller.timed_out)
+        raise _BackendError("timeout" if is_timeout else "http_error", 504 if is_timeout else 502) from error
+    except (HTTPException, OSError, TimeoutError, URLError) as error:
+        is_timeout = (
+            isinstance(error, TimeoutError)
+            or (deadline_controller is not None and deadline_controller.timed_out)
+            or "timed out" in str(getattr(error, "reason", error)).lower()
+        )
         raise _BackendError("timeout" if is_timeout else "network_error", 504 if is_timeout else 502) from error
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, BridgePayloadError, ValueError) as error:
+    except ValueError as error:
+        if deadline_controller is not None and deadline_controller.timed_out:
+            raise _BackendError("timeout", 504) from error
         raise _BackendError("invalid_backend_response") from error
+    except (UnicodeDecodeError, RecursionError) as error:
+        raise _BackendError("invalid_backend_response") from error
+
+
+def _read_backend_response(response: Any, deadline: float) -> bytes:
+    response_socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    read1 = getattr(response, "read1", None)
+    if response_socket is None or not callable(read1):
+        raise _BackendError("invalid_backend_response")
+    parts: list[bytes] = []
+    remaining = MAX_BACKEND_RESPONSE_BYTES + 1
+    while remaining:
+        seconds_left = deadline - time.monotonic()
+        if seconds_left <= 0:
+            raise TimeoutError("Build backend deadline expired")
+        response_socket.settimeout(seconds_left)
+        chunk = read1(min(remaining, 64 * 1024))
+        if not chunk:
+            break
+        parts.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(parts)
 
 
 def _translate_backend(completion: Any, translator: Any, *translator_args: Any) -> list[dict[str, Any]]:
@@ -358,6 +424,133 @@ class _NoRedirect(HTTPRedirectHandler):
 
     def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+
+class _BackendDeadline:
+    """Abort a credentialed backend connection at one absolute wall-clock deadline."""
+
+    def __init__(self, timeout: float) -> None:
+        self.deadline = time.monotonic() + timeout
+        self._lock = Lock()
+        self._connections: list[Any] = []
+        self._response_sockets: list[Any] = []
+        self._expired = False
+        self._finished = False
+        self._timer = Timer(timeout, self._expire)
+        self._timer.daemon = True
+
+    def __enter__(self) -> _BackendDeadline:
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        with self._lock:
+            self._finished = True
+        self._timer.cancel()
+
+    @property
+    def expired(self) -> bool:
+        with self._lock:
+            return self._expired
+
+    @property
+    def timed_out(self) -> bool:
+        return self.expired or time.monotonic() >= self.deadline
+
+    def remaining(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Build backend deadline expired")
+        return remaining
+
+    def register_connection(self, connection: Any) -> None:
+        with self._lock:
+            if self._expired:
+                raise TimeoutError("Build backend deadline expired")
+            self._connections.append(connection)
+
+    def register_response(self, response: Any) -> None:
+        response_socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+        if response_socket is None:
+            raise _BackendError("invalid_backend_response")
+        with self._lock:
+            expired = self._expired
+            if not expired:
+                self._response_sockets.append(response_socket)
+        if expired:
+            self._abort_socket(response_socket)
+            raise TimeoutError("Build backend deadline expired")
+
+    def _expire(self) -> None:
+        with self._lock:
+            if self._finished:
+                return
+            self._expired = True
+            connections = list(self._connections)
+            response_sockets = list(self._response_sockets)
+        for connection in connections:
+            self._abort_socket(getattr(connection, "sock", None))
+        for response_socket in response_sockets:
+            self._abort_socket(response_socket)
+
+    @staticmethod
+    def _abort_socket(backend_socket: Any) -> None:
+        if backend_socket is None:
+            return
+        with suppress(OSError):
+            backend_socket.shutdown(socket.SHUT_RDWR)
+        with suppress(OSError):
+            backend_socket.close()
+
+
+class _DeadlineHTTPHandler(HTTPHandler):
+    def __init__(self, deadline: _BackendDeadline) -> None:
+        super().__init__()
+        self._deadline = deadline
+
+    def http_open(self, request: Any) -> Any:
+        return self.do_open(self._connection, request)
+
+    def _connection(self, host: str, **kwargs: Any) -> HTTPConnection:
+        return _DeadlineHTTPConnection(host, deadline=self._deadline, **kwargs)
+
+
+class _DeadlineHTTPSHandler(HTTPSHandler):
+    def __init__(self, deadline: _BackendDeadline) -> None:
+        super().__init__()
+        self._deadline = deadline
+
+    def https_open(self, request: Any) -> Any:
+        return self.do_open(self._connection, request, context=self._context)
+
+    def _connection(self, host: str, **kwargs: Any) -> HTTPSConnection:
+        return _DeadlineHTTPSConnection(host, deadline=self._deadline, **kwargs)
+
+
+class _DeadlineHTTPConnection(HTTPConnection):
+    def __init__(self, host: str, *, deadline: _BackendDeadline, **kwargs: Any) -> None:
+        self._deadline = deadline
+        super().__init__(host, **kwargs)
+        deadline.register_connection(self)
+
+    def connect(self) -> None:
+        self.timeout = self._deadline.remaining()
+        super().connect()
+        if self.sock is not None:
+            self.sock.settimeout(self._deadline.remaining())
+
+
+class _DeadlineHTTPSConnection(HTTPSConnection):
+    def __init__(self, host: str, *, deadline: _BackendDeadline, **kwargs: Any) -> None:
+        self._deadline = deadline
+        super().__init__(host, **kwargs)
+        deadline.register_connection(self)
+
+    def connect(self) -> None:
+        self.timeout = self._deadline.remaining()
+        super().connect()
+        if self.sock is not None:
+            self.sock.settimeout(self._deadline.remaining())
 
 
 def _handler_for(config: BridgeConfig) -> type[NvidiaBuildBridgeHandler]:
@@ -485,6 +678,7 @@ def start_in_process_bridge(
     log_path: Path,
     request_transport: BuildRequestTransport | None = None,
     allowed_model: str | None = None,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS_PER_REQUEST,
 ) -> RunningBridge:
     """Start one authenticated loopback bridge in a managed daemon thread."""
     readiness_token = secrets.token_urlsafe(32)
@@ -499,6 +693,7 @@ def start_in_process_bridge(
         request_transport=request_transport,
         client_token=client_token,
         allowed_model=allowed_model,
+        max_output_tokens=max_output_tokens,
     )
     server = _create_bridge_server(config)
 
@@ -576,6 +771,12 @@ def _create_bridge_server(config: BridgeConfig) -> _BridgeHTTPServer:
         or not 1 <= config.max_requests <= MAX_REQUESTS_PER_BRIDGE
     ):
         raise ValueError(f"max_requests must be between 1 and {MAX_REQUESTS_PER_BRIDGE}")
+    if (
+        isinstance(config.max_output_tokens, bool)
+        or not isinstance(config.max_output_tokens, int)
+        or not 1 <= config.max_output_tokens <= MAX_OUTPUT_TOKENS_PER_REQUEST
+    ):
+        raise ValueError(f"max_output_tokens must be between 1 and {MAX_OUTPUT_TOKENS_PER_REQUEST}")
     if config.host != "127.0.0.1":
         raise ValueError("bridge host must be 127.0.0.1")
     _build_endpoint(config)
@@ -607,6 +808,10 @@ class _BridgeHTTPServer(ThreadingHTTPServer):
         self._active_workers = 0
         self._request_budget_lock = Lock()
         self._remaining_requests = max_requests
+        self._request_state_lock = Lock()
+        self._active_requests: set[Any] = set()
+        self._header_timers: dict[Any, Timer] = {}
+        self._closing_requests = False
 
     def claim_request(self) -> bool:
         """Atomically consume one authenticated request from this bridge's finite budget."""
@@ -628,10 +833,60 @@ class _BridgeHTTPServer(ThreadingHTTPServer):
     def get_request(self) -> tuple[Any, Any]:
         request, client_address = super().get_request()
         request.settimeout(REQUEST_HEADER_TIMEOUT_SECONDS)
+        header_timer = Timer(REQUEST_HEADER_TIMEOUT_SECONDS, self._expire_request_headers, args=(request,))
+        header_timer.daemon = True
+        with self._request_state_lock:
+            self._active_requests.add(request)
+            self._header_timers[request] = header_timer
+        header_timer.start()
         return request, client_address
+
+    def finish_request_headers(self, request: Any) -> None:
+        """Cancel the absolute request-line/header deadline after parsing completes."""
+        with self._request_state_lock:
+            header_timer = self._header_timers.pop(request, None)
+        if header_timer is not None:
+            header_timer.cancel()
+
+    def release_request(self, request: Any) -> None:
+        """Drop all server bookkeeping after a request socket is no longer owned."""
+        with self._request_state_lock:
+            self._active_requests.discard(request)
+            header_timer = self._header_timers.pop(request, None)
+        if header_timer is not None:
+            header_timer.cancel()
+
+    def close_active_requests(self) -> None:
+        """Force blocked request readers to exit during deterministic shutdown."""
+        with self._request_state_lock:
+            self._closing_requests = True
+            requests = list(self._active_requests)
+            header_timers = list(self._header_timers.values())
+            self._header_timers.clear()
+        for header_timer in header_timers:
+            header_timer.cancel()
+        for request in requests:
+            with suppress(OSError):
+                request.shutdown(socket.SHUT_RDWR)
+            request.close()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        if self._closing_requests and isinstance(sys.exception(), OSError):
+            return
+        super().handle_error(request, client_address)
+
+    def _expire_request_headers(self, request: Any) -> None:
+        with self._request_state_lock:
+            header_timer = self._header_timers.pop(request, None)
+        if header_timer is None:
+            return
+        with suppress(OSError):
+            request.shutdown(socket.SHUT_RDWR)
+        request.close()
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._worker_slots.acquire(blocking=False):
+            self.release_request(request)
             request.close()
             return
         with self._worker_condition:
@@ -641,6 +896,7 @@ class _BridgeHTTPServer(ThreadingHTTPServer):
             try:
                 self.process_request_thread(request, client_address)
             finally:
+                self.release_request(request)
                 with self._worker_condition:
                     self._active_workers -= 1
                     self._worker_condition.notify_all()
@@ -657,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--client-token-file", type=Path)
     parser.add_argument("--allowed-model")
     parser.add_argument("--max-requests", type=int, default=MAX_REQUESTS_PER_BRIDGE)
+    parser.add_argument("--max-output-tokens", type=int, default=MAX_OUTPUT_TOKENS_PER_REQUEST)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--ready-file", type=Path)
     parser.add_argument("--check-ready-file", type=Path)
@@ -712,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
             client_token=client_token,
             allowed_model=arguments.allowed_model.strip(),
             max_requests=arguments.max_requests,
+            max_output_tokens=arguments.max_output_tokens,
         ),
         ready_file=arguments.ready_file,
     )
@@ -753,6 +1011,8 @@ def responses_to_chat_request(payload: Any) -> dict[str, Any]:
 
 def _responses_to_chat_request(
     payload: Any,
+    *,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS_PER_REQUEST,
 ) -> tuple[dict[str, Any], set[str], dict[str, _NamespaceToolTarget]]:
     request = _require_object(payload)
     tools = request.get("tools")
@@ -783,12 +1043,20 @@ def _responses_to_chat_request(
             raise BridgePayloadError("Responses tool_choice 'required' needs an executable tool for NVIDIA Build")
         translated["tool_choice"] = _responses_tool_choice_to_chat(request["tool_choice"], namespace_tools)
     if "max_output_tokens" in request:
-        translated["max_tokens"] = request["max_output_tokens"]
+        translated["max_tokens"] = _require_output_token_limit(
+            request["max_output_tokens"], "max_output_tokens", max_output_tokens
+        )
     return translated, custom_tool_names, namespace_tools
 
 
 def anthropic_to_chat_request(payload: Any) -> dict[str, Any]:
     """Translate an Anthropic Messages request to a Build Chat Completions request."""
+    return _anthropic_to_chat_request(payload)
+
+
+def _anthropic_to_chat_request(
+    payload: Any, *, max_output_tokens: int = MAX_OUTPUT_TOKENS_PER_REQUEST
+) -> dict[str, Any]:
     request = _require_object(payload)
     messages: list[dict[str, Any]] = []
     if "system" in request:
@@ -837,7 +1105,7 @@ def anthropic_to_chat_request(payload: Any) -> dict[str, Any]:
         if isinstance(tool_choice, dict) and tool_choice.get("disable_parallel_tool_use") is True:
             translated["parallel_tool_calls"] = False
     if "max_tokens" in request:
-        translated["max_tokens"] = request["max_tokens"]
+        translated["max_tokens"] = _require_output_token_limit(request["max_tokens"], "max_tokens", max_output_tokens)
     return translated
 
 
@@ -1031,6 +1299,12 @@ def _require_model(request: dict[str, Any]) -> str:
     if not isinstance(model, str) or not model:
         raise BridgePayloadError("model must be a non-empty string")
     return model
+
+
+def _require_output_token_limit(value: Any, field_name: str, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+        raise BridgePayloadError(f"{field_name} must be an integer between 1 and {maximum}")
+    return value
 
 
 def _copy_request_options(source: dict[str, Any], destination: dict[str, Any], names: set[str]) -> None:

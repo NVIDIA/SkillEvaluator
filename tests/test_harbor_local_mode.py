@@ -377,6 +377,105 @@ def test_local_nvidia_build_bridge_cleanup_preserves_cancellation(
     assert close_finished.is_set()
 
 
+def test_local_nvidia_build_bridge_repeated_cancellation_releases_slow_header_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents, nvidia_build_bridge
+
+    temp_dir = tempfile.TemporaryDirectory(prefix="bridge-repeated-cancel-")
+    temp_path = Path(temp_dir.name)
+
+    def transport(_endpoint: str, _body: bytes) -> bytes:
+        return json.dumps(
+            {
+                "id": "chatcmpl-test",
+                "model": "nvidia/model",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }
+        ).encode("utf-8")
+
+    running = nvidia_build_bridge.start_in_process_bridge(
+        api_key="test-repeated-cancel-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        log_path=temp_path / "nvidia-build-bridge.log",
+        request_transport=transport,
+    )
+    port = int(urlsplit(running.origin).port or 0)
+    monkeypatch.setattr(nvidia_build_bridge, "REQUEST_HEADER_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(nvidia_build_bridge, "BACKEND_CONNECT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(nvidia_build_bridge, "IN_PROCESS_START_TIMEOUT_SECONDS", 0.05)
+    client = socket.create_connection(("127.0.0.1", port), timeout=2)
+    stop_sending = threading.Event()
+
+    def drip_headers() -> None:
+        while not stop_sending.is_set():
+            try:
+                client.sendall(b"P")
+            except OSError:
+                return
+            time.sleep(0.015)
+
+    sender = threading.Thread(target=drip_headers)
+    sender.start()
+    deadline = time.monotonic() + 1
+    while running._server.active_workers == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert running._server.active_workers == 1
+
+    close_started = threading.Event()
+    release_close = threading.Event()
+    original_close = running.close
+
+    def delayed_close() -> None:
+        close_started.set()
+        assert release_close.wait(timeout=5)
+        original_close()
+
+    monkeypatch.setattr(running, "close", delayed_close)
+    agent = object.__new__(local_agents.SkillEvaluatorLocalNvidiaBuildCodex)
+    agent._nvidia_build_running_bridge = running
+    agent._nvidia_build_local_log_path = temp_path / "nvidia-build-bridge.log"
+    agent._nvidia_build_local_temp_dir = temp_dir
+    agent._nvidia_build_bridge_client_token = running.client_token
+    agent._nvidia_build_bridge_origin = running.origin
+    agent._nvidia_build_bridge_started = True
+
+    class Environment:
+        async def upload_file(self, _source: object, _destination: object) -> None:
+            pytest.fail("cancelled cleanup must not upload after cancellation")
+
+    async def exercise() -> None:
+        task = asyncio.create_task(agent._cleanup_bridge(Environment()))
+        assert await asyncio.to_thread(close_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release_close.set()
+        stop_sending.set()
+        client.close()
+        sender.join(timeout=1)
+        if not running._closed:
+            running.close()
+
+    assert not sender.is_alive()
+    assert running._closed is True
+    assert agent._nvidia_build_running_bridge is None
+    assert agent._nvidia_build_local_log_path is None
+    assert agent._nvidia_build_local_temp_dir is None
+    assert agent._nvidia_build_bridge_client_token is None
+    assert agent._nvidia_build_bridge_origin is None
+    assert agent._nvidia_build_bridge_started is False
+    assert not temp_path.exists()
+
+
 def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -495,9 +594,9 @@ def test_nvidia_build_container_bridge_cancellation_cleans_all_private_state_uni
 
     agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
     agent.model_name = "nvidia/model"
-    stage_reached: asyncio.Event
-    cleanup_started: asyncio.Event
-    release_cleanup: asyncio.Event
+    stage_reached = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
     cleanup_commands: list[str] = []
 
     class Environment:

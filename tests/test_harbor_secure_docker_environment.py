@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
+import subprocess
+import time
+import uuid
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
@@ -86,8 +90,9 @@ def test_exec_uses_name_only_argv_and_subprocess_override(tmp_path: Path) -> Non
         timeout_sec: int | None = None,
         *,
         env_overrides=None,
+        remote_control=None,
     ) -> ExecResult:
-        del self, check, timeout_sec
+        del self, check, timeout_sec, remote_control
         captured["command"] = command
         captured["env"] = env_overrides
         return ExecResult(stdout="ok", stderr=None, return_code=0)
@@ -277,6 +282,91 @@ def test_compose_cancellation_reaps_process_tree_even_when_repeated(
     assert asyncio.run(run_cancelled()) == ["terminate", "kill"]
 
 
+def test_exec_cancellation_terminates_scoped_remote_group_before_host_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = object.__new__(SkillEvaluatorDockerEnvironment)
+    environment.session_id = "secure-remote-cancellation-test"
+    environment.environment_name = "secure-remote-cancellation-test"
+    environment.environment_dir = tmp_path
+    environment.default_user = None
+    environment.task_env_config = SimpleNamespace(workdir=None, env={})
+    environment._persistent_env = {}
+    environment._resources_compose_path = None
+    environment._mounts_compose_path = None
+    environment._use_prebuilt = True
+    environment._is_windows_container = False
+    environment.extra_docker_compose_paths = []
+    environment._network_policy = SimpleNamespace(network_mode="public")
+    environment._platform = SimpleNamespace(exec_shell_args=lambda command: ["bash", "-c", command])
+    environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_TERMINATE_SECONDS", 0.01)
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_KILL_SECONDS", 0.01)
+
+    async def run_cancelled() -> tuple[list[str], list[tuple[object, ...]]]:
+        actions: list[str] = []
+        commands: list[tuple[object, ...]] = []
+        communicating = asyncio.Event()
+        completed: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+
+        class OriginalProcess:
+            pid = 4545
+            returncode: int | None = None
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                communicating.set()
+                return await asyncio.shield(completed)
+
+        class CleanupProcess:
+            pid = 4546
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                actions.append("remote-cleanup")
+                return b"", b""
+
+        original = OriginalProcess()
+
+        async def create_subprocess(*args: object, **_kwargs: object) -> OriginalProcess | CleanupProcess:
+            commands.append(args)
+            return original if len(commands) == 1 else CleanupProcess()
+
+        def killpg(pid: int, value: signal.Signals) -> None:
+            assert pid == original.pid
+            actions.append(f"host-{value.name.lower()}")
+            if value == signal.SIGKILL:
+                original.returncode = -9
+                if not completed.done():
+                    completed.set_result((b"", b""))
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+        monkeypatch.setattr(secure_docker_environment.os, "killpg", killpg)
+        task = asyncio.create_task(
+            environment.exec("sleep 30", env={"NVIDIA_API_KEY": "credential-for-cancellation-test"})
+        )
+        await asyncio.wait_for(communicating.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        return actions, commands
+
+    actions, commands = asyncio.run(run_cancelled())
+
+    assert len(commands) == 2
+    rendered_original = " ".join(str(arg) for arg in commands[0])
+    rendered_cleanup = " ".join(str(arg) for arg in commands[1])
+    assert ".skillevaluator-exec-" in rendered_original
+    assert "SKILLEVALUATOR_EXEC_TOKEN" in rendered_original
+    assert "exec -u root main bash -c" in rendered_cleanup
+    assert "kill --" in rendered_cleanup
+    assert actions.index("remote-cleanup") < actions.index("host-sigterm")
+
+
 def test_compose_process_cleanup_remains_bounded_when_communication_ignores_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -321,6 +411,240 @@ def test_compose_process_cleanup_remains_bounded_when_communication_ignores_canc
         return finished_within_bound
 
     assert asyncio.run(run_cleanup()) is True
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("stop_mode", ["cancel", "timeout"])
+def test_real_docker_exec_stops_only_its_remote_process_tree(
+    tmp_path: Path,
+    stop_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """A stopped Compose client must not leave its credential-bearing exec alive."""
+    docker_info = subprocess.run(
+        ["docker", "info", "--format", "{{.OSType}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if docker_info.returncode != 0 or docker_info.stdout.strip() != "linux":
+        pytest.skip("requires a running Linux Docker daemon")
+
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_TERMINATE_SECONDS", 0.2)
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_KILL_SECONDS", 0.2)
+
+    compose_path = tmp_path / "docker-compose.yaml"
+    compose_path.write_text(
+        "services:\n"
+        "  main:\n"
+        "    image: python:3.13-slim\n"
+        '    command: ["sh", "-c", "trap : TERM INT; sleep infinity & wait"]\n',
+        encoding="utf-8",
+    )
+    project_name = f"skillevaluator-remote-cancel-{uuid.uuid4().hex[:10]}"
+    compose = [
+        "docker",
+        "compose",
+        "--project-name",
+        project_name,
+        "--project-directory",
+        str(tmp_path),
+        "-f",
+        str(compose_path),
+    ]
+    subprocess.run([*compose, "up", "-d", "--wait"], check=True, timeout=60)
+
+    def cleanup_compose() -> None:
+        subprocess.run([*compose, "down", "--remove-orphans", "--volumes"], check=False, timeout=60)
+
+    request.addfinalizer(cleanup_compose)
+
+    class ComposeOnlyEnvironment(SkillEvaluatorDockerEnvironment):
+        @property
+        def _docker_compose_paths(self) -> list[Path]:
+            return [compose_path]
+
+    environment = object.__new__(ComposeOnlyEnvironment)
+    environment.session_id = project_name
+    environment.environment_name = project_name
+    environment.environment_dir = tmp_path
+    environment.default_user = None
+    environment.task_env_config = SimpleNamespace(workdir=None, env={})
+    environment._persistent_env = {}
+    environment._is_windows_container = False
+    environment._platform = SimpleNamespace(exec_shell_args=lambda command: ["bash", "-c", command])
+    environment._compose_env_vars = MethodType(lambda _self, **_kwargs: dict(os.environ), environment)
+    remote_pid_path = f"/tmp/skillevaluator-test-{uuid.uuid4().hex}.pid"
+    unrelated_pid_path = f"/tmp/skillevaluator-unrelated-{uuid.uuid4().hex}.pid"
+    credential = "credential-must-not-outlive-cancelled-agent-command"
+    real_create_subprocess = asyncio.create_subprocess_exec
+    exec_clients: list[asyncio.subprocess.Process] = []
+
+    async def capture_exec_client(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await real_create_subprocess(*args, **kwargs)
+        if remote_pid_path in " ".join(str(arg) for arg in args):
+            exec_clients.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_exec_client)
+
+    normal_result = asyncio.run(
+        environment.exec(
+            "printf 'normal-output\\n'; printf 'normal-error\\n' >&2; "
+            "printf 'control-token=%s\\n' \"${SKILLEVALUATOR_EXEC_TOKEN-unset}\"; exit 7",
+            env={"NVIDIA_API_KEY": credential},
+        )
+    )
+    assert normal_result.return_code == 7
+    assert set((normal_result.stdout or "").splitlines()) == {
+        "normal-output",
+        "normal-error",
+        "control-token=unset",
+    }
+    assert credential not in (normal_result.stdout or "")
+
+    subprocess.run(
+        [
+            *compose,
+            "exec",
+            "-T",
+            "-d",
+            "main",
+            "sh",
+            "-c",
+            f"echo $$ > {unrelated_pid_path}; exec sleep 300",
+        ],
+        check=True,
+        timeout=5,
+    )
+    for _ in range(100):
+        unrelated_pid_result = subprocess.run(
+            [*compose, "exec", "-T", "main", "cat", unrelated_pid_path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if unrelated_pid_result.returncode == 0 and unrelated_pid_result.stdout.strip():
+            unrelated_pid = int(unrelated_pid_result.stdout.strip())
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("unrelated container process did not publish its PID")
+
+    tampered_marker = f"/tmp/.skillevaluator-exec-tampered-{uuid.uuid4().hex}"
+    subprocess.run(
+        [*compose, "exec", "-T", "main", "sh", "-c", f"printf '%s\\n' {unrelated_pid} > {tampered_marker}"],
+        check=True,
+        timeout=5,
+    )
+    tampered_cleanup = subprocess.run(
+        [
+            *compose,
+            "exec",
+            "-T",
+            "-u",
+            "root",
+            "main",
+            "bash",
+            "-c",
+            secure_docker_environment._REMOTE_TERMINATE_SCRIPT,
+            "skillevaluator-tamper-test",
+            tampered_marker,
+            "token-not-owned-by-the-unrelated-process",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=10,
+    )
+    assert tampered_cleanup.returncode == 4
+    subprocess.run(
+        [*compose, "exec", "-T", "main", "rm", "-f", "--", tampered_marker],
+        check=True,
+        timeout=5,
+    )
+
+    async def exercise() -> int:
+        task = asyncio.create_task(
+            environment.exec(
+                f"trap '' TERM INT HUP; sleep 300 & child=$!; echo $child > {remote_pid_path}; wait $child",
+                env={"NVIDIA_API_KEY": credential},
+                timeout_sec=1 if stop_mode == "timeout" else None,
+            )
+        )
+        for _ in range(100):
+            probe = subprocess.run(
+                [*compose, "exec", "-T", "main", "test", "-s", remote_pid_path],
+                check=False,
+                capture_output=True,
+                timeout=5,
+            )
+            if probe.returncode == 0:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("remote command did not publish its PID")
+
+        remote_pid = int(
+            subprocess.run(
+                [*compose, "exec", "-T", "main", "cat", remote_pid_path],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+        )
+        assert exec_clients, "did not capture the credential-bearing Compose exec client"
+        os.killpg(exec_clients[0].pid, signal.SIGSTOP)
+        if stop_mode == "cancel":
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=15)
+        else:
+            with pytest.raises(RuntimeError, match="timed out"):
+                await asyncio.wait_for(task, timeout=15)
+        return remote_pid
+
+    try:
+        remote_pid = asyncio.run(exercise())
+        process_probe = subprocess.run(
+            [*compose, "exec", "-T", "main", "sh", "-c", f"kill -0 {remote_pid}"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+        marker_probe = subprocess.run(
+            [
+                *compose,
+                "exec",
+                "-T",
+                "main",
+                "sh",
+                "-c",
+                "find /tmp -maxdepth 1 -name '.skillevaluator-exec-*' -print -quit",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        unrelated_probe = subprocess.run(
+            [*compose, "exec", "-T", "main", "sh", "-c", f"kill -0 {unrelated_pid}"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+        assert process_probe.returncode != 0, f"remote PID {remote_pid} survived {stop_mode}"
+        assert unrelated_probe.returncode == 0, "scoped cleanup killed an unrelated container process"
+        assert marker_probe.stdout.strip() == ""
+    finally:
+        cleanup_compose()
 
 
 @pytest.mark.parametrize(

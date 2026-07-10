@@ -33,8 +33,14 @@ def test_secure_docker_exec_hands_environment_over_by_file_without_argv_values(
     async def fake_upload_file(source_path: Path | str, target_path: str) -> None:
         uploaded.append((Path(source_path).read_text(encoding="utf-8"), target_path))
 
-    async def fake_run(command: list[str], check: bool = True, timeout_sec: int | None = None):
-        del check, timeout_sec
+    async def fake_run(
+        command: list[str],
+        check: bool = True,
+        timeout_sec: int | None = None,
+        *,
+        remote_control=None,
+    ):
+        del check, timeout_sec, remote_control
         docker_commands.append(command)
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 
@@ -214,8 +220,14 @@ def test_secure_docker_exec_fails_closed_when_final_secret_cleanup_fails(monkeyp
     async def fake_upload_file(_source_path: Path | str, _target_path: str) -> None:
         return None
 
-    async def fake_run(command: list[str], check: bool = True, timeout_sec: int | None = None):
-        del command, check, timeout_sec
+    async def fake_run(
+        command: list[str],
+        check: bool = True,
+        timeout_sec: int | None = None,
+        *,
+        remote_control=None,
+    ):
+        del command, check, timeout_sec, remote_control
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 
     async def failed_cleanup(_remote_path: str) -> None:

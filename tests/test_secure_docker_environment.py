@@ -38,9 +38,10 @@ def test_secure_docker_exec_hands_environment_over_by_file_without_argv_values(
         check: bool = True,
         timeout_sec: int | None = None,
         *,
-        remote_control=None,
+        stop_main_on_interrupt: bool = False,
     ):
-        del check, timeout_sec, remote_control
+        del check, timeout_sec
+        assert stop_main_on_interrupt is ("if ! ." in " ".join(command))
         docker_commands.append(command)
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 
@@ -225,9 +226,10 @@ def test_secure_docker_exec_fails_closed_when_final_secret_cleanup_fails(monkeyp
         check: bool = True,
         timeout_sec: int | None = None,
         *,
-        remote_control=None,
+        stop_main_on_interrupt: bool = False,
     ):
-        del command, check, timeout_sec, remote_control
+        del check, timeout_sec
+        assert stop_main_on_interrupt is ("if ! ." in " ".join(command))
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 
     async def failed_cleanup(_remote_path: str) -> None:

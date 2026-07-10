@@ -16,6 +16,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from http.client import HTTPConnection, HTTPException, HTTPResponse, HTTPSConnection
+from queue import Empty, Queue
+from threading import BoundedSemaphore, Thread
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
@@ -30,6 +32,7 @@ _MAX_CATALOG_PAGES = 100
 _MAX_MODEL_ID_LENGTH = 512
 _MAX_MODEL_RECORDS = 10_000
 _RESPONSE_READ_CHUNK_BYTES = 64 * 1024
+_DNS_RESOLVER_SLOT = BoundedSemaphore(1)
 _NON_CHAT_MARKERS = (
     "dall-e",
     "embedding",
@@ -154,7 +157,7 @@ class _DeadlineConnectionMixin:
         source_address: tuple[str, int] | None,
     ) -> socket.socket:
         host, port = address
-        addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        addresses = _getaddrinfo_before_deadline(host, port, self._deadline)
         self._remaining_timeout()
         last_error: OSError | None = None
         for address_info in addresses:
@@ -196,6 +199,43 @@ class _DeadlineConnectionMixin:
 
 class _DeadlineHTTPConnection(_DeadlineConnectionMixin, HTTPConnection):
     pass
+
+
+def _getaddrinfo_before_deadline(host: str, port: int, deadline: float) -> list[tuple[Any, ...]]:
+    """Resolve one host without allowing DNS to hold the caller past its deadline.
+
+    ``getaddrinfo`` has no portable timeout or cancellation API. One daemon
+    resolver is therefore allowed in flight globally. If an OS resolver call
+    stalls, callers fail on time and later requests cannot create an unbounded
+    queue or thread leak; the slot is released only when that resolver returns.
+    """
+    if not _DNS_RESOLVER_SLOT.acquire(timeout=_remaining_deadline(deadline)):
+        raise TimeoutError("model catalog request timed out")
+
+    outcome: Queue[Any] = Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            outcome.put_nowait(socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM))
+        except BaseException as exc:
+            outcome.put_nowait(exc)
+        finally:
+            _DNS_RESOLVER_SLOT.release()
+
+    worker = Thread(target=resolve, name="skillevaluator-model-catalog-dns", daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        _DNS_RESOLVER_SLOT.release()
+        raise
+
+    try:
+        resolved = outcome.get(timeout=_remaining_deadline(deadline))
+    except Empty:
+        raise TimeoutError("model catalog request timed out") from None
+    if isinstance(resolved, BaseException):
+        raise resolved
+    return list(resolved)
 
 
 class _DeadlineHTTPSConnection(_DeadlineConnectionMixin, HTTPSConnection):

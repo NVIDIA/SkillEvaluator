@@ -231,6 +231,41 @@ def test_catalog_body_trickle_cannot_extend_the_wall_clock_deadline() -> None:
     assert elapsed < 0.5
 
 
+def test_catalog_dns_resolution_cannot_extend_the_wall_clock_deadline(monkeypatch) -> None:
+    calls = 0
+
+    def slow_resolution(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.2)
+        return []
+
+    monkeypatch.setattr(model_catalog.socket, "getaddrinfo", slow_resolution)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ModelCatalogError, match="timed out"):
+            fetch_model_records(
+                _provider("openai-compatible", base_url="https://slow-resolver.example/v1"),
+                timeout_seconds=0.05,
+            )
+        elapsed = time.monotonic() - started
+        second_started = time.monotonic()
+        with pytest.raises(ModelCatalogError, match="timed out"):
+            fetch_model_records(
+                _provider("openai-compatible", base_url="https://slow-resolver.example/v1"),
+                timeout_seconds=0.05,
+            )
+        second_elapsed = time.monotonic() - second_started
+    finally:
+        # A deadline-bounded daemon resolver may still be completing the OS
+        # call; let it release the one global resolver slot for later tests.
+        time.sleep(0.2)
+
+    assert elapsed < 0.15
+    assert second_elapsed < 0.15
+    assert calls == 1, "a stuck resolver must not create an unbounded thread or work queue"
+
+
 @pytest.mark.parametrize(
     ("immediate", "trickled", "remainder"),
     [
@@ -320,7 +355,9 @@ def test_catalog_connect_attempts_share_one_absolute_deadline(monkeypatch) -> No
         ],
     )
     monkeypatch.setattr(model_catalog.socket, "socket", lambda *_args, **_kwargs: next(sockets))
-    monotonic = iter((100.0, 100.0, 100.08, 100.08))
+    # Resolver-slot acquisition, resolver result wait, post-resolution check,
+    # first address, then the second address before/after connect.
+    monotonic = iter((100.0, 100.0, 100.0, 100.0, 100.08, 100.08))
     monkeypatch.setattr(model_catalog.time, "monotonic", lambda: next(monotonic))
 
     connection = model_catalog._DeadlineHTTPConnection("example.test", timeout=1.0, deadline=100.1)

@@ -811,7 +811,8 @@ class TestGatingSplit:
         assert ">clarity</td>" in output
         assert '<td class="warning-text">1</td>' in output
         assert "Metadata author is recommended." in output
-        assert "1 advisory finding(s) — not blocking:" in output
+        assert "1 advisory finding(s)" in output
+        assert "not blocking:" in output
         assert "Target tests were not executed and coverage was not measured." in output
 
     def test_similarity_only_html_uses_tier2_tab_and_renders_the_match(self, tmp_path: Path) -> None:

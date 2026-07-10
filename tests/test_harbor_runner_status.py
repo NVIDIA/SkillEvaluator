@@ -165,6 +165,96 @@ def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
     assert launches[0]["include_task_names"] == ["case-001"]
 
 
+_UNSAFE_LINK = r"symlink|reparse"
+
+
+def test_merge_attempt_jobs_rejects_symlinked_trial_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-trial"
+    outside.mkdir()
+    (outside / "host-secret.txt").write_text("secret", encoding="utf-8")
+    job_dir = tmp_path / "attempt-001"
+    job_dir.mkdir()
+    trial_link = job_dir / "case-001__trial"
+    trial_link.symlink_to(outside, target_is_directory=True)
+    aggregate_dir = tmp_path / "aggregate"
+
+    with pytest.raises(ValueError, match=_UNSAFE_LINK):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert not (aggregate_dir / f"{job_dir.name}__{trial_link.name}" / "host-secret.txt").exists()
+    assert not (aggregate_dir / "result.json").exists()
+
+
+def test_merge_attempt_jobs_rejects_symlinked_trial_file(tmp_path: Path) -> None:
+    outside = tmp_path / "host-secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    job_dir = tmp_path / "attempt-001"
+    trial_dir = job_dir / "case-001__trial"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "artifact.txt").symlink_to(outside)
+    aggregate_dir = tmp_path / "aggregate"
+
+    with pytest.raises(ValueError, match=_UNSAFE_LINK):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert not (aggregate_dir / f"{job_dir.name}__{trial_dir.name}" / "artifact.txt").exists()
+    assert not (aggregate_dir / "result.json").exists()
+
+
+def test_merge_attempt_jobs_rejects_nested_directory_link_like_reparse_point(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-artifacts"
+    outside.mkdir()
+    (outside / "host-secret.txt").write_text("secret", encoding="utf-8")
+    job_dir = tmp_path / "attempt-001"
+    nested = job_dir / "case-001__trial" / "artifacts"
+    nested.mkdir(parents=True)
+    linked_dir = nested / "external"
+    linked_dir.symlink_to(outside, target_is_directory=True)
+    aggregate_dir = tmp_path / "aggregate"
+
+    with pytest.raises(ValueError, match=_UNSAFE_LINK):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    copied_secret = aggregate_dir / f"{job_dir.name}__case-001__trial" / "artifacts" / "external" / "host-secret.txt"
+    assert not copied_secret.exists()
+    assert not (aggregate_dir / "result.json").exists()
+
+
+def test_merge_attempt_jobs_preserves_regular_trial_artifacts(tmp_path: Path) -> None:
+    job_dir = tmp_path / "attempt-001"
+    trial_dir = job_dir / "case-001__trial"
+    artifacts = trial_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "output.txt").write_text("expected", encoding="utf-8")
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": 1,
+                "stats": {
+                    "n_trials": 1,
+                    "n_errors": 0,
+                    "evals": {
+                        "demo": {
+                            "n_trials": 1,
+                            "n_errors": 0,
+                            "reward_stats": {"reward": {"1.0": [trial_dir.name]}},
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    aggregate_dir = tmp_path / "aggregate"
+
+    runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    merged_trial = aggregate_dir / f"{job_dir.name}__{trial_dir.name}"
+    assert (merged_trial / "artifacts" / "output.txt").read_text(encoding="utf-8") == "expected"
+    merged_result = json.loads((aggregate_dir / "result.json").read_text(encoding="utf-8"))
+    assert merged_result["stats"]["evals"]["demo"]["reward_stats"]["reward"]["1.0"] == [merged_trial.name]
+
+
 def _run(
     monkeypatch: pytest.MonkeyPatch,
     jobs_dir: Path,

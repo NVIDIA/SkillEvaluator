@@ -48,6 +48,7 @@ from skillevaluator.tier3.harbor.progress import (
     safe_progress_reporter,
     secret_values_from_environment,
 )
+from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
 from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
 
@@ -1219,7 +1220,7 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
             while dest.exists():
                 dest = aggregate_dir / f"{job_dir.name}__{child.name}-{suffix}"
                 suffix += 1
-            shutil.copytree(child, dest)
+            copytree_secure(child, dest, allowed_root=job_dir)
             renamed[child.name] = dest.name
 
         stats = _attempt_job_stats(job_dir)

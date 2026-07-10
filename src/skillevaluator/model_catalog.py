@@ -5,18 +5,21 @@
 
 from __future__ import annotations
 
+import io
 import ipaddress
 import json
 import math
+import socket
 import time
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from http.client import HTTPException
+from functools import partial
+from http.client import HTTPConnection, HTTPException, HTTPResponse, HTTPSConnection
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import HTTPHandler, HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
@@ -55,9 +58,182 @@ class _RejectRedirects(HTTPRedirectHandler):
         return None
 
 
+def _remaining_deadline(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("model catalog request timed out")
+    return remaining
+
+
+class _DeadlineSocketRaw(io.RawIOBase):
+    """Socket reader that reapplies one absolute deadline before every recv."""
+
+    def __init__(self, sock: socket.socket, deadline: float) -> None:
+        super().__init__()
+        self._socket = sock
+        self._deadline = deadline
+        self._raw = sock.makefile("rb", buffering=0)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int | None:
+        remaining = _remaining_deadline(self._deadline)
+        self._socket.settimeout(remaining)
+        result = self._raw.readinto(buffer)
+        _remaining_deadline(self._deadline)
+        return result
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def close(self) -> None:
+        if not self.closed:
+            try:
+                self._raw.close()
+            finally:
+                super().close()
+
+
+class _DeadlineResponseSocket:
+    """Minimal socket facade used by ``HTTPResponse`` to build its reader."""
+
+    def __init__(self, sock: socket.socket, deadline: float) -> None:
+        self._socket = sock
+        self._deadline = deadline
+
+    def makefile(self, mode: str) -> io.BufferedReader:
+        if mode != "rb":
+            raise ValueError("deadline response sockets support binary reads only")
+        return io.BufferedReader(_DeadlineSocketRaw(self._socket, self._deadline))
+
+
+class _DeadlineHTTPResponse(HTTPResponse):
+    """HTTP response whose status, headers, and body share one deadline."""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        debuglevel: int = 0,
+        method: str | None = None,
+        url: str | None = None,
+        *,
+        deadline: float,
+    ) -> None:
+        super().__init__(
+            _DeadlineResponseSocket(sock, deadline),
+            debuglevel=debuglevel,
+            method=method,
+            url=url,
+        )
+
+
+class _DeadlineConnectionMixin:
+    """Apply one request deadline across address attempts and HTTP I/O."""
+
+    def __init__(self, *args: Any, deadline: float, **kwargs: Any) -> None:
+        self._deadline = deadline
+        super().__init__(*args, **kwargs)
+        self.response_class = partial(_DeadlineHTTPResponse, deadline=deadline)
+        self._create_connection = self._create_connection_before_deadline
+
+    def _remaining_timeout(self) -> float:
+        return _remaining_deadline(self._deadline)
+
+    def _set_socket_timeout(self) -> None:
+        remaining = self._remaining_timeout()
+        if self.sock is None:
+            self.timeout = remaining
+        else:
+            self.sock.settimeout(remaining)
+
+    def _create_connection_before_deadline(
+        self,
+        address: tuple[str, int],
+        _timeout: object,
+        source_address: tuple[str, int] | None,
+    ) -> socket.socket:
+        host, port = address
+        addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        self._remaining_timeout()
+        last_error: OSError | None = None
+        for address_info in addresses:
+            family, socktype, proto, _canonname, socket_address = address_info
+            candidate: socket.socket | None = None
+            try:
+                candidate = socket.socket(family, socktype, proto)
+                candidate.settimeout(self._remaining_timeout())
+                if source_address:
+                    candidate.bind(source_address)
+                candidate.connect(socket_address)
+                candidate.settimeout(self._remaining_timeout())
+                return candidate
+            except OSError as exc:
+                last_error = exc
+                if candidate is not None:
+                    candidate.close()
+
+        if last_error is not None:
+            raise last_error
+        raise OSError("getaddrinfo returned no addresses")
+
+    def connect(self) -> None:
+        self.timeout = self._remaining_timeout()
+        super().connect()
+        self._set_socket_timeout()
+
+    def send(self, data: Any) -> None:
+        self._set_socket_timeout()
+        super().send(data)
+        self._remaining_timeout()
+
+    def getresponse(self) -> HTTPResponse:
+        self._set_socket_timeout()
+        response = super().getresponse()
+        self._remaining_timeout()
+        return response
+
+
+class _DeadlineHTTPConnection(_DeadlineConnectionMixin, HTTPConnection):
+    pass
+
+
+class _DeadlineHTTPSConnection(_DeadlineConnectionMixin, HTTPSConnection):
+    def connect(self) -> None:
+        """Refresh the deadline between proxy tunneling and the TLS handshake."""
+        self.timeout = self._remaining_timeout()
+        HTTPConnection.connect(self)
+        self._set_socket_timeout()
+        server_hostname = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+        self._set_socket_timeout()
+
+
+def _request_deadline(request: Request) -> float:
+    deadline = getattr(request, "_skillevaluator_deadline", None)
+    if isinstance(deadline, int | float) and not isinstance(deadline, bool) and math.isfinite(deadline):
+        return float(deadline)
+    return time.monotonic() + float(request.timeout)
+
+
+class _DeadlineHTTPHandler(HTTPHandler):
+    def http_open(self, request: Request):
+        return self.do_open(_DeadlineHTTPConnection, request, deadline=_request_deadline(request))
+
+
+class _DeadlineHTTPSHandler(HTTPSHandler):
+    def https_open(self, request: Request):
+        return self.do_open(
+            _DeadlineHTTPSConnection,
+            request,
+            context=self._context,
+            deadline=_request_deadline(request),
+        )
+
+
 def _urlopen_without_redirects(request: Request, *, timeout: float):
     parsed = urlsplit(request.full_url)
-    handlers: list[Any] = [_RejectRedirects()]
+    handlers: list[Any] = [_DeadlineHTTPHandler(), _DeadlineHTTPSHandler(), _RejectRedirects()]
     if parsed.hostname and _is_loopback_host(parsed.hostname):
         handlers.insert(0, ProxyHandler({}))
     return build_opener(*handlers).open(request, timeout=timeout)
@@ -260,13 +436,18 @@ def _request_json(
     }
     try:
         request = Request(url, headers=request_headers, method="GET")
+        request._skillevaluator_deadline = deadline
         with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - validated above
             raw = _read_response_body(response, max_response_bytes=max_response_bytes, deadline=deadline)
     except HTTPError as exc:
         raise ModelCatalogError(f"model catalog returned HTTP {exc.code}") from None
     except TimeoutError:
         raise ModelCatalogError("model catalog request timed out") from None
-    except (HTTPException, URLError, OSError) as exc:
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise ModelCatalogError("model catalog request timed out") from None
+        raise ModelCatalogError(f"model catalog request failed: {type(exc).__name__}") from None
+    except (HTTPException, OSError) as exc:
         raise ModelCatalogError(f"model catalog request failed: {type(exc).__name__}") from None
     except (TypeError, ValueError):
         raise ModelCatalogError("model catalog request configuration is invalid") from None

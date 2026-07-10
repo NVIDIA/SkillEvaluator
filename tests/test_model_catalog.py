@@ -231,6 +231,144 @@ def test_catalog_body_trickle_cannot_extend_the_wall_clock_deadline() -> None:
     assert elapsed < 0.5
 
 
+@pytest.mark.parametrize(
+    ("immediate", "trickled", "remainder"),
+    [
+        (
+            b"",
+            b"HTTP/1.1 200 OK\r\n",
+            b'Content-Type: application/json\r\nContent-Length: 12\r\n\r\n{"data": []}',
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\n",
+            b"X-Slow-Header: xxxxxxxxxxxxxxxxxxxx\r\n",
+            b'Content-Type: application/json\r\nContent-Length: 12\r\n\r\n{"data": []}',
+        ),
+    ],
+    ids=("status-line", "headers"),
+)
+def test_catalog_status_and_header_trickles_cannot_extend_the_wall_clock_deadline(
+    immediate: bytes,
+    trickled: bytes,
+    remainder: bytes,
+) -> None:
+    class SlowProtocolHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            try:
+                self.connection.sendall(immediate)
+                for byte in trickled:
+                    self.connection.sendall(bytes((byte,)))
+                    time.sleep(0.025)
+                self.connection.sendall(remainder)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_args) -> None:
+            return None
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), SlowProtocolHandler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        started = time.monotonic()
+        try:
+            config = _provider(
+                "openai-compatible",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            )
+            with pytest.raises(ModelCatalogError, match="timed out"):
+                fetch_model_records(config, timeout_seconds=0.1)
+            elapsed = time.monotonic() - started
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+    # A socket-inactivity timeout is reset by every byte and takes roughly
+    # 0.5-1.0s for these responses. The configured timeout is an absolute
+    # deadline spanning connection setup, status, headers, and body parsing.
+    assert elapsed < 0.3
+
+
+def test_catalog_connect_attempts_share_one_absolute_deadline(monkeypatch) -> None:
+    class FakeSocket:
+        def __init__(self, *, fail_connect: bool) -> None:
+            self.fail_connect = fail_connect
+            self.timeouts: list[float] = []
+            self.closed = False
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+        def bind(self, _source_address) -> None:
+            return None
+
+        def connect(self, _socket_address) -> None:
+            if self.fail_connect:
+                raise OSError("first address failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    first = FakeSocket(fail_connect=True)
+    second = FakeSocket(fail_connect=False)
+    sockets = iter((first, second))
+    monkeypatch.setattr(
+        model_catalog.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (model_catalog.socket.AF_INET, model_catalog.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 1)),
+            (model_catalog.socket.AF_INET, model_catalog.socket.SOCK_STREAM, 6, "", ("127.0.0.2", 1)),
+        ],
+    )
+    monkeypatch.setattr(model_catalog.socket, "socket", lambda *_args, **_kwargs: next(sockets))
+    monotonic = iter((100.0, 100.0, 100.08, 100.08))
+    monkeypatch.setattr(model_catalog.time, "monotonic", lambda: next(monotonic))
+
+    connection = model_catalog._DeadlineHTTPConnection("example.test", timeout=1.0, deadline=100.1)
+    connected = connection._create_connection_before_deadline(("example.test", 443), None, None)
+
+    assert connected is second
+    assert first.closed is True
+    assert first.timeouts == [pytest.approx(0.1)]
+    assert second.timeouts == [pytest.approx(0.02), pytest.approx(0.02)]
+
+
+def test_loopback_catalog_transport_bypasses_environment_proxy(monkeypatch) -> None:
+    authorization: list[str | None] = []
+    payload = b'{"data": [{"id": "loopback-model"}]}'
+
+    class CatalogHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            authorization.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args) -> None:
+            return None
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with ThreadingHTTPServer(("127.0.0.1", 0), CatalogHandler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            config = _provider(
+                "openai-compatible",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            )
+            records = fetch_model_records(config, timeout_seconds=1.0)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+    assert records == (ModelRecord("loopback-model"),)
+    assert authorization == ["Bearer top-secret-key"]
+
+
 def test_anthropic_pagination_enforces_aggregate_response_bytes(monkeypatch) -> None:
     first = json.dumps({"data": [{"id": "model-a"}], "has_more": True, "last_id": "model-a"}).encode()
     second = json.dumps({"data": [{"id": "model-b"}], "has_more": False, "last_id": "model-b"}).encode()

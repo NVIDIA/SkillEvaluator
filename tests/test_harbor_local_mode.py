@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -477,20 +478,25 @@ def test_strict_exec_bootstrap_runs_from_fresh_private_tmp_venv_under_real_seatb
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_exec_timeout_terminates_background_descendants(tmp_path: Path) -> None:
+    # Deterministic under CPU load: the child sleeps far longer than the exec
+    # timeout (so it can never legitimately write its marker), and instead of
+    # trusting fixed sleeps the test polls until the recorded child PID is
+    # gone. The previous 0.2s-timeout/0.5s-sleep pairing flaked under
+    # pytest-xdist when scheduling latency ate the margins.
     environment = _local_environment(tmp_path)
     started = environment._workspace / "timeout-child-started"
     marker = environment._workspace / "timeout-child-survived"
+    child_pid_path = environment._workspace / "timeout-child-pid"
     command = (
         "printf stdout-before-timeout; printf stderr-before-timeout >&2; "
         "printf started > timeout-child-started; "
-        "(sleep 0.5; printf survived > timeout-child-survived) & wait"
+        "(sleep 15; printf survived > timeout-child-survived) & "
+        "printf '%s' \"$!\" > timeout-child-pid; wait"
     )
     environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
 
     async def run_timeout() -> object:
-        result = await environment.exec(command, timeout_sec=0.2)
-        await asyncio.sleep(0.6)
-        return result
+        return await environment.exec(command, timeout_sec=1.0)
 
     result = asyncio.run(run_timeout())
 
@@ -499,6 +505,21 @@ def test_exec_timeout_terminates_background_descendants(tmp_path: Path) -> None:
     assert "stderr-before-timeout" in (result.stderr or "")
     assert "Timed out" in (result.stderr or "")
     assert started.exists(), "the background descendant did not start before the timeout"
+
+    def process_exists(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    child_pid = int(child_pid_path.read_text())
+    deadline = time.monotonic() + 10
+    while process_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not process_exists(child_pid), "a background descendant survived the timeout kill"
     assert not marker.exists(), "a background descendant wrote after the command timed out"
 
 
@@ -1515,8 +1536,7 @@ def test_strict_runtime_ro_binds_use_exact_interpreter_and_python_library_roots(
     interpreter.parent.mkdir(parents=True)
     interpreter.symlink_to(target)
     library_roots = {
-        name: tmp_path / "python-install" / "lib" / name
-        for name in ("stdlib", "platstdlib", "purelib", "platlib")
+        name: tmp_path / "python-install" / "lib" / name for name in ("stdlib", "platstdlib", "purelib", "platlib")
     }
     for path in library_roots.values():
         path.mkdir(parents=True)
@@ -1996,11 +2016,14 @@ def test_doctor_accepts_available_independent_codex_credential_and_explicit_mode
     monkeypatch.setenv("OPENAI_API_KEY", "independent-openai-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-    assert tier3_commands.doctor(
-        agents="codex",
-        env_mode="local",
-        agent_model=("codex=gpt-5",),
-    ) == 0
+    assert (
+        tier3_commands.doctor(
+            agents="codex",
+            env_mode="local",
+            agent_model=("codex=gpt-5",),
+        )
+        == 0
+    )
     output = capsys.readouterr().out
     assert "operator credential and model plan resolved" in " ".join(output.split())
 
@@ -2025,11 +2048,14 @@ def test_doctor_preserves_docker_rejection_for_mixed_agents(
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
 
-    assert tier3_commands.doctor(
-        agents="codex,opencode",
-        env_mode="docker",
-        agent_model=("codex=gpt-5",),
-    ) == 1
+    assert (
+        tier3_commands.doctor(
+            agents="codex,opencode",
+            env_mode="docker",
+            agent_model=("codex=gpt-5",),
+        )
+        == 1
+    )
     output = capsys.readouterr().out
     assert "Agent runtime credential" in output
     assert "OPENAI_API_KEY + OPENAI_BASE_URL" in " ".join(output.split())

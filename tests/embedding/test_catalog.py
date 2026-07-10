@@ -458,12 +458,16 @@ class TestCatalogPersistence:
             "    raise AssertionError('FIFO catalog was accepted')\n"
         )
 
+        # The timeout guards against a regression where opening the FIFO
+        # blocks forever. It must absorb interpreter startup plus the package
+        # import, which can take several seconds when pytest-xdist saturates
+        # the CPU — 2s flaked under -n auto while always passing standalone.
         completed = subprocess.run(
             [sys.executable, "-c", script, str(fifo)],
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=30,
         )
 
         assert completed.returncode == 0, completed.stderr

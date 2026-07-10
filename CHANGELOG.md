@@ -22,3 +22,9 @@ All notable changes to Skill Evaluator are documented in this file.
   filename patterns, `execution_performed=false`, and
   `coverage_measured=false`; projects must run tests and measure coverage in a
   trusted environment or explicit sandbox.
+
+### Fixed
+
+- Tier 2 content collection now prunes configured evaluation and version
+  artifact directories before enforcing the discovered-path limit, so excluded
+  generated results cannot cause false path-count failures.

@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -271,10 +272,12 @@ class TestCollectFilesSafety:
         assert exc_info.value.metadata == {"actual": 3, "limit": 2}
 
     def test_directory_traversal_error_is_actionable(self, skill_root: Path, monkeypatch) -> None:
-        def deny_traversal(_path: Path, _pattern: str):
-            raise PermissionError("permission denied")
+        def deny_traversal(_root: Path, *, onerror=None, **_kwargs):
+            assert onerror is not None
+            onerror(PermissionError("permission denied"))
+            return iter(())
 
-        monkeypatch.setattr(Path, "rglob", deny_traversal)
+        monkeypatch.setattr(os, "walk", deny_traversal)
 
         with pytest.raises(SkillCollectionError) as exc_info:
             collect_files(skill_root)
@@ -298,6 +301,67 @@ class TestCollectFilesSafety:
         assert exc_info.value.rel_path == "references/outside.md"
         assert "symbolic link or reparse point" in str(exc_info.value)
         assert "replace" in exc_info.value.suggestion.lower()
+
+    def test_rejects_reparse_directory_before_descending(self, skill_root: Path) -> None:
+        target = skill_root / "reparse-directory"
+        target.mkdir()
+        (target / "private.md").write_text("private host content")
+        original_lstat = Path.lstat
+
+        def guarded_walk(root: Path, **_kwargs):
+            yield root, [target.name], []
+            raise AssertionError("walk descended into a reparse directory")
+
+        def fake_lstat(path: Path):
+            if path == target:
+                return SimpleNamespace(
+                    st_mode=stat.S_IFDIR,
+                    st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                )
+            return original_lstat(path)
+
+        with (
+            patch.object(Path, "lstat", fake_lstat),
+            patch.object(os, "walk", guarded_walk),
+            pytest.raises(SkillCollectionError) as exc_info,
+        ):
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == "reparse-directory"
+        assert "symbolic link or reparse point" in str(exc_info.value)
+
+    @pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-specific")
+    def test_rejects_windows_junction_before_walking_target(
+        self, skill_root: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "private.md").write_text("private host content")
+        junction = skill_root / "junction"
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        real_walk = os.walk
+        visited: list[Path] = []
+
+        def recording_walk(*args, **kwargs):
+            for entry in real_walk(*args, **kwargs):
+                visited.append(Path(entry[0]))
+                yield entry
+
+        monkeypatch.setattr(os, "walk", recording_walk)
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == "junction"
+        assert "symbolic link or reparse point" in str(exc_info.value)
+        assert junction not in visited
 
     def test_rejects_windows_reparse_point_even_when_not_a_symlink(self, skill_root: Path) -> None:
         target = skill_root / "reparse.md"
@@ -587,3 +651,36 @@ class TestCollectFilesExclusions:
         result = collect_files(skill_root, excluded_dirs={"build_cache"})
         rel_paths = sorted(f.rel_path for f in result)
         assert rel_paths == ["SKILL.md"]
+
+
+class TestPathBudgetExcludesArtifacts:
+    def test_path_limit_ignores_generated_artifact_trees(self, tmp_path: Path, monkeypatch) -> None:
+        # Live regression: a well-used skill accumulates thousands of trial
+        # artifacts under evals/results/. They are excluded content and must
+        # not consume the path-count budget (managing-calendar failed Tier 2
+        # with "more than 4096 paths" on generated files it never scans).
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 8)
+        skill = tmp_path / "busy-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("# Busy skill\n\nAuthored content.", encoding="utf-8")
+        trials = skill / "evals" / "results" / "20260101_000000" / "trials"
+        trials.mkdir(parents=True)
+        for index in range(10):
+            (trials / f"artifact-{index}.json").write_text("{}", encoding="utf-8")
+
+        result = collect_files(skill)
+
+        assert [f.rel_path for f in result] == ["SKILL.md"]
+
+    def test_path_limit_still_applies_to_authored_content(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 8)
+        skill = tmp_path / "huge-skill"
+        (skill / "docs").mkdir(parents=True)
+        for index in range(10):
+            (skill / "docs" / f"note-{index}.md").write_text("hi", encoding="utf-8")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill)
+
+        assert exc_info.value.check_name == "path_count_limit"
+        assert exc_info.value.metadata == {"actual": 9, "limit": 8}

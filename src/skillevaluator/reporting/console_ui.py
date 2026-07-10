@@ -651,19 +651,24 @@ def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[T
     advisories = sum(len(r.findings) for r in results if r.passed)
     rows: list[TierRow] = []
     if failed:
-        rows.append(TierRow("context", [("duplicates found", f"bold {RED}")]))
-        # Show the actual overlaps: the findings say what duplicated what.
+        # A validator that failed without findings crashed or hit a scan
+        # limit. Only claim duplication when duplicate findings exist.
+        found_duplicates = any(result.findings for result in failed)
+        headline = "duplicates found" if found_duplicates else "scan failed"
+        rows.append(TierRow("context", [(headline, f"bold {RED}")]))
+        # Show the actual overlaps, or the errors that stopped the scan.
         shown = 0
         total = 0
         for result in failed:
             details = [f.message for f in result.findings] or [str(e) for e in result.errors]
+            label = "duplicate" if result.findings else "error"
             total += len(details)
             for message in details:
                 if shown >= 3:
                     continue
                 rows.append(
                     TierRow(
-                        "duplicate",
+                        label,
                         [(str(message)[:110], TEXT)],
                         glyph="✗",
                         glyph_style=f"bold {RED}",

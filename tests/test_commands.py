@@ -787,3 +787,23 @@ def test_display_findings_report_reports_whether_it_rendered(tmp_path) -> None:
         tmp_path,
     )
     assert rendered == set()
+
+
+def test_summarize_tier2_labels_scan_errors_as_errors_not_duplicates() -> None:
+    """A failed scan with no findings must not claim duplicates were found."""
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier2
+
+    crashed = ValidationResult(validator_name="Tier 2 Deduplication")
+    crashed.add_error("Skill tree contains more than 4096 paths.")
+
+    ran, ok, rows, _skip = summarize_tier2([crashed])
+
+    assert ran and not ok
+    rendered = [(row.label, "".join(chunk for chunk, _style in row.segments)) for row in rows]
+    labels = [label for label, _text in rendered]
+    texts = " | ".join(text for _label, text in rendered)
+    assert "scan failed" in texts
+    assert "duplicates found" not in texts
+    assert "error" in labels and "duplicate" not in labels
+    assert "more than 4096 paths" in texts

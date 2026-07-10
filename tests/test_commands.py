@@ -807,3 +807,30 @@ def test_summarize_tier2_labels_scan_errors_as_errors_not_duplicates() -> None:
     assert "duplicates found" not in texts
     assert "error" in labels and "duplicate" not in labels
     assert "more than 4096 paths" in texts
+
+
+@pytest.mark.parametrize("check_name", ["path_count_limit", "chunk_count_limit", "embedding_error"])
+def test_summarize_tier2_labels_structured_scan_failures_as_errors(check_name: str) -> None:
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier2
+
+    failed_scan = ValidationResult(validator_name="Tier 2 Deduplication")
+    failed_scan.add_finding(
+        Finding(
+            category="CONTENT_DEDUP",
+            severity=Severity.CRITICAL,
+            check_name=check_name,
+            message="Tier 2 stopped before duplicate analysis completed.",
+            file_path="SKILL.md",
+        )
+    )
+
+    ran, ok, rows, _skip = summarize_tier2([failed_scan])
+
+    assert ran and not ok
+    rendered = [(row.label, "".join(chunk for chunk, _style in row.segments)) for row in rows]
+    labels = [label for label, _text in rendered]
+    texts = " | ".join(text for _label, text in rendered)
+    assert "scan failed" in texts
+    assert "duplicates found" not in texts
+    assert "error" in labels and "duplicate" not in labels

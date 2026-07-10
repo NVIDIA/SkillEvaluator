@@ -44,6 +44,16 @@ FAINT = "#565B66"  # chrome, pending, bar remainders
 BRIGHT = "#EDEDED"  # the actively-running element
 INK = "#101403"  # pill/badge foreground on green fills
 
+_TIER2_SCAN_FAILURE_CHECKS = frozenset(
+    {
+        "invalid_skill_root",
+        "invalid_text_encoding",
+        "path_access_error",
+        "secure_open_unavailable",
+        "unsafe_path",
+    }
+)
+
 WIDTH = 98
 LABEL = 12
 DUR = 8
@@ -651,37 +661,50 @@ def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[T
     advisories = sum(len(r.findings) for r in results if r.passed)
     rows: list[TierRow] = []
     if failed:
-        # A validator that failed without findings crashed or hit a scan
-        # limit. Only claim duplication when duplicate findings exist.
-        found_duplicates = any(result.findings for result in failed)
+        details: list[tuple[str, str]] = []
+        for result in failed:
+            if result.findings:
+                details.extend(
+                    (
+                        "error" if _tier2_finding_is_scan_failure(finding) else "duplicate",
+                        str(finding.message),
+                    )
+                    for finding in result.findings
+                )
+            else:
+                details.extend(("error", str(error)) for error in result.errors)
+
+        # Resource ceilings and provider/traversal failures are represented as
+        # structured findings, but they mean duplicate analysis did not finish.
+        found_duplicates = any(label == "duplicate" for label, _message in details)
         headline = "duplicates found" if found_duplicates else "scan failed"
         rows.append(TierRow("context", [(headline, f"bold {RED}")]))
         # Show the actual overlaps, or the errors that stopped the scan.
         shown = 0
-        total = 0
-        for result in failed:
-            details = [f.message for f in result.findings] or [str(e) for e in result.errors]
-            label = "duplicate" if result.findings else "error"
-            total += len(details)
-            for message in details:
-                if shown >= 3:
-                    continue
-                rows.append(
-                    TierRow(
-                        label,
-                        [(str(message)[:110], TEXT)],
-                        glyph="✗",
-                        glyph_style=f"bold {RED}",
-                    )
+        for label, message in details:
+            if shown >= 3:
+                continue
+            rows.append(
+                TierRow(
+                    label,
+                    [(message[:110], TEXT)],
+                    glyph="✗",
+                    glyph_style=f"bold {RED}",
                 )
-                shown += 1
-        if total > shown:
-            rows.append(TierRow("", [(f"… {total - shown} more — see the report", MUTED)]))
+            )
+            shown += 1
+        if len(details) > shown:
+            rows.append(TierRow("", [(f"… {len(details) - shown} more — see the report", MUTED)]))
     else:
         rows.append(TierRow("context", [("clean", TEXT), ("  no duplicate guidance", MUTED)]))
     if advisories:
         rows.append(TierRow("advisories", [(str(advisories), TEXT), ("  catalog", MUTED)]))
     return True, not failed, rows, ""
+
+
+def _tier2_finding_is_scan_failure(finding: object) -> bool:
+    check_name = str(getattr(finding, "check_name", "")).casefold()
+    return check_name in _TIER2_SCAN_FAILURE_CHECKS or check_name.endswith("_limit") or check_name.endswith("_error")
 
 
 def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow], str]:

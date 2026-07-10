@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
-from skillevaluator.tier3.harbor.html_report import generate_html_report
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
 
 
@@ -368,7 +368,13 @@ def test_incomplete_default_reward_is_unscored_and_reported(tmp_path: Path) -> N
             "reason": "Reward metrics are incomplete or non-finite; trial was not scored",
         }
     ]
-    report = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    report = render_agent_eval_html_report(
+        skill,
+        results_dir,
+        use_llm_judge=False,
+    ).read_text(encoding="utf-8")
     assert "Reward metrics are incomplete or non-finite; trial was not scored" in report
 
 

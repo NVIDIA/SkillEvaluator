@@ -621,6 +621,100 @@ def test_compact_footer_is_last_and_omits_result_json(tmp_path: Path) -> None:
     assert output.index("Time: 1.0s") < output.index("📊 HTML report")
 
 
+def test_feedback_and_suggestions_render_before_artifacts(tmp_path: Path) -> None:
+    report = tmp_path / "report.html"
+    report.touch()
+    result = {
+        "execution_status": "succeeded",
+        "report_path": str(report),
+        "run_dir": str(tmp_path),
+        "agents": {},
+        "tier3_feedback": {
+            "conclusions": [
+                {"severity": "warn", "title": "Execution gap", "message": "The skill did not run."},
+            ],
+            "recommendations": [
+                {"category": "Fix", "message": "Add the required authentication flow."},
+                {"category": "Test", "message": "Add a successful summarization case."},
+            ],
+            "suggestions": ["Add the required authentication flow."],
+        },
+    }
+
+    output = render_result(result)
+
+    assert "Feedback & Suggestions" in output
+    assert "Execution gap" in output
+    assert "The skill did not run." in output
+    assert "Add the required authentication flow." in output
+    assert "Add a successful summarization case." in output
+    assert output.count("Add the required authentication flow.") == 1
+    assert output.index("Feedback & Suggestions") < output.index("Artifacts")
+
+
+def test_feedback_display_redacts_secrets_controls_and_rich_markup(monkeypatch) -> None:
+    secret = "sk-AbCdEf1234567890"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    result = {
+        "execution_status": "succeeded",
+        "agents": {},
+        "tier3_feedback": {
+            "conclusions": [],
+            "recommendations": [
+                {
+                    "category": "Fix",
+                    "message": f"[link=https://evil.example]credential={secret}\x1b]52;c;INJECT\x07[/link]",
+                }
+            ],
+            "suggestions": [],
+        },
+    }
+    stream = io.StringIO()
+    console = Console(file=stream, force_terminal=True, color_system="standard", width=180)
+
+    render_evaluation_result(result, console=console)
+    output = stream.getvalue()
+
+    assert secret not in output
+    assert "<redacted>" in output
+    assert "\x1b]52;" not in output
+    assert "evil.example" in output
+    assert "\x1b]8;" not in output
+
+
+def test_feedback_overflow_does_not_claim_a_missing_html_report() -> None:
+    output = render_result(
+        {
+            "execution_status": "succeeded",
+            "warnings": ["HTML report was not generated"],
+            "agents": {},
+            "tier3_feedback": {
+                "conclusions": [],
+                "recommendations": [{"message": f"Suggestion {index}"} for index in range(6)],
+            },
+        }
+    )
+
+    assert "1 more suggestion(s) not shown" in output
+    assert "1 more suggestion(s) in the HTML report" not in output
+
+
+def test_feedback_display_supports_legacy_agent_eval_results() -> None:
+    output = render_result(
+        {
+            "execution_status": "succeeded",
+            "agents": {},
+            "agent_eval": {
+                "conclusions": [],
+                "recommendations": [{"message": "Legacy recommendation"}],
+            },
+        }
+    )
+
+    assert "Feedback & Suggestions" in output
+    assert "Legacy recommendation" in output
+
+
 def test_inspect_jobs_requires_existing_retained_directory_and_quotes_path(tmp_path: Path) -> None:
     jobs = tmp_path / "jobs with spaces"
     jobs.mkdir()

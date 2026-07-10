@@ -2641,15 +2641,18 @@
                     <tbody>
                     {% for row in t3_attempt_rows %}
                         {% set case_data = row.case %}
-                        {% set attempts = case_data.attempts or [] %}
-                        {% set attempts_used = case_data.attempts_used | int if case_data.attempts_used is not none else (attempts | length) %}
-                        {% set attempts_missing = case_data.attempts_missing | int if case_data.attempts_missing is not none else 0 %}
-                        {% set attempts_skipped = case_data.attempts_skipped | int if case_data.attempts_skipped is not none else 0 %}
+                        {% set attempts = case_data.get('attempts') or [] %}
+                        {% set attempts_used_value = case_data.get('attempts_used') %}
+                        {% set attempts_missing_value = case_data.get('attempts_missing') %}
+                        {% set attempts_skipped_value = case_data.get('attempts_skipped') %}
+                        {% set attempts_used = attempts_used_value | int if attempts_used_value is not none else (attempts | length) %}
+                        {% set attempts_missing = attempts_missing_value | int if attempts_missing_value is not none else 0 %}
+                        {% set attempts_skipped = attempts_skipped_value | int if attempts_skipped_value is not none else 0 %}
                         {% set total_expected = attempts_used + attempts_missing + attempts_skipped %}
                         {% if total_expected == 0 %}{% set total_expected = t3_max_attempts %}{% endif %}
-                        {% set best_score = case_data.best_score %}
-                        {% set passed = case_data.passed %}
-                        {% set first_pass_attempt = case_data.first_pass_attempt %}
+                        {% set best_score = case_data.get('best_score') %}
+                        {% set passed = case_data.get('passed') %}
+                        {% set first_pass_attempt = case_data.get('first_pass_attempt') %}
                         <tr>
                             <td><strong>{{ row.agent }}</strong></td>
                             <td>{{ row.condition }}</td>
@@ -2658,8 +2661,9 @@
                                 {% if attempts %}
                                 <div class="t3-attempt-list">
                                     {% for att in attempts %}
-                                        {% set sc = att.score %}
-                                        {% set att_idx = att.attempt | int if att.attempt is not none else loop.index %}
+                                        {% set sc = att.get('score') %}
+                                        {% set att_idx_value = att.get('attempt') %}
+                                        {% set att_idx = att_idx_value | int if att_idx_value is not none else loop.index %}
                                         {% if sc is none %}
                                             <span class="t3-attempt-chip muted" title="Attempt {{ att_idx }}: not scored">A{{ att_idx }}: not scored</span>
                                         {% else %}
@@ -3157,7 +3161,7 @@
                                 <div class="t3-sug-body">{{ conclusion.message }}</div>
                             </div>
                             <div class="t3-sug-actions">
-                                <button class="t3-copy-btn" onclick="tier3CopyText(this, {{ ((conclusion.title ~ ': ' ~ conclusion.message) | tojson) }})">Copy</button>
+                                <button class="t3-copy-btn" onclick='tier3CopyText(this, {{ ((conclusion.title ~ ': ' ~ conclusion.message) | tojson) }})'>Copy</button>
                             </div>
                         </div>
                     {% endfor %}
@@ -3190,7 +3194,7 @@
                                     {% endif %}
                                 </div>
                                 <div class="t3-sug-actions">
-                                    <button class="t3-copy-btn" onclick="tier3CopyText(this, {{ (reco.message | string | tojson) }})">Copy</button>
+                                    <button class="t3-copy-btn" onclick='tier3CopyText(this, {{ (reco.message | string | tojson) }})'>Copy</button>
                                 </div>
                             </div>
                         {% endfor %}
@@ -3221,7 +3225,7 @@
                                     {% endif %}
                                 </div>
                                 <div class="t3-sug-actions">
-                                    <button class="t3-copy-btn" onclick="tier3CopyText(this, {{ (suggestion | string | tojson) }})">Copy</button>
+                                    <button class="t3-copy-btn" onclick='tier3CopyText(this, {{ (suggestion | string | tojson) }})'>Copy</button>
                                 </div>
                             </div>
                         {% endfor %}
@@ -3315,24 +3319,24 @@
                         {% if t3_harbor_job_url %}
                             <div class="t3-prov-label">Harbor logs</div>
                             <a href="{{ t3_harbor_job_url }}" target="_blank" rel="noopener" class="t3-prov-value" style="color:var(--accent-color);text-decoration:none;">{{ t3_harbor_job_url }}</a>
-                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick="tier3CopyText(this, {{ (t3_harbor_job_url | string | tojson) }})">Copy</button></div>
+                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick='tier3CopyText(this, {{ (t3_harbor_job_url | string | tojson) }})'>Copy</button></div>
                         {% endif %}
                         {% if t3_harbor_analysis_url %}
                             <div class="t3-prov-label">Harbor analysis</div>
                             <a href="{{ t3_harbor_analysis_url }}" target="_blank" rel="noopener" class="t3-prov-value" style="color:var(--accent-color);text-decoration:none;">{{ t3_harbor_analysis_url }}</a>
-                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick="tier3CopyText(this, {{ (t3_harbor_analysis_url | string | tojson) }})">Copy</button></div>
+                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick='tier3CopyText(this, {{ (t3_harbor_analysis_url | string | tojson) }})'>Copy</button></div>
                         {% endif %}
                         {% if t3_provenance.evaluator_paths %}
                         {% for name, path in t3_provenance.evaluator_paths.items() %}
                             <div class="t3-prov-label">{{ name }}</div>
                             <code class="t3-prov-value">{{ path }}</code>
-                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick="tier3CopyText(this, {{ (path | string | tojson) }})">Copy</button></div>
+                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick='tier3CopyText(this, {{ (path | string | tojson) }})'>Copy</button></div>
                         {% endfor %}
                         {% endif %}
                         {% if t3_provenance.run_dir %}
                             <div class="t3-prov-label">Harbor run dir</div>
                             <code class="t3-prov-value">{{ t3_provenance.run_dir }}</code>
-                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick="tier3CopyText(this, {{ (t3_provenance.run_dir | string | tojson) }})">Copy</button></div>
+                            <div class="t3-prov-action"><button class="t3-copy-btn" onclick='tier3CopyText(this, {{ (t3_provenance.run_dir | string | tojson) }})'>Copy</button></div>
                         {% endif %}
                     </div>
                 </div>

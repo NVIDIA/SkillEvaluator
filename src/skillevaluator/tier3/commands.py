@@ -24,13 +24,13 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator import __version__
+from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate_case_ids
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, _validate_config, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_skillevaluators
 from skillevaluator.tier3.harbor import HARBOR_AGENTS, HARBOR_AGENTS_SUPPORTED, canonical_agent_name
-from skillevaluator.tier3.harbor.html_report import generate_html_report
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
@@ -650,8 +650,7 @@ def evaluate(
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
         if unknown_model_agents:
             raise ValueError(
-                "--agent-model provided for agent(s) not selected by -a/--agents: "
-                + ", ".join(unknown_model_agents)
+                "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
             )
 
         output_dir = resolve_results_root(skill_path, results_dir)
@@ -902,11 +901,7 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     target = latest.resolve() if latest.is_symlink() else latest
     report_path = target / "report.html"
     if not report_path.exists():
-        report_path = generate_html_report(
-            skill_name=skill_path.name,
-            results_dir=target,
-            skill_path=skill_path,
-        )
+        report_path = render_agent_eval_html_report(skill_path, target)
     console.print(f"Opening: [cyan]{report_path}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path

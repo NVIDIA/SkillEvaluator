@@ -454,6 +454,91 @@ def _render_dimensions(
     )
 
 
+def _insight_message(item: object) -> str:
+    if isinstance(item, Mapping):
+        title = str(item.get("title") or "").strip()
+        message = str(item.get("message") or item.get("suggestion") or "").strip()
+        if title and message and title.casefold() not in message.casefold():
+            return f"{title}: {message}"
+        return message or title
+    return str(item).strip()
+
+
+def _insight_rows(items: object) -> list[tuple[str, str]]:
+    if not isinstance(items, list):
+        return []
+    rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        message = _insight_message(item)
+        if not message or message in seen:
+            continue
+        severity = str(item.get("severity") or "") if isinstance(item, Mapping) else ""
+        rows.append((severity, message))
+        seen.add(message)
+    return rows
+
+
+def _render_feedback_and_suggestions(
+    *,
+    console: Console,
+    result: Mapping[str, Any],
+    safe: Any,
+) -> None:
+    agent_eval = result.get("tier3_feedback")
+    if not isinstance(agent_eval, Mapping):
+        # Backward compatibility for results produced by the first unified
+        # reporting implementation.
+        agent_eval = result.get("agent_eval")
+    if not isinstance(agent_eval, Mapping):
+        return
+
+    feedback = _insight_rows(agent_eval.get("conclusions"))
+    suggestions = _insight_rows(agent_eval.get("recommendations"))
+    if not suggestions:
+        suggestions = _insight_rows(agent_eval.get("suggestions_v2"))
+    if not suggestions:
+        suggestions = _insight_rows(agent_eval.get("suggestions"))
+    if not feedback and not suggestions:
+        return
+
+    body = Text()
+    has_html_report = bool(result.get("report_path"))
+    if feedback:
+        body.append("Feedback\n", style="bold")
+        for severity, message in feedback[:3]:
+            icon, style = {
+                "fail": ("✗", "red"),
+                "warn": ("⚠", "yellow"),
+                "pass": ("✓", "green"),
+            }.get(severity, ("•", "dim"))
+            body.append(f"  {icon} ", style=style)
+            body.append(f"{safe(message)}\n")
+        if len(feedback) > 3:
+            location = "in the HTML report" if has_html_report else "not shown"
+            body.append(f"  … {len(feedback) - 3} more feedback item(s) {location}.\n", style="dim")
+
+    if suggestions:
+        if feedback:
+            body.append("\n")
+        body.append("Suggestions\n", style="bold")
+        for index, (_severity, message) in enumerate(suggestions[:5], start=1):
+            body.append(f"  {index}. ", style="cyan")
+            body.append(f"{safe(message)}\n")
+        if len(suggestions) > 5:
+            location = "in the HTML report" if has_html_report else "not shown"
+            body.append(f"  … {len(suggestions) - 5} more suggestion(s) {location}.\n", style="dim")
+
+    console.print(
+        Panel(
+            body,
+            title=Text("Feedback & Suggestions", style="bold cyan"),
+            border_style="cyan",
+            padding=(1, 1),
+        )
+    )
+
+
 def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> None:
     """Render persisted engine truth, aggregating only canonical score components."""
     secret_values = secret_values_from_environment(os.environ)
@@ -514,6 +599,8 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
                 padding=(1, 1),
             )
         )
+
+    _render_feedback_and_suggestions(console=console, result=result, safe=safe)
 
     artifact_rows: list[tuple[str, str]] = []
     report_path = result.get("report_path")

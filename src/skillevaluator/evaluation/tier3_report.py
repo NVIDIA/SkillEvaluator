@@ -47,6 +47,8 @@ _AGENT_EVAL_DESCRIPTION = "Tier 3: Live Agent Evaluation (Harbor)"
 _DIMENSION_IDS = list(DIMENSION_MAPPING.keys())
 
 _SCHEMA_VERSION = "2.0"
+_TIER3_FEEDBACK_SCHEMA_VERSION = "1.0"
+_TIER3_FEEDBACK_FIELDS = ("conclusions", "recommendations", "suggestions", "suggestions_v2")
 
 
 def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None) -> dict[str, Any]:
@@ -154,25 +156,43 @@ def agent_eval_result_from_run(
     Returns ``None`` when no usable run directory or agent data can be found, so
     the caller can fall back to :func:`advisory_skip_result`.
     """
-    # Imported lazily: these pull Tier 3 (Harbor) helpers that must not load on a
-    # base install where ``validate`` runs without the Tier 3 extra.
-    from skillevaluator.tier3.harbor.html_report import (
-        _load_agent_data,
-        _load_dataset,
-        _load_staged_harbor_dataset,
-    )
     from skillevaluator.tier3.results_location import resolve_latest_results
 
     latest = resolve_latest_results(skill_path, results_dir)
     if not latest.exists():
         return None
     run_dir = latest.resolve() if latest.is_symlink() else latest
+    return agent_eval_result_from_directory(
+        skill_path,
+        run_dir,
+        env_mode=env_mode,
+        engine_result=engine_result,
+        use_llm_judge=use_llm_judge,
+    )
 
-    agents = _load_agent_data(run_dir)
+
+def agent_eval_result_from_directory(
+    skill_path: Path,
+    run_dir: Path,
+    *,
+    env_mode: str | None = None,
+    engine_result: dict[str, Any] | None = None,
+    use_llm_judge: bool = True,
+) -> ValidationResult | None:
+    """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run."""
+    # Imported lazily so base-only Tier 1 workflows do not load Tier 3 helpers.
+    from skillevaluator.tier3.harbor.report_data import (
+        load_agent_data,
+        load_dataset,
+        load_staged_harbor_dataset,
+    )
+
+    run_dir = run_dir.expanduser().resolve()
+    agents = load_agent_data(run_dir)
     if not agents:
         return None
 
-    dataset = _load_dataset(skill_path) or _load_staged_harbor_dataset(run_dir)
+    dataset = load_dataset(skill_path) or load_staged_harbor_dataset(run_dir)
     payload = build_agent_eval_payload(
         skill_path.name,
         agents,
@@ -187,6 +207,11 @@ def agent_eval_result_from_run(
         comparison=_read_comparison(run_dir),
         use_llm_judge=use_llm_judge,
     )
+    return _validation_result_from_payload(payload)
+
+
+def _validation_result_from_payload(payload: dict[str, Any] | None) -> ValidationResult | None:
+    """Wrap a canonical Tier 3 payload in the shared validation-result model."""
     if payload is None:
         return None
 
@@ -209,6 +234,50 @@ def agent_eval_result_from_run(
     return result
 
 
+def render_agent_eval_html_report(
+    skill_path: Path,
+    run_dir: Path,
+    *,
+    output_path: Path | None = None,
+    env_mode: str | None = None,
+    engine_result: dict[str, Any] | None = None,
+    use_llm_judge: bool = True,
+) -> Path:
+    """Render one standalone Tier 3 run with the canonical HTML reporter."""
+    from skillevaluator.reporting import HTMLReporter
+
+    skill_path = skill_path.expanduser().resolve()
+    run_dir = run_dir.expanduser().resolve()
+    result = agent_eval_result_from_directory(
+        skill_path,
+        run_dir,
+        env_mode=env_mode,
+        engine_result=engine_result,
+        use_llm_judge=use_llm_judge,
+    )
+    if result is None:
+        raise ValueError(f"No agent results found in {run_dir}")
+
+    canonical_payload = result.metadata.get("agent_eval")
+    if engine_result is not None and isinstance(canonical_payload, dict):
+        # Persist only the compact feedback contract needed by the CLI. The
+        # complete canonical payload remains in the HTML report and can be much
+        # larger because it duplicates trials, datasets, agents, and provenance.
+        engine_result["tier3_feedback"] = {
+            "schema_version": _TIER3_FEEDBACK_SCHEMA_VERSION,
+            **{field: list(canonical_payload.get(field) or []) for field in _TIER3_FEEDBACK_FIELDS},
+        }
+
+    target = output_path.expanduser().resolve() if output_path is not None else run_dir / "report.html"
+    reporter = HTMLReporter(
+        target_path=str(skill_path),
+        content_label="Skill",
+        tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
+    )
+    reporter.save([result], target)
+    return target
+
+
 def build_agent_eval_payload(
     skill_name: str,
     agents: dict[str, dict[str, Any]],
@@ -227,7 +296,7 @@ def build_agent_eval_payload(
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
 
     ``agents`` is the structure produced by
-    :func:`skillevaluator.tier3.harbor.html_report._load_agent_data`.
+    :func:`skillevaluator.tier3.harbor.report_data.load_agent_data`.
     Returns ``None`` when no agent carries usable scores.
 
     The payload mirrors Skill Evaluator's canonical Tier 3 shape so the ported reporters
@@ -237,9 +306,9 @@ def build_agent_eval_payload(
     and ``provenance`` (raw evaluators, raw lift, raw trial rewards) feeds the
     Diagnostics tab.
     """
-    from skillevaluator.tier3.harbor.html_report import _metrics_for_agents
+    from skillevaluator.tier3.harbor.report_data import metrics_for_agents
 
-    metrics = _metrics_for_agents(agents)
+    metrics = metrics_for_agents(agents)
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]
@@ -498,6 +567,12 @@ def _build_agent(
     )
     overall_ws = _mean([d["with_skill"] for d in dimensions if isinstance(d.get("with_skill"), (int, float))])
     overall_bl = _mean([d["baseline"] for d in dimensions if isinstance(d.get("baseline"), (int, float))])
+    if overall_ws is None and not metrics:
+        overall_ws = _mean([reward.get("overall") for reward in info.get("rewards", []) if isinstance(reward, dict)])
+    if overall_bl is None and not metrics:
+        overall_bl = _mean(
+            [reward.get("overall") for reward in info.get("rewards_baseline", []) if isinstance(reward, dict)]
+        )
     overall_lift = (
         round(overall_ws - overall_bl, 4)
         if isinstance(overall_ws, (int, float)) and isinstance(overall_bl, (int, float))

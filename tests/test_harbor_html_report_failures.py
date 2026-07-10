@@ -1,22 +1,45 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression coverage for Harbor failure details in the HTML report."""
+"""Regression coverage for Harbor failure details in the canonical HTML report."""
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.harbor import runner
 from skillevaluator.tier3.harbor.collector import _build_comparison, collect_harbor_results
-from skillevaluator.tier3.harbor.html_report import generate_html_report
 from skillevaluator.tier3.results_location import external_results_root, resolve_latest_results
 
 if TYPE_CHECKING:
     import pytest
+
+
+def _render_report(
+    skill_name: str,
+    results_dir: Path,
+    output_path: Path | None = None,
+    skill_path: Path | None = None,
+) -> Path:
+    skill = skill_path or results_dir.parent / f"{skill_name}-skill"
+    skill.mkdir(parents=True, exist_ok=True)
+    return render_agent_eval_html_report(
+        skill,
+        results_dir,
+        output_path=output_path,
+        use_llm_judge=False,
+    )
+
+
+def _tier3_payload(output: str) -> dict:
+    match = re.search(r'<script type="application/json" id="tier3-full">(.*?)</script>', output, re.DOTALL)
+    assert match is not None
+    return json.loads(match.group(1))
 
 
 def test_report_renders_aggregate_and_trial_failure_details(tmp_path: Path) -> None:
@@ -57,10 +80,10 @@ def test_report_renders_aggregate_and_trial_failure_details(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    report_path = generate_html_report("demo", results_dir)
+    report_path = _render_report("demo", results_dir)
     output = report_path.read_text(encoding="utf-8")
 
-    assert "Failure Details" in output
+    assert "Evaluation incomplete" in output
     assert "With skill aggregate job" in output
     assert "missing trial state counter: n_pending_trials" in output
     assert "case-001__attempt" in output
@@ -96,7 +119,7 @@ def test_collector_failure_details_flow_into_generated_report(tmp_path: Path) ->
         expected_cases=1,
         expected_case_ids=["case-001"],
     )
-    output = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
 
     assert "With skill aggregate job" in output
     assert "did not produce" in output
@@ -139,8 +162,11 @@ def test_failed_agent_has_no_synthetic_score_in_comparison_or_html(tmp_path: Pat
         }
         (summary_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
 
-    output = generate_html_report("demo", tmp_path).read_text(encoding="utf-8")
-    assert '<td class="subtle">NO SCORE</td>' in output
+    output = _render_report("demo", tmp_path).read_text(encoding="utf-8")
+    payload = _tier3_payload(output)
+
+    assert payload["agents"]["failed"]["with_skill"] is None
+    assert payload["agents"]["succeeded"]["with_skill"] == 0.8
 
 
 def test_partial_execution_failure_reports_coverage_without_quality_claims(tmp_path: Path) -> None:
@@ -196,17 +222,15 @@ def test_partial_execution_failure_reports_coverage_without_quality_claims(tmp_p
                 encoding="utf-8",
             )
 
-    output = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
 
-    assert "All commands succeeded on first attempt" not in output
-    assert "Resolve the execution failures shown in Failure Details" in output
-    assert "Expand evals.json" not in output
-    assert "currently 0" not in output
-    assert "4 AgentSkills eval case(s) in dataset" in output
-    assert "0 trials — agent did not produce results" not in output
-    assert "No valid with-skill score" in output
-    assert "4 of 8 expected attempts scored" in output
-    assert "Scored 4 of 8 expected logical attempts" in output
+    payload = _tier3_payload(output)
+
+    assert payload["execution_status"] == "failed"
+    assert payload["expected_attempts"] == 8
+    assert payload["scored_attempts"] == 4
+    assert len(payload["dataset"]) == 4
+    assert "With-skill environment setup failed before trials started" in output
 
 
 def test_failed_with_skill_condition_ignores_stale_partial_quality_artifacts(tmp_path: Path) -> None:
@@ -280,16 +304,16 @@ def test_failed_with_skill_condition_ignores_stale_partial_quality_artifacts(tmp
         encoding="utf-8",
     )
 
-    output = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
 
-    assert "NO SCORE" in output
+    payload = _tier3_payload(output)
+
+    assert payload["agents"]["opencode"]["with_skill"] is None
+    assert payload["agents"]["opencode"]["baseline"] == 0.2
+    assert payload["agents"]["opencode"]["lift"] is None
+    assert payload["agents"]["opencode"]["conditions"]["with_skill"]["expected_attempts"] == 2
+    assert payload["agents"]["opencode"]["conditions"]["with_skill"]["scored_attempts"] == 1
     assert "one required attempt failed" in output
-    assert "0.90" not in output
-    assert "+0.70" not in output
-    assert "passed on attempt" not in output
-    assert "1 of 2 scored" in output
-    assert "1 not scored" in output
-    assert "0 of 0 scored" not in output
 
 
 def test_baseline_only_failure_keeps_valid_with_skill_score(tmp_path: Path) -> None:
@@ -334,14 +358,14 @@ def test_baseline_only_failure_keeps_valid_with_skill_score(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    output = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
+
+    payload = _tier3_payload(output)
 
     assert "Baseline environment setup failed" in output
-    assert "Baseline execution failed; lift unavailable" in output
-    assert "No valid with-skill score" not in output
-    assert "No successfully scored agent" not in output
-    assert '<div class="agent-score" style="color:#22c55e">0.80</div>' in output
-    assert '<td class="subtle">NO SCORE</td>' not in output
+    assert payload["agents"]["opencode"]["with_skill"] == 0.8
+    assert payload["agents"]["opencode"]["baseline"] is None
+    assert payload["agents"]["opencode"]["lift"] is None
 
 
 def test_mixed_agent_charts_use_null_for_failed_with_skill_scores(tmp_path: Path) -> None:
@@ -375,13 +399,13 @@ def test_mixed_agent_charts_use_null_for_failed_with_skill_scores(tmp_path: Path
         encoding="utf-8",
     )
 
-    output = generate_html_report("demo", tmp_path).read_text(encoding="utf-8")
+    output = _render_report("demo", tmp_path).read_text(encoding="utf-8")
 
-    assert 'label:"failed",data:[null, null, null, null, null]' in output
-    assert 'label:"failed",data:[0.0, 0.0, 0.0, 0.0, 0.0]' not in output
-    assert 'label:"succeeded",data:[0.8, 0.8, 0.8, 0.8, 0.8]' in output
-    assert "<td><b>50%</b></td>" not in output
-    assert "<td><b>75%</b></td>" in output
+    payload = _tier3_payload(output)
+
+    assert payload["agents"]["failed"]["with_skill"] is None
+    assert payload["agents"]["succeeded"]["with_skill"] == 0.8
+    assert "rate" not in payload["agents"]["failed"]["pass_at_k"]["with_skill"]
 
 
 def test_failed_default_run_without_metrics_is_not_labeled_custom_only(tmp_path: Path) -> None:
@@ -407,12 +431,13 @@ def test_failed_default_run_without_metrics_is_not_labeled_custom_only(tmp_path:
         encoding="utf-8",
     )
 
-    output = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
 
+    payload = _tier3_payload(output)
+
+    assert payload["metric_ids"] == []
+    assert payload["overall_score"] is None
     assert "Custom Reward Mode" not in output
-    assert "BYOT" not in output
-    assert "custom-only user reward overall" not in output
-    assert "No scored evaluator metrics are available" in output
 
 
 def test_successful_custom_only_run_keeps_custom_reward_labels(tmp_path: Path) -> None:
@@ -459,13 +484,14 @@ def test_successful_custom_only_run_keeps_custom_reward_labels(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    output = generate_html_report("demo", results_dir).read_text(encoding="utf-8")
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
 
-    assert "Custom Reward Mode" in output
-    assert "BYOT" in output
-    assert "custom-only user reward overall" in output
-    assert '<div class="agent-score" style="color:#eab308">0.70</div>' in output
-    assert "No Scored Metrics" not in output
+    payload = _tier3_payload(output)
+
+    assert payload["execution_status"] == "succeeded"
+    assert payload["overall_score"] == 0.7
+    assert payload["agents"]["opencode"]["with_skill"] == 0.7
+    assert "0.70" in output
 
 
 def test_pre_job_launch_failure_produces_html_report(tmp_path: Path) -> None:
@@ -483,11 +509,11 @@ def test_pre_job_launch_failure_produces_html_report(tmp_path: Path) -> None:
         expected_case_ids=["case-001"],
         launch_errors=["opencode with-skill Harbor run failed: model not found"],
     )
-    report = generate_html_report("demo", results_dir)
+    report = _render_report("demo", results_dir)
 
     assert results["agents"]["opencode"]["job_failures"]["with_skill"] == "model not found"
     output = report.read_text(encoding="utf-8")
-    assert "Failure Details" in output
+    assert "Evaluation incomplete" in output
     assert "model not found" in output
 
 
@@ -529,7 +555,7 @@ def test_html_generation_failure_is_persisted_identically_to_returned_result(
     monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
     monkeypatch.setattr(runner, "generate_harbor_tasks", emit_tasks)
     monkeypatch.setattr(runner, "_run_agent_pair", lambda **_kwargs: [])
-    monkeypatch.setattr(runner, "generate_html_report", fail_html)
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", fail_html)
     monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
     monkeypatch.setattr(Path, "symlink_to", deny_symlink)
 

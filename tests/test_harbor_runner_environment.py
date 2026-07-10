@@ -384,7 +384,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "collect_harbor_results",
         lambda **_kwargs: {"execution_status": "complete", "execution_errors": [], "metrics": [], "agents": {}},
     )
-    monkeypatch.setattr(runner, "generate_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
     monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
 
     result = runner.run_harbor_eval(

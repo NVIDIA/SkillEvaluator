@@ -24,13 +24,13 @@ from queue import Empty, SimpleQueue
 from types import MappingProxyType
 from typing import Any
 
+from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.telemetry import record_agent_eval_summary
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import find_evals_file, generate_harbor_tasks, stage_native_harbor_tasks
 from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle, RetentionOutcome
 from skillevaluator.tier3.harbor.collector import collect_harbor_results, validate_harbor_job_result
-from skillevaluator.tier3.harbor.html_report import generate_html_report
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
@@ -382,9 +382,7 @@ def _validate_agent_provider_credentials(
                 "Choose a compatible evaluator provider and agent."
             ]
         if env_mode == ENV_MODE_LOCAL and provider.provider == "anthropic" and "opencode" in agents:
-            return [
-                "anthropic with opencode does not support local mode; use Docker/cloud or select claude-code."
-            ]
+            return ["anthropic with opencode does not support local mode; use Docker/cloud or select claude-code."]
         if env_mode == ENV_MODE_LOCAL and provider.provider == "bedrock":
             return ["bedrock live agents do not support local mode; use Docker or a supported cloud backend."]
         if provider.provider == "bedrock" and "claude-code" in agents:
@@ -552,8 +550,7 @@ def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, st
         owned_references = sorted(reference for reference in references if _is_operator_owned_runtime_name(reference))
         if owned_references:
             errors.append(
-                f"harbor.runtime_env.{name} references operator-owned credential(s): "
-                + ", ".join(owned_references)
+                f"harbor.runtime_env.{name} references operator-owned credential(s): " + ", ".join(owned_references)
             )
             continue
         value = os.path.expandvars(template_value)
@@ -589,11 +586,7 @@ def _harbor_subprocess_environment(
         from skillevaluator.tier3.harbor.local_runtime import local_subprocess_env
 
         local_credentials = _local_agent_credentials(provider)
-        if (
-            provider.provider == "nv_build"
-            and agent == "opencode"
-            and (agent_model or "").startswith("nvidia/")
-        ):
+        if provider.provider == "nv_build" and agent == "opencode" and (agent_model or "").startswith("nvidia/"):
             # OpenCode's NVIDIA adapter reads OPENAI_* internally. Override an
             # independent Codex pair for this Harbor subprocess only; each
             # selected local agent receives its own environment below.
@@ -646,9 +639,7 @@ def _agent_credentials(
             }
         if agent == "codex":
             return {
-                name: os.environ.get(name, "")
-                for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL")
-                if os.environ.get(name)
+                name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
             }
         return {}
 
@@ -672,9 +663,7 @@ def _agent_credentials(
         }
     if provider.provider == "bedrock" and agent == "claude-code":
         credentials = {
-            name: value
-            for name, value in _provider_environment(provider).items()
-            if name.startswith("AWS_") and value
+            name: value for name, value in _provider_environment(provider).items() if name.startswith("AWS_") and value
         }
         credentials["CLAUDE_CODE_USE_BEDROCK"] = "1"
         return credentials
@@ -718,7 +707,9 @@ def _agent_provider_config(
     else:
         resolved_model = model
     default_prefix = "anthropic" if evaluator_provider.provider == "anthropic" else evaluator_provider.provider
-    litellm_prefix = getattr(evaluator_provider, "litellm_model", f"{default_prefix}/{resolved_model}").partition("/")[0]
+    litellm_prefix = getattr(evaluator_provider, "litellm_model", f"{default_prefix}/{resolved_model}").partition("/")[
+        0
+    ]
     return ProviderConfig(
         provider=evaluator_provider.provider,
         model=resolved_model,
@@ -774,10 +765,7 @@ def _resolve_agent_runtime_plan(
             agent_model=models[agent],
         )
         subprocess_env.update(credentials)
-        staged = {
-            name: f"${{{name}}}"
-            for name in (*configured_runtime_env, *credentials)
-        }
+        staged = {name: f"${{{name}}}" for name in (*configured_runtime_env, *credentials)}
         plans[agent] = AgentRuntimePlan(
             agent=agent,
             model=models[agent],
@@ -859,9 +847,7 @@ def _model_for_agent(
             "openai": "openai",
             "openai-compatible": "openai",
         }.get(provider.provider)
-        if namespace and (
-            source == "public provider default" or not selected.startswith(f"{namespace}/")
-        ):
+        if namespace and (source == "public provider default" or not selected.startswith(f"{namespace}/")):
             selected = f"{namespace}/{selected}"
     return selected, source
 
@@ -955,10 +941,7 @@ def _run_agent_pair(
     worker_count = min(len(jobs), n_concurrent)
     if worker_count == len(jobs):
         concurrency_per_job, extra_slots = divmod(n_concurrent, len(jobs))
-        job_concurrency = [
-            concurrency_per_job + (1 if index < extra_slots else 0)
-            for index in range(len(jobs))
-        ]
+        job_concurrency = [concurrency_per_job + (1 if index < extra_slots else 0) for index in range(len(jobs))]
     else:
         job_concurrency = [1] * len(jobs)
     errors: list[str] = []
@@ -1219,9 +1202,7 @@ def _run_harbor_eval_impl(
 
     provider_env = _provider_environment(provider)
     configured_runtime_env, runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"))
-    reporter.set_secret_values(
-        secret_values_from_environment(provider_env) | set(configured_runtime_env.values())
-    )
+    reporter.set_secret_values(secret_values_from_environment(provider_env) | set(configured_runtime_env.values()))
     reporter.emit(ProgressEvent(stage="model-resolution", state="complete", detail="agent models resolved"))
     reporter.start(
         Tier3RunPlan(
@@ -1241,9 +1222,7 @@ def _run_harbor_eval_impl(
     reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
     prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
     if prereq_errors:
-        reporter.emit(
-            ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors))
-        )
+        reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
         return {"error": prereq_errors}
     reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
 
@@ -1264,9 +1243,7 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
     reporter.set_secret_values(
-        set().union(
-            *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
-        )
+        set().union(*(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values()))
     )
     reporter.emit(ProgressEvent(stage="credential-validation", state="complete", detail="credentials validated"))
     verifier_env = {**configured_runtime_env, **provider_env}
@@ -1546,9 +1523,7 @@ def _run_harbor_eval_impl(
 
     if unexpected_worker_error is not None:
         for agent in sorted(active_agents):
-            reporter.emit(
-                ProgressEvent(stage=f"agent:{agent}", state="failed", detail="agent execution interrupted")
-            )
+            reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="failed", detail="agent execution interrupted"))
         _emit_run_finished("failed", "agent execution failed")
         raise unexpected_worker_error
 
@@ -1626,7 +1601,12 @@ def _run_harbor_eval_impl(
 
     report_warning: str | None = None
     try:
-        candidate_report_path = generate_html_report(skill_path.name, run_dir, skill_path=skill_path)
+        candidate_report_path = render_agent_eval_html_report(
+            skill_path,
+            run_dir,
+            env_mode=env_mode,
+            engine_result=results,
+        )
         if candidate_report_path.is_file():
             report_path = candidate_report_path
             results["report_path"] = str(report_path)

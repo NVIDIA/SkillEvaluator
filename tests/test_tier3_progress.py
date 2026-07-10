@@ -384,9 +384,7 @@ def test_cli_plain_progress_emits_exact_configuration_sequence() -> None:
     configuration_lines = [line.split("] ", 1)[-1] for line in result.output.splitlines() if "configuration:" in line]
     assert configuration_lines[0] == "configuration: running"
     assert len(configuration_lines) == 2
-    assert configuration_lines[1].startswith(
-        "configuration: failed - Unknown agent(s): unsupported-agent."
-    )
+    assert configuration_lines[1].startswith("configuration: failed - Unknown agent(s): unsupported-agent.")
     assert result.output.count("Tier 3 live evaluation: simple") == 1
     assert "Harbor Run Configuration" not in result.output
 
@@ -471,10 +469,7 @@ def test_reporters_redact_exact_values_and_secret_shaped_details() -> None:
         progress.ProgressEvent(
             stage="credential-validation",
             state="failed",
-            detail=(
-                "token=literal-super-secret API_KEY=plain-secret-value "
-                "OPENAI_API_KEY=sk-AbCdEf1234567890"
-            ),
+            detail=("token=literal-super-secret API_KEY=plain-secret-value OPENAI_API_KEY=sk-AbCdEf1234567890"),
         )
     )
     reporter.close()
@@ -490,8 +485,7 @@ def test_progress_detail_strips_osc_title_and_hyperlink_payloads() -> None:
     progress = _progress_module()
 
     rendered = progress.redact_progress_detail(
-        "safe\x1b]0;forged title\x07 text "
-        "\x1b]8;;https://malicious.example\x1b\\click\x1b]8;;\x1b\\ done"
+        "safe\x1b]0;forged title\x07 text \x1b]8;;https://malicious.example\x1b\\click\x1b]8;;\x1b\\ done"
     )
 
     assert "forged title" not in rendered
@@ -625,7 +619,7 @@ def _stub_runner(
     def collect_results(**_kwargs):
         return {"execution_status": "succeeded", "execution_errors": [], "metrics": []}
 
-    def write_html(_skill_name, run_dir, **_kwargs):
+    def write_html(_skill_path, run_dir, **_kwargs):
         path = run_dir / "report.html"
         path.write_text("<html></html>", encoding="utf-8")
         return path
@@ -672,7 +666,7 @@ def _stub_runner(
         ),
     )
     monkeypatch.setattr(runner, "collect_harbor_results", collect or collect_results)
-    monkeypatch.setattr(runner, "generate_html_report", html_report or write_html)
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", html_report or write_html)
     monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
     return runner, skill
 
@@ -693,6 +687,33 @@ def test_default_run_cleans_transient_harbor_artifacts(
     persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
     assert persisted["harbor_jobs_retained"] is False
     assert persisted["run_config"]["harbor"]["jobs_retained"] is False
+
+
+def test_runner_persists_compact_feedback_to_result_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    feedback = {
+        "schema_version": "1.0",
+        "conclusions": [{"message": "Execution feedback"}],
+        "recommendations": [{"message": "Actionable suggestion"}],
+        "suggestions": ["Actionable suggestion"],
+        "suggestions_v2": [],
+    }
+
+    def write_html(_skill_path, run_dir, *, engine_result, **_kwargs):
+        engine_result["tier3_feedback"] = feedback
+        path = run_dir / "report.html"
+        path.write_text("<html></html>", encoding="utf-8")
+        return path
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, html_report=write_html)
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert persisted["tier3_feedback"] == feedback
+    assert "agent_eval" not in persisted
 
 
 def test_keep_flag_retains_harbor_artifacts(
@@ -875,6 +896,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
             f"runtime-preflight-{kwargs['agent']}",
         ),
     )
+
     def _run_agent(**kwargs):
         agent = kwargs["agent"]
         operations.append(f"run-agent:{agent}")
@@ -885,16 +907,18 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(
         runner,
         "collect_harbor_results",
-        lambda **_kwargs: operations.append("collect")
-        or {"execution_status": "succeeded", "execution_errors": [], "metrics": []},
+        lambda **_kwargs: (
+            operations.append("collect") or {"execution_status": "succeeded", "execution_errors": [], "metrics": []}
+        ),
     )
-    def _write_report(_skill_name, run_dir, **_kwargs):
+
+    def _write_report(_skill_path, run_dir, **_kwargs):
         operations.append("report")
         report = run_dir / "report.html"
         report.write_text("<html></html>", encoding="utf-8")
         return report
 
-    monkeypatch.setattr(runner, "generate_html_report", _write_report)
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", _write_report)
     monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
 
     result = runner.run_harbor_eval(
@@ -1437,8 +1461,7 @@ def test_command_protects_reporter_startup_and_still_runs_engine(
     monkeypatch.setattr(
         commands,
         "run_harbor_eval",
-        lambda **kwargs: engine_calls.append(kwargs)
-        or {"execution_status": "succeeded", "execution_errors": []},
+        lambda **kwargs: engine_calls.append(kwargs) or {"execution_status": "succeeded", "execution_errors": []},
     )
 
     result = commands.evaluate(

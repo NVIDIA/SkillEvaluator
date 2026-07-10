@@ -75,6 +75,9 @@ If a step fails, start with [Troubleshooting](#troubleshooting).
    `custom_only` grader owns this step instead.
 4. Skill Evaluator collects the result artifacts. Completed standard-grading
    runs render the five human-readable dimensions, pass rates, and Skill Lift.
+5. `evaluate` automatically writes the canonical `report.html` in the run
+   directory. A focused run contains Tier 3 only; a combined validation report
+   contains exactly the tiers that were executed.
 
 The CLI uses the same in-process evaluation service for focused `evaluate`
 runs and `validate --agent-eval` runs. Staged task and raw Harbor job
@@ -239,7 +242,8 @@ skillevaluator compare ./my-skill [--results-dir DIR]
 skillevaluator doctor --agents opencode --env-mode docker [--verify-models]
 ```
 
-- `view` opens the latest local HTML report.
+- `view` opens the latest canonical HTML report and regenerates it from the raw
+  Tier 3 result when the HTML artifact is missing.
 - `compare` summarizes stored results across agents and arms.
 - `doctor` checks backend readiness, agent availability, and visible host
   credentials. `evaluate` remains authoritative for skill-specific config and
@@ -438,7 +442,7 @@ my-skill/
             ├── result.json
             ├── run_config.json
             ├── attempt_policy.json
-            ├── report.html                  # Generated on a best-effort basis
+            ├── report.html                  # Canonical report, generated automatically
             ├── comparison.json             # Multi-agent runs only
             └── <agent>/
                 ├── lift.json               # Present when baseline lift is available
@@ -461,10 +465,12 @@ skillevaluator view ./my-skill
 skillevaluator compare ./my-skill
 ```
 
-For completed `default` and `default_plus_custom` runs, the report summarizes
-five human-readable dimensions. In `custom_only`, the custom grader owns the
-score; the standard dimension panel remains for a stable layout but shows
-`NO SCORE` rather than deriving those dimensions from custom metrics.
+Standalone `evaluate` and combined validation use the same generic report
+renderer. Tier 3 results appear in their own section, alongside Tier 1 and Tier
+2 only when those tiers were executed. Completed `default` and
+`default_plus_custom` runs summarize five human-readable dimensions. In
+`custom_only`, the custom grader's overall result remains visible without
+inventing standard dimension scores from custom metrics.
 
 The terminal output separates persisted truth into **Results by Evaluator**
 (the underlying evaluator metrics and Skill Lift) and **Results by Dimension**
@@ -491,11 +497,11 @@ alongside Skill Lift, not a replacement for the five dimensions. In
 `custom_only`, pass@k uses the custom overall reward and the standard dimension
 rows remain unscored.
 
-The canonical Tier 3 payload embedded by `validate --agent-eval` uses schema
-version 2.0. A completed standard-grading payload includes the summary, five
-dimensions, per-agent results, trials, pass@k, attempt policy, and dataset;
-advisory or skipped payloads may leave some of those sections empty. Focused
-`evaluate` artifacts have file-specific shapes and are not all schema 2.0.
+The canonical Tier 3 payload embedded by both standalone `evaluate` and
+`validate --agent-eval` reports uses schema version 2.0. A completed
+standard-grading payload includes the summary, five dimensions, per-agent
+results, trials, pass@k, attempt policy, and dataset; advisory or skipped
+payloads may leave some of those sections empty.
 
 Keep raw Harbor artifacts for debugging and open them with the bundled viewer:
 

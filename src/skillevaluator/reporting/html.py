@@ -1042,23 +1042,27 @@ class HTMLReporter(ReporterBase):
                     if sname and sname not in quality_scores_by_skill:
                         quality_scores_by_skill[sname] = q
 
-        # Attach quality scores to per-skill data for the template.
-        # Two strategies: (1) exact name match for folder-of-skills mode,
-        # (2) attach to the FIRST entry only for single-skill mode (where
-        # _reorganize_by_skill keys are check names, not skill names).
-        matched = set()
-        for sname, sdata in skills_by_name.items():
-            if sname in quality_scores_by_skill:
-                sdata["quality"] = quality_scores_by_skill[sname]
-                matched.add(sname)
+        def _attach_quality_scores(skills: dict[str, dict[str, Any]]) -> None:
+            # Attach quality scores to per-skill data for the template.
+            # Two strategies: (1) exact name match for folder-of-skills mode,
+            # (2) attach to the FIRST entry only for single-skill mode (where
+            # _reorganize_by_skill keys are check names, not skill names).
+            matched = set()
+            for sname, sdata in skills.items():
+                if sname in quality_scores_by_skill:
+                    sdata["quality"] = quality_scores_by_skill[sname]
+                    matched.add(sname)
 
-        # If no exact matches found, the report is for a single skill whose
-        # name doesn't appear as a key.  Attach to the first entry only to
-        # avoid duplicating the quality panel across every check entry.
-        if not matched and quality_scores_by_skill:
-            single_qs = next(iter(quality_scores_by_skill.values()))
-            first_key = next(iter(skills_by_name))
-            skills_by_name[first_key]["quality"] = single_qs
+            # If no exact matches found, the report is for a single skill whose
+            # name doesn't appear as a key. Attach to the first entry only to
+            # avoid duplicating the quality panel across every check entry.
+            if not matched and quality_scores_by_skill and skills:
+                single_qs = next(iter(quality_scores_by_skill.values()))
+                first_key = next(iter(skills))
+                skills[first_key]["quality"] = single_qs
+
+        _attach_quality_scores(skills_by_name)
+        _attach_quality_scores(tier1_skills)
 
         report_data = {
             "title": self.title,

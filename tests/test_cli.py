@@ -29,6 +29,7 @@ def test_top_level_help_lists_primary_commands() -> None:
     assert "validate" in result.output
     assert "create-eval-dataset" in result.output
     assert "evaluate" in result.output
+    assert "evaluate" in tier3_result.output
     assert "tier1" in result.output
     assert "tier2" in result.output
     assert "tier3" in result.output

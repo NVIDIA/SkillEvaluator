@@ -45,23 +45,45 @@ def test_nvidia_build_is_inferred_from_its_public_key() -> None:
 
 
 def test_openai_compatible_provider_requires_explicit_model() -> None:
-    with pytest.raises(ProviderConfigurationError, match="SKILL_EVAL_LLM_MODEL"):
+    with pytest.raises(ProviderConfigurationError) as exc_info:
         resolve_llm_provider(
             {
                 "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
                 "SKILL_EVAL_LLM_API_KEY": "test-key",
             }
         )
+    assert str(exc_info.value) == "SKILL_EVAL_LLM_MODEL is required for openai-compatible providers."
 
 
 def test_anthropic_requires_explicit_embedding_provider() -> None:
-    with pytest.raises(ProviderConfigurationError, match="SKILL_EVAL_EMBEDDING_PROVIDER"):
+    with pytest.raises(ProviderConfigurationError) as exc_info:
         resolve_embedding_provider(
             {
                 "SKILL_EVAL_LLM_PROVIDER": "anthropic",
                 "ANTHROPIC_API_KEY": "test-anthropic-key",
             }
         )
+    assert (
+        str(exc_info.value)
+        == "SKILL_EVAL_EMBEDDING_PROVIDER is required because anthropic does not provide embeddings."
+    )
+
+
+def test_llm_provider_requires_public_credential_when_not_configured() -> None:
+    with pytest.raises(ProviderConfigurationError) as exc_info:
+        resolve_llm_provider({})
+
+    assert str(exc_info.value) == "SKILL_EVAL_LLM_PROVIDER is required when no public provider credential is configured."
+
+
+def test_llm_provider_error_lists_supported_choices() -> None:
+    with pytest.raises(ProviderConfigurationError) as exc_info:
+        resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "private-hub"})
+
+    assert (
+        str(exc_info.value)
+        == "SKILL_EVAL_LLM_PROVIDER must be one of: anthropic, bedrock, nv_build, openai, openai-compatible."
+    )
 
 
 def test_explicit_openai_embedding_provider_uses_standard_openai_credentials() -> None:

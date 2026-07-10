@@ -546,6 +546,8 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     assert bridge_start[1] == {}
     assert "--api-key-file" in bridge_start[0]
     assert "--client-token-file" in bridge_start[0]
+    assert "chown 0:0" in bridge_start[0]
+    assert bridge_start[0].index("chown 0:0") < bridge_start[0].index("chmod 600")
     assert "--allowed-model nvidia/meta/llama-3.1-8b-instruct" in bridge_start[0]
     assert "--max-requests" in bridge_start[0]
     assert "skillevaluator-nvidia-build-" in bridge_start[0]

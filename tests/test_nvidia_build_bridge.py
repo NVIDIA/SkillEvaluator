@@ -815,6 +815,54 @@ def test_backend_dns_resolution_obeys_deadline_without_late_request_or_resolver_
     assert backend_authorizations == []
 
 
+def test_backend_reads_a_complete_content_length_response_without_reusing_the_closed_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = json.dumps(CHAT_TEXT_RESPONSE).encode("utf-8")
+
+    class BuildHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BuildHandler)
+    backend_thread = Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+    config = bridge.BridgeConfig(
+        api_key="test-content-length-key",
+        build_base_url=bridge.PRODUCTION_BUILD_BASE_URL,
+        host="127.0.0.1",
+        port=0,
+        log_path=tmp_path / "content-length.log",
+        readiness_token="content-length-token",
+        client_token="client-token",
+        allowed_model="nvidia/model",
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_build_endpoint",
+        lambda _config: f"http://127.0.0.1:{backend.server_port}{BUILD_CHAT_COMPLETIONS_PATH}",
+    )
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+
+    try:
+        response = bridge._request_build(config, {"model": "nvidia/model", "messages": []})
+    finally:
+        backend.shutdown()
+        backend.server_close()
+        backend_thread.join(timeout=2)
+
+    assert response == CHAT_TEXT_RESPONSE
+
+
 def test_backend_slow_drip_obeys_an_absolute_deadline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class SlowBuildHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:

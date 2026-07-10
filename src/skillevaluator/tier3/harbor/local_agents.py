@@ -468,6 +468,8 @@ class _NvidiaBuildBridgeAgent:
                     "set -eu; umask 077; "
                     f"rm -f {shlex.quote(self._BRIDGE_PID.as_posix())} "
                     f"{shlex.quote(self._BRIDGE_READY.as_posix())}; "
+                    f"chown 0:0 {shlex.quote(key_file.as_posix())} "
+                    f"{shlex.quote(client_token_file.as_posix())}; "
                     f"chmod 600 {shlex.quote(key_file.as_posix())} "
                     f"{shlex.quote(client_token_file.as_posix())}; "
                     "env -u NVIDIA_API_KEY "

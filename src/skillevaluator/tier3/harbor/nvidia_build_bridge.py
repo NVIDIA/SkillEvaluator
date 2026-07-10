@@ -399,9 +399,15 @@ def _read_backend_response(response: Any, deadline: float) -> bytes:
     read1 = getattr(response, "read1", None)
     if response_socket is None or not callable(read1):
         raise _BackendError("invalid_backend_response")
+    is_closed = getattr(response, "isclosed", None)
     parts: list[bytes] = []
     remaining = MAX_BACKEND_RESPONSE_BYTES + 1
     while remaining:
+        # ``HTTPResponse.read1`` closes its socket as soon as the declared
+        # Content-Length is consumed. Do not try to reset a timeout on that
+        # already-complete descriptor during the next loop iteration.
+        if callable(is_closed) and is_closed():
+            break
         seconds_left = deadline - time.monotonic()
         if seconds_left <= 0:
             raise TimeoutError("Build backend deadline expired")

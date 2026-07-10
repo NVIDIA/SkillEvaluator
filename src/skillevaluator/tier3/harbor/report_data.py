@@ -9,12 +9,26 @@ on-disk Harbor result layout into data consumed by the shared report adapters.
 
 from __future__ import annotations
 
-import contextlib
+import heapq
 import json
+import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+
+logger = logging.getLogger(__name__)
+
+_MAX_JSON_BYTES = 2 * 1024 * 1024
+_MAX_JSON_DEPTH = 64
+_MAX_JSON_NODES = 50_000
+_MAX_AGENTS = 64
+_MAX_TRIALS_PER_CONDITION = 512
+_MAX_STAGED_TASKS = 4096
+_MAX_DATASET_RECORDS = 4096
+_MAX_DIAGNOSTIC_REASONS = 8
+_INVALID_JSON = object()
 
 __all__ = (
     "load_agent_data",
@@ -22,6 +36,179 @@ __all__ = (
     "load_staged_harbor_dataset",
     "metrics_for_agents",
 )
+
+
+class _JSONLimitError(ValueError):
+    def __init__(self, code: str, limit: int) -> None:
+        super().__init__(code)
+        self.code = code
+        self.limit = limit
+
+
+def _record_truncation(
+    diagnostics: list[dict[str, Any]],
+    *,
+    code: str,
+    artifact: str,
+    limit: int,
+) -> None:
+    """Record one bounded, content-free diagnostic and emit it once per scope."""
+    reason = {"code": code, "artifact": artifact, "limit": limit}
+    if reason in diagnostics or len(diagnostics) >= _MAX_DIAGNOSTIC_REASONS:
+        return
+    diagnostics.append(reason)
+    logger.warning("Tier 3 report loader bounded %s: %s (limit=%d)", artifact, code, limit)
+
+
+def _attach_truncation(target: dict[str, Any], diagnostics: list[dict[str, Any]]) -> None:
+    if not diagnostics:
+        return
+    existing = target.get("_report_truncation")
+    reasons = existing.get("reasons", []) if isinstance(existing, dict) else []
+    merged = [*reasons]
+    for reason in diagnostics:
+        if reason not in merged and len(merged) < _MAX_DIAGNOSTIC_REASONS:
+            merged.append(reason)
+    target["_report_truncation"] = {"truncated": True, "reasons": merged}
+
+
+def _bounded_smallest(paths: Iterable[Path], limit: int) -> tuple[list[Path], bool]:
+    """Select paths deterministically without materializing or sorting the full tree."""
+    selected = heapq.nsmallest(limit + 1, paths, key=lambda path: path.as_posix())
+    return selected[:limit], len(selected) > limit
+
+
+def _validate_json_tree(value: Any) -> None:
+    """Validate decoded JSON iteratively so validation itself cannot recurse."""
+    nodes = 0
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_JSON_NODES:
+            raise _JSONLimitError("json_nodes", _MAX_JSON_NODES)
+        if not isinstance(current, dict | list):
+            continue
+        if depth > _MAX_JSON_DEPTH:
+            raise _JSONLimitError("json_depth", _MAX_JSON_DEPTH)
+        if nodes + len(current) > _MAX_JSON_NODES:
+            raise _JSONLimitError("json_nodes", _MAX_JSON_NODES)
+        children = current.values() if isinstance(current, dict) else current
+        stack.extend((child, depth + 1) for child in children)
+
+
+def _read_bounded_bytes(
+    path: Path,
+    diagnostics: list[dict[str, Any]],
+    *,
+    artifact: str,
+) -> bytes | None:
+    try:
+        if path.stat().st_size > _MAX_JSON_BYTES:
+            _record_truncation(
+                diagnostics,
+                code="json_bytes",
+                artifact=artifact,
+                limit=_MAX_JSON_BYTES,
+            )
+            return None
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > _MAX_JSON_BYTES:
+        _record_truncation(
+            diagnostics,
+            code="json_bytes",
+            artifact=artifact,
+            limit=_MAX_JSON_BYTES,
+        )
+        return None
+    return raw
+
+
+def _load_bounded_json(
+    path: Path,
+    diagnostics: list[dict[str, Any]],
+    *,
+    artifact: str,
+) -> Any:
+    raw = _read_bounded_bytes(path, diagnostics, artifact=artifact)
+    if raw is None:
+        return _INVALID_JSON
+    return _decode_bounded_json(raw, diagnostics, artifact=artifact)
+
+
+def _decode_bounded_json(
+    raw: bytes,
+    diagnostics: list[dict[str, Any]],
+    *,
+    artifact: str,
+) -> Any:
+    try:
+        value = json.loads(raw)
+        _validate_json_tree(value)
+    except RecursionError:
+        _record_truncation(
+            diagnostics,
+            code="json_depth",
+            artifact=artifact,
+            limit=_MAX_JSON_DEPTH,
+        )
+        return _INVALID_JSON
+    except _JSONLimitError as exc:
+        _record_truncation(diagnostics, code=exc.code, artifact=artifact, limit=exc.limit)
+        return _INVALID_JSON
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _INVALID_JSON
+    return value
+
+
+def _bounded_dataset_payload(payload: Any, diagnostics: list[dict[str, Any]]) -> Any:
+    """Slice list-like dataset shapes before normalization copies their records."""
+    if isinstance(payload, list):
+        if len(payload) > _MAX_DATASET_RECORDS:
+            _record_truncation(
+                diagnostics,
+                code="dataset_record_limit",
+                artifact="dataset",
+                limit=_MAX_DATASET_RECORDS,
+            )
+            return payload[:_MAX_DATASET_RECORDS]
+        return payload
+    if not isinstance(payload, dict):
+        return payload
+    for key in ("evals", "cases"):
+        records = payload.get(key)
+        if not isinstance(records, list) or len(records) <= _MAX_DATASET_RECORDS:
+            continue
+        _record_truncation(
+            diagnostics,
+            code="dataset_record_limit",
+            artifact="dataset",
+            limit=_MAX_DATASET_RECORDS,
+        )
+        return {**payload, key: records[:_MAX_DATASET_RECORDS]}
+    return payload
+
+
+def _load_bounded_jsonl(raw: bytes, diagnostics: list[dict[str, Any]]) -> list[Any]:
+    records: list[Any] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        value = _decode_bounded_json(line, diagnostics, artifact="dataset_record")
+        if value is _INVALID_JSON:
+            continue
+        records.append(value)
+        if len(records) > _MAX_DATASET_RECORDS:
+            _record_truncation(
+                diagnostics,
+                code="dataset_record_limit",
+                artifact="dataset",
+                limit=_MAX_DATASET_RECORDS,
+            )
+            return records[:_MAX_DATASET_RECORDS]
+    return records
 
 
 def _metrics_for_rewards(rewards: list[dict[str, Any]]) -> list[str]:
@@ -68,18 +255,33 @@ def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
 def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
     """Load per-agent summaries, rewards, lift, and execution coverage."""
     agents: dict[str, dict[str, Any]] = {}
-    for agent_dir in sorted(results_dir.iterdir()):
-        if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
-            continue
+    selection_diagnostics: list[dict[str, Any]] = []
+    try:
+        agent_dirs, agents_truncated = _bounded_smallest(
+            (path for path in results_dir.iterdir() if path.is_dir() and not path.name.startswith("_")),
+            _MAX_AGENTS,
+        )
+    except OSError:
+        return agents
+    if agents_truncated:
+        _record_truncation(
+            selection_diagnostics,
+            code="agent_limit",
+            artifact="agents",
+            limit=_MAX_AGENTS,
+        )
+
+    for agent_dir in agent_dirs:
         agent_name = agent_dir.name
         agent_info: dict[str, Any] = {"name": agent_name}
+        agent_diagnostics: list[dict[str, Any]] = []
         condition_execution: dict[str, dict[str, Any]] = {}
 
         for variant in ("with-skill", "without-skill"):
             summary = agent_dir / variant / "summary.json"
             if summary.exists():
-                try:
-                    data = json.loads(summary.read_text(encoding="utf-8"))
+                data = _load_bounded_json(summary, agent_diagnostics, artifact="summary")
+                if isinstance(data, dict):
                     key = "with_skill" if variant == "with-skill" else "without_skill"
                     agent_info[key] = data.get("scores", data)
                     metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
@@ -118,53 +320,70 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
                     }
                     if variant == "with-skill":
                         agent_info["num_trials"] = data.get("num_trials", 0)
-                except (json.JSONDecodeError, OSError):
-                    pass
 
         lift_file = agent_dir / "lift.json"
         if lift_file.exists():
-            with contextlib.suppress(json.JSONDecodeError, OSError):
-                agent_info["lift"] = json.loads(lift_file.read_text(encoding="utf-8"))
+            lift = _load_bounded_json(lift_file, agent_diagnostics, artifact="lift")
+            if lift is not _INVALID_JSON:
+                agent_info["lift"] = lift
 
         pass_lift_file = agent_dir / "pass_at_k_lift.json"
         if pass_lift_file.exists():
-            with contextlib.suppress(json.JSONDecodeError, OSError):
-                agent_info["pass_lift"] = json.loads(pass_lift_file.read_text(encoding="utf-8"))
+            pass_lift = _load_bounded_json(pass_lift_file, agent_diagnostics, artifact="pass_lift")
+            if pass_lift is not _INVALID_JSON:
+                agent_info["pass_lift"] = pass_lift
 
         custom_lift_file = agent_dir / "custom_lift.json"
         if custom_lift_file.exists():
-            with contextlib.suppress(json.JSONDecodeError, OSError):
-                agent_info["custom_lift"] = json.loads(custom_lift_file.read_text(encoding="utf-8"))
+            custom_lift = _load_bounded_json(custom_lift_file, agent_diagnostics, artifact="custom_lift")
+            if custom_lift is not _INVALID_JSON:
+                agent_info["custom_lift"] = custom_lift
 
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
             trial_list: list[dict[str, Any]] = []
             trials_dir = agent_dir / variant_dir_name / "trials"
             if trials_dir.exists():
-                for trial_dir in sorted(trials_dir.iterdir()):
-                    if not trial_dir.is_dir():
-                        continue
+                try:
+                    trial_dirs, trials_truncated = _bounded_smallest(
+                        (path for path in trials_dir.iterdir() if path.is_dir()),
+                        _MAX_TRIALS_PER_CONDITION,
+                    )
+                except OSError:
+                    trial_dirs, trials_truncated = [], False
+                if trials_truncated:
+                    _record_truncation(
+                        agent_diagnostics,
+                        code="trial_limit",
+                        artifact=variant_dir_name,
+                        limit=_MAX_TRIALS_PER_CONDITION,
+                    )
+                for trial_dir in trial_dirs:
                     reward_file = trial_dir / "reward.json"
                     if not reward_file.exists():
                         continue
-                    try:
-                        reward = json.loads(reward_file.read_text(encoding="utf-8"))
-                    except (json.JSONDecodeError, OSError):
+                    reward = _load_bounded_json(reward_file, agent_diagnostics, artifact="reward")
+                    if not isinstance(reward, dict):
                         continue
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
                     trajectory_file = trial_dir / "trajectory.json"
                     if trajectory_file.exists():
-                        try:
-                            trajectory = json.loads(trajectory_file.read_text(encoding="utf-8"))
+                        trajectory = _load_bounded_json(
+                            trajectory_file,
+                            agent_diagnostics,
+                            artifact="trajectory",
+                        )
+                        if isinstance(trajectory, dict):
                             final_metrics = trajectory.get("final_metrics", {})
+                            if not isinstance(final_metrics, dict):
+                                final_metrics = {}
+                            steps = trajectory.get("steps", [])
                             reward["_traj"] = {
-                                "steps": len(trajectory.get("steps", [])),
+                                "steps": len(steps) if isinstance(steps, list) else 0,
                                 "prompt_tokens": final_metrics.get("total_prompt_tokens", 0),
                                 "completion_tokens": final_metrics.get("total_completion_tokens", 0),
                                 "cached_tokens": final_metrics.get("total_cached_tokens", 0),
                             }
-                        except (json.JSONDecodeError, OSError):
-                            pass
                     trial_list.append(reward)
             agent_info[variant_key] = trial_list
 
@@ -226,7 +445,10 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
                     }
                 else:
                     agent_info[field] = [] if field.startswith("rewards") else {}
+        _attach_truncation(agent_info, agent_diagnostics)
         agents[agent_name] = agent_info
+    if selection_diagnostics and agents:
+        _attach_truncation(next(iter(agents.values())), selection_diagnostics)
     return agents
 
 
@@ -235,14 +457,30 @@ def load_dataset(skill_path: Path | None) -> list[dict[str, Any]]:
     if not skill_path:
         return []
     evals_dir = skill_path / "evals"
+    diagnostics: list[dict[str, Any]] = []
     for name in ("evals.json", "evals.jsonl", "evals.yaml", "evals.yml", "dataset.json"):
         candidate = evals_dir / name
         if candidate.exists():
             try:
-                from skillevaluator.tier3.dataset_utils import load_dataset_entries
+                from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
 
-                return load_dataset_entries(candidate)
-            except (json.JSONDecodeError, OSError, ValueError):
+                if candidate.suffix.lower() == ".json":
+                    payload = _load_bounded_json(candidate, diagnostics, artifact="dataset")
+                    if payload is _INVALID_JSON:
+                        continue
+                else:
+                    raw = _read_bounded_bytes(candidate, diagnostics, artifact="dataset")
+                    if raw is None:
+                        continue
+                    if candidate.suffix.lower() == ".jsonl":
+                        payload = _load_bounded_jsonl(raw, diagnostics)
+                    else:
+                        import yaml
+
+                        payload = yaml.safe_load(raw)
+                        _validate_json_tree(payload)
+                return normalize_dataset_entries(_bounded_dataset_payload(payload, diagnostics))
+            except (json.JSONDecodeError, OSError, RecursionError, ValueError):
                 pass
     return []
 
@@ -251,14 +489,26 @@ def load_staged_harbor_dataset(results_dir: Path) -> list[dict[str, Any]]:
     """Load and deduplicate dataset entries staged into Harbor task trees."""
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
+    diagnostics: list[dict[str, Any]] = []
     tasks_dir = results_dir / "_harbor-tasks"
     if not tasks_dir.exists():
         return entries
-    for entry_file in sorted(tasks_dir.rglob("tests/entry.json")):
-        try:
-            entry = json.loads(entry_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
+    try:
+        entry_files, tasks_truncated = _bounded_smallest(
+            tasks_dir.rglob("tests/entry.json"),
+            _MAX_STAGED_TASKS,
+        )
+    except OSError:
+        return entries
+    if tasks_truncated:
+        _record_truncation(
+            diagnostics,
+            code="staged_task_limit",
+            artifact="staged_tasks",
+            limit=_MAX_STAGED_TASKS,
+        )
+    for entry_file in entry_files:
+        entry = _load_bounded_json(entry_file, diagnostics, artifact="staged_entry")
         if not isinstance(entry, dict):
             continue
         entry_id = entry.get("id")
@@ -267,4 +517,13 @@ def load_staged_harbor_dataset(results_dir: Path) -> list[dict[str, Any]]:
             continue
         seen.add(identity)
         entries.append(entry)
+        if len(entries) >= _MAX_DATASET_RECORDS:
+            if len(entry_files) > len(entries):
+                _record_truncation(
+                    diagnostics,
+                    code="dataset_record_limit",
+                    artifact="staged_dataset",
+                    limit=_MAX_DATASET_RECORDS,
+                )
+            break
     return entries

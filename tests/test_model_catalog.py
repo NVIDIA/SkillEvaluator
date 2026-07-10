@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from http.client import BadStatusLine, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -161,7 +162,9 @@ def test_anthropic_pagination_uses_one_overall_timeout(monkeypatch) -> None:
         timeouts.append(timeout)
         return _Response(next(pages))
 
-    monotonic = iter((100.0, 105.0))
+    # Deadline creation, page-one post-read check, page-two timeout, and
+    # page-two post-read check respectively.
+    monotonic = iter((100.0, 100.0, 105.0, 105.0))
     monkeypatch.setattr(model_catalog.time, "monotonic", lambda: next(monotonic))
     monkeypatch.setattr(model_catalog, "urlopen", fake_urlopen)
 
@@ -184,6 +187,48 @@ def test_anthropic_pagination_fails_when_overall_deadline_expires(monkeypatch) -
     with pytest.raises(ModelCatalogError, match="timed out"):
         fetch_model_records(_provider("anthropic"), timeout_seconds=15.0)
     assert calls == 1
+
+
+def test_catalog_body_trickle_cannot_extend_the_wall_clock_deadline() -> None:
+    payload = json.dumps({"data": [{"id": "slow-model"}]}).encode()
+
+    class SlowBodyHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                for byte in payload:
+                    self.wfile.write(bytes((byte,)))
+                    self.wfile.flush()
+                    time.sleep(0.025)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_args) -> None:
+            return None
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), SlowBodyHandler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        started = time.monotonic()
+        try:
+            config = _provider(
+                "openai-compatible",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            )
+            with pytest.raises(ModelCatalogError, match="timed out"):
+                fetch_model_records(config, timeout_seconds=0.15)
+            elapsed = time.monotonic() - started
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+    # The old single response.read() waited for the complete slow body (~0.9s).
+    # Allow ample scheduler jitter while still proving the configured deadline is
+    # wall-clock bounded rather than reset by each arriving byte.
+    assert elapsed < 0.5
 
 
 def test_anthropic_pagination_enforces_aggregate_response_bytes(monkeypatch) -> None:

@@ -26,6 +26,7 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_CATALOG_PAGES = 100
 _MAX_MODEL_ID_LENGTH = 512
 _MAX_MODEL_RECORDS = 10_000
+_RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 _NON_CHAT_MARKERS = (
     "dall-e",
     "embedding",
@@ -103,6 +104,7 @@ def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -
             headers=headers,
             timeout_seconds=request_timeout,
             max_response_bytes=remaining_bytes,
+            deadline=deadline,
         )
         remaining_bytes -= response_bytes
         data = payload.get("data") if isinstance(payload, dict) else None
@@ -249,6 +251,7 @@ def _request_json(
     headers: Mapping[str, str],
     timeout_seconds: float,
     max_response_bytes: int,
+    deadline: float,
 ) -> tuple[Any, int]:
     request_headers = {
         **headers,
@@ -258,10 +261,12 @@ def _request_json(
     try:
         request = Request(url, headers=request_headers, method="GET")
         with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - validated above
-            raw = response.read(max_response_bytes + 1)
+            raw = _read_response_body(response, max_response_bytes=max_response_bytes, deadline=deadline)
     except HTTPError as exc:
         raise ModelCatalogError(f"model catalog returned HTTP {exc.code}") from None
-    except (HTTPException, TimeoutError, URLError, OSError) as exc:
+    except TimeoutError:
+        raise ModelCatalogError("model catalog request timed out") from None
+    except (HTTPException, URLError, OSError) as exc:
         raise ModelCatalogError(f"model catalog request failed: {type(exc).__name__}") from None
     except (TypeError, ValueError):
         raise ModelCatalogError("model catalog request configuration is invalid") from None
@@ -272,6 +277,58 @@ def _request_json(
         return json.loads(raw), len(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise ModelCatalogError("model catalog returned invalid JSON") from None
+
+
+def _read_response_body(response: Any, *, max_response_bytes: int, deadline: float) -> bytes:
+    """Read one response without letting byte trickles reset the wall-clock limit.
+
+    ``urllib``'s timeout is a socket-inactivity timeout. A peer that sends one
+    byte before each socket timeout can therefore keep a single ``read`` alive
+    indefinitely. Real ``HTTPResponse`` objects expose ``read1``; using it keeps
+    each iteration to one underlying buffered read, while resetting the socket
+    timeout to the *remaining* absolute deadline before every iteration.
+
+    Small test doubles and alternate response objects may expose only ``read``.
+    They still receive a post-read deadline check, although only a real transport
+    socket can interrupt a read that is already in progress.
+    """
+    read_once = getattr(response, "read1", None)
+    if not callable(read_once):
+        raw = response.read(max_response_bytes + 1)
+        if time.monotonic() >= deadline:
+            raise ModelCatalogError("model catalog request timed out")
+        return raw
+
+    chunks: list[bytes] = []
+    total = 0
+    while total <= max_response_bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ModelCatalogError("model catalog request timed out")
+        _set_response_socket_timeout(response, remaining)
+        chunk = read_once(min(_RESPONSE_READ_CHUNK_BYTES, max_response_bytes + 1 - total))
+        if time.monotonic() >= deadline:
+            raise ModelCatalogError("model catalog request timed out")
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _set_response_socket_timeout(response: Any, timeout_seconds: float) -> None:
+    """Best-effort propagation of the remaining deadline to urllib's socket."""
+    candidates = (
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+        getattr(getattr(response, "fp", None), "_sock", None),
+        getattr(getattr(response, "raw", None), "_sock", None),
+        getattr(response, "_sock", None),
+    )
+    for candidate in candidates:
+        settimeout = getattr(candidate, "settimeout", None)
+        if callable(settimeout):
+            settimeout(timeout_seconds)
+            return
 
 
 def _validate_timeout(timeout_seconds: float) -> None:

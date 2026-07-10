@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -49,6 +50,55 @@ _DIMENSION_IDS = list(DIMENSION_MAPPING.keys())
 _SCHEMA_VERSION = "2.0"
 _TIER3_FEEDBACK_SCHEMA_VERSION = "1.0"
 _TIER3_FEEDBACK_FIELDS = ("conclusions", "recommendations", "suggestions", "suggestions_v2")
+
+# Canonical reports are self-contained HTML/JSON artifacts, so untrusted custom
+# grader cardinality must not multiply metric-by-trial detail without bound. The
+# full Harbor artifacts remain available under ``provenance.run_dir``.
+_MAX_EVALUATOR_CARDS_TOTAL = 64
+_MAX_EVIDENCE_PER_CARD = 16
+_MAX_EVIDENCE_ENTRIES_TOTAL = 256
+_MAX_RAW_TRIAL_REWARDS_TOTAL = 256
+_MAX_RAW_METRICS_PER_REWARD = 64
+_MAX_RAW_REWARD_FIELDS = 96
+_MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
+
+
+@dataclass
+class _ReportBudget:
+    cards_remaining: int = _MAX_EVALUATOR_CARDS_TOTAL
+    evidence_remaining: int = _MAX_EVIDENCE_ENTRIES_TOTAL
+    raw_rewards_remaining: int = _MAX_RAW_TRIAL_REWARDS_TOTAL
+    omitted: dict[str, int] = field(default_factory=dict)
+    deduplicated_evidence: int = 0
+
+    def omit(self, section: str, count: int = 1) -> None:
+        if count > 0:
+            self.omitted[section] = self.omitted.get(section, 0) + count
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.omitted)
+
+    def signal(self) -> dict[str, Any]:
+        signal: dict[str, Any] = {
+            "truncated": True,
+            "reason": (
+                "Embedded report details were bounded; retained Harbor artifacts are referenced "
+                "by provenance.run_dir when available."
+            ),
+            "payload_budget_bytes": _MAX_EMBEDDED_REPORT_BYTES,
+            "limits": {
+                "evaluator_cards": _MAX_EVALUATOR_CARDS_TOTAL,
+                "evidence_per_card": _MAX_EVIDENCE_PER_CARD,
+                "evidence_entries": _MAX_EVIDENCE_ENTRIES_TOTAL,
+                "raw_trial_rewards": _MAX_RAW_TRIAL_REWARDS_TOTAL,
+                "raw_metrics_per_reward": _MAX_RAW_METRICS_PER_REWARD,
+            },
+            "omitted": dict(sorted(self.omitted.items())),
+        }
+        if self.deduplicated_evidence:
+            signal["deduplicated_evidence"] = self.deduplicated_evidence
+        return signal
 
 
 def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None) -> dict[str, Any]:
@@ -309,11 +359,12 @@ def build_agent_eval_payload(
     from skillevaluator.tier3.harbor.report_data import metrics_for_agents
 
     metrics = metrics_for_agents(agents)
+    report_budget = _ReportBudget()
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]
         model = _agent_model(name, info, run_config)
-        agent_payloads[name] = _build_agent(name, info, metrics, model)
+        agent_payloads[name] = _build_agent(name, info, metrics, model, report_budget)
 
     if not agent_payloads:
         return None
@@ -440,7 +491,7 @@ def build_agent_eval_payload(
         "metric_labels": metric_labels,
         "attempt_policy": policy,
         "dataset": [d for d in (dataset or []) if isinstance(d, dict)],
-        "provenance": _build_provenance(agent_payloads, agents, run_dir, comparison),
+        "provenance": _build_provenance(agent_payloads, agents, run_dir, comparison, report_budget),
     }
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
@@ -460,6 +511,7 @@ def build_agent_eval_payload(
             payload.get("suggestions_v2") or [],
             evidence_links,
         )
+    _enforce_report_payload_budget(payload, report_budget)
     return payload
 
 
@@ -504,6 +556,7 @@ def _build_provenance(
     raw_agents: dict[str, dict[str, Any]],
     run_dir: Path | None,
     comparison: dict[str, Any] | None,
+    report_budget: _ReportBudget,
 ) -> dict[str, Any]:
     """Assemble the Diagnostics ``provenance`` block.
 
@@ -521,26 +574,222 @@ def _build_provenance(
         "raw_lift": {
             name: {m: e.get("lift") for m, e in ap.get("evaluators", {}).items()} for name, ap in agent_payloads.items()
         },
-        "raw_trial_rewards": {name: _raw_trial_rewards(raw_agents.get(name, {})) for name in agent_payloads},
+        "raw_trial_rewards": {
+            name: _raw_trial_rewards(raw_agents.get(name, {}), report_budget) for name in agent_payloads
+        },
         "evaluator_paths": {},
         "comparison": comparison if isinstance(comparison, dict) else {},
     }
 
 
-# Verbose per-evaluator ``details`` (evidence refs, per-check breakdowns) are
+# Verbose per-evaluator ``details`` / ``custom_details`` (evidence refs,
+# per-check breakdowns) are
 # dropped from the diagnostics payload: they are not rendered by any report
 # panel and would multiply the embedded JSON size several-fold. The full
 # details remain on disk under ``provenance.run_dir`` for deep dives.
-_REWARD_HEAVY_KEYS = frozenset({"details"})
+_REWARD_HEAVY_KEYS = frozenset({"details", "custom_details"})
 
 
-def _raw_trial_rewards(info: dict[str, Any]) -> list[dict[str, Any]]:
+def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> list[dict[str, Any]]:
     """Return compact raw Harbor reward dicts (internal + verbose keys stripped)."""
     rewards: list[dict[str, Any]] = []
     for reward in info.get("rewards") or []:
-        if isinstance(reward, dict):
-            rewards.append({k: v for k, v in reward.items() if not k.startswith("_") and k not in _REWARD_HEAVY_KEYS})
+        if not isinstance(reward, dict):
+            continue
+        if report_budget.raw_rewards_remaining <= 0:
+            report_budget.omit("raw_trial_rewards")
+            continue
+
+        compact: dict[str, Any] = {}
+        if "custom_details" in reward:
+            report_budget.omit("raw_detail_fields")
+        for key, value in reward.items():
+            if key.startswith("_") or key in _REWARD_HEAVY_KEYS:
+                continue
+            if len(compact) >= _MAX_RAW_REWARD_FIELDS:
+                report_budget.omit("raw_reward_fields")
+                continue
+            if key in {"custom_metrics", "metrics"} and isinstance(value, dict):
+                value = _bounded_raw_metric_mapping(value, report_budget)
+            compact[key] = value
+
+        rewards.append(compact)
+        report_budget.raw_rewards_remaining -= 1
     return rewards
+
+
+def _bounded_raw_metric_mapping(value: dict[Any, Any], report_budget: _ReportBudget) -> dict[str, Any]:
+    """Keep a deterministic representative slice of raw custom metric maps."""
+    bounded: dict[str, Any] = {}
+    for raw_name in sorted(value, key=str):
+        if len(bounded) >= _MAX_RAW_METRICS_PER_REWARD:
+            report_budget.omit("raw_metric_values")
+            continue
+        name = str(raw_name)
+        if len(name) > 256 or name in bounded:
+            report_budget.omit("raw_metric_values")
+            continue
+        bounded[name] = value[raw_name]
+    return bounded
+
+
+def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Keep the complete self-contained payload within a hard serialized budget.
+
+    Cardinality limits normally keep the payload comfortably below the cap. The
+    staged pruning below is a final fail-safe for unusually large diagnostics,
+    datasets, or user-authored strings. Every lossy stage is surfaced through
+    ``report_truncation`` and the original run artifacts remain on disk.
+    """
+
+    def refresh_signal() -> None:
+        if report_budget.truncated:
+            payload["report_truncation"] = report_budget.signal()
+
+    refresh_signal()
+    if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
+        return
+
+    provenance = payload.get("provenance")
+    if isinstance(provenance, dict):
+        comparison = provenance.get("comparison")
+        if comparison:
+            provenance["comparison"] = {}
+            report_budget.omit("comparison_payloads")
+    refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
+        if isinstance(raw_rewards, dict):
+            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
+            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
+            report_budget.omit("raw_trial_rewards", omitted)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        omitted_evidence = 0
+        for agent in (payload.get("agents") or {}).values():
+            if not isinstance(agent, dict):
+                continue
+            for card in agent.get("evaluator_cards") or []:
+                if isinstance(card, dict) and isinstance(card.get("evidence"), list):
+                    omitted_evidence += len(card["evidence"])
+                    card["evidence"] = []
+        report_budget.omit("evidence_entries", omitted_evidence)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        omitted_items = 0
+        for key in ("dataset", "trials"):
+            items = payload.get(key)
+            if isinstance(items, list):
+                omitted_items += len(items)
+                payload[key] = []
+        for agent in (payload.get("agents") or {}).values():
+            if not isinstance(agent, dict):
+                continue
+            for key in ("trials", "trials_baseline", "cases"):
+                items = agent.get(key)
+                if isinstance(items, list):
+                    omitted_items += len(items)
+                    agent[key] = []
+            if agent.get("conditions"):
+                agent["conditions"] = {}
+                omitted_items += 1
+        report_budget.omit("dataset_and_trial_items", omitted_items)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        omitted_cards = 0
+        for agent in (payload.get("agents") or {}).values():
+            if isinstance(agent, dict):
+                omitted_cards += len(agent.get("evaluator_cards") or [])
+                agent["evaluator_cards"] = []
+        payload["evaluator_cards"] = []
+        report_budget.omit("evaluator_cards", omitted_cards)
+        for key in ("conclusions", "recommendations", "suggestions", "suggestions_v2"):
+            items = payload.get(key)
+            if isinstance(items, list) and items:
+                report_budget.omit("insight_items", len(items))
+                payload[key] = []
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        _replace_with_minimal_payload(payload, report_budget)
+
+    refresh_signal()
+
+
+def _serialized_payload_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Last-resort bounded shape for pathological single-field payloads."""
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    compact_summary = {
+        key: value
+        for key, value in summary.items()
+        if key
+        in {
+            "schema_version",
+            "verdict",
+            "overall_score",
+            "overall_lift",
+            "environment",
+            "runtime_seconds",
+            "execution_status",
+            "expected_attempts",
+            "scored_attempts",
+        }
+    }
+    compact_summary["skill_name"] = str(summary.get("skill_name") or payload.get("skill_name") or "")[:256]
+    compact_summary["best_agent"] = str(summary.get("best_agent") or payload.get("best_agent") or "")[:256]
+    compact_summary["agents_run"] = [str(name)[:256] for name in (summary.get("agents_run") or [])[:64]]
+    compact_summary["execution_errors"] = [str(error)[:1024] for error in (summary.get("execution_errors") or [])[:16]]
+
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    compact = {
+        "schema_version": payload.get("schema_version", _SCHEMA_VERSION),
+        "summary": compact_summary,
+        "skill_name": compact_summary["skill_name"],
+        "verdict": payload.get("verdict", VERDICT_NEUTRAL),
+        "best_agent": compact_summary["best_agent"],
+        "agents_run": compact_summary["agents_run"],
+        "environment": payload.get("environment"),
+        "overall_score": payload.get("overall_score"),
+        "overall_lift": payload.get("overall_lift"),
+        "composite_lift": payload.get("composite_lift"),
+        "execution_status": payload.get("execution_status"),
+        "execution_errors": compact_summary["execution_errors"],
+        "expected_attempts": payload.get("expected_attempts", 0),
+        "scored_attempts": payload.get("scored_attempts", 0),
+        "runtime_seconds": payload.get("runtime_seconds", 0.0),
+        "agents": {},
+        "dimensions": [],
+        "evaluators": {},
+        "evaluator_cards": [],
+        "cases": [],
+        "trials": [],
+        "insights": {},
+        "conclusions": [],
+        "recommendations": [],
+        "suggestions": [],
+        "suggestions_v2": [],
+        "metric_ids": [],
+        "metric_labels": {},
+        "dataset": [],
+        "provenance": {
+            "source": provenance.get("source", "harbor"),
+            "run_dir": str(provenance.get("run_dir") or "")[:1024] or None,
+            "raw_trial_rewards": {},
+            "evaluator_paths": {},
+            "comparison": {},
+        },
+    }
+    payload.clear()
+    payload.update(compact)
+    report_budget.omit("payload_sections")
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +802,7 @@ def _build_agent(
     info: dict[str, Any],
     metrics: list[str],
     model: str | None,
+    report_budget: _ReportBudget,
 ) -> dict[str, Any]:
     with_scores = info.get("with_skill") or {}
     without_scores = info.get("without_skill") or {}
@@ -604,6 +854,7 @@ def _build_agent(
             custom_with_skill=info.get("custom_with_skill") or {},
             custom_without_skill=info.get("custom_without_skill") or {},
             custom_lift=info.get("custom_lift") or {},
+            report_budget=report_budget,
         ),
         "dimensions": dimensions,
         "with_skill": overall_ws,
@@ -764,10 +1015,16 @@ def _compact_evidence_refs(raw_refs: object) -> list[str]:
     return refs
 
 
-def _metric_evidence(metric: str, rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _metric_evidence(
+    metric: str,
+    rewards: list[dict[str, Any]],
+    report_budget: _ReportBudget,
+) -> list[dict[str, Any]]:
     from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
 
     evidence: list[dict[str, Any]] = []
+    by_fingerprint: dict[str, dict[str, Any]] = {}
+    seen_fingerprints: set[str] = set()
     for reward in rewards:
         if not isinstance(reward, dict):
             continue
@@ -805,18 +1062,31 @@ def _metric_evidence(metric: str, rewards: list[dict[str, Any]]) -> list[dict[st
         if isinstance(criteria, dict):
             checks = [str(name)[:128] for name in criteria][:8]
 
-        evidence.append(
-            {
-                "entry_id": str(reward.get("entry_id") or "trial"),
-                "score": float(raw_score)
-                if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
-                else None,
-                "notes": notes,
-                "failures": failures,
-                "checks": checks,
-                "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
-            }
-        )
+        entry = {
+            "entry_id": str(reward.get("entry_id") or "trial")[:256],
+            "score": float(raw_score)
+            if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
+            else None,
+            "notes": notes,
+            "failures": failures,
+            "checks": checks,
+            "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
+        }
+        fingerprint = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if fingerprint in seen_fingerprints:
+            existing = by_fingerprint.get(fingerprint)
+            if existing is not None:
+                existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
+                report_budget.deduplicated_evidence += 1
+            continue
+        seen_fingerprints.add(fingerprint)
+
+        if len(evidence) >= _MAX_EVIDENCE_PER_CARD or report_budget.evidence_remaining <= 0:
+            report_budget.omit("evidence_entries")
+            continue
+        evidence.append(entry)
+        by_fingerprint[fingerprint] = entry
+        report_budget.evidence_remaining -= 1
     return evidence
 
 
@@ -842,6 +1112,7 @@ def _evaluator_card(
     *,
     label: str,
     rewards: list[dict[str, Any]],
+    report_budget: _ReportBudget,
 ) -> dict[str, Any]:
     ws = _as_float(scores.get("with_skill"))
     return {
@@ -851,7 +1122,7 @@ def _evaluator_card(
         "baseline": scores.get("baseline"),
         "lift": scores.get("lift"),
         "status": "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail"),
-        "evidence": _metric_evidence(metric, rewards),
+        "evidence": _metric_evidence(metric, rewards, report_budget),
     }
 
 
@@ -862,17 +1133,23 @@ def _evaluator_cards(
     custom_with_skill: dict[str, Any],
     custom_without_skill: dict[str, Any],
     custom_lift: dict[str, Any],
+    report_budget: _ReportBudget,
 ) -> list[dict[str, Any]]:
     from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, extract_custom_metrics
 
     cards: list[dict[str, Any]] = []
     for metric, scores in evaluators.items():
+        if report_budget.cards_remaining <= 0:
+            report_budget.omit("evaluator_cards")
+            continue
+        report_budget.cards_remaining -= 1
         cards.append(
             _evaluator_card(
                 metric,
                 scores,
                 label=METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
                 rewards=rewards,
+                report_budget=report_budget,
             )
         )
 
@@ -884,6 +1161,10 @@ def _evaluator_cards(
         with_skill = _custom_metric_score(metric, custom_with_skill, rewards)
         if with_skill is None:
             continue
+        if report_budget.cards_remaining <= 0:
+            report_budget.omit("evaluator_cards")
+            continue
+        report_budget.cards_remaining -= 1
         baseline = _custom_metric_score(metric, custom_without_skill, [])
         lift = _lift_value(metric, custom_lift)
         if lift is None and baseline is not None:
@@ -894,6 +1175,7 @@ def _evaluator_cards(
                 {"with_skill": with_skill, "baseline": baseline, "lift": lift},
                 label=f"Custom: {metric}",
                 rewards=rewards,
+                report_budget=report_budget,
             )
         )
     return cards

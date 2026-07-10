@@ -195,6 +195,7 @@ def test_canonical_html_renders_evaluator_evidence_and_custom_metric_details() -
         use_llm_judge=False,
     )
     assert payload is not None
+    assert "report_truncation" not in payload
 
     agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
 
@@ -238,6 +239,127 @@ def test_canonical_html_tolerates_legacy_string_evidence_refs() -> None:
 
     assert "failure" in agents_html
     assert "trajectory.json#/steps/14" in agents_html
+
+
+def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "security": 1.0,
+        "goal_accuracy": 0.5,
+        "details": {"goal_accuracy": {"reason": "same representative evidence"}},
+    }
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "with_skill": {"security": 1.0, "goal_accuracy": 0.5},
+                "rewards": [dict(reward), dict(reward)],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    goal_card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "goal_accuracy")
+    assert goal_card["evidence"] == [
+        {
+            "entry_id": "case-1",
+            "score": 0.5,
+            "notes": ["same representative evidence"],
+            "failures": [],
+            "checks": [],
+            "evidence_refs": [],
+            "occurrences": 2,
+        }
+    ]
+    agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
+    assert "\u00d72" in agents_html
+
+
+def test_canonical_payload_bounds_high_cardinality_custom_report_details() -> None:
+    metric_count = 100
+    trial_count = 100
+    custom_scores = {f"custom_metric_{index:03d}": 0.75 for index in range(metric_count)}
+    custom_details = {
+        metric: {
+            "reason": f"representative evidence for {metric} " + ("x" * 2_000),
+            "evidence_refs": [{"source": "custom_reward.json", "json_pointer": f"/details/{metric}"}],
+        }
+        for metric in custom_scores
+    }
+    rewards = [
+        {
+            "entry_id": f"case-{index:03d}",
+            "security": 1.0,
+            "custom_metrics": dict(custom_scores),
+            "custom_details": custom_details,
+        }
+        for index in range(trial_count)
+    ]
+
+    payload = build_agent_eval_payload(
+        "high-cardinality-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": trial_count,
+                "scored_attempts": trial_count,
+                "with_skill": {"security": 1.0},
+                "custom_with_skill": custom_scores,
+                "rewards": rewards,
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    cards = payload["agents"]["codex"]["evaluator_cards"]
+    raw_rewards = payload["provenance"]["raw_trial_rewards"]["codex"]
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+
+    assert len(cards) <= 64
+    assert all(len(card["evidence"]) <= 16 for card in cards)
+    assert sum(len(card["evidence"]) for card in cards) <= 256
+    assert all("custom_details" not in reward for reward in raw_rewards)
+    assert any(card["evidence"] for card in cards), "representative evidence should survive bounded reporting"
+    assert payload["report_truncation"]["truncated"] is True
+    assert payload["report_truncation"]["omitted"]["evaluator_cards"] > 0
+    assert payload["report_truncation"]["omitted"]["evidence_entries"] > 0
+    assert payload["report_truncation"]["payload_budget_bytes"] == 2 * 1024 * 1024
+    assert len(encoded) <= payload["report_truncation"]["payload_budget_bytes"]
+
+
+def test_canonical_payload_enforces_total_serialized_budget() -> None:
+    payload = build_agent_eval_payload(
+        "oversized-comparison-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [{"entry_id": "case-1", "security": 1.0}],
+            }
+        },
+        comparison={"unrendered_blob": "x" * (3 * 1024 * 1024)},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+    truncation = payload["report_truncation"]
+
+    assert payload["summary"]["execution_status"] == "succeeded"
+    assert payload["provenance"]["comparison"] == {}
+    assert truncation["truncated"] is True
+    assert truncation["omitted"]["comparison_payloads"] == 1
+    assert len(encoded) <= truncation["payload_budget_bytes"]
 
 
 def test_standalone_tier3_persists_the_canonical_feedback_payload(tmp_path: Path) -> None:

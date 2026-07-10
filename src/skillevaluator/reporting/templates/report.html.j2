@@ -3017,7 +3017,7 @@
                                 {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': []}}) %}
                             {% endif %}
                             {% set entry = dedup_map[eid] %}
-                            {% set _ = entry.update({'count': entry.count + 1}) %}
+                            {% set _ = entry.update({'count': entry.count + (ev.occurrences or 1)}) %}
                             {% if ev.score is not none %}
                                 {% set _ = entry.update({'sum': entry.sum + ev.score, 'with_score': entry.with_score + 1}) %}
                             {% endif %}

@@ -19,8 +19,10 @@ Features include:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
@@ -39,6 +41,103 @@ if TYPE_CHECKING:
 
 
 _TIER2_VALIDATOR_MARKERS = ("similarity", "dedup", "context optimization")
+
+# Tier 3 already enforces a 2 MiB canonical payload limit. HTML needs a
+# separate bound because script-safe escaping (``<`` -> ``\u003c``), pretty
+# diagnostics, and visible dataset fields can otherwise multiply that payload
+# many times over. Large canonical payloads are embedded once as base64 while a
+# bounded projection feeds the human-readable panels.
+_TIER3_JSON_EMBED_MAX_BYTES = 512 * 1024
+_TIER3_HTML_PREVIEW_TRIGGER_BYTES = 256 * 1024
+_TIER3_HTML_PREVIEW_CHARS = 128 * 1024
+_TIER3_HTML_PREVIEW_STRING_CHARS = 4 * 1024
+_TIER3_HTML_PREVIEW_COLLECTION_ITEMS = 64
+_TIER3_PREVIEW_MARKER = "... [HTML preview truncated; download the full Tier 3 payload]"
+
+
+@dataclass
+class _Tier3PreviewBudget:
+    chars_remaining: int = _TIER3_HTML_PREVIEW_CHARS
+    omitted_characters: int = 0
+    omitted_items: int = 0
+
+
+def _compact_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _script_safe_json(value: object) -> str:
+    """Serialize JSON for an HTML raw-text script element without expansion attacks."""
+    return (
+        _compact_json(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def _canonical_tier3_embed(payload: dict[str, Any] | None) -> tuple[str, str]:
+    """Return one safe canonical Tier 3 copy and its browser decoding mode."""
+    if not payload:
+        return "", "json"
+    raw = _compact_json(payload)
+    safe = _script_safe_json(payload)
+    if len(safe.encode("utf-8")) <= _TIER3_JSON_EMBED_MAX_BYTES:
+        return safe, "json"
+    return base64.b64encode(raw.encode("utf-8")).decode("ascii"), "base64"
+
+
+def _bounded_tier3_preview_value(value: Any, budget: _Tier3PreviewBudget) -> Any:
+    if isinstance(value, str):
+        allowed = min(_TIER3_HTML_PREVIEW_STRING_CHARS, max(0, budget.chars_remaining))
+        if len(value) <= allowed:
+            budget.chars_remaining -= len(value)
+            return value
+        budget.omitted_characters += len(value) - allowed
+        budget.chars_remaining -= allowed
+        if allowed <= len(_TIER3_PREVIEW_MARKER):
+            return _TIER3_PREVIEW_MARKER[:allowed]
+        return value[: allowed - len(_TIER3_PREVIEW_MARKER)] + _TIER3_PREVIEW_MARKER
+
+    if isinstance(value, list):
+        kept = min(len(value), _TIER3_HTML_PREVIEW_COLLECTION_ITEMS)
+        budget.omitted_items += len(value) - kept
+        bounded: list[Any] = []
+        for item in value[:kept]:
+            bounded.append(_bounded_tier3_preview_value(item, budget))
+        return bounded
+
+    if isinstance(value, dict):
+        items = list(value.items())
+        kept = min(len(items), _TIER3_HTML_PREVIEW_COLLECTION_ITEMS)
+        budget.omitted_items += len(items) - kept
+        bounded_dict: dict[Any, Any] = {}
+        for key, item in items[:kept]:
+            budget.chars_remaining = max(0, budget.chars_remaining - len(str(key)))
+            bounded_dict[key] = _bounded_tier3_preview_value(item, budget)
+        return bounded_dict
+
+    return value
+
+
+def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, int]]:
+    """Return a presentation-only projection plus visible omission counts."""
+    if not payload or len(_compact_json(payload).encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        return payload, {}
+
+    budget = _Tier3PreviewBudget()
+    preview = _bounded_tier3_preview_value(payload, budget)
+    notice = {
+        key: value
+        for key, value in {
+            "characters": budget.omitted_characters,
+            "items": budget.omitted_items,
+        }.items()
+        if value > 0
+    }
+    return preview, notice
 
 
 def is_tier2_validator_name(validator_name: str | None) -> bool:
@@ -969,6 +1068,9 @@ class HTMLReporter(ReporterBase):
         tier2_summary = self._compute_tier_summary(tier2_results)
         tier3_summary = self._compute_tier_summary(tier3_results)
         tier3_data = self._tier3_report_data(tier3_results)
+        tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
+        tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
         # Keep the Tier 1 dashboard scoped to Tier 1. Tier 2 and Tier 3 have
         # dedicated tabs; including an advisory Tier 3 skip here would make
@@ -1089,7 +1191,10 @@ class HTMLReporter(ReporterBase):
             "top_issues": top_issues,
             "contributors": contributors,
             "quality_scores": quality_scores_by_skill,
-            "tier3": tier3_data,
+            # Tier 3 is embedded once in ``#tier3-full``. The export helper
+            # resolves this reference at download time, avoiding a second full
+            # copy inside ``#report-data``.
+            "tier3": {"$ref": "#tier3-full"} if tier3_data else None,
             "gating": gating,
         }
         report_json = (
@@ -1158,7 +1263,11 @@ class HTMLReporter(ReporterBase):
             content_label=cl,
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
-            tier3=tier3_data,
+            tier3=tier3_preview,
+            tier3_canonical_data=tier3_canonical_data,
+            tier3_canonical_encoding=tier3_canonical_encoding,
+            tier3_truncation=tier3_truncation,
+            tier3_preview_notice=tier3_preview_notice,
             tier1_summary=tier1_summary,
             tier2_summary=tier2_summary,
             tier3_summary=tier3_summary,

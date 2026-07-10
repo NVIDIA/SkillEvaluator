@@ -364,12 +364,19 @@ def build_agent_eval_payload(
     for name in sorted(agents):
         info = agents[name]
         model = _agent_model(name, info, run_config)
-        agent_payloads[name] = _build_agent(name, info, metrics, model, report_budget)
+        agent_payloads[name] = _build_agent(name, info, metrics, model)
 
     if not agent_payloads:
         return None
 
     best_agent = _pick_best_agent(agent_payloads)
+    detail_priority = ([best_agent] if best_agent else []) + [name for name in agent_payloads if name != best_agent]
+    for name in detail_priority:
+        _attach_agent_report_details(
+            agent_payloads[name],
+            agents.get(name, {}),
+            report_budget,
+        )
     best = agent_payloads.get(best_agent, {})
 
     execution_errors = list(
@@ -491,7 +498,14 @@ def build_agent_eval_payload(
         "metric_labels": metric_labels,
         "attempt_policy": policy,
         "dataset": [d for d in (dataset or []) if isinstance(d, dict)],
-        "provenance": _build_provenance(agent_payloads, agents, run_dir, comparison, report_budget),
+        "provenance": _build_provenance(
+            agent_payloads,
+            agents,
+            run_dir,
+            comparison,
+            report_budget,
+            detail_priority=detail_priority,
+        ),
     }
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
@@ -557,6 +571,8 @@ def _build_provenance(
     run_dir: Path | None,
     comparison: dict[str, Any] | None,
     report_budget: _ReportBudget,
+    *,
+    detail_priority: list[str],
 ) -> dict[str, Any]:
     """Assemble the Diagnostics ``provenance`` block.
 
@@ -575,7 +591,9 @@ def _build_provenance(
             name: {m: e.get("lift") for m, e in ap.get("evaluators", {}).items()} for name, ap in agent_payloads.items()
         },
         "raw_trial_rewards": {
-            name: _raw_trial_rewards(raw_agents.get(name, {}), report_budget) for name in agent_payloads
+            name: _raw_trial_rewards(raw_agents.get(name, {}), report_budget)
+            for name in detail_priority
+            if name in agent_payloads
         },
         "evaluator_paths": {},
         "comparison": comparison if isinstance(comparison, dict) else {},
@@ -802,7 +820,6 @@ def _build_agent(
     info: dict[str, Any],
     metrics: list[str],
     model: str | None,
-    report_budget: _ReportBudget,
 ) -> dict[str, Any]:
     with_scores = info.get("with_skill") or {}
     without_scores = info.get("without_skill") or {}
@@ -848,14 +865,7 @@ def _build_agent(
         "scored_attempts": _as_nonnegative_int(info.get("scored_attempts")),
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
         "evaluators": evaluators,
-        "evaluator_cards": _evaluator_cards(
-            evaluators,
-            rewards=info.get("rewards") or [],
-            custom_with_skill=info.get("custom_with_skill") or {},
-            custom_without_skill=info.get("custom_without_skill") or {},
-            custom_lift=info.get("custom_lift") or {},
-            report_budget=report_budget,
-        ),
+        "evaluator_cards": [],
         "dimensions": dimensions,
         "with_skill": overall_ws,
         "baseline": overall_bl,
@@ -871,6 +881,28 @@ def _build_agent(
         },
         "cases": _cases(info),
     }
+
+
+def _attach_agent_report_details(
+    agent_payload: dict[str, Any],
+    info: dict[str, Any],
+    report_budget: _ReportBudget,
+) -> None:
+    """Populate bounded diagnostic details after the best agent is known.
+
+    Global report limits intentionally prioritize the best-scoring agent. This
+    keeps its top-level evaluator cards, evidence, and raw rewards useful even
+    when an alphabetically earlier agent has adversarial custom-metric
+    cardinality.
+    """
+    agent_payload["evaluator_cards"] = _evaluator_cards(
+        agent_payload.get("evaluators", {}),
+        rewards=info.get("rewards") or [],
+        custom_with_skill=info.get("custom_with_skill") or {},
+        custom_without_skill=info.get("custom_without_skill") or {},
+        custom_lift=info.get("custom_lift") or {},
+        report_budget=report_budget,
+    )
 
 
 def _build_evaluators(
@@ -1022,10 +1054,16 @@ def _metric_evidence(
 ) -> list[dict[str, Any]]:
     from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
 
+    if report_budget.evidence_remaining <= 0:
+        report_budget.omit("evidence_entries", len(rewards))
+        return []
+
     evidence: list[dict[str, Any]] = []
     by_fingerprint: dict[str, dict[str, Any]] = {}
-    seen_fingerprints: set[str] = set()
-    for reward in rewards:
+    for reward_index, reward in enumerate(rewards):
+        if report_budget.evidence_remaining <= 0:
+            report_budget.omit("evidence_entries", len(rewards) - reward_index)
+            break
         if not isinstance(reward, dict):
             continue
         details = reward.get("details")
@@ -1073,13 +1111,11 @@ def _metric_evidence(
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
         fingerprint = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        if fingerprint in seen_fingerprints:
-            existing = by_fingerprint.get(fingerprint)
-            if existing is not None:
-                existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
-                report_budget.deduplicated_evidence += 1
+        existing = by_fingerprint.get(fingerprint)
+        if existing is not None:
+            existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
+            report_budget.deduplicated_evidence += 1
             continue
-        seen_fingerprints.add(fingerprint)
 
         if len(evidence) >= _MAX_EVIDENCE_PER_CARD or report_budget.evidence_remaining <= 0:
             report_budget.omit("evidence_entries")

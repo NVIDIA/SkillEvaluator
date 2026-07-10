@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from pathlib import Path
 
 from skillevaluator.evaluation.tier3_report import (
+    _metric_evidence,
+    _ReportBudget,
     agent_eval_result_from_directory,
     build_agent_eval_payload,
     render_agent_eval_html_report,
@@ -51,6 +54,19 @@ def _render_agent_payload(payload: dict) -> str:
 
 def _tier3_page(html: str, page: str, next_page: str) -> str:
     return html.split(f'id="tier3-page-{page}"', 1)[1].split(f'id="tier3-page-{next_page}"', 1)[0]
+
+
+def _embedded_tier3_payload(html: str) -> dict:
+    match = re.search(
+        r'<script type="application/json" id="tier3-full"(?P<attrs>[^>]*)>(?P<body>.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    assert match is not None
+    body = match.group("body").strip()
+    if 'data-encoding="base64"' in match.group("attrs"):
+        body = base64.b64decode(body).decode("utf-8")
+    return json.loads(body)
 
 
 def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None:
@@ -278,6 +294,56 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
     ]
     agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
     assert "\u00d72" in agents_html
+    assert "1 cases, 2 trials" in agents_html
+
+
+def test_deduplicated_evidence_average_is_weighted_by_occurrences() -> None:
+    rewards = [
+        {
+            "entry_id": "case-1",
+            "security": 1.0,
+            "goal_accuracy": score,
+            "details": {"goal_accuracy": {"reason": reason}},
+        }
+        for score, reason in [(0.0, "same failure"), (0.0, "same failure"), (1.0, "eventual success")]
+    ]
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 3,
+                "scored_attempts": 3,
+                "with_skill": {"security": 1.0, "goal_accuracy": 1 / 3},
+                "rewards": rewards,
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
+    evidence_row = agents_html.split('<span class="t3-ev-id">case-1</span>', 1)[1].split("</li>", 1)[0]
+
+    assert "1 cases, 3 trials" in agents_html
+    assert ">0.33<" in evidence_row
+
+
+def test_metric_evidence_does_not_scan_rewards_after_global_budget_is_exhausted() -> None:
+    class NeverIteratedRewards:
+        def __len__(self) -> int:
+            return 50_000
+
+        def __iter__(self):
+            raise AssertionError("an exhausted evidence budget must not scan reward payloads")
+
+    budget = _ReportBudget(evidence_remaining=0)
+
+    evidence = _metric_evidence("goal_accuracy", NeverIteratedRewards(), budget)  # type: ignore[arg-type]
+
+    assert evidence == []
+    assert budget.omitted["evidence_entries"] == 50_000
 
 
 def test_canonical_payload_bounds_high_cardinality_custom_report_details() -> None:
@@ -332,6 +398,92 @@ def test_canonical_payload_bounds_high_cardinality_custom_report_details() -> No
     assert payload["report_truncation"]["omitted"]["evidence_entries"] > 0
     assert payload["report_truncation"]["payload_budget_bytes"] == 2 * 1024 * 1024
     assert len(encoded) <= payload["report_truncation"]["payload_budget_bytes"]
+
+    html = _render_agent_payload(payload)
+    assert "Embedded report details were bounded" in html
+    assert "evaluator cards omitted:" in html
+    assert str(payload["report_truncation"]["omitted"]["evaluator_cards"]) in html
+
+
+def test_global_report_budget_prioritizes_best_agent_details() -> None:
+    custom_scores = {f"custom_metric_{index:03d}": 0.2 for index in range(80)}
+    low_agent_rewards = [
+        {
+            "entry_id": f"low-{index:03d}",
+            "security": 0.1,
+            "custom_metrics": custom_scores,
+        }
+        for index in range(256)
+    ]
+    payload = build_agent_eval_payload(
+        "multi-agent-budget",
+        {
+            "aaa": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": len(low_agent_rewards),
+                "scored_attempts": len(low_agent_rewards),
+                "with_skill": {"security": 0.1},
+                "custom_with_skill": custom_scores,
+                "rewards": low_agent_rewards,
+            },
+            "zzz": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 1.0},
+                "rewards": [
+                    {
+                        "entry_id": "best-case",
+                        "security": 1.0,
+                        "goal_accuracy": 1.0,
+                        "details": {"goal_accuracy": {"reason": "best-agent evidence"}},
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    assert payload["best_agent"] == "zzz"
+    best_cards = payload["agents"]["zzz"]["evaluator_cards"]
+    assert best_cards
+    assert payload["evaluator_cards"] == best_cards
+    assert any(card["evidence"] for card in best_cards)
+    assert payload["provenance"]["raw_trial_rewards"]["zzz"]
+
+
+def test_escape_heavy_payload_has_bounded_html_and_one_recoverable_canonical_copy() -> None:
+    escape_heavy_prompt = "<" * 1_500_000
+    payload = build_agent_eval_payload(
+        "escape-heavy",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [{"entry_id": "case-1", "security": 1.0}],
+            }
+        },
+        dataset=[{"id": "case-1", "prompt": escape_heavy_prompt}],
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert len(html.encode("utf-8")) <= 4 * 1024 * 1024
+    assert html.count('id="tier3-full"') == 1
+    assert 'id="tier3-raw-evaluators"' not in html
+    assert 'id="tier3-raw-lift"' not in html
+    assert 'id="tier3-comparison"' not in html
+    assert _embedded_tier3_payload(html)["dataset"][0]["prompt"] == escape_heavy_prompt
+    assert "HTML preview omitted" in html
+    assert "characters" in html
 
 
 def test_canonical_payload_enforces_total_serialized_budget() -> None:

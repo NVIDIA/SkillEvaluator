@@ -2201,6 +2201,9 @@
             .t3-prov-grid .t3-prov-action { display:flex; gap:0.4rem; }
             .t3-download-grid { display:flex; flex-wrap:wrap; gap:0.5rem; }
             .t3-download-grid .t3-copy-btn { padding:0.4rem 0.85rem; font-size:0.78rem; }
+            .t3-truncation-notice { background:var(--badge-warn-bg); border:1px solid var(--warning-color); border-left:4px solid var(--warning-color); border-radius:10px; color:var(--dark-text); margin:0 0 1rem; padding:0.8rem 1rem; }
+            .t3-truncation-notice strong { display:block; margin-bottom:0.3rem; }
+            .t3-truncation-notice ul { display:flex; flex-wrap:wrap; gap:0.25rem 1rem; margin:0.35rem 0 0; padding-left:1.2rem; font-size:0.82rem; color:var(--text-secondary); }
             /* Insight source tag (deterministic vs LLM) */
             .t3-insight-source { display:inline-block; padding:0.05rem 0.4rem; border-radius:4px; font-size:0.65rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; vertical-align:middle; margin-left:0.35rem; }
             .insight-source-deterministic { background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border-color); }
@@ -2255,6 +2258,31 @@
             <button class="t3-subtab" data-tier3-tab="dataset" onclick="showTier3SubTab('dataset', this)">Dataset</button>
             <button class="t3-subtab" data-tier3-tab="provenance" onclick="showTier3SubTab('provenance', this)">Diagnostics</button>
         </nav>
+
+        {% if tier3_truncation or tier3_preview_notice %}
+        <div class="t3-truncation-notice" role="status">
+            <strong>Embedded report details were bounded.</strong>
+            {% if tier3_truncation %}
+            <span>The canonical payload omits bounded diagnostic details; retained Harbor artifacts remain available from the run directory.</span>
+            {% endif %}
+            {% if tier3_preview_notice %}
+            <span>
+                HTML preview omitted
+                {% if tier3_preview_notice.characters %}{{ tier3_preview_notice.characters }} characters{% endif %}
+                {% if tier3_preview_notice.characters and tier3_preview_notice.items %} and {% endif %}
+                {% if tier3_preview_notice.items %}{{ tier3_preview_notice.items }} items{% endif %}.
+                JSON Downloads preserve the complete bounded canonical payload.
+            </span>
+            {% endif %}
+            {% if tier3_truncation.omitted %}
+            <ul>
+                {% for section, count in tier3_truncation.omitted.items() %}
+                <li>{{ section | replace('_', ' ') }} omitted: {{ count }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </div>
+        {% endif %}
 
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview">
@@ -3017,17 +3045,22 @@
                                 {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': []}}) %}
                             {% endif %}
                             {% set entry = dedup_map[eid] %}
-                            {% set _ = entry.update({'count': entry.count + (ev.occurrences or 1)}) %}
+                            {% set ev_occurrences = ev.occurrences or 1 %}
+                            {% set _ = entry.update({'count': entry.count + ev_occurrences}) %}
                             {% if ev.score is not none %}
-                                {% set _ = entry.update({'sum': entry.sum + ev.score, 'with_score': entry.with_score + 1}) %}
+                                {% set _ = entry.update({'sum': entry.sum + (ev.score * ev_occurrences), 'with_score': entry.with_score + ev_occurrences}) %}
                             {% endif %}
                             {% if ev.notes and not entry.notes %}{% set _ = entry.update({'notes': ev.notes}) %}{% endif %}
                             {% if ev.failures and not entry.failures %}{% set _ = entry.update({'failures': ev.failures}) %}{% endif %}
                             {% if ev.checks and not entry.checks %}{% set _ = entry.update({'checks': ev.checks}) %}{% endif %}
                             {% if ev.evidence_refs and not entry.evidence_refs %}{% set _ = entry.update({'evidence_refs': ev.evidence_refs}) %}{% endif %}
                         {% endfor %}
+                        {% set evidence_totals = namespace(trials=0) %}
+                        {% for ev in card.evidence %}
+                            {% set evidence_totals.trials = evidence_totals.trials + (ev.occurrences or 1) %}
+                        {% endfor %}
                         <details class="t3-eval-evidence">
-                            <summary>Per-trial evidence ({{ dedup_order | length }} cases, {{ card.evidence | length }} trials)</summary>
+                            <summary>Per-trial evidence ({{ dedup_order | length }} cases, {{ evidence_totals.trials }} trials)</summary>
                             <ul>
                             {% for eid in dedup_order %}
                                 {% set ev = dedup_map[eid] %}
@@ -3288,11 +3321,7 @@
                     </div>
                 </div>
             </details>
-            <script type="application/json" id="tier3-full">{{ tier3 | tojson }}</script>
-            {% if t3_provenance.raw_evaluators %}<script type="application/json" id="tier3-raw-evaluators">{{ t3_provenance.raw_evaluators | tojson }}</script>{% endif %}
-            {% if t3_provenance.raw_lift %}<script type="application/json" id="tier3-raw-lift">{{ t3_provenance.raw_lift | tojson }}</script>{% endif %}
-            {% if t3_provenance.comparison %}<script type="application/json" id="tier3-comparison">{{ t3_provenance.comparison | tojson }}</script>{% endif %}
-            {% if tier3.timing %}<script type="application/json" id="tier3-timing">{{ tier3.timing | tojson }}</script>{% endif %}
+            <script type="application/json" id="tier3-full"{% if tier3_canonical_encoding == 'base64' %} data-encoding="base64"{% endif %}>{{ tier3_canonical_data | safe }}</script>
 
             {% if tier3.evaluators %}
             <details class="t3-details">
@@ -3492,20 +3521,53 @@
                 feedback(false);
             }
         }
-        function tier3DownloadJson(scriptId, filename) {
-            var node = document.getElementById(scriptId);
-            if (!node) return;
+        function tier3CanonicalPayload() {
+            if (tier3CanonicalPayload.cached) return tier3CanonicalPayload.cached;
+            var node = document.getElementById('tier3-full');
+            if (!node) return null;
             var raw = (node.textContent || '').trim();
-            if (!raw) return;
-            var pretty = raw;
+            if (!raw) return null;
+            if (node.getAttribute('data-encoding') === 'base64') {
+                var binary = atob(raw);
+                var bytes = new Uint8Array(binary.length);
+                for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                raw = new TextDecoder('utf-8').decode(bytes);
+            }
             try {
-                pretty = JSON.stringify(JSON.parse(raw), null, 2);
-            } catch (err) { /* keep original */ }
+                tier3CanonicalPayload.cached = JSON.parse(raw);
+                return tier3CanonicalPayload.cached;
+            } catch (err) {
+                return null;
+            }
+        }
+        function tier3DownloadValue(downloadId) {
+            var payload = tier3CanonicalPayload();
+            if (!payload) return null;
+            var paths = {
+                'tier3-full': [],
+                'tier3-raw-evaluators': ['provenance', 'raw_evaluators'],
+                'tier3-raw-lift': ['provenance', 'raw_lift'],
+                'tier3-comparison': ['provenance', 'comparison'],
+                'tier3-timing': ['timing']
+            };
+            var path = paths[downloadId];
+            if (!path) return null;
+            var value = payload;
+            for (var i = 0; i < path.length; i++) {
+                if (!value || typeof value !== 'object') return null;
+                value = value[path[i]];
+            }
+            return value;
+        }
+        function tier3DownloadJson(downloadId, filename) {
+            var value = tier3DownloadValue(downloadId);
+            if (value === null || typeof value === 'undefined') return;
+            var pretty = JSON.stringify(value, null, 2);
             var blob = new Blob([pretty], { type: 'application/json' });
             var url = URL.createObjectURL(blob);
             var a = document.createElement('a');
             a.href = url;
-            a.download = filename || (scriptId + '.json');
+            a.download = filename || (downloadId + '.json');
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -3728,7 +3790,13 @@
             if (window.rebuildTier3Charts) window.rebuildTier3Charts();
         }
         function exportJSON() {
-            const jsonData = document.getElementById('report-data').textContent;
+            let jsonData = document.getElementById('report-data').textContent;
+            try {
+                const report = JSON.parse(jsonData);
+                const tier3Payload = (typeof tier3CanonicalPayload === 'function') ? tier3CanonicalPayload() : null;
+                if (tier3Payload) report.tier3 = tier3Payload;
+                jsonData = JSON.stringify(report, null, 2);
+            } catch (err) { /* retain the embedded report JSON */ }
             const blob = new Blob([jsonData], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');

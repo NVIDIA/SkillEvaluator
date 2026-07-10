@@ -88,14 +88,10 @@ def test_pass_summary_marks_incomplete_reward_unscored() -> None:
     )
 
     case = summary["cases"]["case-001"]
-    assert case["attempts"] == [
-        {
-            "attempt": 1,
-            "trial": "case-001__attempt1",
-            "score": None,
-            "passed": False,
-        }
-    ]
+    # An incomplete reward is not a scored attempt: it contributes no pass@k
+    # attempt row and the attempt is reported as missing instead.
+    assert case["attempts"] == []
+    assert case["passed"] is False
     assert case["attempts_used"] == 0
     assert case["attempts_missing"] == 1
     assert case["best_score"] is None

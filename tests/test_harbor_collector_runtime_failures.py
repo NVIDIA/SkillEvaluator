@@ -458,3 +458,210 @@ def test_unexpected_case_fails_execution_coverage(tmp_path: Path) -> None:
 
     assert results["execution_status"] == "failed"
     assert any("Unexpected scored cases: case-evil" in error for error in results["execution_errors"])
+
+
+CASES = ("case-a", "case-b")
+
+
+def _write_reward(
+    jobs_dir: Path,
+    *,
+    variant: str,
+    case_id: str,
+    attempt: int,
+    score: float = 0.25,
+    steps: tuple[str, ...] = (),
+    trial_name: str | None = None,
+) -> None:
+    trial = jobs_dir / f"demo-opencode-{variant}" / (trial_name or f"{case_id}_attempt{attempt:03d}")
+    verifier_dirs = [trial / "steps" / step / "verifier" for step in steps] or [trial / "verifier"]
+    reward = {
+        "entry_id": case_id,
+        "overall": score,
+        "security": score,
+        "skill_execution": score,
+        "skill_efficiency": score,
+        "accuracy": score,
+        "goal_accuracy": score,
+        "behavior_check": score,
+    }
+    for verifier_dir in verifier_dirs:
+        verifier_dir.mkdir(parents=True, exist_ok=True)
+        (verifier_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+
+
+def _write_variant_job_results(jobs_dir: Path, variants: tuple[str, ...] = ("with", "without")) -> None:
+    """Persist a complete Harbor job result covering every staged trial directory."""
+    for variant in variants:
+        job_dir = jobs_dir / f"demo-opencode-{variant}"
+        if not job_dir.is_dir():
+            continue
+        trial_names = sorted(path.name for path in job_dir.iterdir() if path.is_dir())
+        _write_complete_job_result(job_dir, trial_names)
+
+
+def _collect(tmp_path: Path, **kwargs: object) -> dict[str, object]:
+    options: dict[str, object] = {
+        "n_attempts": 2,
+        "expected_cases": 2,
+        "expected_case_ids": list(CASES),
+    }
+    options.update(kwargs)
+    return collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        **options,
+    )
+
+
+def test_stop_on_pass_does_not_report_intentionally_skipped_attempts(tmp_path: Path) -> None:
+    for variant in ("with", "without"):
+        for case_id in CASES:
+            _write_reward(tmp_path / "jobs", variant=variant, case_id=case_id, attempt=1, score=1.0)
+    _write_variant_job_results(tmp_path / "jobs")
+
+    result = _collect(tmp_path, n_attempts=3, stop_on_pass=True)
+
+    assert result["execution_status"] == "succeeded"
+    assert result["expected_attempts"] == 4
+    assert result["scored_attempts"] == 4
+
+
+def test_stop_on_pass_records_skipped_attempts_in_pass_summary(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=0.2)
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=2, score=1.0)
+    _write_variant_job_results(jobs_dir, variants=("with",))
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=3,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+    )
+
+    pass_at_k = result["agents"]["opencode"]["pass_at_k"]["with_skill"]
+    assert pass_at_k["stop_on_pass"] is True
+    case = pass_at_k["cases"]["case-a"]
+    assert case["passed"] is True
+    assert case["first_pass_attempt"] == 2
+    assert case["attempts_used"] == 2
+    assert case["attempts_skipped"] == 1
+    assert case["attempts_missing"] == 0
+    assert result["attempt_policy"]["stop_on_pass"] is True
+    assert result["execution_status"] == "succeeded"
+
+
+def test_stop_on_pass_rejects_a_lone_late_attempt(tmp_path: Path) -> None:
+    _write_reward(tmp_path / "jobs", variant="with", case_id="case-a", attempt=3, score=1.0)
+    _write_variant_job_results(tmp_path / "jobs", variants=("with",))
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=3,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["expected_attempts"] == 3
+    assert result["scored_attempts"] == 1
+
+
+def test_stop_on_pass_rejects_failed_attempt_before_pass(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=1.0)
+    failed_trial = jobs_dir / "demo-opencode-with/case-a_attempt001"
+    (failed_trial / "result.json").write_text(
+        json.dumps(
+            {
+                "exception_info": {
+                    "exception_type": "TaskFailure",
+                    "exception_message": "attempt one crashed",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=2, score=1.0)
+    _write_variant_job_results(jobs_dir, variants=("with",))
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=3,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["agents"]["opencode"]["trial_failures"]["with_skill"]
+
+
+def test_multistep_stop_on_pass_uses_authoritative_root_reward(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=1.0, steps=("prepare",))
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=0.0, steps=("finish",))
+    trial = jobs_dir / "demo-opencode-with/case-a_attempt001"
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": "case-a_attempt001",
+                "task_name": "case-a",
+                "verifier_result": {"rewards": {"overall": 0.5}},
+                "step_results": [
+                    {"step_name": "prepare", "verifier_result": {"rewards": {"overall": 1.0}}},
+                    {"step_name": "finish", "verifier_result": {"rewards": {"overall": 0.0}}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_variant_job_results(jobs_dir, variants=("with",))
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=2,
+        pass_threshold=0.75,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+    )
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert result["expected_attempts"] == 2
+    assert result["scored_attempts"] == 1
+    assert agent["pass_at_k"]["with_skill"]["rate"] == 0.0
+
+
+def test_duplicate_logical_attempt_ordinals_fail(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1)
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="case-a",
+        attempt=1,
+        trial_name="copy-case-a_attempt001",
+    )
+    _write_variant_job_results(jobs_dir, variants=("with",))
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=2,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+    )
+
+    assert result["execution_status"] == "failed"
+    assert any("duplicate attempt ordinals" in str(error) for error in result["execution_errors"])

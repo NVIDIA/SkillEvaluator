@@ -168,6 +168,7 @@ def _write_evals_config(evals_dir: Path, *, grading_mode: str, task_source: str)
     harbor["task_source"] = task_source
     harbor.setdefault("n_attempts", 1)
     harbor.setdefault("pass_threshold", 0.60)
+    harbor.setdefault("stop_on_pass", False)
 
     grading = data.setdefault("grading", {})
     if not isinstance(grading, dict):
@@ -597,6 +598,7 @@ def evaluate(
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
+    stop_on_pass: bool | None = None,
     n_concurrent: int | None,
     max_agents: int | None,
     model: str | None,
@@ -608,7 +610,7 @@ def evaluate(
     grading_mode: str | None,
     results_dir: Path | None,
     harbor_keep_jobs: bool,
-    agent_runtime_preflight: bool = True,
+    agent_runtime_preflight: bool | None = None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -661,6 +663,7 @@ def evaluate(
             skip_baseline=skip_baseline,
             n_attempts=n_attempts,
             pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
             model=model,

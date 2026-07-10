@@ -1515,6 +1515,7 @@ def _default_attempt_policy() -> dict[str, Any]:
     return {
         "max_attempts": 1,
         "pass_threshold": 0.50,
+        "stop_on_pass": False,
         "score_definition": AGENT_EVAL_SCORE_DEFINITION,
     }
 

@@ -1072,11 +1072,52 @@ def _attempt_sort_key(reward: dict[str, Any]) -> tuple[int, int | str, str, str]
     return (1 if started_at else 2, started_at, "", trial_name)
 
 
+def _attempt_ordinal(reward: dict[str, Any]) -> int | None:
+    """Return an explicit Harbor attempt ordinal when the trial names carry one."""
+    for key in ("_trial_root_name", "_trial_name"):
+        match = re.search(r"attempt0*(\d+)", str(reward.get(key) or ""), flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse multi-step reward rows to one pass@k score per Harbor trial root."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for index, reward in enumerate(rewards):
+        root = str(reward.get("_trial_root_name") or reward.get("_trial_name") or f"__row_{index}")
+        grouped.setdefault(root, []).append(reward)
+
+    logical: list[dict[str, Any]] = []
+    for root, rows in grouped.items():
+        authoritative = next((row for row in rows if not row.get("_step_name")), None)
+        if authoritative is not None or len(rows) == 1:
+            logical.append(authoritative if authoritative is not None else rows[0])
+            continue
+        first = rows[0]
+        scores = [_overall_score(row) for row in rows]
+        logical.append(
+            {
+                "entry_id": first.get("entry_id"),
+                "overall": (
+                    sum(score for score in scores if score is not None) / len(scores)
+                    if all(score is not None for score in scores)
+                    else None
+                ),
+                "_trial_name": root,
+                "_trial_root_name": root,
+                "_started_at": first.get("_started_at"),
+            }
+        )
+    return logical
+
+
 def _pass_summary(
     rewards: list[dict[str, Any]],
     *,
     n_attempts: int,
     pass_threshold: float,
+    stop_on_pass: bool = False,
     expected_cases: int | None,
     expected_case_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1084,7 +1125,9 @@ def _pass_summary(
     expected_ids = list(dict.fromkeys(str(case_id) for case_id in (expected_case_ids or []) if str(case_id)))
     expected_id_set = set(expected_ids) if expected_ids else None
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for reward in rewards:
+    for reward in _logical_attempt_rewards(rewards):
+        if _overall_score(reward) is None:
+            continue
         grouped.setdefault(_entry_id(reward, expected_id_set), []).append(reward)
 
     cases: dict[str, Any] = {}
@@ -1102,16 +1145,15 @@ def _pass_summary(
         attempt_rows = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
-        scored_attempts = 0
         for idx, reward in enumerate(sorted(attempts, key=_attempt_sort_key), start=1):
-            raw_score = _overall_score(reward)
-            score = round(raw_score, 4) if raw_score is not None else None
-            passed = score is not None and score >= pass_threshold
+            overall = _overall_score(reward)
+            if overall is None:
+                continue
+            score = round(overall, 4)
+            passed = score >= pass_threshold
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
-            if score is not None:
-                scored_attempts += 1
-                best_score = score if best_score is None else max(best_score, score)
+            best_score = score if best_score is None else max(best_score, score)
             attempt_rows.append(
                 {
                     "attempt": idx,
@@ -1126,13 +1168,16 @@ def _pass_summary(
         if case_passed and is_expected_case:
             passed_cases += 1
         if is_expected_case:
-            attempts_used += scored_attempts
-        missing = max(0, n_attempts - scored_attempts)
+            attempts_used += len(attempts)
+        unscored = max(0, n_attempts - len(attempts))
+        skipped = unscored if stop_on_pass and case_passed else 0
+        missing = 0 if skipped else unscored
 
         cases[entry_id] = {
             "passed": case_passed,
             "first_pass_attempt": first_pass_attempt,
-            "attempts_used": scored_attempts,
+            "attempts_used": len(attempts),
+            "attempts_skipped": skipped,
             "attempts_missing": missing,
             "best_score": round(best_score, 4) if best_score is not None else None,
             "attempts": attempt_rows,
@@ -1152,6 +1197,7 @@ def _pass_summary(
     return {
         "k": n_attempts,
         "pass_threshold": pass_threshold,
+        "stop_on_pass": stop_on_pass,
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
         "total_cases": total_cases,
@@ -1477,16 +1523,18 @@ def _condition_execution_summary(
     n_attempts: int,
     job_failure: str,
     skipped: bool = False,
+    stop_on_pass: bool = False,
+    pass_threshold: float = 0.50,
 ) -> dict[str, Any]:
     """Describe whether a Harbor condition produced complete logical attempts.
 
     Native multi-step tasks may emit several reward rows for one Harbor trial.
     ``_trial_root_name`` is therefore the attempt identity; the case id alone
     is not sufficient and raw reward-row count would over-count those tasks.
+    Early-stopped cases require attempts only through their first passing trial.
     """
     expected_ids = list(dict.fromkeys(str(case_id) for case_id in (expected_case_ids or []) if str(case_id)))
     expected_count = len(expected_ids) if expected_ids else int(expected_cases or 0)
-    expected_attempts = expected_count * n_attempts
     if skipped:
         return {
             "execution_status": "skipped",
@@ -1497,7 +1545,14 @@ def _condition_execution_summary(
 
     errors: list[str] = [job_failure] if job_failure else []
     expected_set = set(expected_ids)
-    roots: dict[str, tuple[str, set[str]]] = {}
+    logical_passed: dict[str, bool] = {}
+    for reward in _logical_attempt_rewards(rewards):
+        score = _overall_score(reward)
+        if score is not None:
+            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = (
+                score >= pass_threshold
+            )
+    roots: dict[str, dict[str, Any]] = {}
     for reward in rewards:
         root = str(reward.get("_trial_root_name") or "").strip()
         case_id = _entry_id(reward, expected_set or None)
@@ -1508,37 +1563,86 @@ def _condition_execution_summary(
         if not case_id or case_id == "unknown":
             errors.append(f"Scored trial {root!r} has no case identifier")
             continue
-        if overall_score(reward) is None:
+        score = overall_score(reward)
+        if score is None:
             errors.append(f"Scored trial {root!r} has incomplete or non-finite reward metrics")
             continue
         existing = roots.get(root)
         if existing is None:
-            roots[root] = (case_id, {step_name} if step_name else set())
+            roots[root] = {
+                "case_id": case_id,
+                "steps": {step_name} if step_name else set(),
+                "reward": reward,
+                "passed": logical_passed.get(root, score >= pass_threshold),
+                "attempt_ordinal": _attempt_ordinal(reward),
+            }
             continue
-        existing_case, steps = existing
-        if existing_case != case_id:
+        if existing["case_id"] != case_id:
             errors.append(f"Harbor trial {root!r} maps to multiple cases")
-        elif not step_name or step_name in steps:
+        elif not step_name or step_name in existing["steps"]:
             errors.append(f"Harbor trial {root!r} has duplicate reward rows")
         else:
-            steps.add(step_name)
+            existing["steps"].add(step_name)
 
-    by_case: dict[str, int] = {}
-    for case_id, _steps in roots.values():
-        by_case[case_id] = by_case.get(case_id, 0) + 1
+    by_case: dict[str, list[dict[str, Any]]] = {}
+    for root_data in roots.values():
+        by_case.setdefault(str(root_data["case_id"]), []).append(root_data)
+    for attempts in by_case.values():
+        attempts.sort(key=lambda item: _attempt_sort_key(item["reward"]))
+
+    def _case_attempt_coverage(case_id: str, attempts: list[dict[str, Any]]) -> tuple[int, bool, bool]:
+        explicit = [item["attempt_ordinal"] for item in attempts if item["attempt_ordinal"] is not None]
+        all_explicit = len(explicit) == len(attempts) and bool(attempts)
+        if explicit and len(explicit) != len(attempts):
+            errors.append(f"Scored case {case_id!r} mixes explicit and implicit attempt labels")
+        if len(explicit) != len(set(explicit)):
+            errors.append(f"Scored case {case_id!r} has duplicate attempt ordinals")
+
+        required = n_attempts
+        if stop_on_pass:
+            first_pass = next(
+                ((index, item) for index, item in enumerate(attempts, start=1) if item["passed"]),
+                None,
+            )
+            if first_pass is not None:
+                observed_index, passed_attempt = first_pass
+                required = int(passed_attempt["attempt_ordinal"] or observed_index)
+        if required > n_attempts:
+            errors.append(f"Scored case {case_id!r} has an attempt ordinal above configured maximum {n_attempts}")
+
+        if all_explicit:
+            expected_ordinals = set(range(1, required + 1))
+            actual_ordinals = set(explicit)
+            return required, bool(expected_ordinals - actual_ordinals), bool(actual_ordinals - expected_ordinals)
+        return required, len(attempts) < required, len(attempts) > required
+
+    missing: list[str] = []
+    excess: list[str] = []
+    expected_attempts = 0 if stop_on_pass else expected_count * n_attempts
+    case_ids = expected_ids or sorted(by_case)
+    for case_id in case_ids:
+        required, case_missing, case_excess = _case_attempt_coverage(case_id, by_case.get(case_id, []))
+        if stop_on_pass:
+            expected_attempts += required
+        if case_missing:
+            missing.append(case_id)
+        if case_excess:
+            excess.append(case_id)
 
     if expected_ids:
-        missing = sorted(case_id for case_id in expected_ids if by_case.get(case_id, 0) < n_attempts)
-        excess = sorted(case_id for case_id in expected_ids if by_case.get(case_id, 0) > n_attempts)
         unexpected = sorted(case_id for case_id in by_case if case_id not in expected_set)
-        if missing:
-            errors.append("Missing scored attempts for cases: " + ", ".join(missing))
-        if excess:
-            errors.append("Excess scored attempts for cases: " + ", ".join(excess))
         if unexpected:
             errors.append("Unexpected scored cases: " + ", ".join(unexpected))
-    elif expected_count and len(by_case) != expected_count:
-        errors.append(f"Scored case coverage is {len(by_case)}/{expected_count}")
+    else:
+        if expected_count and len(by_case) != expected_count:
+            errors.append(f"Scored case coverage is {len(by_case)}/{expected_count}")
+        if stop_on_pass and expected_count > len(by_case):
+            expected_attempts += (expected_count - len(by_case)) * n_attempts
+
+    if missing:
+        errors.append("Missing scored attempts for cases: " + ", ".join(sorted(missing)))
+    if excess:
+        errors.append("Excess scored attempts for cases: " + ", ".join(sorted(excess)))
 
     scored_attempts = len(roots)
     if scored_attempts != expected_attempts:
@@ -1578,6 +1682,7 @@ def collect_harbor_results(
     skip_baseline: bool = False,
     n_attempts: int = 1,
     pass_threshold: float = 0.50,
+    stop_on_pass: bool = False,
     expected_cases: int | None = None,
     expected_case_ids: list[str] | None = None,
     expected_trials: int | None = None,
@@ -1602,6 +1707,7 @@ def collect_harbor_results(
         "attempt_policy": {
             "max_attempts": n_attempts,
             "pass_threshold": pass_threshold,
+            "stop_on_pass": stop_on_pass,
             "score_definition": score_definition(DISPLAY_METRICS),
         },
     }
@@ -1645,6 +1751,7 @@ def collect_harbor_results(
                 with_rewards,
                 n_attempts=n_attempts,
                 pass_threshold=pass_threshold,
+                stop_on_pass=stop_on_pass,
                 expected_cases=expected_cases,
                 expected_case_ids=expected_case_ids,
             )
@@ -1654,6 +1761,8 @@ def collect_harbor_results(
                 expected_cases=expected_cases,
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
+                stop_on_pass=stop_on_pass,
+                pass_threshold=pass_threshold,
             )
             _save_trials(
                 with_rewards,
@@ -1726,6 +1835,8 @@ def collect_harbor_results(
                 expected_cases=expected_cases,
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
+                stop_on_pass=stop_on_pass,
+                pass_threshold=pass_threshold,
             )
         if with_job_dir is None:
             summary_dir = agent_dir / "with-skill"
@@ -1781,6 +1892,7 @@ def collect_harbor_results(
                     without_rewards,
                     n_attempts=n_attempts,
                     pass_threshold=pass_threshold,
+                    stop_on_pass=stop_on_pass,
                     expected_cases=expected_cases,
                     expected_case_ids=expected_case_ids,
                 )
@@ -1790,6 +1902,8 @@ def collect_harbor_results(
                     expected_cases=expected_cases,
                     n_attempts=n_attempts,
                     job_failure=without_job_failure,
+                    stop_on_pass=stop_on_pass,
+                    pass_threshold=pass_threshold,
                 )
                 _save_trials(
                     without_rewards,
@@ -1865,6 +1979,8 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=without_job_failure,
                 skipped=skip_baseline,
+                stop_on_pass=stop_on_pass,
+                pass_threshold=pass_threshold,
             )
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"

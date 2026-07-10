@@ -379,6 +379,18 @@
           "type": "float"
         },
         {
+          "is_flag": true,
+          "name": "stop_on_pass",
+          "opts": [
+            "--stop-on-pass"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-stop-on-pass"
+          ],
+          "type": "boolean"
+        },
+        {
           "name": "n_concurrent",
           "opts": [
             "--n-concurrent"
@@ -483,7 +495,6 @@
           "type": "boolean"
         },
         {
-          "default": "True",
           "is_flag": true,
           "name": "agent_runtime_preflight",
           "opts": [
@@ -1585,6 +1596,18 @@
               "type": "float"
             },
             {
+              "is_flag": true,
+              "name": "stop_on_pass",
+              "opts": [
+                "--stop-on-pass"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-stop-on-pass"
+              ],
+              "type": "boolean"
+            },
+            {
               "name": "model",
               "opts": [
                 "--model"
@@ -2187,6 +2210,18 @@
               "type": "float"
             },
             {
+              "is_flag": true,
+              "name": "stop_on_pass",
+              "opts": [
+                "--stop-on-pass"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-stop-on-pass"
+              ],
+              "type": "boolean"
+            },
+            {
               "name": "n_concurrent",
               "opts": [
                 "--n-concurrent"
@@ -2291,7 +2326,6 @@
               "type": "boolean"
             },
             {
-              "default": "True",
               "is_flag": true,
               "name": "agent_runtime_preflight",
               "opts": [
@@ -2812,6 +2846,18 @@
           ],
           "param_type": "option",
           "type": "float"
+        },
+        {
+          "is_flag": true,
+          "name": "stop_on_pass",
+          "opts": [
+            "--stop-on-pass"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-stop-on-pass"
+          ],
+          "type": "boolean"
         },
         {
           "name": "model",

@@ -3251,11 +3251,12 @@
 
             {# Attempt Policy is configuration/provenance: useful for reproducing a run but not
                an Overview decision signal. Keep it here so reviewers can confirm the exact
-               max-attempts and pass-threshold settings the run used. #}
-            {% if tier3.attempt_policy and t3_max_attempts > 1 %}
+               max-attempts / pass-threshold / stop-on-pass settings the run used. #}
+            {% if tier3.attempt_policy and (t3_max_attempts > 1 or t3_attempt_policy.stop_on_pass) %}
             <div class="t3-section t3-collapsed" id="tier3-attempt-policy">
                 <strong>Attempt Policy:</strong> max attempts {{ t3_max_attempts }},
-                pass threshold &ge; {{ "%.2f" | format(t3_attempt_policy.pass_threshold or 0.5) }}.
+                pass threshold &ge; {{ "%.2f" | format(t3_attempt_policy.pass_threshold or 0.5) }},
+                stop-on-pass {{ 'enabled' if t3_attempt_policy.stop_on_pass else 'disabled' }}.
             </div>
             {% endif %}
 

@@ -28,10 +28,15 @@ from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.telemetry import record_agent_eval_summary
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
-from skillevaluator.tier3.harbor.adapter import find_evals_file, generate_harbor_tasks, stage_native_harbor_tasks
+from skillevaluator.tier3.harbor.adapter import (
+    build_eval_base_image,
+    find_evals_file,
+    generate_harbor_tasks,
+    stage_native_harbor_tasks,
+)
 from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle, RetentionOutcome
 from skillevaluator.tier3.harbor.collector import collect_harbor_results, validate_harbor_job_result
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, overall_score, score_definition
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
     ProgressEvent,
@@ -869,6 +874,7 @@ def _run_harbor(
     override_storage_mb: int | None,
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
+    include_task_names: list[str] | None = None,
 ) -> tuple[bool, str]:
     command = build_harbor_run_command(
         dataset_path=dataset,
@@ -880,6 +886,7 @@ def _run_harbor(
         model=model,
         jobs_dir=jobs_dir,
         timeout_multiplier=timeout_multiplier,
+        include_task_names=include_task_names,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
@@ -915,6 +922,189 @@ def _validate_harbor_job_result(
     )
 
 
+def _job_passed(job_dir: Path, pass_threshold: float) -> bool:
+    """Return True when any reward in a one-task Harbor job reaches threshold."""
+    for reward_file in sorted(job_dir.rglob("reward.json")):
+        if reward_file.parent.name != "verifier":
+            continue
+        try:
+            reward = json.loads(reward_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(reward, dict):
+            continue
+        score = overall_score(reward)
+        if score is not None and score >= pass_threshold:
+            return True
+    return False
+
+
+def _attempt_job_stats(
+    job_dir: Path,
+) -> tuple[int, int, int, dict[str, tuple[int, int, dict[str, dict[str, list[str]]]]]] | None:
+    """Read one per-attempt Harbor job result for merging; ``None`` when unreadable."""
+    try:
+        result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    total = result.get("n_total_trials")
+    stats = result.get("stats")
+    if not isinstance(total, int) or isinstance(total, bool) or not isinstance(stats, dict):
+        return None
+    if any(key in stats for key in ("n_completed_trials", "n_errored_trials")):
+        completed = stats.get("n_completed_trials")
+        errored = stats.get("n_errored_trials")
+    else:
+        completed = stats.get("n_trials")
+        errored = stats.get("n_errors")
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in (completed, errored)):
+        return None
+
+    evals_out: dict[str, tuple[int, int, dict[str, dict[str, list[str]]]]] = {}
+    evals = stats.get("evals")
+    if isinstance(evals, dict):
+        for eval_name, eval_stats in evals.items():
+            if not isinstance(eval_stats, dict):
+                continue
+            n_trials = eval_stats.get("n_trials")
+            n_errors = eval_stats.get("n_errors")
+            reward_stats = eval_stats.get("reward_stats")
+            per_metric: dict[str, dict[str, list[str]]] = {}
+            if isinstance(reward_stats, dict):
+                for metric, buckets in reward_stats.items():
+                    if not isinstance(buckets, dict):
+                        continue
+                    per_metric[str(metric)] = {
+                        str(bucket): [str(name) for name in names]
+                        for bucket, names in buckets.items()
+                        if isinstance(names, list)
+                    }
+            evals_out[str(eval_name)] = (
+                n_trials if isinstance(n_trials, int) and not isinstance(n_trials, bool) else 0,
+                n_errors if isinstance(n_errors, int) and not isinstance(n_errors, bool) else 0,
+                per_metric,
+            )
+    return total, completed, errored, evals_out
+
+
+def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
+    """Merge per-attempt Harbor jobs into the job directory shape collection expects.
+
+    Trial directories are copied under attempt-qualified names and the
+    per-attempt Harbor ``result.json`` statistics are combined so the merged
+    job still satisfies :func:`validate_harbor_job_result`.
+    """
+    if aggregate_dir.exists():
+        shutil.rmtree(aggregate_dir)
+    aggregate_dir.mkdir(parents=True, exist_ok=True)
+
+    total_trials = 0
+    completed_trials = 0
+    errored_trials = 0
+    merged_evals: dict[str, dict[str, Any]] = {}
+    for job_dir in job_dirs:
+        if not job_dir.is_dir():
+            continue
+        renamed: dict[str, str] = {}
+        for child in sorted(job_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            dest = aggregate_dir / f"{job_dir.name}__{child.name}"
+            suffix = 2
+            while dest.exists():
+                dest = aggregate_dir / f"{job_dir.name}__{child.name}-{suffix}"
+                suffix += 1
+            shutil.copytree(child, dest)
+            renamed[child.name] = dest.name
+
+        stats = _attempt_job_stats(job_dir)
+        if stats is None:
+            continue
+        job_total, job_completed, job_errored, job_evals = stats
+        total_trials += job_total
+        completed_trials += job_completed
+        errored_trials += job_errored
+        for eval_name, (eval_trials, eval_errors, reward_stats) in job_evals.items():
+            merged = merged_evals.setdefault(eval_name, {"n_trials": 0, "n_errors": 0, "reward_stats": {}})
+            merged["n_trials"] += eval_trials
+            merged["n_errors"] += eval_errors
+            for metric, buckets in reward_stats.items():
+                merged_buckets = merged["reward_stats"].setdefault(metric, {})
+                for bucket, trial_names in buckets.items():
+                    merged_buckets.setdefault(bucket, []).extend(
+                        renamed.get(name, f"{job_dir.name}__{name}") for name in trial_names
+                    )
+
+    (aggregate_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": total_trials,
+                "stats": {
+                    "n_trials": completed_trials,
+                    "n_errors": errored_trials,
+                    "evals": merged_evals,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _run_stop_on_pass_variant(
+    *,
+    skill_name: str,
+    agent: str,
+    variant: str,
+    dataset: Path,
+    task_names: list[str],
+    env_mode: str,
+    model: str,
+    jobs_dir: Path,
+    run_env: dict[str, str],
+    n_attempts: int,
+    pass_threshold: float,
+    timeout_multiplier: float,
+    override_cpus: int | None,
+    override_memory_mb: int | None,
+    override_storage_mb: int | None,
+) -> list[str]:
+    """Run each case one attempt at a time, stopping its attempts on first pass."""
+    errors: list[str] = []
+    attempt_job_dirs: list[Path] = []
+    for task_name in task_names:
+        for attempt in range(1, n_attempts + 1):
+            job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
+            ok, detail = _run_harbor(
+                dataset=dataset,
+                agent=agent,
+                job_name=job_name,
+                env_mode=env_mode,
+                model=model,
+                jobs_dir=jobs_dir,
+                run_env=run_env,
+                n_attempts=1,
+                n_concurrent=1,
+                timeout_multiplier=timeout_multiplier,
+                override_cpus=override_cpus,
+                override_memory_mb=override_memory_mb,
+                override_storage_mb=override_storage_mb,
+                expected_trials=1,
+                include_task_names=[task_name],
+            )
+            job_dir = jobs_dir / job_name
+            attempt_job_dirs.append(job_dir)
+            if not ok:
+                errors.append(f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
+                continue
+            if _job_passed(job_dir, pass_threshold):
+                break
+    _merge_attempt_jobs(attempt_job_dirs, jobs_dir / f"{skill_name}-{agent}-{variant}")
+    return errors
+
+
 def _run_agent_pair(
     *,
     skill_name: str,
@@ -932,10 +1122,38 @@ def _run_agent_pair(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     expected_trials: int,
+    stop_on_pass: bool = False,
+    pass_threshold: float = 0.50,
+    task_names: list[str] | None = None,
 ) -> list[str]:
     jobs = [("with", with_skill)]
     if baseline is not None:
         jobs.append(("without", baseline))
+    if stop_on_pass:
+        # A later attempt is launched only after the previous one scored, so
+        # stop-on-pass runs each condition sequentially, one attempt at a time.
+        sequential_errors: list[str] = []
+        for variant, dataset in jobs:
+            sequential_errors.extend(
+                _run_stop_on_pass_variant(
+                    skill_name=skill_name,
+                    agent=agent,
+                    variant=variant,
+                    dataset=dataset,
+                    task_names=list(task_names or []),
+                    env_mode=env_mode,
+                    model=model,
+                    jobs_dir=jobs_dir,
+                    run_env=run_env,
+                    n_attempts=n_attempts,
+                    pass_threshold=pass_threshold,
+                    timeout_multiplier=timeout_multiplier,
+                    override_cpus=override_cpus,
+                    override_memory_mb=override_memory_mb,
+                    override_storage_mb=override_storage_mb,
+                )
+            )
+        return sequential_errors
     # The advertised concurrency is one per-agent trial budget. Split it
     # across concurrently running conditions instead of multiplying it by two.
     worker_count = min(len(jobs), n_concurrent)
@@ -1102,6 +1320,7 @@ def _run_harbor_eval_impl(
     skip_baseline: bool = False,
     n_attempts: int | None = None,
     pass_threshold: float | None = None,
+    stop_on_pass: bool | None = None,
     n_concurrent: int | None = None,
     max_agents: int | None = None,
     model: str | None = None,
@@ -1114,7 +1333,7 @@ def _run_harbor_eval_impl(
     reference_skills_dir: Path | None = None,
     output_dir: Path | None = None,
     keep_harbor_jobs: bool = False,
-    agent_runtime_preflight: bool = True,
+    agent_runtime_preflight: bool | None = None,
     env_mode: str = DEFAULT_ENV_MODE,
     env_mode_source: str = "CLI",
     timeout_multiplier: float | None = None,
@@ -1153,19 +1372,31 @@ def _run_harbor_eval_impl(
     grading_config = config.get("grading", {})
     n_attempts = n_attempts if n_attempts is not None else harbor_config.get("n_attempts", 1)
     pass_threshold = pass_threshold if pass_threshold is not None else harbor_config.get("pass_threshold", 0.5)
+    stop_on_pass = stop_on_pass if stop_on_pass is not None else harbor_config.get("stop_on_pass", False)
     n_concurrent = n_concurrent if n_concurrent is not None else harbor_config.get("n_concurrent", 4)
     max_agents = max_agents if max_agents is not None else harbor_config.get("max_agents", len(agents))
     timeout_multiplier = (
         timeout_multiplier if timeout_multiplier is not None else harbor_config.get("timeout_multiplier", 1.0)
     )
+    agent_runtime_preflight = (
+        agent_runtime_preflight
+        if agent_runtime_preflight is not None
+        else harbor_config.get("agent_runtime_preflight", True)
+    )
     grading_mode = grading_mode or grading_config.get("mode", "default")
     workspace_mode = skill_workspace_mode or workspace_config.get("mode", "isolated")
     dockerfile_mode = custom_dockerfile_mode or harbor_config.get("custom_dockerfile_mode", "rebase")
+    # The public engine ships self-contained per-task Dockerfiles by default;
+    # ``reuse``/``rebuild`` opt into the shared pre-built eval base image.
+    base_image_mode = harbor_config.get("base_image_mode", "disabled")
     task_source = harbor_config.get("task_source", "auto")
 
     if not isinstance(n_attempts, int) or n_attempts < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid attempt count"))
         return {"error": ["n_attempts must be >= 1"]}
+    if stop_on_pass and n_attempts == 1:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid attempt policy"))
+        return {"error": ["stop_on_pass requires n_attempts > 1"]}
     if not isinstance(n_concurrent, int) or n_concurrent < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid concurrency"))
         return {"error": ["n_concurrent must be >= 1"]}
@@ -1296,6 +1527,34 @@ def _run_harbor_eval_impl(
 
     emitter = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
     resource_config = harbor_config.get("resources", {})
+    use_base_image = env_mode == "docker" and base_image_mode != "disabled"
+    base_image = ""
+    if use_base_image:
+        reporter.emit(
+            ProgressEvent(
+                stage="docker-images",
+                state="running",
+                detail=f"preparing shared eval base image ({base_image_mode})",
+            )
+        )
+        base_image = build_eval_base_image(
+            skill_path.resolve(),
+            reference_skills_dir,
+            workspace_skill_paths=workspace_skills,
+            force_rebuild=base_image_mode == "rebuild",
+        )
+        if base_image:
+            reporter.emit(
+                ProgressEvent(stage="docker-images", state="complete", detail=f"eval base image ready: {base_image}")
+            )
+        else:
+            reporter.emit(
+                ProgressEvent(
+                    stage="docker-images",
+                    state="degraded",
+                    detail="base image build failed; falling back to per-task Dockerfiles",
+                )
+            )
     agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
     expected_task_names: list[str] | None = None
     reporter.emit(
@@ -1318,6 +1577,7 @@ def _run_harbor_eval_impl(
                 workspace_skill_paths=workspace_skills,
                 workspace_mode=workspace_mode,
                 grading_mode=grading_mode,
+                base_image=base_image,
                 custom_dockerfile_mode=dockerfile_mode,
                 copy_repo=copy_repo,
                 runtime_env=dict(runtime_plans[agent].staged_env),
@@ -1346,6 +1606,7 @@ def _run_harbor_eval_impl(
                     workspace_skill_paths=workspace_skills,
                     workspace_mode=workspace_mode,
                     grading_mode=grading_mode,
+                    base_image=base_image,
                     custom_dockerfile_mode=dockerfile_mode,
                     copy_repo=copy_repo,
                     runtime_env=dict(runtime_plans[agent].staged_env),
@@ -1395,7 +1656,8 @@ def _run_harbor_eval_impl(
     )
     if env_mode == ENV_MODE_LOCAL:
         reporter.emit(ProgressEvent(stage="docker-images", state="skipped", detail="local environment selected"))
-    else:
+    elif not use_base_image:
+        # The shared base image branch already emitted its terminal stage event.
         reporter.emit(
             ProgressEvent(
                 stage="docker-images",
@@ -1472,6 +1734,9 @@ def _run_harbor_eval_impl(
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
             expected_trials=expected_trials,
+            stop_on_pass=bool(stop_on_pass),
+            pass_threshold=float(pass_threshold),
+            task_names=task_names,
         )
 
     active_agents: set[str] = set()
@@ -1537,9 +1802,12 @@ def _run_harbor_eval_impl(
             skip_baseline=skip_baseline,
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
+            stop_on_pass=bool(stop_on_pass),
             expected_cases=len(task_names),
             expected_case_ids=task_names,
-            expected_trials=expected_trials,
+            # Early-stopped cases legitimately use fewer trials than the
+            # n_attempts maximum; per-case coverage is validated instead.
+            expected_trials=None if stop_on_pass else expected_trials,
             env_mode=env_mode,
             agent_models=model_resolution,
             launch_errors=errors,
@@ -1554,8 +1822,10 @@ def _run_harbor_eval_impl(
         "harbor": {
             "environment": {"value": env_mode, "source": env_mode_source},
             "n_attempts": n_attempts,
+            "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
+            "base_image_mode": base_image_mode,
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
@@ -1575,6 +1845,7 @@ def _run_harbor_eval_impl(
             "attempt_policy": {
                 "max_attempts": n_attempts,
                 "pass_threshold": float(pass_threshold),
+                "stop_on_pass": bool(stop_on_pass),
                 "score_definition": score_definition(tuple(results.get("metrics", DEFAULT_METRICS))),
             },
         }

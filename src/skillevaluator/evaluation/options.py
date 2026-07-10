@@ -29,6 +29,7 @@ class EvaluationOptions:
     skip_baseline: bool = False
     n_attempts: int | None = None
     pass_threshold: float | None = None
+    stop_on_pass: bool | None = None
     n_concurrent: int | None = None
     max_agents: int | None = None
     model: str | None = None
@@ -40,7 +41,7 @@ class EvaluationOptions:
     grading_mode: str | None = None
     results_dir: Path | None = None
     harbor_keep_jobs: bool = False
-    agent_runtime_preflight: bool = True
+    agent_runtime_preflight: bool | None = None
     timeout_multiplier: float | None = None
     override_cpus: int | None = None
     override_memory_mb: int | None = None

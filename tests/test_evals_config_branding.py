@@ -27,12 +27,27 @@ def test_public_grading_mode_normalizes_for_the_existing_engine(tmp_path: Path) 
     assert config["grading"]["mode"] == "default_plus_custom"
 
 
-def test_legacy_grading_mode_remains_readable(tmp_path: Path) -> None:
-    _write_config(tmp_path, "default_plus_custom")
+@pytest.mark.parametrize(
+    ("legacy_mode", "normalized_mode"),
+    [
+        ("aces_default", "default"),
+        ("aces_plus_custom", "default_plus_custom"),
+    ],
+)
+def test_legacy_grading_mode_remains_readable(tmp_path: Path, legacy_mode: str, normalized_mode: str) -> None:
+    """Retired grading-mode spellings stay accepted and normalize to current names."""
+    _write_config(tmp_path, legacy_mode)
 
     config, _ = load_evals_config(tmp_path)
 
-    assert config["grading"]["mode"] == "default_plus_custom"
+    assert config["grading"]["mode"] == normalized_mode
+
+
+def test_unknown_grading_mode_is_rejected(tmp_path: Path) -> None:
+    _write_config(tmp_path, "creative_scoring")
+
+    with pytest.raises(EvalsConfigError, match=r"grading\.mode"):
+        load_evals_config(tmp_path)
 
 
 def test_agent_model_is_trimmed_during_config_loading(tmp_path: Path) -> None:

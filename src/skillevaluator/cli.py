@@ -56,8 +56,32 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 ENV_MODE_CHOICE = click.Choice(list(HARBOR_ENVIRONMENTS))
-GRADING_MODE_CHOICE = click.Choice(["default", "default_plus_custom", "custom_only"])
-CUSTOM_GRADING_MODE_CHOICE = click.Choice(["default_plus_custom", "custom_only"])
+
+
+class _AliasChoice(click.Choice):
+    """Expose current names in help while accepting retired aliases."""
+
+    def __init__(self, choices: list[str], aliases: dict[str, str]) -> None:
+        super().__init__(choices)
+        self.aliases = aliases
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, str):
+            value = self.aliases.get(value, value)
+        return super().convert(value, param, ctx)
+
+
+GRADING_MODE_CHOICE = _AliasChoice(
+    ["default", "default_plus_custom", "custom_only"],
+    {
+        "aces_default": "default",
+        "aces_plus_custom": "default_plus_custom",
+    },
+)
+CUSTOM_GRADING_MODE_CHOICE = _AliasChoice(
+    ["default_plus_custom", "custom_only"],
+    {"aces_plus_custom": "default_plus_custom"},
+)
 
 
 def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter, value: float) -> float:
@@ -396,6 +420,7 @@ def _run_agent_eval_or_skip(
     max_agents: int | None,
     n_attempts: int | None = None,
     pass_threshold: float | None = None,
+    stop_on_pass: bool | None = None,
     model: str | None = None,
     agent_model: tuple[str, ...] = (),
     grading_mode: str | None = None,
@@ -429,6 +454,7 @@ def _run_agent_eval_or_skip(
         max_agents=max_agents,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
+        stop_on_pass=stop_on_pass,
         model=model,
         agent_model=agent_model,
         grading_mode=grading_mode,
@@ -949,6 +975,13 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Score threshold (0.0-1.0) for a case to count as passed.",
 )
 @click.option(
+    "--stop-on-pass/--no-stop-on-pass",
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Stop a case's remaining attempts once one passes.",
+)
+@click.option(
     "--model",
     default=None,
     cls=GroupedOption,
@@ -1034,6 +1067,7 @@ def validate(
     max_agents: int | None,
     n_attempts: int | None,
     pass_threshold: float | None,
+    stop_on_pass: bool | None,
     model: str | None,
     agent_model: tuple[str, ...],
     grading_mode: str | None,
@@ -1265,6 +1299,7 @@ def validate(
             max_agents=max_agents,
             n_attempts=n_attempts,
             pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
             model=model,
             agent_model=agent_model,
             grading_mode=grading_mode,
@@ -1592,6 +1627,11 @@ def dedup_scan(
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
+@click.option(
+    "--stop-on-pass/--no-stop-on-pass",
+    default=None,
+    help="Stop a case's remaining attempts once one passes.",
+)
 @click.option("--n-concurrent", type=int, default=None)
 @click.option("--max-agents", type=int, default=None)
 @click.option("--model", default=None, help="Global agent model override.")
@@ -1605,9 +1645,8 @@ def dedup_scan(
 @click.option("--harbor-keep-jobs", is_flag=True)
 @click.option(
     "--agent-runtime-preflight/--no-agent-runtime-preflight",
-    default=True,
-    show_default=True,
-    help="Run one real agent smoke task before the full evaluation matrix.",
+    default=None,
+    help="Run one real agent smoke task before the full evaluation matrix [default: enabled].",
 )
 @click.option("--timeout-multiplier", type=float, default=None)
 @click.option("--override-cpus", type=int, default=None)
@@ -1628,6 +1667,7 @@ def evaluate(
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
+    stop_on_pass: bool | None,
     n_concurrent: int | None,
     max_agents: int | None,
     model: str | None,
@@ -1639,7 +1679,7 @@ def evaluate(
     grading_mode: str | None,
     results_dir: Path | None,
     harbor_keep_jobs: bool,
-    agent_runtime_preflight: bool,
+    agent_runtime_preflight: bool | None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -1661,6 +1701,7 @@ def evaluate(
         skip_baseline=skip_baseline,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
+        stop_on_pass=stop_on_pass,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
         model=model,

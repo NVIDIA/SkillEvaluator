@@ -52,11 +52,47 @@ def test_live_eval_exposes_only_harbor_native_environments() -> None:
     assert "--agent-runtime-preflight" in result.output
 
 
-@pytest.mark.parametrize("key", ["base_image_mode", "agent_runtime_preflight"])
-def test_public_config_rejects_retired_runtime_controls(tmp_path: Path, key: str) -> None:
+def test_public_config_accepts_runtime_controls(tmp_path: Path) -> None:
     evals = tmp_path / "evals"
     evals.mkdir()
-    (evals / "config.yml").write_text(f"schema_version: 1\nharbor:\n  {key}: true\n", encoding="utf-8")
+    (evals / "config.yml").write_text(
+        "schema_version: 1\n"
+        "harbor:\n"
+        "  base_image_mode: rebuild\n"
+        "  n_attempts: 3\n"
+        "  stop_on_pass: true\n"
+        "  agent_runtime_preflight: false\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_evals_config(tmp_path)
+
+    assert config["harbor"]["base_image_mode"] == "rebuild"
+    assert config["harbor"]["stop_on_pass"] is True
+    assert config["harbor"]["agent_runtime_preflight"] is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("base_image_mode", "sometimes"), ("stop_on_pass", "'yes'"), ("agent_runtime_preflight", "1")],
+)
+def test_public_config_validates_runtime_control_values(tmp_path: Path, key: str, value: str) -> None:
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    (evals / "config.yml").write_text(f"schema_version: 1\nharbor:\n  {key}: {value}\n", encoding="utf-8")
+
+    with pytest.raises(EvalsConfigError, match=rf"harbor\.{key}"):
+        load_evals_config(tmp_path)
+
+
+def test_public_config_still_rejects_sandbox_policy(tmp_path: Path) -> None:
+    """The public engine has no consumer for a config-level sandbox policy."""
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    (evals / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  sandbox:\n    template: harbor-eval\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(EvalsConfigError, match="unknown harbor key"):
         load_evals_config(tmp_path)

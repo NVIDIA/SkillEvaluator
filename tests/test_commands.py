@@ -735,11 +735,11 @@ def test_tier3_evaluate_visible_copy_owns_its_params() -> None:
     assert [p.name for p in cli_module._tier3_evaluate_visible.params] == [p.name for p in cli_module.evaluate.params]
 
 
-def test_compact_feedback_panel_only_renders_as_fallback(monkeypatch) -> None:
+def test_compact_feedback_panel_filters_messages_rendered_in_detailed_panel(monkeypatch) -> None:
     # Regression (live duplicate-feedback bug): the detailed per-evaluator
-    # findings report and the compact payload panel both rendered after the
-    # score tables. The compact panel is now a FALLBACK for when the detailed
-    # report cannot render (no reward files on disk).
+    # findings report and the compact payload panel both rendered the same
+    # suggestions after the score tables. The compact panel now filters items
+    # that the detailed report says it rendered.
     import io
 
     from rich.console import Console
@@ -763,12 +763,12 @@ def test_compact_feedback_panel_only_renders_as_fallback(monkeypatch) -> None:
         "tier3_feedback": {"recommendations": [{"suggestion": "Add more eval cases"}]},
     }
 
-    monkeypatch.setattr(harbor_report, "display_findings_report", lambda *_a, **_k: True)
+    monkeypatch.setattr(harbor_report, "display_findings_report", lambda *_a, **_k: {"Add more eval cases"})
     stream = io.StringIO()
     render_evaluation_result(result, console=Console(file=stream, width=200))
     assert "Feedback & Suggestions" not in stream.getvalue()
 
-    monkeypatch.setattr(harbor_report, "display_findings_report", lambda *_a, **_k: False)
+    monkeypatch.setattr(harbor_report, "display_findings_report", lambda *_a, **_k: set())
     stream = io.StringIO()
     render_evaluation_result(result, console=Console(file=stream, width=200))
     assert "Feedback & Suggestions" in stream.getvalue()
@@ -786,4 +786,4 @@ def test_display_findings_report_reports_whether_it_rendered(tmp_path) -> None:
         ["codex"],
         tmp_path,
     )
-    assert rendered is False
+    assert rendered == set()

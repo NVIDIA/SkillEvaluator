@@ -766,12 +766,12 @@ def display_findings_report(
     skill_name: str,
     harbor_agents: list[str],
     results_dir: Path,
-) -> bool:
+) -> set[str]:
     """Display the findings report panel after the score table.
 
-    Returns True when the panel was actually printed, so callers can fall
-    back to the compact payload-based feedback panel instead of rendering
-    both (the duplicate-feedback bug).
+    Return the atomic feedback messages printed in the detailed panel. The
+    caller uses these to suppress only matching compact feedback items while
+    preserving payload-only conclusions and recommendations.
     """
     from rich.console import Console
     from rich.panel import Panel
@@ -793,7 +793,7 @@ def display_findings_report(
         best_agent = harbor_agents[0] if harbor_agents else ""
 
     if not best_agent or best_agent not in agents_data:
-        return False
+        return set()
 
     agent_reports: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
     report_agents = list(dict.fromkeys([*harbor_agents, *agents_data.keys()]))
@@ -808,16 +808,27 @@ def display_findings_report(
             agent_reports[agent] = (findings_for_agent, rewards_for_agent)
 
     if best_agent not in agent_reports:
-        return False
+        return set()
 
     findings, rewards = agent_reports[best_agent]
     body = _render_findings_body(findings)
+    rendered_messages = {
+        str(message).strip()
+        for finding in findings
+        for message in (
+            finding.get("label"),
+            METRIC_QUESTIONS.get(str(finding.get("metric") or "")),
+            *(finding.get("reasons") or []),
+        )
+        if str(message or "").strip()
+    }
 
     structured = _generate_suggestions_structured(skill_name, findings, rewards)
     suggestions = [s["suggestion"] for s in structured]
     suggestion_mode = "remediation" if suggestions else "passing_next_steps"
 
     if suggestions:
+        rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
         suggestions = add_evidence_links_to_suggestions(suggestions, rewards)
         body.append("  \U0001f4a1 SUGGESTIONS\n", style="bold cyan")
         for i, suggestion in enumerate(suggestions, 1):
@@ -825,9 +836,11 @@ def display_findings_report(
     else:
         body.append("  \U0001f4a1 NEXT STEPS\n", style="bold cyan")
         suggestions = _passing_skill_suggestions(findings, rewards)
+        rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
         suggestions = add_evidence_links_to_suggestions(suggestions, rewards)
         for i, suggestion in enumerate(suggestions, 1):
             body.append(f"    {i}. {suggestion}\n", style="white")
+    rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
 
     env_mode = _findings_env_mode(harbor_result)
     for agent, (agent_findings, _agent_rewards) in agent_reports.items():
@@ -869,4 +882,4 @@ def display_findings_report(
         )
     )
     console.print()
-    return True
+    return rendered_messages

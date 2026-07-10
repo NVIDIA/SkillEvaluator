@@ -169,7 +169,7 @@ def test_nvidia_build_bridge_agents_are_not_local_mode_agents() -> None:
     assert LOCAL_AGENT_IMPORT_PATHS["codex"] != NVIDIA_BUILD_AGENT_IMPORT_PATHS["codex"]
 
 
-def test_local_claude_uses_noninteractive_permissions_and_trial_temp_dir(
+def test_local_claude_uses_managed_permissions_and_trial_temp_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from harbor.agents.installed.claude_code import ClaudeCode
@@ -195,16 +195,16 @@ def test_local_claude_uses_noninteractive_permissions_and_trial_temp_dir(
     asyncio.run(
         agent.exec_as_agent(
             object(),
-            "claude --permission-mode bypassPermissions -- 'do not rewrite --permission-mode bypassPermissions'",
+            "claude --permission-mode=bypassPermissions -- 'do not rewrite --permission-mode=bypassPermissions'",
             env={"CLAUDE_CODE_TMPDIR": "/private/tmp/unsafe"},
         )
     )
 
     command = str(captured["command"])
     launcher = command.partition(" -- ")[0]
-    assert "--permission-mode bypassPermissions" in launcher
-    assert "--permission-mode=auto" not in launcher
-    assert command.endswith("'do not rewrite --permission-mode bypassPermissions'")
+    assert "--permission-mode=auto" in launcher
+    assert "--permission-mode=bypassPermissions" not in launcher
+    assert command.endswith("'do not rewrite --permission-mode=bypassPermissions'")
     assert command.startswith("mkdir -p /logs/agent/claude-tmp && ")
     assert captured["env"] == {"CLAUDE_CODE_TMPDIR": "/logs/agent/claude-tmp"}
 

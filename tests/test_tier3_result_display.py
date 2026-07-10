@@ -652,6 +652,52 @@ def test_feedback_and_suggestions_render_before_artifacts(tmp_path: Path) -> Non
     assert output.index("Feedback & Suggestions") < output.index("Artifacts")
 
 
+def test_detailed_findings_only_suppress_matching_payload_feedback(monkeypatch) -> None:
+    from skillevaluator.tier3.harbor import report as harbor_report
+
+    monkeypatch.setattr(
+        harbor_report,
+        "display_findings_report",
+        lambda *_args, **_kwargs: {
+            "SHARED_CONCLUSION",
+            "SHARED_RECOMMENDATION",
+        },
+    )
+    result = {
+        "execution_status": "succeeded",
+        "skill_name": "simple",
+        "run_dir": "/tmp/run",
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "with_skill": {"security": 1.0},
+                "without_skill": {"security": 1.0},
+                "lift": {"overall": {"with_skill": 1.0, "without_skill": 1.0, "delta": 0.0}},
+            }
+        },
+        "tier3_feedback": {
+            "conclusions": [
+                {"severity": "warn", "message": "SHARED_CONCLUSION"},
+                {"severity": "warn", "message": "UNIQUE_CONCLUSION_ONLY"},
+            ],
+            "recommendations": [
+                {"message": "SHARED_RECOMMENDATION"},
+                {"message": "UNIQUE_RECOMMENDATION_ONLY"},
+            ],
+        },
+    }
+    stream = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=stream, force_terminal=False, width=180))
+    output = stream.getvalue()
+
+    assert output.count("UNIQUE_CONCLUSION_ONLY") == 1
+    assert output.count("UNIQUE_RECOMMENDATION_ONLY") == 1
+    assert "SHARED_CONCLUSION" not in output
+    assert "SHARED_RECOMMENDATION" not in output
+    assert output.count("Feedback & Suggestions") == 1
+
+
 def test_feedback_display_redacts_secrets_controls_and_rich_markup(monkeypatch) -> None:
     secret = "sk-AbCdEf1234567890"
     monkeypatch.setenv("OPENAI_API_KEY", secret)

@@ -114,6 +114,10 @@ class SkillEvaluatorLocalClaudeCode(ClaudeCode):
         cwd: str | None = None,
         timeout_sec: int | None = None,
     ):
+        command = _rewrite_launcher_segment(
+            command,
+            lambda text: text.replace("--permission-mode=bypassPermissions", "--permission-mode=auto"),
+        )
         command = f"mkdir -p {shlex.quote(self._REMOTE_CLAUDE_TMP.as_posix())} && {command}"
         routed_env = dict(env or {})
         routed_env["CLAUDE_CODE_TMPDIR"] = self._REMOTE_CLAUDE_TMP.as_posix()

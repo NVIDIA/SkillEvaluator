@@ -598,7 +598,13 @@ def _build_agent(
         "scored_attempts": _as_nonnegative_int(info.get("scored_attempts")),
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
         "evaluators": evaluators,
-        "evaluator_cards": _evaluator_cards(evaluators),
+        "evaluator_cards": _evaluator_cards(
+            evaluators,
+            rewards=info.get("rewards") or [],
+            custom_with_skill=info.get("custom_with_skill") or {},
+            custom_without_skill=info.get("custom_without_skill") or {},
+            custom_lift=info.get("custom_lift") or {},
+        ),
         "dimensions": dimensions,
         "with_skill": overall_ws,
         "baseline": overall_bl,
@@ -738,23 +744,157 @@ def _deterministic_verdict(ws: float | None) -> str | None:
     return _verdict_for_score(float(ws))
 
 
-def _evaluator_cards(evaluators: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY
+def _compact_evidence_refs(raw_refs: object) -> list[str]:
+    if not isinstance(raw_refs, list):
+        return []
+    refs: list[str] = []
+    for raw in raw_refs:
+        if isinstance(raw, str):
+            rendered = raw.strip()
+        elif isinstance(raw, dict):
+            source = str(raw.get("source") or "").strip()
+            pointer = str(raw.get("json_pointer") or raw.get("path") or "").strip()
+            rendered = f"{source}{pointer}" if source else pointer
+        else:
+            continue
+        if rendered and rendered not in refs:
+            refs.append(rendered[:512])
+        if len(refs) == 3:
+            break
+    return refs
+
+
+def _metric_evidence(metric: str, rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
+
+    evidence: list[dict[str, Any]] = []
+    for reward in rewards:
+        if not isinstance(reward, dict):
+            continue
+        details = reward.get("details")
+        detail = details.get(metric) if isinstance(details, dict) else None
+        if not isinstance(detail, dict):
+            custom_details = reward.get("custom_details")
+            detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
+        if not isinstance(detail, dict):
+            continue
+
+        raw_score = reward.get(metric)
+        if not isinstance(raw_score, (int, float)) or isinstance(raw_score, bool):
+            raw_score = extract_custom_metrics(reward).get(metric)
+
+        notes: list[str] = []
+        reason = detail.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            notes.append(reason.strip()[:512])
+
+        failures: list[str] = []
+        results = detail.get("results")
+        if isinstance(results, list):
+            for result in results:
+                if not isinstance(result, dict) or result.get("passed") is not False:
+                    continue
+                failure = result.get("reason")
+                if isinstance(failure, str) and failure.strip():
+                    failures.append(failure.strip()[:512])
+                if len(failures) == 3:
+                    break
+
+        checks: list[str] = []
+        criteria = detail.get("criteria")
+        if isinstance(criteria, dict):
+            checks = [str(name)[:128] for name in criteria][:8]
+
+        evidence.append(
+            {
+                "entry_id": str(reward.get("entry_id") or "trial"),
+                "score": float(raw_score)
+                if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
+                else None,
+                "notes": notes,
+                "failures": failures,
+                "checks": checks,
+                "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
+            }
+        )
+    return evidence
+
+
+def _custom_metric_score(metric: str, configured: dict[str, Any], rewards: list[dict[str, Any]]) -> float | None:
+    from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
+
+    value = configured.get(metric)
+    if isinstance(value, dict):
+        value = value.get("score")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    values = [
+        metrics[metric]
+        for reward in rewards
+        if isinstance(reward, dict) and (metrics := extract_custom_metrics(reward)) and metric in metrics
+    ]
+    return _mean(values)
+
+
+def _evaluator_card(
+    metric: str,
+    scores: dict[str, Any],
+    *,
+    label: str,
+    rewards: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ws = _as_float(scores.get("with_skill"))
+    return {
+        "id": metric,
+        "label": label,
+        "with_skill": ws,
+        "baseline": scores.get("baseline"),
+        "lift": scores.get("lift"),
+        "status": "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail"),
+        "evidence": _metric_evidence(metric, rewards),
+    }
+
+
+def _evaluator_cards(
+    evaluators: dict[str, dict[str, Any]],
+    *,
+    rewards: list[dict[str, Any]],
+    custom_with_skill: dict[str, Any],
+    custom_without_skill: dict[str, Any],
+    custom_lift: dict[str, Any],
+) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, extract_custom_metrics
 
     cards: list[dict[str, Any]] = []
     for metric, scores in evaluators.items():
-        ws = _as_float(scores.get("with_skill"))
-        status = "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail")
         cards.append(
-            {
-                "id": metric,
-                "label": METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
-                "with_skill": ws,
-                "baseline": scores.get("baseline"),
-                "lift": scores.get("lift"),
-                "status": status,
-                "evidence": [],
-            }
+            _evaluator_card(
+                metric,
+                scores,
+                label=METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
+                rewards=rewards,
+            )
+        )
+
+    custom_names = set(custom_with_skill)
+    for reward in rewards:
+        if isinstance(reward, dict):
+            custom_names.update(extract_custom_metrics(reward))
+    for metric in sorted(custom_names.difference(evaluators)):
+        with_skill = _custom_metric_score(metric, custom_with_skill, rewards)
+        if with_skill is None:
+            continue
+        baseline = _custom_metric_score(metric, custom_without_skill, [])
+        lift = _lift_value(metric, custom_lift)
+        if lift is None and baseline is not None:
+            lift = round(with_skill - baseline, 4)
+        cards.append(
+            _evaluator_card(
+                metric,
+                {"with_skill": with_skill, "baseline": baseline, "lift": lift},
+                label=f"Custom: {metric}",
+                rewards=rewards,
+            )
         )
     return cards
 

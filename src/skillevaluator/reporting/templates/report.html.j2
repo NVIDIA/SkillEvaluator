@@ -3014,7 +3014,7 @@
                             {% set eid = ev.entry_id or 'trial' %}
                             {% if eid not in dedup_map %}
                                 {% set _ = dedup_order.append(eid) %}
-                                {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': []}}) %}
+                                {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': []}}) %}
                             {% endif %}
                             {% set entry = dedup_map[eid] %}
                             {% set _ = entry.update({'count': entry.count + 1}) %}
@@ -3024,6 +3024,7 @@
                             {% if ev.notes and not entry.notes %}{% set _ = entry.update({'notes': ev.notes}) %}{% endif %}
                             {% if ev.failures and not entry.failures %}{% set _ = entry.update({'failures': ev.failures}) %}{% endif %}
                             {% if ev.checks and not entry.checks %}{% set _ = entry.update({'checks': ev.checks}) %}{% endif %}
+                            {% if ev.evidence_refs and not entry.evidence_refs %}{% set _ = entry.update({'evidence_refs': ev.evidence_refs}) %}{% endif %}
                         {% endfor %}
                         <details class="t3-eval-evidence">
                             <summary>Per-trial evidence ({{ dedup_order | length }} cases, {{ card.evidence | length }} trials)</summary>
@@ -3038,6 +3039,7 @@
                                         {% if ev.notes %}{{ (ev.notes[:2] | join('; '))[:160] }}{% endif %}
                                         {% if ev.failures %}<span style="color:var(--danger-color);">{{ (ev.failures[:2] | join('; '))[:120] }}</span>{% endif %}
                                         {% if not ev.notes and not ev.failures and ev.checks %}{{ (ev.checks | length) }} checks{% endif %}
+                                        {% if ev.evidence_refs %}<span class="t3-ev-refs">Evidence: {{ ev.evidence_refs[:3] | join('; ') }}</span>{% endif %}
                                     </span>
                                     <span class="t3-ev-count">×{{ ev.count }}</span>
                                     {% if avg_score is not none %}
@@ -3065,9 +3067,9 @@
         <section class="t3-page" id="tier3-page-dataset">
             {% if t3_dataset %}
             <div class="t3-dataset-hero">
-                <h2>Evaluation Dataset</h2>
+                <h2>AgentSkills Dataset</h2>
                 <p style="color:var(--text-secondary);font-size:0.9rem;margin:0.25rem 0 0;">
-                    {{ t3_dataset | length }} eval case{{ 's' if t3_dataset | length != 1 else '' }} used for this Tier 3 run.
+                    {{ t3_dataset | length }} AgentSkills eval case{{ 's' if t3_dataset | length != 1 else '' }} used for this Tier 3 run.
                 </p>
                 <div class="t3-ds-meta" style="margin-top:0.75rem;">
                     <span class="t3-ds-chip">Skill: <b>{{ tier3.skill_name or 'unknown' }}</b></span>
@@ -3083,7 +3085,10 @@
             </div>
             <div class="t3-dataset-list" id="t3-dataset-list">
                 {% for case in t3_dataset %}
-                {% set _hay = (case.id or '') ~ ' ' ~ (case.question or '') ~ ' ' ~ (case.expected_skill or '') ~ ' ' ~ (case.expected_script or '') ~ ' ' ~ (case.category or '') ~ ' ' ~ (case.ground_truth or '') %}
+                {% set case_prompt = case.prompt or case.question %}
+                {% set case_expected_output = case.expected_output or case.ground_truth %}
+                {% set case_assertions = case.assertions or case.expected_behavior %}
+                {% set _hay = (case.id or '') ~ ' ' ~ (case_prompt or '') ~ ' ' ~ (case.expected_skill or '') ~ ' ' ~ (case.expected_script or '') ~ ' ' ~ (case.category or '') ~ ' ' ~ (case_expected_output or '') %}
                 <details class="t3-ds-card" id="dataset-case-{{ case.id or loop.index }}" data-tier3-filterable="{{ _hay }}"{% if loop.first %} open{% endif %}>
                     <summary>
                     <div class="t3-ds-head" style="margin-bottom:0;">
@@ -3096,22 +3101,22 @@
                     </div>
                     </summary>
                     <div class="t3-ds-body">
-                    {% if case.question %}
+                    {% if case_prompt %}
                     <div class="t3-ds-field">
-                        <span class="t3-ds-label">Question</span>
-                        <div class="t3-ds-value">{{ case.question }}</div>
+                        <span class="t3-ds-label">Prompt</span>
+                        <div class="t3-ds-value">{{ case_prompt }}</div>
                     </div>
                     {% endif %}
-                    {% if case.ground_truth %}
+                    {% if case_expected_output %}
                     <div class="t3-ds-field">
-                        <span class="t3-ds-label">Ground Truth</span>
-                        <div class="t3-ds-value t3-ds-gt">{{ case.ground_truth }}</div>
+                        <span class="t3-ds-label">Expected Output</span>
+                        <div class="t3-ds-value t3-ds-gt">{{ case_expected_output }}</div>
                     </div>
                     {% endif %}
-                    {% if case.expected_behavior %}
+                    {% if case_assertions %}
                     <div class="t3-ds-field">
-                        <span class="t3-ds-label">Expected Behavior</span>
-                        <ol class="t3-ds-behaviors">{% for b in case.expected_behavior %}<li>{{ b }}</li>{% endfor %}</ol>
+                        <span class="t3-ds-label">Assertions</span>
+                        <ol class="t3-ds-behaviors">{% for b in case_assertions %}<li>{{ b }}</li>{% endfor %}</ol>
                     </div>
                     {% endif %}
                     </div>

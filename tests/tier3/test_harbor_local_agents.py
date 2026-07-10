@@ -85,7 +85,7 @@ def test_local_claude_uses_managed_policy_permission_mode(monkeypatch, tmp_path)
         fake_parent_exec,
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://inference-api.nvidia.com")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://provider.example/v1")
 
     agent = SkillEvaluatorLocalClaudeCode(logs_dir=tmp_path, model_name="aws/anthropic/bedrock-claude-opus-4-6")
     asyncio.run(agent.run("do the thing", environment=object(), context=object()))
@@ -106,7 +106,7 @@ def test_local_claude_does_not_rewrite_instruction_permission_text(monkeypatch, 
         fake_parent_exec,
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://inference-api.nvidia.com")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://provider.example/v1")
 
     agent = SkillEvaluatorLocalClaudeCode(logs_dir=tmp_path, model_name="aws/anthropic/bedrock-claude-opus-4-6")
     asyncio.run(
@@ -140,7 +140,7 @@ def test_local_codex_preserves_full_gateway_model_name(monkeypatch, tmp_path) ->
         agent.exec_as_agent(
             object(),
             "codex exec --model gpt-5.4 --json -- 'hello'",
-            env={"OPENAI_BASE_URL": "https://inference-api.nvidia.com/v1"},
+            env={"OPENAI_BASE_URL": "https://provider.example/v1"},
         )
     )
 
@@ -188,7 +188,7 @@ def test_local_codex_preserves_instruction_text_during_launcher_rewrites(monkeyp
             object(),
             "codex exec --model gpt-5.4 --json -- "
             "'say --model gpt-5.4 and /tmp/codex-secrets literally'",
-            env={"OPENAI_BASE_URL": "https://inference-api.nvidia.com/v1"},
+            env={"OPENAI_BASE_URL": "https://provider.example/v1"},
         )
     )
 
@@ -212,7 +212,7 @@ def test_local_opencode_supports_nvidia_provider_without_harbor_patch(monkeypatc
         fake_parent_exec,
     )
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://inference-api.nvidia.com/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://provider.example/v1")
 
     agent = SkillEvaluatorLocalOpenCode(logs_dir=tmp_path, model_name="nvidia/openai/openai/gpt-5.4")
     asyncio.run(agent.run("do the thing", environment=object(), context=object()))
@@ -225,7 +225,7 @@ def test_local_opencode_supports_nvidia_provider_without_harbor_patch(monkeypatc
     assert "stdbuf" not in run_command
     assert "--dangerously-skip-permissions" not in run_command
     assert any(env.get("OPENAI_API_KEY") == "sk-test" for env in envs)
-    assert any(env.get("OPENAI_BASE_URL") == "https://inference-api.nvidia.com/v1" for env in envs)
+    assert any(env.get("OPENAI_BASE_URL") == "https://provider.example/v1" for env in envs)
 
 
 def test_local_opencode_non_nvidia_fallback_renders_prompt_once(monkeypatch, tmp_path) -> None:

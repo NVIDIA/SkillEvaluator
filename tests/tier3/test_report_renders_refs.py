@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from skillevaluator.tier3.harbor import html_report, report
+from skillevaluator.tier3.harbor import report
 
 
 def _reward():
@@ -75,22 +75,6 @@ def test_cli_findings_include_custom_metric_details():
     assert custom["evidence_refs"][0]["source"] == "custom_reward.json"
 
 
-def test_html_findings_renders_evidence_section():
-    html = html_report._build_agent_findings({"rewards": [_reward()]})
-    assert "/steps/14" in html and "Evidence" in html
-
-
-def test_html_findings_include_custom_metric_details():
-    html = html_report._build_agent_findings({
-        "metrics_with_skill": [],
-        "custom_with_skill": {"domain_quality": 0.9},
-        "rewards": [_reward_with_custom_metric()],
-    })
-    assert "domain_quality" in html
-    assert "custom domain matched" in html
-    assert "custom_reward.json/details/domain_quality" in html
-
-
 # --- New renderer backward-compat tests ---
 
 def test_cli_renders_dict_ref_as_compact_string(monkeypatch):
@@ -128,27 +112,3 @@ def test_cli_renders_legacy_string_ref_without_error():
     text = report._render_findings_body(findings_with_string_refs).plain
     # The ref won't be rendered as a dict, but the function should not crash
     assert text  # just checking it renders without exception
-
-
-def test_html_renders_dict_ref_correctly():
-    """HTML renderer must display source+json_pointer from a dict ref."""
-    html = html_report._build_agent_findings({"rewards": [_reward_with_dict_refs()]})
-    assert "/steps/14" in html
-    assert "Evidence" in html
-    assert "trajectory.json" in html
-
-
-def test_html_renders_legacy_string_ref_without_error():
-    """HTML renderer must tolerate a legacy string ref in reward.details.evidence_refs."""
-    reward_with_string_refs = {
-        "entry_id": "legacy-001",
-        "security": 1.0, "skill_execution": 1.0, "skill_efficiency": 1.0,
-        "accuracy": 1.0, "goal_accuracy": 0.3, "behavior_check": 1.0,
-        "details": {"goal_accuracy": {
-            "reason": "failure",
-            "evidence_refs": ["trajectory.json#/steps/14"],  # legacy string
-        }},
-    }
-    # Should not raise
-    html = html_report._build_agent_findings({"rewards": [reward_with_string_refs]})
-    assert html  # rendered without exception

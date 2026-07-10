@@ -133,7 +133,7 @@ def test_check_activation_recognizes_codex_exec_command_cat_skill_md_with_frontm
     tool_calls = [
         {
             "action": "exec_command",
-            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/astra-sandbox-smoke-skill/SKILL.md"},
+            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/sandbox-smoke-skill/SKILL.md"},
             "observation": "---\nname: sandbox-smoke\n---\n# Sandbox Smoke Skill\n",
         }
     ]
@@ -284,7 +284,7 @@ def test_check_routing_recognizes_codex_exec_command_cat_skill_md_with_frontmatt
     tool_calls = [
         {
             "action": "exec_command",
-            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/astra-sandbox-smoke-skill/SKILL.md"},
+            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/sandbox-smoke-skill/SKILL.md"},
             "observation": "---\nname: sandbox-smoke\n---\n# Sandbox Smoke Skill\n",
         }
     ]
@@ -308,7 +308,7 @@ def test_check_workflow_order_recognizes_codex_exec_command_cat_skill_md():
     tool_calls = [
         {
             "action": "exec_command",
-            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/astra-sandbox-smoke-skill/SKILL.md"},
+            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/sandbox-smoke-skill/SKILL.md"},
             "observation": "---\nname: sandbox-smoke\n---\n",
         }
     ]
@@ -380,7 +380,7 @@ def test_check_tool_efficiency_counts_codex_exec_command_cmd_as_productive():
     tool_calls = [
         {
             "action": "exec_command",
-            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/astra-sandbox-smoke-skill/SKILL.md"},
+            "action_input": {"cmd": "cat /tmp/agent-home/.agents/skills/sandbox-smoke-skill/SKILL.md"},
             "observation": "---\nname: sandbox-smoke\n---\n",
         }
     ]
@@ -520,7 +520,7 @@ def test_check_security_tracks_target_skill_use_before_unsafe_action():
 # read — penalizing Codex's Efficiency relative to Claude Code's native Read/Skill.
 # ---------------------------------------------------------------------------
 
-_SMOKE_SKILL = "/tmp/agent-home/.agents/skills/astra-sandbox-smoke-skill/SKILL.md"
+_SMOKE_SKILL = "/tmp/agent-home/.agents/skills/sandbox-smoke-skill/SKILL.md"
 _SMOKE_OBS = "---\nname: sandbox-smoke\n---\n# Sandbox Smoke Skill\n"
 
 

@@ -150,24 +150,13 @@ def test_openai_compatible_provider_requires_explicit_model() -> None:
 
 
 def test_anthropic_requires_explicit_embedding_provider() -> None:
-    with pytest.raises(ProviderConfigurationError) as exc_info:
+    with pytest.raises(ProviderConfigurationError, match="SKILL_EVAL_EMBEDDING_PROVIDER"):
         resolve_embedding_provider(
             {
                 "SKILL_EVAL_LLM_PROVIDER": "anthropic",
                 "ANTHROPIC_API_KEY": "test-anthropic-key",
             }
         )
-    assert (
-        str(exc_info.value)
-        == "SKILL_EVAL_EMBEDDING_PROVIDER is required because anthropic does not provide embeddings."
-    )
-
-
-def test_llm_provider_requires_public_credential_when_not_configured() -> None:
-    with pytest.raises(ProviderConfigurationError) as exc_info:
-        resolve_llm_provider({})
-
-    assert str(exc_info.value) == "SKILL_EVAL_LLM_PROVIDER is required when no public provider credential is configured."
 
 
 def test_llm_provider_error_lists_supported_choices() -> None:

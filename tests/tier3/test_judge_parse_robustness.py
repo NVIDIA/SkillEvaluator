@@ -6,7 +6,7 @@ Regression tests for behavior_check judge response parsing.
 
 Root cause (live-reproduced 2026-06-10 by replaying Harbor trial
 ``evaluator-plugin-001__DrQLA2j`` from run ``aces-nick-e2e-rebased-20260608-092041``
-against the real Inference Hub): the verifier judge ran ``openai/openai/gpt-5.5``
+against a real OpenAI-compatible reasoning endpoint): the verifier judge ran ``openai/openai/gpt-5.5``
 (a reasoning model, via ``[verifier.env] SKILL_EVAL_JUDGE_MODEL``) with
 ``max_tokens=1024``.  That budget includes hidden reasoning tokens; on 3 of 4
 replay attempts the API returned ``finish_reason="length"`` with

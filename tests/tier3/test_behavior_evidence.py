@@ -231,7 +231,7 @@ def test_attach_metric_evidence_refs_preserves_existing_judge_details() -> None:
 
 def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
     secret_path = "/logs/agent/nvapi-AbCdEfGh12345678.json"
-    openshift_token = "sha256~abcdefghijklmnop"
+    sha256_token = "sha256~abcdefghijklmnop"
     cursor_token = "crsr_deadbeefcafebabe"
     jwt_token = (
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -250,7 +250,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
                             "file_path": secret_path,
                             "content": (
                                 "tokens sk-AbCdEfGh12345678 "
-                                f"{openshift_token} {cursor_token} {jwt_token}"
+                                f"{sha256_token} {cursor_token} {jwt_token}"
                             ),
                         },
                     }
@@ -259,7 +259,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
                     "results": [
                         {
                             "source_call_id": "write-secret-path",
-                            "content": f"wrote {secret_path} with {openshift_token} and {cursor_token}",
+                            "content": f"wrote {secret_path} with {sha256_token} and {cursor_token}",
                         }
                     ]
                 },
@@ -271,7 +271,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
     refs = atif_helpers.build_metric_evidence_refs(
         traj,
         "Save the result.",
-        ground_truth=f"Save {secret_path} after login {openshift_token}",
+        ground_truth=f"Save {secret_path} after login {sha256_token}",
         expected_behavior=[f"Save {secret_path} using {cursor_token} and {jwt_token}"],
     )
 
@@ -279,7 +279,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
     for raw_secret in (
         "nvapi-AbCdEfGh12345678",
         "sk-AbCdEfGh12345678",
-        openshift_token,
+        sha256_token,
         cursor_token,
         jwt_token,
     ):
@@ -299,7 +299,7 @@ def test_harbor_template_metric_evidence_refs_redact_harbor_secret_shapes() -> N
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    openshift_token = "sha256~abcdefghijklmnop"
+    sha256_token = "sha256~abcdefghijklmnop"
     cursor_token = "crsr_deadbeefcafebabe"
     jwt_token = (
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -316,7 +316,7 @@ def test_harbor_template_metric_evidence_refs_redact_harbor_secret_shapes() -> N
                             "tool_call_id": "bash-secret",
                             "function_name": "Bash",
                             "arguments": {
-                                "command": f"nemo auth --token {openshift_token} --cursor {cursor_token}"
+                                "command": f"nemo auth --token {sha256_token} --cursor {cursor_token}"
                             },
                         }
                     ],
@@ -327,12 +327,12 @@ def test_harbor_template_metric_evidence_refs_redact_harbor_secret_shapes() -> N
             ]
         },
         "Run auth.",
-        ground_truth=f"Do not leak {openshift_token}",
+        ground_truth=f"Do not leak {sha256_token}",
         expected_behavior=[f"Do not leak {cursor_token} or {jwt_token}"],
     )
 
     rendered = json.dumps(refs)
-    assert openshift_token not in rendered
+    assert sha256_token not in rendered
     assert cursor_token not in rendered
     assert jwt_token not in rendered
     assert "sha256~<redacted>" in rendered

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from skillevaluator.evaluation.tier3_report import (
     agent_eval_result_from_directory,
+    build_agent_eval_payload,
     render_agent_eval_html_report,
 )
 from skillevaluator.models import ValidationResult
@@ -42,6 +43,16 @@ def _write_summary(
     )
 
 
+def _render_agent_payload(payload: dict) -> str:
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = payload
+    return HTMLReporter(include_timestamp=False).render_all([result])
+
+
+def _tier3_page(html: str, page: str, next_page: str) -> str:
+    return html.split(f'id="tier3-page-{page}"', 1)[1].split(f'id="tier3-page-{next_page}"', 1)[0]
+
+
 def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None:
     skill = tmp_path / "demo"
     skill.mkdir()
@@ -58,6 +69,175 @@ def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None
     assert 'data-tier3-tab="trials"' in html
     assert "Diagnostics" in html
     assert "Skill Evaluator" in html
+
+
+def test_canonical_report_prefers_agentskills_dataset_fields() -> None:
+    payload = build_agent_eval_payload(
+        "hld-documents",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 1.0},
+                "rewards": [{"entry_id": "case-1", "security": 1.0, "goal_accuracy": 1.0}],
+            }
+        },
+        dataset=[
+            {
+                "id": "case-1",
+                "prompt": "Use hld-documents for this design.",
+                "question": "legacy fallback should not be shown",
+                "expected_output": "A complete HLD document is produced.",
+                "ground_truth": "legacy fallback should not be shown",
+                "assertions": ["The agent reads SKILL.md.", "The agent writes the HLD sections."],
+                "expected_behavior": ["legacy fallback should not be shown"],
+                "expected_skill": "hld-documents",
+            }
+        ],
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    dataset_html = _tier3_page(_render_agent_payload(payload), "dataset", "suggestions")
+
+    assert "<h2>AgentSkills Dataset</h2>" in dataset_html
+    assert "1 AgentSkills eval case used for this Tier 3 run." in dataset_html
+    assert '<span class="t3-ds-label">Prompt</span>' in dataset_html
+    assert '<span class="t3-ds-label">Expected Output</span>' in dataset_html
+    assert '<span class="t3-ds-label">Assertions</span>' in dataset_html
+    assert "Use hld-documents for this design." in dataset_html
+    assert "A complete HLD document is produced." in dataset_html
+    assert "The agent reads SKILL.md." in dataset_html
+    assert "legacy fallback should not be shown" not in dataset_html
+
+
+def test_standalone_report_loads_staged_legacy_dataset_with_agentskills_labels(tmp_path: Path) -> None:
+    skill = tmp_path / "hld-documents"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260709_120006"
+    _write_summary(run_dir)
+    entry_dir = run_dir / "_harbor-tasks" / "hld-documents-001" / "tests"
+    entry_dir.mkdir(parents=True)
+    (entry_dir / "entry.json").write_text(
+        json.dumps(
+            {
+                "id": "hld-documents-001",
+                "question": "Create an HLD for packet reordering.",
+                "ground_truth": "A complete HLD document is produced.",
+                "expected_behavior": [
+                    "The agent reads the hld-documents skill.",
+                    "The agent includes hardware register tables.",
+                ],
+                "expected_skill": "hld-documents",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = render_agent_eval_html_report(skill, run_dir, use_llm_judge=False)
+    dataset_html = _tier3_page(report.read_text(encoding="utf-8"), "dataset", "suggestions")
+
+    assert "<h2>AgentSkills Dataset</h2>" in dataset_html
+    assert '<span class="t3-ds-label">Prompt</span>' in dataset_html
+    assert '<span class="t3-ds-label">Expected Output</span>' in dataset_html
+    assert '<span class="t3-ds-label">Assertions</span>' in dataset_html
+    assert "Create an HLD for packet reordering." in dataset_html
+    assert "A complete HLD document is produced." in dataset_html
+    assert "The agent includes hardware register tables." in dataset_html
+
+
+def test_canonical_html_renders_evaluator_evidence_and_custom_metric_details() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 0.2},
+                "custom_with_skill": {"domain_quality": 0.9},
+                "rewards": [
+                    {
+                        "entry_id": "case-1",
+                        "security": 1.0,
+                        "goal_accuracy": 0.2,
+                        "custom_metrics": {"domain_quality": 0.9},
+                        "details": {
+                            "goal_accuracy": {
+                                "reason": "results file not produced",
+                                "evidence_refs": [
+                                    {
+                                        "source": "trajectory.json",
+                                        "json_pointer": "/steps/14",
+                                        "kind": "tool_call",
+                                    }
+                                ],
+                            },
+                            "domain_quality": {
+                                "score": 0.9,
+                                "reason": "custom domain matched",
+                                "evidence_refs": [
+                                    {
+                                        "source": "custom_reward.json",
+                                        "json_pointer": "/details/domain_quality",
+                                        "kind": "custom_metric",
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
+
+    assert "results file not produced" in agents_html
+    assert "trajectory.json/steps/14" in agents_html
+    assert "domain_quality" in agents_html
+    assert "custom domain matched" in agents_html
+    assert "custom_reward.json/details/domain_quality" in agents_html
+
+
+def test_canonical_html_tolerates_legacy_string_evidence_refs() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 0.3},
+                "rewards": [
+                    {
+                        "entry_id": "legacy-001",
+                        "security": 1.0,
+                        "goal_accuracy": 0.3,
+                        "details": {
+                            "goal_accuracy": {
+                                "reason": "failure",
+                                "evidence_refs": ["trajectory.json#/steps/14"],
+                            }
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
+
+    assert "failure" in agents_html
+    assert "trajectory.json#/steps/14" in agents_html
 
 
 def test_standalone_tier3_persists_the_canonical_feedback_payload(tmp_path: Path) -> None:

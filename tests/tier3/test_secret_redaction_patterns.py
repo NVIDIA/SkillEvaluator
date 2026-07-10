@@ -28,7 +28,7 @@ def test_benign_hyphenated_words_are_not_redacted():
 
 def test_real_sk_key_is_still_redacted():
     secret = _fixture_secret("sk-", "abcdefgh", "ijklmnop")
-    line = f"export NVIDIA_INFERENCE_KEY={secret}"
+    line = f"export NVIDIA_API_KEY={secret}"
 
     red = redact_secrets_in_log_line(line)
 

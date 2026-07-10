@@ -42,6 +42,7 @@ Agent-refined mode (--refine):
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -304,14 +305,21 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-async def _generate_with_llm(skill: dict[str, Any], full: bool = False) -> list[dict[str, Any]]:
+async def _generate_with_llm(
+    skill: dict[str, Any],
+    full: bool = False,
+    *,
+    fallback_to_template: bool = True,
+) -> list[dict[str, Any]]:
     """Generate test cases using LLM for more natural questions."""
     try:
         from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 
         provider = resolve_llm_provider()
     except ProviderConfigurationError as exc:
-        print(f"Public LLM provider is not configured ({exc}). Using template mode.")
+        if not fallback_to_template:
+            raise RuntimeError("LLM dataset generation requires a configured provider") from exc
+        print("Public LLM provider is not configured. Using deterministic template mode.")
         return _generate_full(skill) if full else _generate_simple(skill)
 
     name = skill["name"]
@@ -407,6 +415,38 @@ No other fields."""
             text = text.group(1) if text else "[]"
 
         cases = json.loads(text)
+        expected_count = 4 if full else 1
+        required_fields = {
+            "id",
+            "question",
+            "expected_skill",
+            "expected_script",
+            "ground_truth",
+            "expected_behavior",
+        }
+        if (
+            not isinstance(cases, list)
+            or len(cases) != expected_count
+            or any(
+                not isinstance(case, dict)
+                or not required_fields.issubset(case)
+                or not isinstance(case["id"], str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", case["id"])
+                or not isinstance(case["question"], str)
+                or not case["question"].strip()
+                or not isinstance(case["ground_truth"], str)
+                or not case["ground_truth"].strip()
+                or not isinstance(case["expected_behavior"], list)
+                or not case["expected_behavior"]
+                or any(not isinstance(behavior, str) or not behavior.strip() for behavior in case["expected_behavior"])
+                for case in cases
+            )
+        ):
+            raise ValueError(
+                "provider returned an invalid one-case dataset"
+                if not full
+                else "provider returned an invalid four-case dataset"
+            )
 
         # Clean: remove any should_trigger or bucket fields
         # Append security behavior if not already present
@@ -419,9 +459,31 @@ No other fields."""
 
         return cases
 
-    except Exception as e:
-        print(f"LLM generation failed ({e}). Using template mode.")
+    except Exception as exc:
+        if not fallback_to_template:
+            raise RuntimeError("LLM dataset generation failed") from exc
+        print("Warning: LLM generation failed; using deterministic template mode.")
         return _generate_full(skill) if full else _generate_simple(skill)
+
+
+def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
+    """Create exactly one new eval case without overwriting an existing dataset."""
+    skill_path = skill_path.resolve()
+    evals_dir = skill_path / "evals"
+    if evals_dir.is_symlink() or (os.path.lexists(evals_dir) and not evals_dir.is_dir()):
+        raise ValueError(f"evals directory must be a real directory inside the skill: {evals_dir}")
+    output_path = evals_dir / "evals.json"
+    if output_path.exists():
+        raise FileExistsError(f"Dataset already exists: {output_path}")
+    skill = _parse_skill(skill_path)
+    cases = asyncio.run(_generate_with_llm(skill, fallback_to_template=False)) if use_llm else _generate_simple(skill)
+    if len(cases) != 1:
+        raise RuntimeError("one-case generation did not return exactly one case")
+    evals_dir.mkdir(parents=True, exist_ok=True)
+    with output_path.open("x", encoding="utf-8") as output:
+        json.dump(_to_agentskills_dataset(skill["name"], cases), output, indent=2, ensure_ascii=False)
+        output.write("\n")
+    return output_path
 
 
 def _ensure_project_imports():

@@ -190,6 +190,7 @@ class ExternalTool:
         timeout: int = 120,
         log_command: bool = True,
         env: Mapping[str, str] | None = None,
+        replace_env: bool = False,
     ) -> ToolResult:
         """Execute tool with given arguments.
 
@@ -200,6 +201,9 @@ class ExternalTool:
             log_command: Whether to log the command being run
             env: Extra environment variables merged over the parent
                 environment for this invocation only
+            replace_env: Use ``env`` as the complete child environment instead
+                of merging it over the parent. Use this for credential-isolated
+                subprocesses.
 
         Returns:
             ToolResult with stdout, stderr, and error info
@@ -219,13 +223,14 @@ class ExternalTool:
             logger.info(f"Running {self.name}: {' '.join(cmd[:5])}...")
 
         try:
+            child_env = dict(env or {}) if replace_env else ({**os.environ, **env} if env else None)
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 cwd=cwd,
-                env={**os.environ, **env} if env else None,
+                env=child_env,
             )
             return ToolResult(
                 success=True,

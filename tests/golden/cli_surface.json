@@ -275,6 +275,15 @@
           "param_type": "option"
         },
         {
+          "multiple": true,
+          "name": "agent_model",
+          "opts": [
+            "--agent-model"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "verify_models",
@@ -336,6 +345,16 @@
         {
           "default": "False",
           "is_flag": true,
+          "name": "autopilot",
+          "opts": [
+            "--autopilot"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
           "name": "skip_baseline",
           "opts": [
             "--skip-baseline"
@@ -358,6 +377,18 @@
           ],
           "param_type": "option",
           "type": "float"
+        },
+        {
+          "is_flag": true,
+          "name": "stop_on_pass",
+          "opts": [
+            "--stop-on-pass"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-stop-on-pass"
+          ],
+          "type": "boolean"
         },
         {
           "name": "n_concurrent",
@@ -464,6 +495,18 @@
           "type": "boolean"
         },
         {
+          "is_flag": true,
+          "name": "agent_runtime_preflight",
+          "opts": [
+            "--agent-runtime-preflight"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
           "name": "timeout_multiplier",
           "opts": [
             "--timeout-multiplier"
@@ -494,6 +537,33 @@
           ],
           "param_type": "option",
           "type": "integer"
+        },
+        {
+          "choices": [
+            "auto",
+            "rich",
+            "plain",
+            "off"
+          ],
+          "default": "auto",
+          "name": "progress",
+          "opts": [
+            "--progress"
+          ],
+          "param_type": "option"
+        }
+      ]
+    },
+    "harbor-view": {
+      "params": [
+        {
+          "name": "jobs_dir",
+          "opts": [
+            "jobs_dir"
+          ],
+          "param_type": "argument",
+          "required": true,
+          "type": "directory"
         }
       ]
     },
@@ -697,6 +767,29 @@
           ],
           "param_type": "option",
           "type": "directory"
+        }
+      ]
+    },
+    "models": {
+      "params": [
+        {
+          "default": "10",
+          "name": "limit",
+          "opts": [
+            "--limit"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
+          ],
+          "param_type": "option",
+          "type": "boolean"
         }
       ]
     },
@@ -1294,9 +1387,38 @@
               "param_type": "option"
             },
             {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "full",
+              "opts": [
+                "--full"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "verbose",
+              "opts": [
+                "--verbose"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
               "name": "checks",
               "opts": [
-                "--checks"
+                "--checks",
+                "--tier1-checks"
               ],
               "param_type": "option",
               "type": "text"
@@ -1327,11 +1449,13 @@
               "is_flag": true,
               "name": "llm",
               "opts": [
-                "--llm"
+                "--llm",
+                "--tier1-llm"
               ],
               "param_type": "option",
               "secondary_opts": [
-                "--no-llm"
+                "--no-llm",
+                "--no-tier1-llm"
               ],
               "type": "boolean"
             },
@@ -1385,11 +1509,13 @@
               "is_flag": true,
               "name": "dedup",
               "opts": [
-                "--dedup"
+                "--dedup",
+                "--tier2"
               ],
               "param_type": "option",
               "secondary_opts": [
-                "--no-dedup"
+                "--no-dedup",
+                "--no-tier2"
               ],
               "type": "boolean"
             },
@@ -1398,7 +1524,18 @@
               "is_flag": true,
               "name": "agent_eval",
               "opts": [
-                "--agent-eval"
+                "--agent-eval",
+                "--tier3"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "autopilot",
+              "opts": [
+                "--autopilot"
               ],
               "param_type": "option",
               "type": "boolean"
@@ -1480,6 +1617,18 @@
               ],
               "param_type": "option",
               "type": "float"
+            },
+            {
+              "is_flag": true,
+              "name": "stop_on_pass",
+              "opts": [
+                "--stop-on-pass"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-stop-on-pass"
+              ],
+              "type": "boolean"
             },
             {
               "name": "model",
@@ -1980,6 +2129,15 @@
               "param_type": "option"
             },
             {
+              "multiple": true,
+              "name": "agent_model",
+              "opts": [
+                "--agent-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "verify_models",
@@ -2041,6 +2199,16 @@
             {
               "default": "False",
               "is_flag": true,
+              "name": "autopilot",
+              "opts": [
+                "--autopilot"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
               "name": "skip_baseline",
               "opts": [
                 "--skip-baseline"
@@ -2063,6 +2231,18 @@
               ],
               "param_type": "option",
               "type": "float"
+            },
+            {
+              "is_flag": true,
+              "name": "stop_on_pass",
+              "opts": [
+                "--stop-on-pass"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-stop-on-pass"
+              ],
+              "type": "boolean"
             },
             {
               "name": "n_concurrent",
@@ -2169,6 +2349,18 @@
               "type": "boolean"
             },
             {
+              "is_flag": true,
+              "name": "agent_runtime_preflight",
+              "opts": [
+                "--agent-runtime-preflight"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-agent-runtime-preflight"
+              ],
+              "type": "boolean"
+            },
+            {
               "name": "timeout_multiplier",
               "opts": [
                 "--timeout-multiplier"
@@ -2199,6 +2391,20 @@
               ],
               "param_type": "option",
               "type": "integer"
+            },
+            {
+              "choices": [
+                "auto",
+                "rich",
+                "plain",
+                "off"
+              ],
+              "default": "auto",
+              "name": "progress",
+              "opts": [
+                "--progress"
+              ],
+              "param_type": "option"
             }
           ]
         },
@@ -2433,9 +2639,38 @@
           "param_type": "option"
         },
         {
+          "name": "tiers",
+          "opts": [
+            "--tiers"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "full",
+          "opts": [
+            "--full"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "verbose",
+          "opts": [
+            "--verbose"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
           "name": "checks",
           "opts": [
-            "--checks"
+            "--checks",
+            "--tier1-checks"
           ],
           "param_type": "option",
           "type": "text"
@@ -2466,11 +2701,13 @@
           "is_flag": true,
           "name": "llm",
           "opts": [
-            "--llm"
+            "--llm",
+            "--tier1-llm"
           ],
           "param_type": "option",
           "secondary_opts": [
-            "--no-llm"
+            "--no-llm",
+            "--no-tier1-llm"
           ],
           "type": "boolean"
         },
@@ -2524,11 +2761,13 @@
           "is_flag": true,
           "name": "dedup",
           "opts": [
-            "--dedup"
+            "--dedup",
+            "--tier2"
           ],
           "param_type": "option",
           "secondary_opts": [
-            "--no-dedup"
+            "--no-dedup",
+            "--no-tier2"
           ],
           "type": "boolean"
         },
@@ -2537,7 +2776,18 @@
           "is_flag": true,
           "name": "agent_eval",
           "opts": [
-            "--agent-eval"
+            "--agent-eval",
+            "--tier3"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "autopilot",
+          "opts": [
+            "--autopilot"
           ],
           "param_type": "option",
           "type": "boolean"
@@ -2619,6 +2869,18 @@
           ],
           "param_type": "option",
           "type": "float"
+        },
+        {
+          "is_flag": true,
+          "name": "stop_on_pass",
+          "opts": [
+            "--stop-on-pass"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-stop-on-pass"
+          ],
+          "type": "boolean"
         },
         {
           "name": "model",

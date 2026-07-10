@@ -38,7 +38,7 @@ def _fixture_secret(*parts: str) -> str:
 
 REAL_SECRETS = [
     _fixture_secret("sk-", "abcdefgh", "12345678"),
-    "export NVIDIA_INFERENCE_KEY=" + _fixture_secret("sk-", "abcdefgh", "12345678"),
+    "export NVIDIA_API_KEY=" + _fixture_secret("sk-", "abcdefgh", "12345678"),
     _fixture_secret("nvapi-", "abcdefgh", "12345678"),
     # Key glued directly onto a word char with no separator: still caught via
     # the strong real-key signature (>=20 alnum with lower+upper+digit).

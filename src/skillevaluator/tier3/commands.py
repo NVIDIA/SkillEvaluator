@@ -24,19 +24,27 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator import __version__
+from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate_case_ids
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, _validate_config, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_skillevaluators
-from skillevaluator.tier3.harbor import HARBOR_AGENTS, HARBOR_AGENTS_SUPPORTED
-from skillevaluator.tier3.harbor.html_report import generate_html_report
+from skillevaluator.tier3.harbor import HARBOR_AGENTS, HARBOR_AGENTS_SUPPORTED, canonical_agent_name
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+from skillevaluator.tier3.harbor.progress import (
+    NullProgressReporter,
+    ProgressEvent,
+    ProgressReporter,
+    Tier3RunPlan,
+    safe_progress_reporter,
+    secret_values_from_environment,
+)
 from skillevaluator.tier3.harbor.runner import (
     _check_prerequisites,
     _harbor_bin,
     _model_for_agent,
-    _validate_agent_provider_credentials,
+    _resolve_agent_runtime_plan,
     run_harbor_eval,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
@@ -160,6 +168,7 @@ def _write_evals_config(evals_dir: Path, *, grading_mode: str, task_source: str)
     harbor["task_source"] = task_source
     harbor.setdefault("n_attempts", 1)
     harbor.setdefault("pass_threshold", 0.60)
+    harbor.setdefault("stop_on_pass", False)
 
     grading = data.setdefault("grading", {})
     if not isinstance(grading, dict):
@@ -315,7 +324,7 @@ def parse_agents(raw_agents: str | None) -> list[str]:
     """Parse a comma-separated Harbor agent list."""
     if not raw_agents:
         return ["codex"]
-    agents = [item.strip() for item in raw_agents.split(",") if item.strip()]
+    agents = [canonical_agent_name(item.strip()) for item in raw_agents.split(",") if item.strip()]
     seen: set[str] = set()
     deduped: list[str] = []
     for agent in agents:
@@ -328,15 +337,24 @@ def parse_agents(raw_agents: str | None) -> list[str]:
 def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, list[str]]:
     """Parse ``--agent-model agent=model`` values."""
     overrides: dict[str, list[str]] = {}
+    authored_names: dict[str, str] = {}
     for raw in raw_overrides:
         if "=" not in raw:
             raise ValueError("--agent-model must be in AGENT=MODEL form")
         agent, model = raw.split("=", 1)
-        agent = agent.strip()
+        authored_name = agent.strip()
+        agent = canonical_agent_name(authored_name)
         model = model.strip()
         if not agent or not model:
             raise ValueError("--agent-model must include both agent and model")
+        previous = authored_names.get(agent)
+        if previous is not None:
+            raise ValueError(
+                f"--agent-model names {previous} and {authored_name} refer to the same agent "
+                f"({agent}); specify only one model for {agent}"
+            )
         overrides.setdefault(agent, []).append(model)
+        authored_names[agent] = authored_name
     return overrides
 
 
@@ -580,6 +598,7 @@ def evaluate(
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
+    stop_on_pass: bool | None = None,
     n_concurrent: int | None,
     max_agents: int | None,
     model: str | None,
@@ -591,60 +610,86 @@ def evaluate(
     grading_mode: str | None,
     results_dir: Path | None,
     harbor_keep_jobs: bool,
+    agent_runtime_preflight: bool | None = None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
 
     agent_list = parse_agents(agents)
-    unknown = validate_agents(agent_list)
-    if unknown:
-        supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
-        raise ValueError(f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}")
-
+    reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
+    engine_started = False
     try:
-        resolve_llm_provider()
-    except ProviderConfigurationError as exc:
-        raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
-
-    agent_models = parse_agent_model_overrides(agent_model)
-    unknown_model_agents = sorted(set(agent_models) - set(agent_list))
-    if unknown_model_agents:
-        raise ValueError(
-            "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
+        reporter.set_secret_values(secret_values_from_environment(os.environ))
+        reporter.start(
+            Tier3RunPlan(
+                skill_name=skill_path.name,
+                environment=env_mode,
+                agents=tuple(agent_list),
+                baseline=not skip_baseline,
+                attempts=n_attempts,
+                concurrency=n_concurrent,
+                max_agents=max_agents,
+                timeout_multiplier=timeout_multiplier,
+            )
         )
+        reporter.emit(ProgressEvent(stage="configuration", state="running"))
+        unknown = validate_agents(agent_list)
+        if unknown:
+            supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
+            raise ValueError(f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}")
 
-    output_dir = resolve_results_root(skill_path, results_dir)
-    result = run_harbor_eval(
-        skill_path=skill_path.resolve(),
-        agents=agent_list,
-        skip_baseline=skip_baseline,
-        n_attempts=n_attempts,
-        pass_threshold=pass_threshold,
-        n_concurrent=n_concurrent,
-        max_agents=max_agents,
-        model=model,
-        agent_models=agent_models or None,
-        custom_dockerfile_mode=custom_dockerfile_mode,
-        skill_workspace_mode=skill_workspace_mode,
-        include_skills=[p.resolve() for p in include_skills] or None,
-        copy_repo=copy_repo,
-        grading_mode=grading_mode,
-        output_dir=output_dir,
-        keep_harbor_jobs=harbor_keep_jobs,
-        env_mode=env_mode,
-        env_mode_source="CLI",
-        timeout_multiplier=timeout_multiplier,
-        override_cpus=override_cpus,
-        override_memory_mb=override_memory_mb,
-        override_storage_mb=override_storage_mb,
-    )
-    if "error" in result:
-        raise RuntimeError("; ".join(str(error) for error in result["error"]))
-    return result
+        try:
+            resolve_llm_provider()
+        except ProviderConfigurationError as exc:
+            raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
+
+        agent_models = parse_agent_model_overrides(agent_model)
+        unknown_model_agents = sorted(set(agent_models) - set(agent_list))
+        if unknown_model_agents:
+            raise ValueError(
+                "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
+            )
+
+        output_dir = resolve_results_root(skill_path, results_dir)
+        engine_started = True
+        return run_harbor_eval(
+            skill_path=skill_path.resolve(),
+            agents=agent_list,
+            skip_baseline=skip_baseline,
+            n_attempts=n_attempts,
+            pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
+            n_concurrent=n_concurrent,
+            max_agents=max_agents,
+            model=model,
+            agent_models=agent_models or None,
+            custom_dockerfile_mode=custom_dockerfile_mode,
+            skill_workspace_mode=skill_workspace_mode,
+            include_skills=[p.resolve() for p in include_skills] or None,
+            copy_repo=copy_repo,
+            grading_mode=grading_mode,
+            output_dir=output_dir,
+            keep_harbor_jobs=harbor_keep_jobs,
+            agent_runtime_preflight=agent_runtime_preflight,
+            env_mode=env_mode,
+            env_mode_source="CLI",
+            timeout_multiplier=timeout_multiplier,
+            override_cpus=override_cpus,
+            override_memory_mb=override_memory_mb,
+            override_storage_mb=override_storage_mb,
+            progress_reporter=reporter,
+        )
+    except Exception as exc:
+        if not engine_started:
+            reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
+        raise
+    finally:
+        reporter.close()
 
 
 def doctor(
@@ -652,6 +697,7 @@ def doctor(
     agents: str | None,
     env_mode: str,
     verify_models: bool = False,
+    agent_model: tuple[str, ...] = (),
 ) -> int:
     """Check whether live evaluation dependencies are available."""
     env_mode = _engine_env_mode(env_mode)
@@ -659,12 +705,52 @@ def doctor(
     rows: list[tuple[str, str, str]] = []
     rows.append(("CLI package", "pass", f"skillevaluator {__version__}"))
 
+    provider = None
+    model_resolution: dict[str, tuple[str, str]] = {}
+    runtime_plans: dict[str, Any] = {}
     try:
         provider = resolve_llm_provider()
     except ProviderConfigurationError as exc:
         rows.append(("Public LLM provider", "fail", str(exc)))
     else:
         rows.append(("Public LLM provider", "pass", f"{provider.provider} / {provider.model}"))
+        try:
+            overrides = parse_agent_model_overrides(agent_model)
+        except ValueError as exc:
+            overrides = {}
+            rows.append(("Agent model plan", "fail", str(exc)))
+        unknown_model_agents = sorted(set(overrides) - set(agent_list))
+        if unknown_model_agents:
+            rows.append(
+                (
+                    "Agent model plan",
+                    "fail",
+                    "--agent-model provided for agent(s) not selected by -a/--agents: "
+                    + ", ".join(unknown_model_agents),
+                )
+            )
+        model_resolution = {
+            agent: _model_for_agent(
+                agent,
+                cli_model=(overrides.get(agent) or [None])[0],
+                config_agents={},
+                provider=provider,
+            )
+            for agent in agent_list
+        }
+        plan_error: str | None = None
+        if not unknown_model_agents and not validate_agents(agent_list):
+            try:
+                runtime_plans = _resolve_agent_runtime_plan(
+                    provider=provider,
+                    agents=agent_list,
+                    models={agent: details[0] for agent, details in model_resolution.items()},
+                    configured_runtime_env={},
+                    env_mode=env_mode,
+                    model_sources={agent: details[1] for agent, details in model_resolution.items()},
+                )
+            except ValueError as exc:
+                plan_error = str(exc)
         if provider.provider == "nv_build":
             labels = {"codex": "Codex", "claude-code": "Claude Code", "opencode": "OpenCode"}
             credential_label = (
@@ -672,30 +758,12 @@ def doctor(
                 if len(agent_list) == 1 and agent_list[0] in labels
                 else "Agent runtime credential"
             )
-            credential_errors = _validate_agent_provider_credentials(
-                provider,
-                agent_list,
-                {
-                    "NVIDIA_API_KEY": os.environ.get("NVIDIA_API_KEY", ""),
-                    "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
-                    "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL", ""),
-                    "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
-                    "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
-                },
-                dict.fromkeys(agent_list, "doctor host preflight"),
-                env_mode=env_mode,
-            )
-            if credential_errors:
-                for error in credential_errors:
-                    rows.append((credential_label, "fail", error))
-            else:
-                rows.append(
-                    (
-                        credential_label,
-                        "pass",
-                        "host credential compatibility checks passed; skill config and model are validated by evaluate.",
-                    )
-                )
+            if plan_error is not None:
+                rows.append((credential_label, "fail", plan_error))
+            elif runtime_plans:
+                rows.append((credential_label, "pass", "operator credential and model plan resolved"))
+        elif plan_error is not None:
+            rows.append(("Agent runtime credential", "fail", plan_error))
 
     unknown = validate_agents(agent_list)
     if unknown:
@@ -711,21 +779,14 @@ def doctor(
         rows.append((f"{env_mode} prerequisite", "pass", "ready"))
 
     if verify_models:
-        try:
-            provider = resolve_llm_provider()
-        except ProviderConfigurationError as exc:
-            rows.append(("provider model", "fail", str(exc)))
+        if provider is None or not runtime_plans:
+            rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
-            selected_models = [
-                _model_for_agent(
-                    agent,
-                    cli_model=None,
-                    config_agents={},
-                    provider=provider,
-                )[0]
-                for agent in agent_list
-            ]
-            rows.append(("provider model", "pass", ", ".join(selected_models)))
+            from skillevaluator.tier3.harbor.runtime_preflight import probe_model
+
+            for agent in agent_list:
+                probe = probe_model(runtime_plans[agent].provider)
+                rows.append((f"{agent} model", "pass" if probe.ok else "fail", probe.detail))
 
     table = Table(title="SkillEvaluator Doctor", box=SIMPLE, show_edge=False)
     table.add_column("Check", style="bold")
@@ -843,11 +904,7 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     target = latest.resolve() if latest.is_symlink() else latest
     report_path = target / "report.html"
     if not report_path.exists():
-        report_path = generate_html_report(
-            skill_name=skill_path.name,
-            results_dir=target,
-            skill_path=skill_path,
-        )
+        report_path = render_agent_eval_html_report(skill_path, target)
     console.print(f"Opening: [cyan]{report_path}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path
@@ -905,14 +962,14 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                     "path": str(agent_dir),
                     "num_trials": data.get("num_trials", "?"),
                 }
-            wo_summary = agent_dir / "without-skill" / "summary.json"
-            if wo_summary.exists():
-                try:
-                    wo_scores = _summary_scores(json.loads(wo_summary.read_text(encoding="utf-8")))
-                    if wo_scores:
-                        agent_without[agent_name] = wo_scores
-                except (ValueError, OSError):
-                    pass
+                wo_summary = agent_dir / "without-skill" / "summary.json"
+                if wo_summary.exists():
+                    try:
+                        wo_scores = _summary_scores(json.loads(wo_summary.read_text(encoding="utf-8")))
+                        if wo_scores:
+                            agent_without[agent_name] = wo_scores
+                    except (ValueError, OSError):
+                        pass
 
     if not agent_with:
         console.print("[red]No agent results found. Run skillevaluator evaluate first.[/red]")
@@ -972,6 +1029,8 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 
 
 def _summary_scores(data: dict[str, Any]) -> dict[str, float]:
+    if data.get("execution_status") != "succeeded":
+        return {}
     scores: dict[str, float] = {}
     raw_scores = data.get("scores", data)
     if isinstance(raw_scores, dict):

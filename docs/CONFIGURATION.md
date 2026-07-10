@@ -17,6 +17,10 @@ offline:
 `validate` without `--no-dedup` stays usable keyless: the Tier 2 dedup pass
 skips gracefully when no embedding provider is configured.
 
+`evaluate --autopilot` can create its missing one-case dataset without a key,
+but the live evaluation that follows still needs the evaluator-provider and
+selected-agent credentials shown above.
+
 ## Public Providers
 
 Set `SKILL_EVAL_LLM_PROVIDER` to `openai`, `anthropic`, `nv_build`, `bedrock`,
@@ -25,25 +29,45 @@ each ships a default model that `SKILL_EVAL_LLM_MODEL` overrides:
 
 | Provider (`SKILL_EVAL_LLM_PROVIDER`) | Credential | Endpoint | Default model |
 | --- | --- | --- | --- |
-| `nv_build` | `NVIDIA_API_KEY` | integrate.api.nvidia.com | `meta/llama-3.1-8b-instruct` |
+| `nv_build` | `NVIDIA_API_KEY` | integrate.api.nvidia.com | `nvidia/nemotron-3-nano-30b-a3b` |
 | `anthropic` | `ANTHROPIC_API_KEY` | api.anthropic.com | `claude-sonnet-4-5` |
-| `openai` | `OPENAI_API_KEY` | api.openai.com | `gpt-4.1-mini` |
+| `openai` | `OPENAI_API_KEY` | api.openai.com | `gpt-5.4-mini` |
 | `bedrock` | Standard AWS credential chain; `AWS_REGION` (defaults to `us-west-2`) | AWS Bedrock Runtime | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` |
 | `openai-compatible` | `SKILL_EVAL_LLM_API_KEY` + `SKILL_EVAL_LLM_BASE_URL` + `SKILL_EVAL_LLM_MODEL` | Any OpenAI-compatible URL | _(explicit)_ |
 
 The quickest start is a free NVIDIA API Catalog key from
 [build.nvidia.com](https://build.nvidia.com/), exported as `NVIDIA_API_KEY` —
 it covers LLM judging and Tier 2 embeddings with one credential. For a custom
-OpenAI-compatible endpoint, `SKILL_EVAL_LLM_BASE_URL` takes precedence over
-the provider default.
+OpenAI-compatible endpoint, select `openai-compatible` and set its explicit
+base URL; the public `nv_build` endpoint is fixed and cannot be redirected.
+
+Show a filtered, bounded view of model candidates visible to the selected
+authenticated provider:
+
+```bash
+skillevaluator models
+skillevaluator models --limit 25 --json
+```
+
+The command uses the same provider, configured model, credential, and endpoint
+resolution as evaluation. It does not choose a different provider, rewrite
+model IDs for an agent, or probe a harness. Catalog visibility alone is not
+runtime or end-to-end proof; use `doctor --verify-models` and a live Tier 3 run
+for those checks. Bedrock catalog verification remains in `doctor` because it
+uses the AWS SDK rather than an HTTP `/models` endpoint.
 
 The `--llm` security analysis runs
 [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own
 provider environment (`SKILLSPECTOR_PROVIDER` plus per-provider credential
 variables). SkillEvaluator bridges your configured provider automatically for
-that invocation, so the one key above is all you need. Setting
-`SKILLSPECTOR_PROVIDER` yourself disables the bridge and your own
-SkillSpector configuration wins.
+that invocation, so the one key above is all you need. For `nv_build`, the
+invocation uses SkillSpector's OpenAI-compatible provider path with the public
+NVIDIA Build endpoint and the structured-output-capable public default model;
+it does not create a second NVIDIA credential name.
+Only the selected provider settings and basic process environment are passed
+to the SkillSpector subprocess; unrelated ambient credentials are not. Setting
+`SKILLSPECTOR_PROVIDER` to a supported public provider keeps that explicit
+SkillSpector configuration authoritative.
 
 ## Embeddings
 
@@ -51,7 +75,10 @@ Tier 2 uses an OpenAI-compatible embeddings API. Set
 `SKILL_EVAL_EMBEDDING_PROVIDER` to `openai` (`text-embedding-3-small`),
 `nv_build` (`nvidia/nv-embed-v1`), or `openai-compatible`. Use
 `SKILL_EVAL_EMBEDDING_MODEL` and `SKILL_EVAL_EMBEDDING_BASE_URL` to override
-defaults.
+defaults for providers that support overrides. The `nv_build` endpoint remains
+fixed even when `SKILL_EVAL_EMBEDDING_BASE_URL` is set. To use a custom
+embedding endpoint, select `openai-compatible` and provide its model, key, and
+base URL explicitly.
 
 Anthropic and Bedrock do not provide embeddings, so when one of those is the
 LLM provider, configure an embedding-capable provider separately for Tier 2:
@@ -95,36 +122,45 @@ stronger local model for verdicts you intend to act on.
 
 ## Live Agent Credentials
 
-The evaluator provider is used for dataset generation and verifier-side
-judging. It is not automatically an agent credential. Configure credentials
-for the agent you select separately.
+The evaluator provider and live agent normally use separate credential roles.
+NVIDIA Build is an explicit Docker and local exception: one `NVIDIA_API_KEY`
+powers the evaluator plus direct OpenCode and SkillEvaluator's compatibility
+bridges.
 
-For example, Codex requires an OpenAI credential compatible with the Responses
-API. An NVIDIA Build key is intentionally verifier-only and cannot be used as
-the Codex `OPENAI_API_KEY`. For a Docker task, reference the agent credential
-from the skill's `evals/config.yml` rather than committing a literal value:
+| Agent path | Credential and model behavior |
+| --- | --- |
+| Direct OpenCode + NVIDIA Build | One `NVIDIA_API_KEY`; the default is `nvidia/nvidia/nemotron-3-nano-30b-a3b` (`nvidia/` provider namespace plus the raw Build model ID) |
+| Codex + NVIDIA Build | Docker or local compatibility bridge; one `NVIDIA_API_KEY`; defaults to `nvidia/nemotron-3-super-120b-a12b` |
+| Experimental Claude Code + NVIDIA Build | Docker or local compatibility bridge; one `NVIDIA_API_KEY`; defaults to `nvidia/nemotron-3-super-120b-a12b` and uses the bridge's reduced executable tool set |
+| Native Codex | `OPENAI_API_KEY` + `OPENAI_BASE_URL` for a full Responses provider; the OpenAI default is `gpt-5.4-mini` |
+| Native Claude Code | `ANTHROPIC_API_KEY` and an Anthropic-compatible endpoint/model |
 
-```yaml
-schema_version: 1
-harbor:
-  runtime_env:
-    OPENAI_API_KEY: ${OPENAI_API_KEY}
-    OPENAI_BASE_URL: ${OPENAI_BASE_URL}
-  agents:
-    codex:
-      model: gpt-4.1-mini
+Export operator credentials on the host; never place them in a checked-out
+skill's configuration. For Build-backed Docker or local agents:
+
+```bash
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+export NVIDIA_API_KEY='nvapi-...'
+skillevaluator doctor --agents opencode,codex,claude-code --env-mode docker
+skillevaluator doctor --agents opencode,codex,claude-code --env-mode local
 ```
 
-This lets an NVIDIA Build provider supply evaluator-owned chat, embeddings, and
-verifier calls while Codex uses its own OpenAI credential and model. You can
-also supply that model at invocation time with `--agent-model codex=MODEL`.
+Build-backed Codex and Claude Code start a loopback bridge. Their vendor CLI
+never receives the real Build key. Docker uses a short-lived file handoff and a
+sentinel client key. Local mode keeps the key in Harbor's trusted parent process
+and gives the vendor CLI a unique per-trial capability token. Cloud
+Codex/Claude Code continue to require their native provider credentials and
+explicit model selection where applicable.
 
-Do not commit credentials. On the Docker backend, Harbor task environment
-values can be visible to users able to inspect host process arguments. Use
-scoped, short-lived credentials and a non-shared host, or use an environment
-with platform-managed secret injection.
+For a Bedrock evaluator with the Claude Code live agent, Docker/cloud mode
+requires either an explicit `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair
+or `AWS_BEARER_TOKEN_BEDROCK`; local mode is not supported for this pairing.
+Other standard AWS credential-chain modes remain valid for evaluator-side LLM
+calls but are not forwarded into a live-agent task container.
 
-`runtime_env` is for task and agent values, not host-process configuration.
+`runtime_env` is for non-credential task values, not agent credentials or
+host-process configuration. It cannot reference protected host credentials
+under an innocent alias.
 Names that control the launcher or dynamic runtime, including `PATH`,
 `PYTHON*`, `LD_*`, `DYLD_*`, `DOCKER_*`, `COMPOSE_*`, proxy variables, and
 telemetry exporters, are rejected. Configure the selected Harbor backend in

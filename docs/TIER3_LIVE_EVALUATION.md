@@ -5,14 +5,17 @@ better at the task?** Skill Evaluator runs a real agent (such as `codex`,
 `claude-code`, or `opencode`) against the same eval cases with the skill
 installed and, unless `--skip-baseline` is used, without it — in a selected
 [Harbor](https://github.com/harbor-framework/harbor) environment. Docker and
-cloud backends provide environment isolation; local mode applies its configured
-OS-sandbox policy.
+cloud backends provide environment isolation. Experimental local mode applies
+its configured OS-sandbox policy and is intended for trusted skills and
+workspaces; Docker provides stronger isolation for untrusted code.
 
 With `default` or `default_plus_custom` grading, completed reports lead with five
 human-readable dimensions: **Security, Correctness, Discoverability,
 Effectiveness, and Efficiency**. The with-skill and without-skill results make
 the skill's effect visible rather than treating a single agent run as proof of
 quality. In `custom_only` mode, the user-owned grader defines the score instead.
+Default dimension rows remain visible for a stable terminal layout but show
+`NO SCORE`; custom metrics are not re-labeled as standard dimensions.
 
 ## Table of Contents
 
@@ -41,9 +44,9 @@ uv tool install "skillevaluator[tier3] @ git+https://github.com/NVIDIA/SkillEval
 export SKILL_EVAL_LLM_PROVIDER=openai
 export OPENAI_API_KEY='...'
 
-# 3. Configure the live-agent credential role (see below)
-#    For codex this is an OpenAI Responses API key, configured in
-#    evals/config.yml via environment substitution.
+# 3. Configure the live-agent credential role on the host (see below).
+#    NVIDIA Build Docker/local paths can reuse NVIDIA_API_KEY. Do not put credentials
+#    or credential aliases in evals/config.yml.
 
 # 4. Generate eval cases for your skill
 skillevaluator create-eval-dataset ./my-skill --full
@@ -52,7 +55,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 skillevaluator doctor --agents codex --env-mode docker
 
 # 6. Run the live comparison
-skillevaluator evaluate ./my-skill --agents codex --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
 
 # 7. Open the HTML report
 skillevaluator view ./my-skill
@@ -72,17 +75,22 @@ If a step fails, start with [Troubleshooting](#troubleshooting).
    `custom_only` grader owns this step instead.
 4. Skill Evaluator collects the result artifacts. Completed standard-grading
    runs render the five human-readable dimensions, pass rates, and Skill Lift.
+5. `evaluate` automatically writes the canonical `report.html` in the run
+   directory. A focused run contains Tier 3 only; a combined validation report
+   contains exactly the tiers that were executed.
 
 The CLI uses the same in-process evaluation service for focused `evaluate`
-runs and `validate --agent-eval` runs. Temporary task and job directories are
-deleted after collection; pass `--harbor-keep-jobs` to retain them.
+runs and `validate --agent-eval` runs. Staged task and raw Harbor job
+directories are transient and deleted by default on successful and failed
+runs; `report.html`, `result.json`, and collected summaries remain. Pass
+`--harbor-keep-jobs` to retain the transient directories for inspection.
 
 ## Two Ways to Run Tier 3
 
 | Use case | Command | When to use |
 | --- | --- | --- |
 | Full validation | `skillevaluator validate ./my-skill --agent-eval` | Add advisory Tier 3 results after the standard validation stages |
-| Focused evaluation | `skillevaluator evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
+| Focused evaluation | `skillevaluator tier3 evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
 
 Tier 3 remains advisory when attached to `validate`: it is included in the
 combined reports but does not change the validation exit code. Focused live
@@ -97,52 +105,86 @@ Tier 3 needs:
    file, or native tasks under `evals/harbor/`.
 2. The `tier3` extra, which installs Harbor and the evaluator dependencies.
 3. A configured evaluator LLM provider.
-4. The selected live agent's native credential.
+4. The selected live agent credential (or the shared `NVIDIA_API_KEY` for
+   Build-backed Docker/local agents).
 5. A configured environment, such as Docker, local OS isolation, or a supported
    Harbor cloud backend.
 
-The evaluator and live agent use **two credential roles**. They are not copied
-between roles automatically, although a user may deliberately source both from
-the same host secret. Local mode is an exception: for compatible agent/provider
-pairs, the runner can map evaluator-provider credentials into the environment
-variables read by the local agent CLI.
+The evaluator and live agent use **two credential roles**. They are resolved
+from the operator's host environment, outside the checked-out skill. A skill
+cannot replace, alias, or reroute provider/agent/backend credentials through
+`evals/config.yml`.
 
 | Credential | Used for | How to set |
 | --- | --- | --- |
 | Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key; see [CONFIGURATION.md](CONFIGURATION.md) |
-| Live agent credential | The agent actually performing the task | Run-scoped values in `evals/config.yml` `harbor.runtime_env` |
+| Live agent credential | The agent actually performing the task | Export the agent's credential in the host environment before `doctor`/`evaluate` |
 
-For example, NVIDIA Build can power dataset generation and standard grading,
-while `codex` uses an OpenAI Responses API credential. Configure agent
-credentials through environment-variable substitution; never put literal keys
-in the file:
+Public NVIDIA Build at [build.nvidia.com](https://build.nvidia.com/) uses the
+`nv_build` provider and `NVIDIA_API_KEY`. The same key powers direct OpenCode
+and SkillEvaluator's Docker/local compatibility bridges:
 
-```yaml
-schema_version: 1
-harbor:
-  runtime_env:
-    OPENAI_API_KEY: ${CODEX_OPENAI_API_KEY}
-    OPENAI_BASE_URL: ${CODEX_OPENAI_BASE_URL}
-  agents:
-    codex:
-      model: gpt-4.1-mini
+```bash
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+export NVIDIA_API_KEY='nvapi-...'
+skillevaluator models
+skillevaluator doctor --agents opencode --env-mode docker --verify-models
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
+
+# Codex Responses -> NVIDIA Build Chat Completions
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker
+
+# Experimental Claude Code Messages -> NVIDIA Build Chat Completions
+skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker
+
+# The same three paths are available under the trusted local OS sandbox
+skillevaluator doctor --agents opencode,codex,claude-code --env-mode local --verify-models
+skillevaluator evaluate ./my-skill --agents codex --env-mode local
 ```
 
-The agent model must be selected explicitly when the evaluator provider's
-default model is not valid for that agent. Use `--agent-model codex=MODEL` for
-a per-invocation override.
+`models` only shows a filtered, bounded view of the authenticated Build
+catalog. The following `doctor` and `evaluate` commands provide runtime and
+end-to-end evidence; the listing itself does not claim harness compatibility.
+
+OpenCode talks to Build directly. Codex and Claude Code use loopback protocol
+bridges owned by SkillEvaluator. In Docker, the vendor CLI receives only a
+sentinel key and the real key crosses a short-lived file handoff. In local mode,
+the bridge runs in Harbor's trusted parent process and the CLI receives a unique
+per-trial capability token. The experimental Claude Code bridge keeps executable
+core and compatible MCP tools but omits Claude-specific tools that Build cannot
+execute. Harbor cloud Codex/Claude Code continue to use native provider
+credentials.
+
+Direct OpenCode defaults to `nvidia/nemotron-3-nano-30b-a3b`, rendered as
+`nvidia/nvidia/nemotron-3-nano-30b-a3b`. Bridged Codex and experimental Claude
+Code default to `nvidia/nemotron-3-super-120b-a12b`, the verified default for
+their larger tool surfaces. For an explicit Nemotron Super override or a manual
+Llama comparison, use:
+
+```bash
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker \
+  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
+```
+
+SkillEvaluator never changes models silently. Explicit CLI/config overrides
+remain exact, and an unavailable model fails rather than switching to Llama.
 
 Security notes:
 
-- Do not commit credentials. `runtime_env` values pass into the task
-  environment and may be visible to users able to inspect processes on a
-  shared host. Prefer scoped, short-lived credentials and isolated hosts.
-- Evaluator-provider credentials are not inserted into `runtime_env`
-  automatically. In local mode, compatible provider credentials may instead be
-  routed directly to the selected agent subprocess. Every value that you place
-  in `runtime_env` is available to every agent selected for that run. For strict
-  per-agent secret isolation, use separate runs with only the values required by
-  that agent.
+- Do not commit credentials. NVIDIA Build Docker runs use a host-only key file
+  plus short-lived container handoffs. Local bridges retain the real key only
+  in Harbor's trusted parent and authenticate each CLI with a unique capability
+  token. Bridge vendor CLIs never receive the real key. Use scoped, short-lived
+  keys.
+- `runtime_env` is only for non-credential task values. Credential names,
+  provider routing, backend controls, and aliases such as
+  `SAFE_NAME=${NVIDIA_API_KEY}` are rejected.
 - `runtime_env` cannot override host launcher, language-runtime, Docker,
   Compose, proxy, or telemetry controls. Configure the selected backend in the
   host environment.
@@ -152,13 +194,14 @@ Security notes:
 ### `evaluate`
 
 ```bash
-skillevaluator evaluate <SKILL_PATH> [OPTIONS]
+skillevaluator tier3 evaluate <SKILL_PATH> [OPTIONS]
 ```
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `-a`, `--agents` | `codex` | Comma-separated Harbor agents |
+| `-a`, `--agents` | `codex` | Comma-separated Harbor agents; `claude` is accepted as an alias for `claude-code` |
 | `--env-mode` | `docker` | Docker, local, or a supported Harbor cloud backend |
+| `--autopilot` | false | Reuse an existing eval source, or create exactly one case before evaluation |
 | `--skip-baseline` | false | Skip the without-skill arm for faster iteration; no Skill Lift is produced |
 | `--n-attempts` | `1` | Attempts per eval case; values above one add pass@k context |
 | `--pass-threshold` | `0.5` | Score required for an attempt to count as passed |
@@ -173,22 +216,49 @@ skillevaluator evaluate <SKILL_PATH> [OPTIONS]
 | `--custom-dockerfile-mode` | `rebase` | `preserve` or `rebase` a custom eval Dockerfile |
 | `--results-dir` | `evals/results` or `SKILLEVALUATOR_RESULTS_DIR` | Write results below an explicit external root |
 | `--harbor-keep-jobs` | false | Retain Harbor job directories for inspection |
+| `--agent-runtime-preflight` | true | Run one real agent smoke task before the full A/B matrix |
+| `--progress` | `auto` | Rich TTY progress, stable plain lines, or `off` |
 | `--timeout-multiplier` | `1.0` | Scale Harbor setup, run, and verifier timeouts |
 | `--override-cpus`, `--override-memory-mb`, `--override-storage-mb` | engine default | Per-environment resource overrides |
+
+The `claude` alias is also accepted in `--agent-model` and under
+`harbor.agents` in `evals/config.yml`. It is canonicalized before execution;
+persisted result keys, paths, progress, and reports always use `claude-code`.
+Do not configure both names for the same run.
+
+For OpenCode, the resolved runtime model includes its adapter namespace
+(`nvidia/`, `openai/`, or `anthropic/`). Provider defaults are raw catalog IDs
+and are always qualified automatically. An explicit `--agent-model` or
+`harbor.agents.<agent>.model` value that already starts with the expected
+namespace is treated as a complete OpenCode runtime ID; an unprefixed value is
+qualified automatically. If a raw catalog ID itself starts with that namespace,
+repeat it in the runtime ID (for example, raw `nvidia/model` becomes
+`nvidia/nvidia/model`).
 
 Examples:
 
 ```bash
-# Multi-agent comparison
-skillevaluator evaluate ./my-skill --agents codex,opencode --env-mode docker
+# Generate one case only when needed, then run the evaluation
+skillevaluator tier3 evaluate ./my-skill --autopilot --agents opencode
+
+# NVIDIA Build + OpenCode
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
 
 # Faster iteration without the baseline arm
-skillevaluator evaluate ./my-skill --agents codex --skip-baseline
+skillevaluator tier3 evaluate ./my-skill --agents opencode --skip-baseline
 
 # Three attempts per case for pass@k context
-skillevaluator evaluate ./my-skill --agents codex \
+skillevaluator tier3 evaluate ./my-skill --agents opencode \
   --n-attempts 3 --pass-threshold 0.7
 ```
+
+Autopilot never overwrites an accepted dataset or native Harbor task source.
+When no source exists, it uses the configured public LLM provider to generate
+one case. Without a configured provider key—or if LLM generation fails—it
+warns and writes the deterministic one-case template instead. `--skip-baseline`
+remains an independent evaluation option. Dataset creation can be keyless, but
+the live evaluation that follows still requires its evaluator-provider and
+selected-agent credentials.
 
 ### `create-eval-dataset`
 
@@ -212,10 +282,11 @@ skillevaluator create-eval-dataset <SKILL_PATH> [OPTIONS]
 ```bash
 skillevaluator view ./my-skill [--results-dir DIR]
 skillevaluator compare ./my-skill [--results-dir DIR]
-skillevaluator doctor --agents codex --env-mode docker [--verify-models]
+skillevaluator doctor --agents opencode --env-mode docker [--verify-models]
 ```
 
-- `view` opens the latest local HTML report.
+- `view` opens the latest canonical HTML report and regenerates it from the raw
+  Tier 3 result when the HTML artifact is missing.
 - `compare` summarizes stored results across agents and arms.
 - `doctor` checks backend readiness, agent availability, and visible host
   credentials. `evaluate` remains authoritative for skill-specific config and
@@ -242,16 +313,21 @@ uv tool install --with 'harbor[daytona]' \
   "skillevaluator[tier3] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 
 export DAYTONA_API_KEY='...'
-skillevaluator evaluate ./my-skill --agents codex --env-mode daytona
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode daytona
 ```
 
 ### Local mode (`--env-mode local`)
 
-Local mode runs the agent CLI directly on the host — no Docker. Under the
-default `require` setting it is confined by an OS sandbox: **bubblewrap** on
-Linux and **Seatbelt** (`sandbox-exec`) on macOS. It is meant for
-**semi-trusted** skills on a developer machine; use Docker or a cloud
-environment for arbitrary untrusted code.
+Local mode is experimental and runs the agent CLI directly on the host — no
+Docker. Under the default `require` setting it is confined by an OS sandbox:
+**bubblewrap** on
+Linux and **Seatbelt** (`sandbox-exec`) on macOS. It is intended for trusted
+skills and workspaces on a developer machine; Docker or a cloud environment
+provides stronger isolation for untrusted code.
+
+Native Windows local mode is intentionally unsupported and fails before agent
+runtime discovery for every sandbox setting, including `prefer` and `off`.
+Use WSL2 for the Linux/Bubblewrap local path, or use `--env-mode docker`.
 
 Linux bubblewrap is the strong path because it uses namespace isolation. macOS
 Seatbelt confines filesystem access and network access at the kernel level, but
@@ -262,10 +338,13 @@ and system exceptions. This is stricter but may expose compatibility issues in
 host developer tools.
 
 ```bash
-# opencode works with NVIDIA Build and other OpenAI-compatible endpoints
+# All three harnesses work with NVIDIA Build in local mode
 export NVIDIA_API_KEY='nvapi-...'
-skillevaluator evaluate ./my-skill --agents opencode \
-  --env-mode local --model nvidia/openai/gpt-oss-120b
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+skillevaluator doctor --agents opencode,codex,claude-code \
+  --env-mode local --verify-models
+skillevaluator evaluate ./my-skill --agents opencode,codex,claude-code \
+  --env-mode local
 ```
 
 Requirements and behavior:
@@ -276,7 +355,8 @@ Requirements and behavior:
 - **Sandbox required by default:** if no supported OS sandbox is usable, the
   `require` setting fails closed. `prefer` may continue with advisory-only
   protection, while `off` disables kernel confinement and is only for fully
-  trusted skills.
+  trusted skills. These settings apply only to Linux and macOS; none can enable
+  native Windows local mode.
 - **Confinement when the OS sandbox is active:** writes are restricted to the
   run directory. The host home and common secret locations are excluded from
   the run's readable filesystem. These guarantees do not apply with
@@ -408,7 +488,7 @@ my-skill/
             ├── result.json
             ├── run_config.json
             ├── attempt_policy.json
-            ├── report.html                  # Generated on a best-effort basis
+            ├── report.html                  # Canonical report, generated automatically
             ├── comparison.json             # Multi-agent runs only
             └── <agent>/
                 ├── lift.json               # Present when baseline lift is available
@@ -431,9 +511,18 @@ skillevaluator view ./my-skill
 skillevaluator compare ./my-skill
 ```
 
-For completed `default` and `default_plus_custom` runs, the report summarizes
-five human-readable dimensions. In `custom_only`, the custom grader owns the
-score and the standard dimension view is omitted.
+Standalone `evaluate` and combined validation use the same generic report
+renderer. Tier 3 results appear in their own section, alongside Tier 1 and Tier
+2 only when those tiers were executed. Completed `default` and
+`default_plus_custom` runs summarize five human-readable dimensions. In
+`custom_only`, the custom grader's overall result remains visible without
+inventing standard dimension scores from custom metrics.
+
+The terminal output separates persisted truth into **Results by Evaluator**
+(the underlying evaluator metrics and Skill Lift) and **Results by Dimension**
+(the five report rollups). A final compact **Artifacts** panel lists the HTML
+report and output directory. It adds **Inspect jobs** only when a retained jobs
+directory actually exists.
 
 | Dimension | Question answered |
 | --- | --- |
@@ -452,27 +541,37 @@ With multiple attempts, pass@k shows whether at least one attempt for each case
 met `--pass-threshold`. Under standard grading it is reliability context
 alongside Skill Lift, not a replacement for the five dimensions. In
 `custom_only`, pass@k uses the custom overall reward and the standard dimension
-view remains absent.
+rows remain unscored.
 
-The canonical Tier 3 payload embedded by `validate --agent-eval` uses schema
-version 2.0. A completed standard-grading payload includes the summary, five
-dimensions, per-agent results, trials, pass@k, attempt policy, and dataset;
-advisory or skipped payloads may leave some of those sections empty. Focused
-`evaluate` artifacts have file-specific shapes and are not all schema 2.0.
+The canonical Tier 3 payload embedded by both standalone `evaluate` and
+`validate --agent-eval` reports uses schema version 2.0. A completed
+standard-grading payload includes the summary, five dimensions, per-agent
+results, trials, pass@k, attempt policy, and dataset; advisory or skipped
+payloads may leave some of those sections empty.
 
-Keep Harbor artifacts for debugging with `--harbor-keep-jobs`; the report links
-to the retained job directories.
+Keep raw Harbor artifacts for debugging and open them with the bundled viewer:
+
+```bash
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
+  --harbor-keep-jobs
+skillevaluator tier3 harbor-view ./my-results/<run-id>/_harbor-jobs
+```
+
+Without `--harbor-keep-jobs`, the transient job/task directories are removed
+and no inspection command is printed. The normal report and collected result
+artifacts remain available.
 
 ## Troubleshooting
 
 | Symptom | Likely cause and fix |
 | --- | --- |
 | `A public LLM provider is required for live evaluation` | Set `SKILL_EVAL_LLM_PROVIDER` and the corresponding evaluator-provider key. |
-| Agent authentication fails | Configure the live-agent credential role through `harbor.runtime_env` in `evals/config.yml`. |
+| Agent authentication fails | Export the selected agent credential on the host; do not place operator credentials in skill-owned `harbor.runtime_env`. |
 | `evaluate` cannot start the environment | Start Docker or configure the selected `--env-mode`; run `doctor` with the same agent and environment. |
+| `Native Windows local mode is unsupported` | Run local mode inside WSL2, or select `--env-mode docker`; `SKILLEVALUATOR_LOCAL_SANDBOX=prefer/off` is not a Windows bypass. |
 | No eval dataset or native task source found | Run `skillevaluator create-eval-dataset ./my-skill` or add accepted files under `evals/`. |
 | Agent model is rejected | Supply a model valid for that agent with `--agent-model AGENT=MODEL`. |
-| Results look wrong or a case is hard to diagnose | Re-run with `--harbor-keep-jobs`, then inspect retained artifacts with `view` or `tier3 harbor-view`. |
+| Results look wrong or a case is hard to diagnose | Re-run with `--harbor-keep-jobs`, then use the printed `skillevaluator tier3 harbor-view <JOBS_DIR>` command. |
 
 Every live run requires a configured evaluator provider plus the credentials
 required by the selected agent and environment.

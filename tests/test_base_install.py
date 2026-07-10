@@ -19,10 +19,11 @@ REPO = Path(__file__).resolve().parents[1]
 FIXTURE = REPO / "tests" / "fixtures" / "skills" / "simple"
 
 _SUBPROCESS = r"""
+import os
 import sys
 
 BLOCKED = {
-    "harbor", "openai", "litellm",
+    "anthropic", "boto3", "botocore", "harbor", "openai", "litellm",
     "langgraph", "langgraph_checkpoint",
     "opentelemetry",
 }
@@ -43,6 +44,17 @@ from skillevaluator.cli import cli
 
 help_result = CliRunner().invoke(cli, ["--help"])
 assert help_result.exit_code == 0, help_result.output
+
+for name in (
+    "SKILL_EVAL_LLM_PROVIDER", "SKILL_EVAL_LLM_MODEL",
+    "SKILL_EVAL_LLM_API_KEY", "SKILL_EVAL_LLM_BASE_URL",
+    "NVIDIA_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+):
+    os.environ.pop(name, None)
+
+models_result = CliRunner().invoke(cli, ["models"])
+assert models_result.exit_code == 1, models_result.output
+assert "No provider is configured" in models_result.output, models_result.output
 
 validate_result = CliRunner().invoke(
     cli, ["validate", FIXTURE, "--no-llm", "--checks", "schema,quality,lint"]

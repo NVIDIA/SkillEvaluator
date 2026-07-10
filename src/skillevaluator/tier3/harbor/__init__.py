@@ -35,31 +35,25 @@ LOCAL_AGENT_IMPORT_PATHS = {
 HARBOR_AGENTS_SUPPORTED = frozenset(
     {
         "claude-code",
-        "cursor-cli",
-        "openhands",
-        "mini-swe-agent",
         "codex",
         "opencode",
-        "cline-cli",
-        "terminus-2",
     }
 )
 
-HARBOR_AGENTS_EXPERIMENTAL = frozenset(
-    {
-        "aider",
-        "gemini-cli",
-        "goose",
-        "qwen-coder",
-        "terminus",
-        "oracle",
-        "nop",
-    }
-)
+HARBOR_AGENTS_EXPERIMENTAL: frozenset[str] = frozenset()
 
 HARBOR_AGENTS = HARBOR_AGENTS_SUPPORTED | HARBOR_AGENTS_EXPERIMENTAL
 
+AGENT_ALIASES = {"claude": "claude-code"}
+
+
+def canonical_agent_name(agent: str) -> str:
+    """Return the Harbor agent identifier for a public CLI/config name."""
+    return AGENT_ALIASES.get(agent, agent)
+
+
 __all__ = [
+    "AGENT_ALIASES",
     "DEFAULT_ENV_MODE",
     "ENV_MODE_LOCAL",
     "HARBOR_AGENTS",
@@ -71,4 +65,5 @@ __all__ = [
     "LOCAL_AGENT_IMPORT_PATHS",
     "LOCAL_ENV_IMPORT_PATH",
     "LOCAL_HARBOR_AGENTS",
+    "canonical_agent_name",
 ]

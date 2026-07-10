@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -36,6 +39,11 @@ PUBLIC_REQUIRED_FILES = (
     ".github/workflows/security.yml",
 )
 PUBLIC_TEXT_SUFFIXES = {"", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yml", ".yaml", ".j2"}
+PACKAGED_NVIDIA_BUILD_RUNTIME_FILES = {
+    "skillevaluator/tier3/harbor/local_agents.py",
+    "skillevaluator/tier3/harbor/nvidia_build_bridge.py",
+    "skillevaluator/tier3/harbor/secure_docker_environment.py",
+}
 SOURCE_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".nox",
@@ -114,33 +122,30 @@ def test_public_extras_exclude_internal_runtime_dependencies() -> None:
     extras = project["project"]["optional-dependencies"]
     dependency_text = "\n".join(requirement.lower() for requirements in extras.values() for requirement in requirements)
 
-    assert "pymilvus" not in dependency_text
-    assert "sandbox-k8s" not in dependency_text
-    assert "ippbot" not in dependency_text
+    assert "py" + "mil" + "vus" not in dependency_text
+    assert "sandbox" + "-k8s" not in dependency_text
+    assert "ipp" + "bot" not in dependency_text
 
 
 def test_public_sources_exclude_retired_internal_runtime_paths() -> None:
-    # validators/security.py is the one sanctioned user of the NVIDIA
-    # inference-key variable name: public SkillSpector documents it as its
-    # nv_build credential, and the --llm bridge must set it. Everywhere
-    # else the name marks a retired internal runtime path.
-    skillspector_bridge = REPO_ROOT / "src" / "skillevaluator" / "validators" / "security.py"
-    source_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in (REPO_ROOT / "src").rglob("*.py") if path != skillspector_bridge
-    )
+    source_text = "\n".join(path.read_text(encoding="utf-8") for path in (REPO_ROOT / "src").rglob("*.py"))
     retired_terms = (
-        "NVIDIA" + "_INFERENCE_KEY",
+        "NVI" + "DIA" + "_INFERENCE_KEY",
         "as" + "tra_sandbox",
         "inter" + "_skill",
-        "py" + "milvus",
+        "py" + "mil" + "vus",
     )
 
     for term in retired_terms:
         assert term not in source_text
 
-    bridge_text = skillspector_bridge.read_text(encoding="utf-8")
-    for term in retired_terms[1:]:
-        assert term not in bridge_text
+
+def test_public_docs_explain_the_single_nvidia_credential_skillspector_path() -> None:
+    configuration = (REPO_ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+
+    assert "SkillSpector's OpenAI-compatible provider path" in configuration
+    assert "does not create a second NVIDIA credential name" in configuration
+    assert "Only the selected provider settings and basic process environment" in configuration
 
 
 def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
@@ -208,6 +213,33 @@ def test_public_sources_use_the_public_nvidia_build_contract() -> None:
 
     assert '"NVIDIA_API_KEY"' in provider_config
     assert "https://integrate.api.nvidia.com/v1" in provider_config
+
+
+def test_public_distributions_include_nvidia_build_runtime_bridges(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "build", "--outdir", str(tmp_path)],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"distribution build failed:\n{result.stdout}\n{result.stderr}"
+
+    wheels = list(tmp_path.glob("*.whl"))
+    sdists = list(tmp_path.glob("*.tar.gz"))
+    assert len(wheels) == 1
+    assert len(sdists) == 1
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        wheel_members = set(archive.namelist())
+    missing_from_wheel = PACKAGED_NVIDIA_BUILD_RUNTIME_FILES - wheel_members
+    assert not missing_from_wheel, f"wheel is missing runtime bridge files: {sorted(missing_from_wheel)}"
+
+    with tarfile.open(sdists[0], "r:gz") as archive:
+        sdist_members = {member.name.partition("/")[2] for member in archive.getmembers()}
+    expected_sdist_members = {f"src/{path}" for path in PACKAGED_NVIDIA_BUILD_RUNTIME_FILES}
+    missing_from_sdist = expected_sdist_members - sdist_members
+    assert not missing_from_sdist, f"sdist is missing runtime bridge files: {sorted(missing_from_sdist)}"
 
 
 def test_removed_benchmark_authoring_surface_stays_absent() -> None:
@@ -333,6 +365,24 @@ def test_github_actions_are_pinned_to_commit_shas() -> None:
         assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{workflow_path.relative_to(REPO_ROOT)}: unpinned ref {ref}"
 
 
+def test_ci_scans_source_and_built_distributions_for_oss_boundary_violations() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    scanner_command = "python scripts/check_oss_boundary.py"
+    source_scan = f"{scanner_command} --root . --allowlist config/oss_boundary_allowlist.json"
+    artifact_scan = f"{source_scan} --archive dist/*.whl --archive dist/*.tar.gz"
+
+    assert source_scan in workflow
+    assert artifact_scan in workflow
+    assert workflow.index("uv build --python 3.13 --no-sources") < workflow.index(artifact_scan)
+
+
+def test_retired_private_upload_artifact_is_not_part_of_public_gitignore() -> None:
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    retired_artifact = "." + "harbor" + "-viewer-upload/"
+
+    assert retired_artifact not in gitignore
+
+
 def test_public_package_metadata_has_no_personal_email_addresses() -> None:
     project = _project()
 
@@ -369,4 +419,28 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert "sends each discovered `SKILL.md` in full" in public_docs
     assert "Only candidate clusters found by the embedding stage are" in public_docs
     assert "sent to the configured chat LLM for classification" in public_docs
-    assert "NVIDIA_INFERENCE_KEY" not in public_docs
+    assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs
+
+
+def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    configuration = (REPO_ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "TIER3_LIVE_EVALUATION.md").read_text(encoding="utf-8")
+    public_docs = f"{readme}\n{configuration}\n{tier3}"
+
+    assert "gpt-5.4-mini" in public_docs
+    assert "nvidia/nemotron-3-nano-30b-a3b" in public_docs
+    assert "nvidia/nvidia/nemotron-3-nano-30b-a3b" in public_docs
+    assert "Nemotron Super" in public_docs
+    assert "meta/llama-3.1-8b-instruct" in public_docs
+    assert "--agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model codex=nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model claude-code=nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model opencode=nvidia/meta/llama-3.1-8b-instruct" in public_docs
+    assert "skillevaluator evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
+    assert "skillevaluator evaluate ./my-skill --agents codex --env-mode docker\n" in tier3
+    assert "skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker\n" in tier3
+    assert "never changes models silently" in public_docs
+    assert "direct OpenCode" in public_docs
+    assert "Docker or local compatibility bridge" in public_docs
+    assert "experimental Claude Code" in public_docs

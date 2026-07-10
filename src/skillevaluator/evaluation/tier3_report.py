@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
+from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -47,6 +50,124 @@ _AGENT_EVAL_DESCRIPTION = "Tier 3: Live Agent Evaluation (Harbor)"
 _DIMENSION_IDS = list(DIMENSION_MAPPING.keys())
 
 _SCHEMA_VERSION = "2.0"
+_TIER3_FEEDBACK_SCHEMA_VERSION = "1.0"
+_TIER3_FEEDBACK_FIELDS = ("conclusions", "recommendations", "suggestions", "suggestions_v2")
+
+# Canonical reports are self-contained HTML/JSON artifacts, so untrusted custom
+# grader cardinality must not multiply metric-by-trial detail without bound. The
+# full Harbor artifacts remain available under ``provenance.run_dir``.
+_MAX_EVALUATOR_CARDS_TOTAL = 64
+_MAX_EVIDENCE_PER_CARD = 16
+_MAX_EVIDENCE_SCAN_PER_CARD = 64
+_MAX_EVIDENCE_ENTRIES_TOTAL = 256
+_MAX_RAW_TRIAL_REWARDS_TOTAL = 256
+_MAX_RAW_METRICS_PER_REWARD = 64
+_MAX_RAW_REWARD_FIELDS = 96
+_MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD = 128
+_MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
+
+
+def _finite_float(value: object) -> float | None:
+    """Return a JSON-safe finite number, rejecting booleans and non-finite floats."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _sanitize_json_numbers(value: Any) -> Any:
+    """Copy a canonical payload while replacing non-finite floats with JSON null."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _sanitize_json_numbers(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_sanitize_json_numbers(item) for item in value]
+    return value
+
+
+@dataclass
+class _ReportBudget:
+    cards_remaining: int = _MAX_EVALUATOR_CARDS_TOTAL
+    evidence_remaining: int = _MAX_EVIDENCE_ENTRIES_TOTAL
+    raw_rewards_remaining: int = _MAX_RAW_TRIAL_REWARDS_TOTAL
+    omitted: dict[str, int] = field(default_factory=dict)
+    deduplicated_evidence: int = 0
+    artifact_loading: list[dict[str, Any]] = field(default_factory=list)
+
+    def omit(self, section: str, count: int = 1) -> None:
+        if count > 0:
+            self.omitted[section] = self.omitted.get(section, 0) + count
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.omitted or self.artifact_loading)
+
+    def signal(self) -> dict[str, Any]:
+        signal: dict[str, Any] = {
+            "truncated": True,
+            "reason": (
+                "Embedded report details were bounded; retained Harbor artifacts are referenced "
+                "by provenance.run_dir when available."
+            ),
+            "payload_budget_bytes": _MAX_EMBEDDED_REPORT_BYTES,
+            "limits": {
+                "evaluator_cards": _MAX_EVALUATOR_CARDS_TOTAL,
+                "evidence_per_card": _MAX_EVIDENCE_PER_CARD,
+                "evidence_scanned_per_card": _MAX_EVIDENCE_SCAN_PER_CARD,
+                "evidence_entries": _MAX_EVIDENCE_ENTRIES_TOTAL,
+                "raw_trial_rewards": _MAX_RAW_TRIAL_REWARDS_TOTAL,
+                "raw_metrics_per_reward": _MAX_RAW_METRICS_PER_REWARD,
+                "custom_metric_name_visits_per_reward": _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD,
+            },
+            "omitted": dict(sorted(self.omitted.items())),
+        }
+        if self.deduplicated_evidence:
+            signal["deduplicated_evidence"] = self.deduplicated_evidence
+        if self.artifact_loading:
+            signal["artifact_loading"] = list(self.artifact_loading)
+        return signal
+
+
+_MAX_ARTIFACT_LOADING_REASONS = 16
+
+
+def _artifact_loading_reasons(
+    agents: dict[str, dict[str, Any]],
+    dataset: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Collect only bounded, schema-checked loader diagnostics for the report."""
+    markers = [info.get("_report_truncation") for info in agents.values() if isinstance(info, dict)]
+    markers.append(getattr(dataset, "_report_truncation", None))
+    reasons: list[dict[str, Any]] = []
+    for marker in markers:
+        if not isinstance(marker, dict) or not isinstance(marker.get("reasons"), list):
+            continue
+        for candidate in marker["reasons"]:
+            if not isinstance(candidate, dict):
+                continue
+            code = candidate.get("code")
+            artifact = candidate.get("artifact")
+            limit = candidate.get("limit")
+            if (
+                not isinstance(code, str)
+                or not isinstance(artifact, str)
+                or not isinstance(limit, int)
+                or isinstance(limit, bool)
+                or limit < 0
+                or len(code) > 64
+                or len(artifact) > 64
+            ):
+                continue
+            reason = {"code": code, "artifact": artifact, "limit": limit}
+            if reason not in reasons:
+                reasons.append(reason)
+            if len(reasons) >= _MAX_ARTIFACT_LOADING_REASONS:
+                return reasons
+    return reasons
 
 
 def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None) -> dict[str, Any]:
@@ -154,25 +275,43 @@ def agent_eval_result_from_run(
     Returns ``None`` when no usable run directory or agent data can be found, so
     the caller can fall back to :func:`advisory_skip_result`.
     """
-    # Imported lazily: these pull Tier 3 (Harbor) helpers that must not load on a
-    # base install where ``validate`` runs without the Tier 3 extra.
-    from skillevaluator.tier3.harbor.html_report import (
-        _load_agent_data,
-        _load_dataset,
-        _load_staged_harbor_dataset,
-    )
     from skillevaluator.tier3.results_location import resolve_latest_results
 
     latest = resolve_latest_results(skill_path, results_dir)
     if not latest.exists():
         return None
     run_dir = latest.resolve() if latest.is_symlink() else latest
+    return agent_eval_result_from_directory(
+        skill_path,
+        run_dir,
+        env_mode=env_mode,
+        engine_result=engine_result,
+        use_llm_judge=use_llm_judge,
+    )
 
-    agents = _load_agent_data(run_dir)
+
+def agent_eval_result_from_directory(
+    skill_path: Path,
+    run_dir: Path,
+    *,
+    env_mode: str | None = None,
+    engine_result: dict[str, Any] | None = None,
+    use_llm_judge: bool = True,
+) -> ValidationResult | None:
+    """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run."""
+    # Imported lazily so base-only Tier 1 workflows do not load Tier 3 helpers.
+    from skillevaluator.tier3.harbor.report_data import (
+        load_agent_data,
+        load_dataset,
+        load_staged_harbor_dataset,
+    )
+
+    run_dir = run_dir.expanduser().resolve()
+    agents = load_agent_data(run_dir)
     if not agents:
         return None
 
-    dataset = _load_dataset(skill_path) or _load_staged_harbor_dataset(run_dir)
+    dataset = load_dataset(skill_path) or load_staged_harbor_dataset(run_dir)
     payload = build_agent_eval_payload(
         skill_path.name,
         agents,
@@ -187,6 +326,11 @@ def agent_eval_result_from_run(
         comparison=_read_comparison(run_dir),
         use_llm_judge=use_llm_judge,
     )
+    return _validation_result_from_payload(payload)
+
+
+def _validation_result_from_payload(payload: dict[str, Any] | None) -> ValidationResult | None:
+    """Wrap a canonical Tier 3 payload in the shared validation-result model."""
     if payload is None:
         return None
 
@@ -196,7 +340,7 @@ def agent_eval_result_from_run(
     )
     result.metadata["agent_eval"] = payload
     best = payload.get("best_agent") or "n/a"
-    if payload.get("execution_status") == "succeeded" and isinstance(payload.get("overall_score"), int | float):
+    if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
         result.add_success(
             "agent_eval",
             f"Tier 3 evaluation complete: verdict {str(payload.get('verdict', 'neutral')).upper()}; best agent {best}",
@@ -207,6 +351,50 @@ def agent_eval_result_from_run(
         for error in errors:
             result.add_error(str(error))
     return result
+
+
+def render_agent_eval_html_report(
+    skill_path: Path,
+    run_dir: Path,
+    *,
+    output_path: Path | None = None,
+    env_mode: str | None = None,
+    engine_result: dict[str, Any] | None = None,
+    use_llm_judge: bool = True,
+) -> Path:
+    """Render one standalone Tier 3 run with the canonical HTML reporter."""
+    from skillevaluator.reporting import HTMLReporter
+
+    skill_path = skill_path.expanduser().resolve()
+    run_dir = run_dir.expanduser().resolve()
+    result = agent_eval_result_from_directory(
+        skill_path,
+        run_dir,
+        env_mode=env_mode,
+        engine_result=engine_result,
+        use_llm_judge=use_llm_judge,
+    )
+    if result is None:
+        raise ValueError(f"No agent results found in {run_dir}")
+
+    canonical_payload = result.metadata.get("agent_eval")
+    if engine_result is not None and isinstance(canonical_payload, dict):
+        # Persist only the compact feedback contract needed by the CLI. The
+        # complete canonical payload remains in the HTML report and can be much
+        # larger because it duplicates trials, datasets, agents, and provenance.
+        engine_result["tier3_feedback"] = {
+            "schema_version": _TIER3_FEEDBACK_SCHEMA_VERSION,
+            **{field: list(canonical_payload.get(field) or []) for field in _TIER3_FEEDBACK_FIELDS},
+        }
+
+    target = output_path.expanduser().resolve() if output_path is not None else run_dir / "report.html"
+    reporter = HTMLReporter(
+        target_path=str(skill_path),
+        content_label="Skill",
+        tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
+    )
+    reporter.save([result], target)
+    return target
 
 
 def build_agent_eval_payload(
@@ -227,7 +415,7 @@ def build_agent_eval_payload(
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
 
     ``agents`` is the structure produced by
-    :func:`skillevaluator.tier3.harbor.html_report._load_agent_data`.
+    :func:`skillevaluator.tier3.harbor.report_data.load_agent_data`.
     Returns ``None`` when no agent carries usable scores.
 
     The payload mirrors Skill Evaluator's canonical Tier 3 shape so the ported reporters
@@ -237,9 +425,10 @@ def build_agent_eval_payload(
     and ``provenance`` (raw evaluators, raw lift, raw trial rewards) feeds the
     Diagnostics tab.
     """
-    from skillevaluator.tier3.harbor.html_report import _metrics_for_agents
+    from skillevaluator.tier3.harbor.report_data import metrics_for_agents
 
-    metrics = _metrics_for_agents(agents)
+    metrics = metrics_for_agents(agents)
+    report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]
@@ -250,6 +439,13 @@ def build_agent_eval_payload(
         return None
 
     best_agent = _pick_best_agent(agent_payloads)
+    detail_priority = ([best_agent] if best_agent else []) + [name for name in agent_payloads if name != best_agent]
+    for name in detail_priority:
+        _attach_agent_report_details(
+            agent_payloads[name],
+            agents.get(name, {}),
+            report_budget,
+        )
     best = agent_payloads.get(best_agent, {})
 
     execution_errors = list(
@@ -268,14 +464,8 @@ def build_agent_eval_payload(
         execution_status = "skipped"
 
     raw_overall_score = best.get("with_skill")
-    overall_score = (
-        float(raw_overall_score)
-        if execution_status == "succeeded"
-        and isinstance(raw_overall_score, int | float)
-        and not isinstance(raw_overall_score, bool)
-        else None
-    )
-    overall_lift = best.get("lift")
+    overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
+    overall_lift = _finite_float(best.get("lift"))
     verdict = _verdict_from_lift(overall_lift) if overall_score is not None else VERDICT_NEUTRAL
 
     metric_ids = list(best.get("evaluators", {}).keys())
@@ -297,9 +487,9 @@ def build_agent_eval_payload(
         "best_agent": best_agent,
         "agents_run": list(agent_payloads.keys()),
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
-        "overall_lift": (round(overall_lift, 4) if isinstance(overall_lift, (int, float)) else None),
+        "overall_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "environment": env_mode,
-        "runtime_seconds": float(runtime_seconds or 0.0),
+        "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
         "expected_attempts": sum(
@@ -347,12 +537,12 @@ def build_agent_eval_payload(
         "environment": env_mode,
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
         "overall_lift": summary["overall_lift"],
-        "composite_lift": round(overall_lift, 4) if isinstance(overall_lift, (int, float)) else None,
+        "composite_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
         "expected_attempts": summary["expected_attempts"],
         "scored_attempts": summary["scored_attempts"],
-        "runtime_seconds": float(runtime_seconds or 0.0),
+        "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "agents": agent_payloads,
         "dimensions": best_dimensions,
         "dimension_hints": dict(DIMENSION_HINTS),
@@ -371,7 +561,14 @@ def build_agent_eval_payload(
         "metric_labels": metric_labels,
         "attempt_policy": policy,
         "dataset": [d for d in (dataset or []) if isinstance(d, dict)],
-        "provenance": _build_provenance(agent_payloads, agents, run_dir, comparison),
+        "provenance": _build_provenance(
+            agent_payloads,
+            agents,
+            run_dir,
+            comparison,
+            report_budget,
+            detail_priority=detail_priority,
+        ),
     }
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
@@ -391,6 +588,8 @@ def build_agent_eval_payload(
             payload.get("suggestions_v2") or [],
             evidence_links,
         )
+    payload = _sanitize_json_numbers(payload)
+    _enforce_report_payload_budget(payload, report_budget)
     return payload
 
 
@@ -435,6 +634,9 @@ def _build_provenance(
     raw_agents: dict[str, dict[str, Any]],
     run_dir: Path | None,
     comparison: dict[str, Any] | None,
+    report_budget: _ReportBudget,
+    *,
+    detail_priority: list[str],
 ) -> dict[str, Any]:
     """Assemble the Diagnostics ``provenance`` block.
 
@@ -452,26 +654,266 @@ def _build_provenance(
         "raw_lift": {
             name: {m: e.get("lift") for m, e in ap.get("evaluators", {}).items()} for name, ap in agent_payloads.items()
         },
-        "raw_trial_rewards": {name: _raw_trial_rewards(raw_agents.get(name, {})) for name in agent_payloads},
+        "raw_trial_rewards": {
+            name: _raw_trial_rewards(raw_agents.get(name, {}), report_budget)
+            for name in detail_priority
+            if name in agent_payloads
+        },
         "evaluator_paths": {},
         "comparison": comparison if isinstance(comparison, dict) else {},
     }
 
 
-# Verbose per-evaluator ``details`` (evidence refs, per-check breakdowns) are
+# Verbose per-evaluator ``details`` / ``custom_details`` (evidence refs,
+# per-check breakdowns) are
 # dropped from the diagnostics payload: they are not rendered by any report
 # panel and would multiply the embedded JSON size several-fold. The full
 # details remain on disk under ``provenance.run_dir`` for deep dives.
-_REWARD_HEAVY_KEYS = frozenset({"details"})
+_REWARD_HEAVY_KEYS = frozenset({"details", "custom_details"})
 
 
-def _raw_trial_rewards(info: dict[str, Any]) -> list[dict[str, Any]]:
+def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> list[dict[str, Any]]:
     """Return compact raw Harbor reward dicts (internal + verbose keys stripped)."""
+    source_rewards = info.get("rewards") or []
+    total_rewards = len(source_rewards)
+    if report_budget.raw_rewards_remaining <= 0:
+        report_budget.omit("raw_trial_rewards", total_rewards)
+        return []
+
     rewards: list[dict[str, Any]] = []
-    for reward in info.get("rewards") or []:
-        if isinstance(reward, dict):
-            rewards.append({k: v for k, v in reward.items() if not k.startswith("_") and k not in _REWARD_HEAVY_KEYS})
+    for reward_index, reward in enumerate(source_rewards):
+        if report_budget.raw_rewards_remaining <= 0:
+            report_budget.omit("raw_trial_rewards", total_rewards - reward_index)
+            break
+        if not isinstance(reward, dict):
+            continue
+
+        compact: dict[str, Any] = {}
+        if "custom_details" in reward:
+            report_budget.omit("raw_detail_fields")
+        for field_index, (key, value) in enumerate(reward.items()):
+            if key.startswith("_") or key in _REWARD_HEAVY_KEYS:
+                continue
+            if len(compact) >= _MAX_RAW_REWARD_FIELDS:
+                report_budget.omit("raw_reward_fields", len(reward) - field_index)
+                break
+            if key in {"custom_metrics", "metrics"} and isinstance(value, dict):
+                value = _bounded_raw_metric_mapping(value, report_budget)
+            compact[key] = value
+
+        rewards.append(compact)
+        report_budget.raw_rewards_remaining -= 1
     return rewards
+
+
+def _bounded_raw_metric_mapping(value: dict[Any, Any], report_budget: _ReportBudget) -> dict[str, Any]:
+    """Keep a deterministic representative slice of raw custom metric maps."""
+    bounded: dict[str, Any] = {}
+    candidates = list(islice(value.items(), _MAX_RAW_METRICS_PER_REWARD + 1))
+    for raw_name, raw_value in sorted(candidates, key=lambda item: str(item[0])):
+        if len(bounded) >= _MAX_RAW_METRICS_PER_REWARD:
+            break
+        name = str(raw_name)
+        if len(name) > 256 or name in bounded:
+            continue
+        bounded[name] = raw_value
+    report_budget.omit("raw_metric_values", max(0, len(value) - len(bounded)))
+    return bounded
+
+
+def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Drop duplicated lower-priority details before touching best-agent evidence."""
+    best_agent = str(payload.get("best_agent") or "")
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        return
+
+    omitted = 0
+    provenance = payload.get("provenance")
+    raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
+    for name, agent in agents.items():
+        if name == best_agent or not isinstance(agent, dict):
+            continue
+        for key in ("evaluator_cards", "trials", "trials_baseline", "cases"):
+            items = agent.get(key)
+            if isinstance(items, list) and items:
+                omitted += len(items)
+                agent[key] = []
+        if agent.get("conditions"):
+            omitted += 1
+            agent["conditions"] = {}
+        if isinstance(raw_rewards, dict):
+            items = raw_rewards.get(name)
+            if isinstance(items, list) and items:
+                omitted += len(items)
+                raw_rewards[name] = []
+    report_budget.omit("non_best_agent_details", omitted)
+
+
+def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Keep the complete self-contained payload within a hard serialized budget.
+
+    Cardinality limits normally keep the payload comfortably below the cap. The
+    staged pruning below is a final fail-safe for unusually large diagnostics,
+    datasets, or user-authored strings. Every lossy stage is surfaced through
+    ``report_truncation`` and the original run artifacts remain on disk.
+    """
+
+    def refresh_signal() -> None:
+        if report_budget.truncated:
+            payload["report_truncation"] = report_budget.signal()
+
+    refresh_signal()
+    if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
+        return
+
+    provenance = payload.get("provenance")
+    if isinstance(provenance, dict):
+        comparison = provenance.get("comparison")
+        if comparison:
+            provenance["comparison"] = {}
+            report_budget.omit("comparison_payloads")
+    refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        _prune_non_best_agent_details(payload, report_budget)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        omitted_items = 0
+        for key in ("dataset", "trials"):
+            items = payload.get(key)
+            if isinstance(items, list) and items:
+                omitted_items += len(items)
+                payload[key] = []
+        for agent in (payload.get("agents") or {}).values():
+            if not isinstance(agent, dict):
+                continue
+            for key in ("trials", "trials_baseline", "cases"):
+                items = agent.get(key)
+                if isinstance(items, list) and items:
+                    omitted_items += len(items)
+                    agent[key] = []
+            if agent.get("conditions"):
+                agent["conditions"] = {}
+                omitted_items += 1
+        report_budget.omit("dataset_and_trial_items", omitted_items)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
+        if isinstance(raw_rewards, dict):
+            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
+            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
+            report_budget.omit("raw_trial_rewards", omitted)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        omitted_evidence = 0
+        for agent in (payload.get("agents") or {}).values():
+            if not isinstance(agent, dict):
+                continue
+            for card in agent.get("evaluator_cards") or []:
+                if isinstance(card, dict) and isinstance(card.get("evidence"), list):
+                    omitted_evidence += len(card["evidence"])
+                    card["evidence"] = []
+        for card in payload.get("evaluator_cards") or []:
+            if isinstance(card, dict) and isinstance(card.get("evidence"), list):
+                card["evidence"] = []
+        report_budget.omit("evidence_entries", omitted_evidence)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        omitted_cards = 0
+        for agent in (payload.get("agents") or {}).values():
+            if isinstance(agent, dict):
+                omitted_cards += len(agent.get("evaluator_cards") or [])
+                agent["evaluator_cards"] = []
+        payload["evaluator_cards"] = []
+        report_budget.omit("evaluator_cards", omitted_cards)
+        for key in ("conclusions", "recommendations", "suggestions", "suggestions_v2"):
+            items = payload.get(key)
+            if isinstance(items, list) and items:
+                report_budget.omit("insight_items", len(items))
+                payload[key] = []
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        _replace_with_minimal_payload(payload, report_budget)
+
+    refresh_signal()
+
+
+def _serialized_payload_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Last-resort bounded shape for pathological single-field payloads."""
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    compact_summary = {
+        key: value
+        for key, value in summary.items()
+        if key
+        in {
+            "schema_version",
+            "verdict",
+            "overall_score",
+            "overall_lift",
+            "environment",
+            "runtime_seconds",
+            "execution_status",
+            "expected_attempts",
+            "scored_attempts",
+        }
+    }
+    compact_summary["skill_name"] = str(summary.get("skill_name") or payload.get("skill_name") or "")[:256]
+    compact_summary["best_agent"] = str(summary.get("best_agent") or payload.get("best_agent") or "")[:256]
+    compact_summary["agents_run"] = [str(name)[:256] for name in (summary.get("agents_run") or [])[:64]]
+    compact_summary["execution_errors"] = [str(error)[:1024] for error in (summary.get("execution_errors") or [])[:16]]
+
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    compact = {
+        "schema_version": payload.get("schema_version", _SCHEMA_VERSION),
+        "summary": compact_summary,
+        "skill_name": compact_summary["skill_name"],
+        "verdict": payload.get("verdict", VERDICT_NEUTRAL),
+        "best_agent": compact_summary["best_agent"],
+        "agents_run": compact_summary["agents_run"],
+        "environment": payload.get("environment"),
+        "overall_score": payload.get("overall_score"),
+        "overall_lift": payload.get("overall_lift"),
+        "composite_lift": payload.get("composite_lift"),
+        "execution_status": payload.get("execution_status"),
+        "execution_errors": compact_summary["execution_errors"],
+        "expected_attempts": payload.get("expected_attempts", 0),
+        "scored_attempts": payload.get("scored_attempts", 0),
+        "runtime_seconds": payload.get("runtime_seconds", 0.0),
+        "agents": {},
+        "dimensions": [],
+        "evaluators": {},
+        "evaluator_cards": [],
+        "cases": [],
+        "trials": [],
+        "insights": {},
+        "conclusions": [],
+        "recommendations": [],
+        "suggestions": [],
+        "suggestions_v2": [],
+        "metric_ids": [],
+        "metric_labels": {},
+        "dataset": [],
+        "provenance": {
+            "source": provenance.get("source", "harbor"),
+            "run_dir": str(provenance.get("run_dir") or "")[:1024] or None,
+            "raw_trial_rewards": {},
+            "evaluator_paths": {},
+            "comparison": {},
+        },
+    }
+    payload.clear()
+    payload.update(compact)
+    report_budget.omit("payload_sections")
 
 
 # ---------------------------------------------------------------------------
@@ -496,13 +938,15 @@ def _build_agent(
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
     )
-    overall_ws = _mean([d["with_skill"] for d in dimensions if isinstance(d.get("with_skill"), (int, float))])
-    overall_bl = _mean([d["baseline"] for d in dimensions if isinstance(d.get("baseline"), (int, float))])
-    overall_lift = (
-        round(overall_ws - overall_bl, 4)
-        if isinstance(overall_ws, (int, float)) and isinstance(overall_bl, (int, float))
-        else None
-    )
+    overall_ws = _mean([d["with_skill"] for d in dimensions])
+    overall_bl = _mean([d["baseline"] for d in dimensions])
+    if overall_ws is None and not metrics:
+        overall_ws = _mean([reward.get("overall") for reward in info.get("rewards", []) if isinstance(reward, dict)])
+    if overall_bl is None and not metrics:
+        overall_bl = _mean(
+            [reward.get("overall") for reward in info.get("rewards_baseline", []) if isinstance(reward, dict)]
+        )
+    overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
 
     trials = _normalize_trials(info.get("rewards") or [], metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)
@@ -523,7 +967,7 @@ def _build_agent(
         "scored_attempts": _as_nonnegative_int(info.get("scored_attempts")),
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
         "evaluators": evaluators,
-        "evaluator_cards": _evaluator_cards(evaluators),
+        "evaluator_cards": [],
         "dimensions": dimensions,
         "with_skill": overall_ws,
         "baseline": overall_bl,
@@ -541,6 +985,28 @@ def _build_agent(
     }
 
 
+def _attach_agent_report_details(
+    agent_payload: dict[str, Any],
+    info: dict[str, Any],
+    report_budget: _ReportBudget,
+) -> None:
+    """Populate bounded diagnostic details after the best agent is known.
+
+    Global report limits intentionally prioritize the best-scoring agent. This
+    keeps its top-level evaluator cards, evidence, and raw rewards useful even
+    when an alphabetically earlier agent has adversarial custom-metric
+    cardinality.
+    """
+    agent_payload["evaluator_cards"] = _evaluator_cards(
+        agent_payload.get("evaluators", {}),
+        rewards=info.get("rewards") or [],
+        custom_with_skill=info.get("custom_with_skill") or {},
+        custom_without_skill=info.get("custom_without_skill") or {},
+        custom_lift=info.get("custom_lift") or {},
+        report_budget=report_budget,
+    )
+
+
 def _build_evaluators(
     metrics: list[str],
     with_scores: dict[str, Any],
@@ -549,16 +1015,15 @@ def _build_evaluators(
 ) -> dict[str, dict[str, Any]]:
     evaluators: dict[str, dict[str, Any]] = {}
     for metric in metrics:
-        ws = with_scores.get(metric)
-        if not isinstance(ws, (int, float)) or isinstance(ws, bool):
+        ws = _finite_float(with_scores.get(metric))
+        if ws is None:
             continue
-        bl = without_scores.get(metric)
-        bl = float(bl) if isinstance(bl, (int, float)) and not isinstance(bl, bool) else None
+        bl = _finite_float(without_scores.get(metric))
         lift = _lift_value(metric, lift_data)
         if lift is None and bl is not None:
-            lift = round(float(ws) - bl, 4)
+            lift = round(ws - bl, 4)
         evaluators[metric] = {
-            "with_skill": float(ws),
+            "with_skill": ws,
             "baseline": bl,
             "lift": lift if lift is not None else 0.0,
         }
@@ -582,7 +1047,7 @@ def _build_dimensions(
             bl = _dimension_score(without_scores, cfg)
         if ws is None and bl is None:
             continue
-        lift = round(ws - bl, 4) if isinstance(ws, (int, float)) and isinstance(bl, (int, float)) else None
+        lift = round(ws - bl, 4) if ws is not None and bl is not None else None
         entry = precomputed_with.get(dim_id) if isinstance(precomputed_with.get(dim_id), dict) else {}
         # Signals (the evaluators that actually fed this dimension) populate the
         # "Signals" column; reasoning bullets and a deterministic verdict fill
@@ -596,9 +1061,9 @@ def _build_dimensions(
         dimensions.append(
             {
                 "id": dim_id,
-                "with_skill": round(ws, 4) if isinstance(ws, (int, float)) else None,
-                "score": round(ws, 4) if isinstance(ws, (int, float)) else None,
-                "baseline": round(bl, 4) if isinstance(bl, (int, float)) else None,
+                "with_skill": round(ws, 4) if ws is not None else None,
+                "score": round(ws, 4) if ws is not None else None,
+                "baseline": round(bl, 4) if bl is not None else None,
                 "lift": lift,
                 "explanation": explanation,
                 "verdict": verdict,
@@ -642,12 +1107,12 @@ def _deterministic_reasoning(
 
     parts: list[str] = []
     for signal in signals:
-        value = with_scores.get(signal)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            parts.append(f"{signal}={float(value):.2f}")
+        value = _finite_float(with_scores.get(signal))
+        if value is not None:
+            parts.append(f"{signal}={value:.2f}")
     bullets = _human_reasoning_bullets(
-        with_skill=float(ws) if isinstance(ws, (int, float)) else 0.0,
-        baseline=bl if isinstance(bl, (int, float)) else None,
+        with_skill=_finite_float(ws) or 0.0,
+        baseline=_finite_float(bl),
         lift=lift,
         parts=parts,
     )
@@ -656,30 +1121,354 @@ def _deterministic_reasoning(
 
 def _deterministic_verdict(ws: float | None) -> str | None:
     """Deterministic PASS/NEUTRAL/FAIL verdict for a dimension score."""
-    if not isinstance(ws, (int, float)):
+    numeric = _finite_float(ws)
+    if numeric is None:
         return None
     from skillevaluator.evaluation.dimension_judge import _verdict_for_score
 
-    return _verdict_for_score(float(ws))
+    return _verdict_for_score(numeric)
 
 
-def _evaluator_cards(evaluators: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _compact_evidence_refs(raw_refs: object) -> list[str]:
+    if not isinstance(raw_refs, list):
+        return []
+    refs: list[str] = []
+    for raw in raw_refs:
+        if isinstance(raw, str):
+            rendered = raw.strip()
+        elif isinstance(raw, dict):
+            source = str(raw.get("source") or "").strip()
+            pointer = str(raw.get("json_pointer") or raw.get("path") or "").strip()
+            rendered = f"{source}{pointer}" if source else pointer
+        else:
+            continue
+        if rendered and rendered not in refs:
+            refs.append(rendered[:512])
+        if len(refs) == 3:
+            break
+    return refs
+
+
+def _custom_metric_value(reward: dict[str, Any], metric: str) -> float | None:
+    """Read one custom metric without materializing every custom metric in a reward."""
+    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+
+    if metric in RESERVED_METRIC_NAMES:
+        return None
+
+    numeric: float | None = None
+    sources = (reward.get("custom_metrics"), reward.get("metrics"), reward)
+    for source in sources:
+        if not isinstance(source, dict) or metric not in source:
+            continue
+        value = source.get(metric)
+        if isinstance(value, dict):
+            value = value.get("score")
+        candidate = _finite_float(value)
+        if candidate is not None:
+            numeric = candidate
+    return numeric
+
+
+def _bounded_custom_metric_names(
+    reward: dict[str, Any],
+    *,
+    excluded: set[str],
+    limit: int,
+) -> tuple[list[str], bool]:
+    """Return a bounded custom-name sample and whether more names may exist."""
+    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+
+    if limit <= 0:
+        return [], False
+
+    sources = [
+        source for source in (reward.get("custom_metrics"), reward.get("metrics"), reward) if isinstance(source, dict)
+    ]
+    total_items = sum(len(source) for source in sources)
+    names: list[str] = []
+    seen: set[str] = set()
+    visits = 0
+    for source in sources:
+        for raw_name, raw_value in source.items():
+            visits += 1
+            name = str(raw_name)
+            value = raw_value.get("score") if isinstance(raw_value, dict) else raw_value
+            if (
+                name not in RESERVED_METRIC_NAMES
+                and name not in excluded
+                and name not in seen
+                and _finite_float(value) is not None
+            ):
+                seen.add(name)
+                names.append(name)
+                if len(names) >= limit:
+                    return names, visits < total_items
+            if visits >= _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD:
+                return names, visits < total_items
+    return names, False
+
+
+def _metric_evidence(
+    metric: str,
+    rewards: list[dict[str, Any]],
+    report_budget: _ReportBudget,
+    sampling: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if report_budget.evidence_remaining <= 0:
+        report_budget.omit("evidence_entries", len(rewards))
+        return []
+
+    evidence: list[dict[str, Any]] = []
+    by_fingerprint: dict[str, dict[str, Any]] = {}
+    total_rewards = len(rewards)
+    scan_limit = min(total_rewards, _MAX_EVIDENCE_SCAN_PER_CARD)
+    scanned_trials = 0
+    output_truncated = False
+    for reward in islice(rewards, scan_limit):
+        if report_budget.evidence_remaining <= 0:
+            output_truncated = True
+            break
+        scanned_trials += 1
+        if not isinstance(reward, dict):
+            continue
+        details = reward.get("details")
+        detail = details.get(metric) if isinstance(details, dict) else None
+        if not isinstance(detail, dict):
+            custom_details = reward.get("custom_details")
+            detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
+        if not isinstance(detail, dict):
+            continue
+
+        raw_score = _finite_float(reward.get(metric))
+        if raw_score is None:
+            raw_score = _custom_metric_value(reward, metric)
+
+        notes: list[str] = []
+        reason = detail.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            notes.append(reason.strip()[:512])
+
+        failures: list[str] = []
+        results = detail.get("results")
+        if isinstance(results, list):
+            for result in results:
+                if not isinstance(result, dict) or result.get("passed") is not False:
+                    continue
+                failure = result.get("reason")
+                if isinstance(failure, str) and failure.strip():
+                    failures.append(failure.strip()[:512])
+                if len(failures) == 3:
+                    break
+
+        checks: list[str] = []
+        criteria = detail.get("criteria")
+        if isinstance(criteria, dict):
+            checks = [str(name)[:128] for name in criteria][:8]
+
+        entry = {
+            "entry_id": str(reward.get("entry_id") or "trial")[:256],
+            "score": raw_score,
+            "notes": notes,
+            "failures": failures,
+            "checks": checks,
+            "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
+        }
+        fingerprint = json.dumps(
+            entry,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        existing = by_fingerprint.get(fingerprint)
+        if existing is not None:
+            existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
+            report_budget.deduplicated_evidence += 1
+            continue
+
+        if len(evidence) >= _MAX_EVIDENCE_PER_CARD or report_budget.evidence_remaining <= 0:
+            report_budget.omit("evidence_entries")
+            output_truncated = True
+            continue
+        evidence.append(entry)
+        by_fingerprint[fingerprint] = entry
+        report_budget.evidence_remaining -= 1
+    unscanned_trials = max(0, total_rewards - scanned_trials)
+    report_budget.omit("evidence_entries", unscanned_trials)
+    if sampling is not None and (output_truncated or unscanned_trials):
+        represented_trials = sum(int(item.get("occurrences", 1)) for item in evidence)
+        sampling.update(
+            {
+                "truncated": True,
+                "counts_are_lower_bounds": True,
+                "scanned_trials": scanned_trials,
+                "total_trials": total_rewards,
+                "represented_cases": len({str(item.get("entry_id") or "trial") for item in evidence}),
+                "represented_trials": represented_trials,
+            }
+        )
+    return evidence
+
+
+def _custom_metric_score(metric: str, configured: dict[str, Any], rewards: list[dict[str, Any]]) -> float | None:
+    value = configured.get(metric)
+    if isinstance(value, dict):
+        value = value.get("score")
+    configured_score = _finite_float(value)
+    if configured_score is not None:
+        return configured_score
+    values = [
+        score
+        for reward in rewards
+        if isinstance(reward, dict) and (score := _custom_metric_value(reward, metric)) is not None
+    ]
+    return _mean(values)
+
+
+def _discover_custom_metric_scores(
+    custom_with_skill: dict[str, Any],
+    rewards: list[dict[str, Any]],
+    excluded: set[str],
+    limit: int,
+    report_budget: _ReportBudget,
+) -> dict[str, float]:
+    """Discover at most ``limit`` custom names and aggregate reward scores once."""
+    if limit <= 0:
+        report_budget.omit("evaluator_cards", len(custom_with_skill))
+        report_budget.omit("custom_metric_discovery_trials", len(rewards))
+        return {}
+
+    candidates: dict[str, None] = {}
+    for raw_name in islice(iter(custom_with_skill), limit + 1):
+        name = str(raw_name)
+        if name not in excluded and name not in candidates:
+            candidates[name] = None
+
+    configured_total = len(custom_with_skill)
+    if len(candidates) > limit:
+        selected = sorted(candidates)[:limit]
+        report_budget.omit("evaluator_cards", max(1, configured_total - len(selected)))
+        report_budget.omit("custom_metric_discovery_trials", len(rewards))
+        return {
+            name: score for name in selected if (score := _custom_metric_score(name, custom_with_skill, [])) is not None
+        }
+
+    sums: dict[str, float] = dict.fromkeys(candidates, 0.0)
+    counts: dict[str, int] = dict.fromkeys(candidates, 0)
+    omitted_name_seen = configured_total > len(candidates)
+    for reward in rewards:
+        if not isinstance(reward, dict):
+            continue
+        for name in tuple(candidates):
+            numeric = _custom_metric_value(reward, name)
+            if numeric is not None:
+                sums[name] += numeric
+                counts[name] += 1
+
+        remaining = limit - len(candidates)
+        discovered, truncated = _bounded_custom_metric_names(
+            reward,
+            excluded=excluded | set(candidates),
+            limit=remaining + 1 if remaining > 0 else 1,
+        )
+        if truncated or len(discovered) > remaining:
+            omitted_name_seen = True
+        for name in sorted(discovered)[:remaining]:
+            candidates[name] = None
+            sums[name] = 0.0
+            counts[name] = 0
+            numeric = _custom_metric_value(reward, name)
+            if numeric is not None:
+                sums[name] = numeric
+                counts[name] = 1
+
+    if omitted_name_seen:
+        report_budget.omit("evaluator_cards", max(1, configured_total - len(candidates)))
+
+    scores: dict[str, float] = {}
+    for name in sorted(candidates):
+        configured = _custom_metric_score(name, custom_with_skill, [])
+        if configured is not None:
+            scores[name] = configured
+        elif counts.get(name, 0):
+            scores[name] = round(sums[name] / counts[name], 4)
+    return scores
+
+
+def _evaluator_card(
+    metric: str,
+    scores: dict[str, Any],
+    *,
+    label: str,
+    rewards: list[dict[str, Any]],
+    report_budget: _ReportBudget,
+) -> dict[str, Any]:
+    ws = _as_float(scores.get("with_skill"))
+    evidence_sampling: dict[str, Any] = {}
+    card = {
+        "id": metric,
+        "label": label,
+        "with_skill": ws,
+        "baseline": scores.get("baseline"),
+        "lift": scores.get("lift"),
+        "status": "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail"),
+        "evidence": _metric_evidence(metric, rewards, report_budget, evidence_sampling),
+    }
+    if evidence_sampling:
+        card["evidence_sampling"] = evidence_sampling
+    return card
+
+
+def _evaluator_cards(
+    evaluators: dict[str, dict[str, Any]],
+    *,
+    rewards: list[dict[str, Any]],
+    custom_with_skill: dict[str, Any],
+    custom_without_skill: dict[str, Any],
+    custom_lift: dict[str, Any],
+    report_budget: _ReportBudget,
+) -> list[dict[str, Any]]:
     from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY
 
     cards: list[dict[str, Any]] = []
-    for metric, scores in evaluators.items():
-        ws = _as_float(scores.get("with_skill"))
-        status = "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail")
+    evaluator_items = list(evaluators.items())
+    for evaluator_index, (metric, scores) in enumerate(evaluator_items):
+        if report_budget.cards_remaining <= 0:
+            report_budget.omit("evaluator_cards", len(evaluator_items) - evaluator_index)
+            break
+        report_budget.cards_remaining -= 1
         cards.append(
-            {
-                "id": metric,
-                "label": METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
-                "with_skill": ws,
-                "baseline": scores.get("baseline"),
-                "lift": scores.get("lift"),
-                "status": status,
-                "evidence": [],
-            }
+            _evaluator_card(
+                metric,
+                scores,
+                label=METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
+                rewards=rewards,
+                report_budget=report_budget,
+            )
+        )
+
+    custom_scores = _discover_custom_metric_scores(
+        custom_with_skill,
+        rewards,
+        set(evaluators),
+        report_budget.cards_remaining,
+        report_budget,
+    )
+    for metric, with_skill in custom_scores.items():
+        report_budget.cards_remaining -= 1
+        baseline = _custom_metric_score(metric, custom_without_skill, [])
+        lift = _lift_value(metric, custom_lift)
+        if lift is None and baseline is not None:
+            lift = round(with_skill - baseline, 4)
+        cards.append(
+            _evaluator_card(
+                metric,
+                {"with_skill": with_skill, "baseline": baseline, "lift": lift},
+                label=f"Custom: {metric}",
+                rewards=rewards,
+                report_budget=report_budget,
+            )
         )
     return cards
 
@@ -716,16 +1505,12 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     for reward in rewards:
         if not isinstance(reward, dict):
             continue
-        scores = {
-            m: reward.get(m)
-            for m in metrics
-            if isinstance(reward.get(m), (int, float)) and not isinstance(reward.get(m), bool)
-        }
+        scores = {m: numeric for m in metrics if (numeric := _finite_float(reward.get(m))) is not None}
         trial: dict[str, Any] = {
             "trial_id": reward.get("trial_id"),
             "entry_id": reward.get("entry_id"),
             "scores": scores,
-            "overall": reward.get("overall"),
+            "overall": _finite_float(reward.get("overall")),
         }
         traj = reward.get("_traj")
         if isinstance(traj, dict):
@@ -776,10 +1561,10 @@ def _attach_baseline_pairs(
         lift_scores: dict[str, float] = {}
         scores = trial.get("scores") or {}
         for metric in metrics:
-            score = scores.get(metric)
-            base = trial["baseline_scores"].get(metric)
-            if isinstance(score, (int, float)) and isinstance(base, (int, float)):
-                lift_scores[metric] = round(float(score) - float(base), 4)
+            score = _finite_float(scores.get(metric))
+            base = _finite_float(trial["baseline_scores"].get(metric))
+            if score is not None and base is not None:
+                lift_scores[metric] = round(score - base, 4)
         if lift_scores:
             trial["lift_scores"] = lift_scores
 
@@ -1069,8 +1854,8 @@ def _display_label_for_harbor_evidence(evidence: dict[str, Any]) -> str:
 
 
 def _trial_evidence_sort_key(trial: dict[str, Any]) -> tuple[int, str]:
-    overall = trial.get("overall")
-    if isinstance(overall, int | float) and not isinstance(overall, bool):
+    overall = _finite_float(trial.get("overall"))
+    if overall is not None:
         return (0 if overall < 0.8 else 1, f"{overall:.4f}")
     return (2, str(trial.get("entry_id") or trial.get("trial_id") or ""))
 
@@ -1186,22 +1971,20 @@ def _build_conclusions(
         best_name = _pick_best_agent(agents)
         if best_name:
             best = agents[best_name]
-            best_score = best.get("with_skill", 0.0)
-            if not isinstance(best_score, (int, float)):
-                best_score = 0.0
-            lift = best.get("lift")
+            best_score = _finite_float(best.get("with_skill")) or 0.0
+            lift = _finite_float(best.get("lift"))
             conclusions.append(
                 {
                     "severity": "pass" if best_score >= 0.7 else "warn",
                     "title": "Best performing agent",
                     "message": (
                         f"{best_name} leads with overall score {best_score:.2f}"
-                        + (f" and lift {lift:+.2f}." if isinstance(lift, (int, float)) else ".")
+                        + (f" and lift {lift:+.2f}." if lift is not None else ".")
                     ),
                 }
             )
 
-    numeric_dims = [d for d in dimensions if isinstance(d.get("score"), (int, float))]
+    numeric_dims = [d for d in dimensions if _finite_float(d.get("score")) is not None]
     if numeric_dims:
         weakest = min(numeric_dims, key=lambda d: d.get("score", 0.0))
         conclusions.append(
@@ -1218,8 +2001,8 @@ def _build_conclusions(
     failing_trials: list[str] = []
     for agent_name, agent in agents.items():
         for trial in agent.get("trials") or []:
-            overall = trial.get("overall")
-            if overall is None or (isinstance(overall, (int, float)) and overall < pass_threshold):
+            overall = _finite_float(trial.get("overall"))
+            if overall is None or overall < pass_threshold:
                 failing_trials.append(f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}")
     if failing_trials:
         conclusions.append(
@@ -1239,9 +2022,9 @@ def _suggestions_for_dimensions(dimensions: list[dict[str, Any]]) -> list[str]:
     """Default suggestions: target the weakest dimensions (Skill Evaluator parity)."""
     pending: list[tuple[float, str]] = []
     for dim in dimensions:
-        score = dim.get("with_skill", dim.get("score", 0.0))
-        if isinstance(score, (int, float)) and score < 0.7:
-            pending.append((float(score), dim.get("id", "")))
+        score = _finite_float(dim.get("with_skill", dim.get("score", 0.0)))
+        if score is not None and score < 0.7:
+            pending.append((score, dim.get("id", "")))
     pending.sort()
 
     if not pending:
@@ -1258,9 +2041,10 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
     if value is None:
         return 0.50
     try:
-        return float(value)
+        numeric = float(value)
     except (TypeError, ValueError):
         return 0.50
+    return numeric if math.isfinite(numeric) else 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -1279,19 +2063,18 @@ def _weighted(scores: dict[str, Any], evaluators: list[str], weights: list[float
     num = 0.0
     den = 0.0
     for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = scores.get(evaluator)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            num += float(value) * float(weight)
-            den += float(weight)
+        value = _finite_float(scores.get(evaluator))
+        finite_weight = _finite_float(weight)
+        if value is not None and finite_weight is not None:
+            num += value * finite_weight
+            den += finite_weight
     return (num / den) if den > 0 else None
 
 
 def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None:
     entry = precomputed.get(dim_id)
     if isinstance(entry, dict):
-        score = entry.get("score")
-        if isinstance(score, (int, float)) and not isinstance(score, bool):
-            return float(score)
+        return _finite_float(entry.get("score"))
     return None
 
 
@@ -1299,18 +2082,17 @@ def _lift_value(metric: str, lift_data: dict[str, Any]) -> float | None:
     entry = lift_data.get(metric)
     if isinstance(entry, dict):
         candidate = entry.get("delta", entry.get("lift"))
-        return float(candidate) if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) else None
-    if isinstance(entry, (int, float)) and not isinstance(entry, bool):
-        return float(entry)
-    return None
+        return _finite_float(candidate)
+    return _finite_float(entry)
 
 
 def _verdict_from_lift(lift: float | None) -> str:
-    if not isinstance(lift, (int, float)):
+    numeric = _finite_float(lift)
+    if numeric is None:
         return VERDICT_NEUTRAL
-    if lift >= _VERDICT_PASS_THRESHOLD:
+    if numeric >= _VERDICT_PASS_THRESHOLD:
         return VERDICT_PASS
-    if lift <= _VERDICT_FAIL_THRESHOLD:
+    if numeric <= _VERDICT_FAIL_THRESHOLD:
         return VERDICT_FAIL
     return VERDICT_NEUTRAL
 
@@ -1319,9 +2101,7 @@ def _pick_best_agent(agents: dict[str, dict[str, Any]]) -> str:
     eligible = {
         name: agent
         for name, agent in agents.items()
-        if agent.get("execution_status") == "succeeded"
-        and isinstance(agent.get("with_skill"), int | float)
-        and not isinstance(agent.get("with_skill"), bool)
+        if agent.get("execution_status") == "succeeded" and _finite_float(agent.get("with_skill")) is not None
     }
     if not eligible:
         return ""
@@ -1430,9 +2210,9 @@ def _runtime_seconds(engine_result: dict[str, Any] | None) -> float:
     if not isinstance(engine_result, dict):
         return 0.0
     for key in ("runtime_seconds", "elapsed", "duration_seconds", "total_runtime"):
-        value = engine_result.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+        value = _finite_float(engine_result.get(key))
+        if value is not None:
+            return value
     return 0.0
 
 
@@ -1440,17 +2220,18 @@ def _default_attempt_policy() -> dict[str, Any]:
     return {
         "max_attempts": 1,
         "pass_threshold": 0.50,
+        "stop_on_pass": False,
         "score_definition": AGENT_EVAL_SCORE_DEFINITION,
     }
 
 
 def _mean(values: list[float]) -> float | None:
-    numeric = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    numeric = [finite for value in values if (finite := _finite_float(value)) is not None]
     return round(sum(numeric) / len(numeric), 4) if numeric else None
 
 
 def _as_float(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    return _finite_float(value) or 0.0
 
 
 def _as_nonnegative_int(value: Any) -> int:

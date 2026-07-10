@@ -6,7 +6,7 @@ Regression tests for behavior_check judge response parsing.
 
 Root cause (live-reproduced 2026-06-10 by replaying Harbor trial
 ``evaluator-plugin-001__DrQLA2j`` from run ``aces-nick-e2e-rebased-20260608-092041``
-against the real Inference Hub): the verifier judge ran ``openai/openai/gpt-5.5``
+against a real OpenAI-compatible reasoning endpoint): the verifier judge ran ``openai/openai/gpt-5.5``
 (a reasoning model, via ``[verifier.env] SKILL_EVAL_JUDGE_MODEL``) with
 ``max_tokens=1024``.  That budget includes hidden reasoning tokens; on 3 of 4
 replay attempts the API returned ``finish_reason="length"`` with
@@ -38,13 +38,7 @@ import pytest
 from skillevaluator.tier3.eval_core import llm_judge
 
 _TEMPLATE = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "skillevaluator"
-    / "tier3"
-    / "harbor"
-    / "templates"
-    / "eval.py"
+    Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
 )
 
 
@@ -155,9 +149,7 @@ def test_behavior_judge_treats_list_payload_as_unparseable(monkeypatch):
     # A bare array is valid JSON but not a judge object; old code raised
     # AttributeError on parsed.get -- now it takes the diagnostic-zero path.
     calls: list[dict] = []
-    monkeypatch.setattr(
-        llm_judge, "call_public_llm", _scripted_hub(["[1, 2, 3]", "[1, 2, 3]"], calls)
-    )
+    monkeypatch.setattr(llm_judge, "call_public_llm", _scripted_hub(["[1, 2, 3]", "[1, 2, 3]"], calls))
 
     result = llm_judge.judge_behavior_check("conversation", ["b1"])
 
@@ -319,9 +311,9 @@ def test_template_extract_json_matches_eval_core_on_rejected_shapes(text):
 
 
 def test_template_salvage_matches_eval_core():
-    assert eval_template._salvage_behavior_results(
+    assert eval_template._salvage_behavior_results(TRUNCATED_RESULTS_RESPONSE) == llm_judge._salvage_behavior_results(
         TRUNCATED_RESULTS_RESPONSE
-    ) == llm_judge._salvage_behavior_results(TRUNCATED_RESULTS_RESPONSE)
+    )
 
 
 @pytest.mark.parametrize(

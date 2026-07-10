@@ -132,7 +132,14 @@ Tier 2 embeddings with one variable:
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
+skillevaluator models
 ```
+
+`skillevaluator models` shows a filtered, bounded view of model candidates
+visible to the selected provider key; add `--json` for machine-readable
+output. Catalog visibility is not proof that an agent harness can execute the
+model. Use `doctor` and a live Tier 3 evaluation for runtime and end-to-end
+verification.
 
 OpenAI, Anthropic, Bedrock, any OpenAI-compatible endpoint, and fully local
 servers work too: [configuration guide](docs/CONFIGURATION.md).
@@ -175,17 +182,23 @@ validation, and exactly where the chat LLM comes in:
 
 ## Tier 3: Live Agent Evaluation
 
-Tier 3 evaluates your skill by running a real agent (`codex`, and other
-supported CLIs) against generated tasks, with and without the skill, inside
+Tier 3 evaluates your skill by running a real agent (`opencode`, `codex`, or
+`claude-code`) against generated tasks, with and without the skill, inside
 [Harbor](https://github.com/harbor-framework/harbor) sandboxes. Most runs use
-**Docker** (the default) or **local mode** (`--env-mode local`: Linux
-bubblewrap, no Docker; macOS Seatbelt is semi-trusted and blocks common
-detached shell patterns but has no PID namespace; use Docker for untrusted
-code). Set
-`SKILLEVALUATOR_LOCAL_STRICT_READS=1` for deny-all reads with only selected
-runtime/system exceptions. Unsandboxed local execution requires explicitly
-opting into trusted mode. Cloud backends are available through the same
-`--env-mode` flag.
+**Docker** (the default) or **experimental local mode** (`--env-mode local`:
+Linux bubblewrap, no Docker; macOS Seatbelt is semi-trusted and blocks common
+detached shell patterns but has no PID namespace). Local mode is intended for
+trusted skills and workspaces; Docker provides stronger isolation for
+untrusted code. Native Windows local mode is unsupported, including
+trusted/unsandboxed overrides; use WSL2 for the Linux local path or Docker
+instead. Set `SKILLEVALUATOR_LOCAL_STRICT_READS=1` for deny-all reads with only
+selected runtime/system exceptions. On Linux/macOS, unsandboxed local execution
+requires explicitly opting into trusted mode. Cloud backends are available
+through the same `--env-mode` flag.
+
+`claude` is accepted as a convenience alias in agent lists, model overrides,
+and `evals/config.yml`. Skill Evaluator canonicalizes it to `claude-code`, so
+result keys, paths, progress, and reports always use `claude-code`.
 
 Standard grading reports lead with five human-readable dimensions. Skill Lift
 is the measured difference between the with-skill and without-skill runs, while
@@ -200,39 +213,70 @@ In `custom_only` mode, the user-owned grader defines the score instead.
 | **Effectiveness** | Is it better with the skill than without? |
 | **Efficiency** | Does it use tools and tokens efficiently? |
 
-Live evaluation has **two credential roles**: the evaluator provider generates
-tasks and performs standard grading, while the selected agent needs credentials
-compatible with its own API. A compatible local-mode agent can reuse a mapped
-provider credential; Docker and cloud agents receive values configured through
-`evals/config.yml`. When NVIDIA Build is the evaluator, `codex` needs a separate
-OpenAI-compatible Responses credential and model, while `claude-code` needs an
-Anthropic credential and model.
+Live evaluation normally has **two credential roles**: the evaluator provider
+generates tasks and performs standard grading, while the selected agent uses
+its native provider credential. NVIDIA Build is an explicit Docker and local
+exception: one `NVIDIA_API_KEY` powers direct OpenCode and SkillEvaluator's
+compatibility bridges for Codex and experimental Claude Code. Operator
+credentials come only from the host environment; a checked-out skill cannot
+replace, alias, or reroute them through `evals/config.yml`.
 
-The commands below assume that the agent credential is mapped through
-`harbor.runtime_env` as shown in the [Tier 3 guide](docs/TIER3_LIVE_EVALUATION.md#prerequisites-and-credentials).
-For `codex` with NVIDIA Build, also select an OpenAI-compatible model with
-`--agent-model`:
+This external-user path needs only a Build key from
+[build.nvidia.com](https://build.nvidia.com/):
 
 ```bash
 # 1. Readiness check first — seconds, and it names any missing key or sandbox
-skillevaluator doctor --agents codex --env-mode docker
+skillevaluator doctor --agents opencode --env-mode docker --verify-models
 
 # 2. Generate eval tasks (writes evals/evals.json; --no-llm for a keyless template)
 skillevaluator create-eval-dataset ./my-skill --full
 skillevaluator create-eval-dataset ./my-skill --full --refine
 
+# Or replace steps 2 and 3 with one non-destructive autopilot command
+skillevaluator tier3 evaluate ./my-skill --autopilot --agents opencode --env-mode docker
+
 # 3. Run the with-skill vs. without-skill evaluation
-skillevaluator evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=gpt-4.1-mini
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
 
 # 4. Read the results
 skillevaluator view ./my-skill      # HTML report
 skillevaluator compare ./my-skill   # side-by-side comparison
 ```
 
+For Docker or local NVIDIA Build runs, change `--agents opencode` to
+`--agents codex` or `--agents claude-code`; no second provider key is needed.
+Direct OpenCode defaults to `nvidia/nemotron-3-nano-30b-a3b` (rendered as
+`nvidia/nvidia/nemotron-3-nano-30b-a3b`). Bridged Codex and experimental Claude
+Code default to `nvidia/nemotron-3-super-120b-a12b`, the verified model for
+their larger tool surfaces. Choose a different model explicitly when comparison
+requirements justify it:
+
+```bash
+# Nemotron Super: explicit higher-quality override for each harness.
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker \
+  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+
+# Llama remains an explicit direct-OpenCode alternative.
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
+```
+
+SkillEvaluator never changes explicit model overrides silently. The bridges are
+available in Docker and local modes. Harbor cloud modes still require an
+independent OpenAI Responses credential for Codex or a native Anthropic
+credential for Claude Code. Do not put agent credentials in skill-owned
+`harbor.runtime_env`.
+
 Results are written under `evals/results` by default. Use `--results-dir` or
 `SKILLEVALUATOR_RESULTS_DIR` to place them elsewhere. The `--refine` option
 uses existing or collected agent trajectories to improve generated cases.
+Raw Harbor job and staged-task directories are temporary and deleted by
+default. Add `--harbor-keep-jobs` to retain them; the final **Artifacts** panel
+then prints the canonical `skillevaluator tier3 harbor-view <JOBS_DIR>` command.
 
 Custom graders, Harbor-format tasks, and agent credential setup:
 [Tier 3 guide](docs/TIER3_LIVE_EVALUATION.md).
@@ -244,7 +288,7 @@ Tier-prefixed commands call the same implementations as the primary commands:
 ```bash
 skillevaluator tier1 validate ./my-skill --no-dedup
 skillevaluator tier2 similarity-check ./skills
-skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
 ```
 
 ## Installation options

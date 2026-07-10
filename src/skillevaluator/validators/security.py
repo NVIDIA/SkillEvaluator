@@ -44,13 +44,58 @@ logger = get_logger(__name__)
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
-_SKILLSPECTOR_NVIDIA_KEY = "NVIDIA" + "_INFERENCE_KEY"
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
-    "nv_build": "nv_build",
+    "nv_build": "openai",
     "openai": "openai",
     "openai-compatible": "openai",
+}
+_SKILLSPECTOR_PROCESS_ENV_NAMES = frozenset(
+    {
+        "COMSPEC",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "PATH",
+        "PATHEXT",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
+_SKILLSPECTOR_AWS_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_CONFIG_FILE",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_DEFAULT_REGION",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_ROLE_ARN",
+        "AWS_ROLE_SESSION_NAME",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_SDK_LOAD_CONFIG",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+    }
+)
+_SKILLSPECTOR_EXPLICIT_PROVIDER_ENV = {
+    "anthropic": frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}),
+    "bedrock": _SKILLSPECTOR_AWS_ENV_NAMES,
+    "openai": frozenset({"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_PROJECT_ID"}),
 }
 
 _SKILLSPECTOR_LLM_FAILURE_MARKERS = (
@@ -80,47 +125,67 @@ def _skillspector_llm_stderr_failed(stderr: str) -> bool:
     return any(marker in normalized for marker in _SKILLSPECTOR_LLM_FAILURE_MARKERS)
 
 
-def _skillspector_child_env() -> dict[str, str] | None:
+def _copy_selected_environment(environ: Mapping[str, str], names: Iterable[str]) -> dict[str, str]:
+    return {name: environ[name] for name in names if environ.get(name, "").strip()}
+
+
+def _skillspector_process_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    source = os.environ if environ is None else environ
+    return _copy_selected_environment(source, _SKILLSPECTOR_PROCESS_ENV_NAMES)
+
+
+def _skillspector_child_env() -> dict[str, str]:
     """Map public provider settings into an invocation-scoped SkillSpector environment."""
-    child_env = dict(os.environ)
-    skillspector_provider = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
-    public_key = os.environ.get("NVIDIA_API_KEY", "").strip()
-    changed = False
+    source = os.environ
+    child_env = _skillspector_process_env(source)
+    skillspector_provider = source.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
+    skillspector_model = source.get("SKILLSPECTOR_MODEL", "").strip()
 
     if skillspector_provider:
-        if (
-            skillspector_provider in {"nv_build", "nv_inference"}
-            and public_key
-            and not child_env.get(_SKILLSPECTOR_NVIDIA_KEY, "").strip()
-        ):
-            child_env[_SKILLSPECTOR_NVIDIA_KEY] = public_key
-            changed = True
-        return child_env if changed else None
+        if skillspector_provider in _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV:
+            child_env["SKILLSPECTOR_PROVIDER"] = skillspector_provider
+            if skillspector_model:
+                child_env["SKILLSPECTOR_MODEL"] = skillspector_model
+            child_env.update(
+                _copy_selected_environment(source, _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV[skillspector_provider])
+            )
+            return child_env
+        if skillspector_provider != "nv_build":
+            # Unsupported/private providers fail closed through the generic
+            # public path without receiving any provider credential.
+            child_env["SKILLSPECTOR_PROVIDER"] = "openai"
+            if skillspector_model:
+                child_env["SKILLSPECTOR_MODEL"] = skillspector_model
+            return child_env
 
     try:
-        provider = resolve_llm_provider(child_env)
+        resolution_env = dict(source)
+        if skillspector_provider == "nv_build":
+            resolution_env["SKILL_EVAL_LLM_PROVIDER"] = "nv_build"
+            if skillspector_model:
+                resolution_env["SKILL_EVAL_LLM_MODEL"] = skillspector_model
+        provider = resolve_llm_provider(resolution_env)
     except ProviderConfigurationError:
-        return None
+        return child_env
 
     mapped_provider = _SKILLSPECTOR_PROVIDER_MAP.get(provider.provider)
     if mapped_provider is None:
-        return None
+        return child_env
 
     child_env["SKILLSPECTOR_PROVIDER"] = mapped_provider
-    child_env.setdefault("SKILLSPECTOR_MODEL", provider.model)
-    changed = True
+    child_env["SKILLSPECTOR_MODEL"] = skillspector_model or provider.model
 
-    if provider.provider == "nv_build" and public_key and not child_env.get(_SKILLSPECTOR_NVIDIA_KEY, "").strip():
-        child_env[_SKILLSPECTOR_NVIDIA_KEY] = public_key
-    elif provider.provider in {"openai", "openai-compatible"}:
+    if provider.provider in {"nv_build", "openai-compatible"}:
         if provider.api_key:
             child_env["OPENAI_API_KEY"] = provider.api_key
         if provider.base_url:
             child_env["OPENAI_BASE_URL"] = provider.base_url
-    elif provider.provider == "anthropic" and provider.base_url:
-        child_env.setdefault("ANTHROPIC_BASE_URL", provider.base_url)
+    else:
+        child_env.update(provider.child_environment())
+        if provider.provider == "bedrock":
+            child_env.update(_copy_selected_environment(source, _SKILLSPECTOR_AWS_ENV_NAMES))
 
-    return child_env if changed else None
+    return child_env
 
 
 def _tree_contains_artifact_dirs(root: Path) -> bool:
@@ -142,42 +207,6 @@ def _rewrite_path_prefix(value, old: str, new: str):
     if isinstance(value, dict):
         return {k: _rewrite_path_prefix(v, old, new) for k, v in value.items()}
     return value
-
-
-def skillspector_llm_env(environ: Mapping[str, str]) -> dict[str, str]:
-    """Map the configured SKILL_EVAL provider onto SkillSpector's env contract.
-
-    SkillSpector resolves credentials from ``SKILLSPECTOR_PROVIDER`` plus its
-    own per-provider variables (``NVIDIA_INFERENCE_KEY``, ``OPENAI_API_KEY``,
-    ``ANTHROPIC_API_KEY``, the AWS chain); it does not read ``SKILL_EVAL_*``.
-    Returns only additions that are safe: nothing at all when the user set
-    ``SKILLSPECTOR_PROVIDER`` themselves, and never a value for a variable
-    that is already present in the environment.
-    """
-    if environ.get("SKILLSPECTOR_PROVIDER"):
-        return {}
-
-    provider = (environ.get("SKILL_EVAL_LLM_PROVIDER") or "").strip().lower()
-    bridged: dict[str, str] = {}
-
-    if provider == "nv_build":
-        bridged["SKILLSPECTOR_PROVIDER"] = "nv_build"
-        key = environ.get("NVIDIA_API_KEY")
-        if key and not environ.get("NVIDIA_INFERENCE_KEY"):
-            bridged["NVIDIA_INFERENCE_KEY"] = key
-    elif provider in ("openai", "anthropic", "bedrock"):
-        # SkillSpector reads the same credential variables for these.
-        bridged["SKILLSPECTOR_PROVIDER"] = provider
-    elif provider == "openai-compatible":
-        bridged["SKILLSPECTOR_PROVIDER"] = "openai"
-        key = environ.get("SKILL_EVAL_LLM_API_KEY")
-        base_url = environ.get("SKILL_EVAL_LLM_BASE_URL")
-        if key and not environ.get("OPENAI_API_KEY"):
-            bridged["OPENAI_API_KEY"] = key
-        if base_url and not environ.get("OPENAI_BASE_URL"):
-            bridged["OPENAI_BASE_URL"] = base_url
-
-    return bridged
 
 
 def _issue_field(issue: dict):
@@ -466,8 +495,8 @@ class SecurityValidator(ValidatorBase):
             args.append("--no-llm")
 
         logger.info("Running %s on %s", stage_name, scan_root)
-        child_env = _skillspector_child_env() if use_llm else None
-        tool_result = Tools.skillspector.run(args, timeout=300, env=child_env)
+        child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
+        tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
 
         if not tool_result.success or tool_result.error_message:
             result.add_error(tool_result.error_message or f"{stage_name} failed to execute")

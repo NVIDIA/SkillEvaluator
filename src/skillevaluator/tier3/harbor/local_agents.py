@@ -5,19 +5,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
 import re
+import secrets
 import shlex
+import tempfile
+import uuid
 from collections.abc import Callable
-from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
+from contextlib import suppress
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.opencode import OpenCode
 from harbor.models.trial.paths import EnvironmentPaths
+
+from skillevaluator.tier3.harbor.nvidia_build_bridge import (
+    MAX_REQUESTS_PER_BRIDGE,
+    RunningBridge,
+    start_in_process_bridge,
+)
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
@@ -25,6 +37,40 @@ if TYPE_CHECKING:
 _CODEX_MODEL_ARG_RE = re.compile(r"(?P<prefix>(?:^|\s)--model(?:=|\s+))(?P<model>[^\s]+)(?P<suffix>(?=\s|$))")
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_NVIDIA_BUILD_BRIDGE_BASE_URL = "https://integrate.api.nvidia.com/v1"
+_NVIDIA_BUILD_BRIDGE_HOST = "127.0.0.1"
+_NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
+_NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+
+
+async def _await_task_uninterruptibly(
+    task: asyncio.Task[Any],
+    *,
+    preserve_cancellation: bool = True,
+) -> Any:
+    """Await cleanup work to completion even if cancellation is repeated."""
+    cancellation_requested = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            if task.done():
+                result = task.result()
+                break
+    if cancellation_requested and preserve_cancellation:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _close_running_bridge(
+    running: RunningBridge,
+    *,
+    preserve_cancellation: bool = True,
+) -> None:
+    close_task = asyncio.create_task(asyncio.to_thread(running.close))
+    await _await_task_uninterruptibly(close_task, preserve_cancellation=preserve_cancellation)
 
 
 def _codex_config_toml(base_url: str) -> str:
@@ -56,6 +102,8 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
 class SkillEvaluatorLocalClaudeCode(ClaudeCode):
     """Claude Code wrapper that skips bootstrap install in local mode."""
 
+    _REMOTE_CLAUDE_TMP = PurePosixPath(EnvironmentPaths.agent_dir / "claude-tmp")
+
     async def install(self, environment: BaseEnvironment) -> None:
         await self.exec_as_agent(environment, command="claude --version")
 
@@ -74,10 +122,13 @@ class SkillEvaluatorLocalClaudeCode(ClaudeCode):
             command,
             lambda text: text.replace("--permission-mode=bypassPermissions", "--permission-mode=auto"),
         )
+        command = f"mkdir -p {shlex.quote(self._REMOTE_CLAUDE_TMP.as_posix())} && {command}"
+        routed_env = dict(env or {})
+        routed_env["CLAUDE_CODE_TMPDIR"] = self._REMOTE_CLAUDE_TMP.as_posix()
         return await super().exec_as_agent(
             environment,
             command=command,
-            env=env,
+            env=routed_env,
             cwd=cwd,
             timeout_sec=timeout_sec,
         )
@@ -137,19 +188,20 @@ class SkillEvaluatorLocalCodex(Codex):
         )
 
     async def run(self, instruction, environment: BaseEnvironment, context) -> None:  # type: ignore[no-untyped-def]
-        config_path = self._REMOTE_CODEX_HOME / "config.toml"
-        base_url = os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
-        config_text = _codex_config_toml(base_url).replace("'", "'\"'\"'")
-        await self.exec_as_agent(
-            environment,
-            command=(
-                f"mkdir -p {self._REMOTE_CODEX_HOME.as_posix()} "
-                f"{self._REMOTE_CODEX_SECRETS_DIR.as_posix()} && "
-                f"cat > {config_path.as_posix()} <<'EOF'\n"
-                f"{config_text}"
-                "EOF\n"
-            ),
-        )
+        if getattr(self, "_nvidia_build_bridge_client_env", None) is None:
+            config_path = self._REMOTE_CODEX_HOME / "config.toml"
+            base_url = os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
+            config_text = _codex_config_toml(base_url).replace("'", "'\"'\"'")
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    f"mkdir -p {self._REMOTE_CODEX_HOME.as_posix()} "
+                    f"{self._REMOTE_CODEX_SECRETS_DIR.as_posix()} && "
+                    f"cat > {config_path.as_posix()} <<'EOF'\n"
+                    f"{config_text}"
+                    "EOF\n"
+                ),
+            )
         await super().run(instruction=instruction, environment=environment, context=context)
 
 
@@ -277,8 +329,460 @@ class SkillEvaluatorLocalOpenCode(OpenCode):
         )
 
 
+class _NvidiaBuildBridgeAgent:
+    """Run a Docker-only loopback bridge around Harbor's stock vendor agent."""
+
+    _BRIDGE_SCRIPT = PurePosixPath(EnvironmentPaths.agent_dir / "nvidia-build-bridge.py")
+    _BRIDGE_PID = PurePosixPath(EnvironmentPaths.agent_dir / "nvidia-build-bridge.pid")
+    _BRIDGE_READY = PurePosixPath(EnvironmentPaths.agent_dir / "nvidia-build-bridge.ready")
+    _BRIDGE_LOG = PurePosixPath(EnvironmentPaths.agent_dir / "nvidia-build-bridge.log")
+
+    def _bridge_client_environment(self) -> dict[str, str]:
+        raise NotImplementedError
+
+    def _rewrite_bridge_client_command(self, command: str) -> str:
+        return command
+
+    async def _prepare_bridge_client(self, environment: BaseEnvironment) -> None:
+        """Perform optional agent-specific setup after the bridge is healthy."""
+
+    async def _bridge_raw_exec(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+    ):
+        # Docker tasks may declare a non-root USER. Lifecycle files copied by
+        # Docker are not guaranteed to be owned by that user, so the private
+        # key handoff and cleanup must run through Harbor's root executor.
+        return await super().exec_as_root(environment, command=command, env=env)
+
+    @staticmethod
+    def _require_success(result: object, operation: str) -> None:
+        if getattr(result, "return_code", 0) != 0:
+            raise RuntimeError(f"NVIDIA Build bridge {operation} failed")
+
+    @staticmethod
+    def _resolve_bridge_api_key() -> str:
+        host_key_file = os.environ.get(_NVIDIA_BUILD_HOST_KEY_FILE_ENV, "").strip()
+        if host_key_file:
+            try:
+                api_key = Path(host_key_file).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise RuntimeError("NVIDIA Build bridge key handoff file is unavailable") from exc
+            if not api_key:
+                raise RuntimeError("NVIDIA Build bridge key handoff file is empty")
+            return api_key
+        api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+        if api_key == _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY:
+            raise RuntimeError(
+                f"NVIDIA Build bridge requires {_NVIDIA_BUILD_HOST_KEY_FILE_ENV} for file-backed credentials"
+            )
+        if not api_key:
+            raise RuntimeError("NVIDIA Build bridge requires NVIDIA_API_KEY")
+        return api_key
+
+    @staticmethod
+    def _bridge_result_stdout(result: object) -> str:
+        stdout = getattr(result, "stdout", "")
+        if isinstance(stdout, bytes):
+            return stdout.decode("utf-8", errors="strict")
+        return str(stdout or "")
+
+    @staticmethod
+    def _parse_bridge_origin(value: str) -> str:
+        origin = value.strip()
+        try:
+            parsed = urlsplit(origin)
+            port = parsed.port
+        except ValueError as exc:
+            raise RuntimeError("NVIDIA Build bridge returned an invalid dynamic origin") from exc
+        expected_origin = f"http://{_NVIDIA_BUILD_BRIDGE_HOST}:{port}" if port is not None else ""
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != _NVIDIA_BUILD_BRIDGE_HOST
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or port is None
+            or origin != expected_origin
+        ):
+            raise RuntimeError("NVIDIA Build bridge returned an invalid dynamic origin")
+        return origin
+
+    def _bridge_origin(self) -> str:
+        origin = getattr(self, "_nvidia_build_bridge_origin", None)
+        if not origin:
+            raise RuntimeError("NVIDIA Build bridge dynamic origin is unavailable")
+        return str(origin)
+
+    def _bridge_api_url(self) -> str:
+        return f"{self._bridge_origin()}/v1"
+
+    def _bridge_client_token(self) -> str:
+        client_token = getattr(self, "_nvidia_build_bridge_client_token", None)
+        if not client_token:
+            raise RuntimeError("NVIDIA Build bridge client token is unavailable")
+        return str(client_token)
+
+    async def _start_bridge(self, environment: BaseEnvironment) -> None:
+        api_key = self._resolve_bridge_api_key()
+        model_name = str(self.model_name or "").strip()
+        if not model_name:
+            raise RuntimeError("NVIDIA Build bridge requires a selected model")
+        private_file_stem = f"/tmp/.skillevaluator-nvidia-build-{uuid.uuid4().hex}"
+        key_file = PurePosixPath(f"{private_file_stem}.key")
+        client_token_file = PurePosixPath(f"{private_file_stem}.token")
+        client_token = secrets.token_urlsafe(32)
+        self._nvidia_build_bridge_key_file = key_file
+        self._nvidia_build_bridge_client_token_file = client_token_file
+        self._nvidia_build_bridge_client_token = client_token
+        # From the first upload onward, every exit path owns cleanup. Mark that
+        # responsibility before any await can be cancelled.
+        self._nvidia_build_bridge_started = True
+        try:
+            await environment.upload_file(
+                Path(__file__).with_name("nvidia_build_bridge.py"), self._BRIDGE_SCRIPT.as_posix()
+            )
+
+            # Harbor's Docker executor renders values supplied through
+            # ``env=`` in the host-side ``docker compose exec`` argv. Hand the
+            # credential over as a mode-0600 file in container-only /tmp
+            # instead, then let the bridge consume and unlink it before
+            # accepting requests.
+            with tempfile.TemporaryDirectory(prefix="skillevaluator-nvidia-build-") as temp_dir:
+                host_key_file = Path(temp_dir) / key_file.name
+                host_key_file.write_text(api_key, encoding="utf-8")
+                host_key_file.chmod(0o600)
+                host_client_token_file = Path(temp_dir) / client_token_file.name
+                host_client_token_file.write_text(client_token, encoding="utf-8")
+                host_client_token_file.chmod(0o600)
+                await environment.upload_file(host_key_file, key_file.as_posix())
+                await environment.upload_file(host_client_token_file, client_token_file.as_posix())
+
+            start_result = await self._bridge_raw_exec(
+                environment,
+                command=(
+                    "set -eu; umask 077; "
+                    f"rm -f {shlex.quote(self._BRIDGE_PID.as_posix())} "
+                    f"{shlex.quote(self._BRIDGE_READY.as_posix())}; "
+                    f"chown 0:0 {shlex.quote(key_file.as_posix())} "
+                    f"{shlex.quote(client_token_file.as_posix())}; "
+                    f"chmod 600 {shlex.quote(key_file.as_posix())} "
+                    f"{shlex.quote(client_token_file.as_posix())}; "
+                    "env -u NVIDIA_API_KEY "
+                    f"python3 {shlex.quote(self._BRIDGE_SCRIPT.as_posix())} "
+                    f"--build-base-url {_NVIDIA_BUILD_BRIDGE_BASE_URL} "
+                    f"--api-key-file {shlex.quote(key_file.as_posix())} "
+                    f"--client-token-file {shlex.quote(client_token_file.as_posix())} "
+                    f"--allowed-model {shlex.quote(model_name)} "
+                    f"--max-requests {MAX_REQUESTS_PER_BRIDGE} "
+                    "--port 0 "
+                    f"--ready-file {shlex.quote(self._BRIDGE_READY.as_posix())} "
+                    f"--log-path {shlex.quote(self._BRIDGE_LOG.as_posix())} "
+                    ">/dev/null 2>&1 & "
+                    f"echo $! > {shlex.quote(self._BRIDGE_PID.as_posix())}"
+                ),
+                env={},
+            )
+            self._require_success(start_result, "startup")
+            health_result = await self._bridge_raw_exec(
+                environment,
+                command=(
+                    "set -u; "
+                    "for attempt in $(seq 1 15); do "
+                    f"if [ ! -s {shlex.quote(self._BRIDGE_PID.as_posix())} ]; then exit 1; fi; "
+                    f'bridge_pid="$(cat {shlex.quote(self._BRIDGE_PID.as_posix())})"; '
+                    'if ! kill -0 "$bridge_pid" 2>/dev/null; then exit 1; fi; '
+                    f"if [ -s {shlex.quote(self._BRIDGE_READY.as_posix())} ]; then "
+                    "if bridge_origin=$(env -u NVIDIA_API_KEY "
+                    f"python3 {shlex.quote(self._BRIDGE_SCRIPT.as_posix())} "
+                    f"--check-ready-file {shlex.quote(self._BRIDGE_READY.as_posix())} 2>/dev/null); then "
+                    'if ! kill -0 "$bridge_pid" 2>/dev/null; then exit 1; fi; '
+                    "printf '%s\n' \"$bridge_origin\"; exit 0; "
+                    "fi; fi; "
+                    "sleep 1; "
+                    "done; echo 'NVIDIA Build bridge health check failed' >&2; exit 1"
+                ),
+                env={},
+            )
+            self._require_success(health_result, "health check")
+            self._nvidia_build_bridge_origin = self._parse_bridge_origin(self._bridge_result_stdout(health_result))
+        except BaseException:
+            # Uploads and the detached launch can complete even when their
+            # awaiter is cancelled. Complete cleanup despite repeat
+            # cancellation, then preserve the original startup failure.
+            cleanup_task = asyncio.create_task(self._cleanup_bridge(environment))
+            with suppress(BaseException):
+                await _await_task_uninterruptibly(cleanup_task, preserve_cancellation=False)
+            raise
+
+    async def _cleanup_bridge(self, environment: BaseEnvironment) -> None:
+        # The bridge log itself has a fixed sanitized format. Retain it as the
+        # sole lifecycle artifact; remove its executable and private metadata.
+        key_file = getattr(self, "_nvidia_build_bridge_key_file", None)
+        client_token_file = getattr(self, "_nvidia_build_bridge_client_token_file", None)
+        private_file_cleanup = "".join(
+            f" {shlex.quote(path.as_posix())}" for path in (key_file, client_token_file) if path is not None
+        )
+        cleanup_complete = False
+        try:
+            cleanup_result = await self._bridge_raw_exec(
+                environment,
+                command=(
+                    f"if [ -s {shlex.quote(self._BRIDGE_PID.as_posix())} ]; then "
+                    f'kill "$(cat {shlex.quote(self._BRIDGE_PID.as_posix())})" 2>/dev/null || true; '
+                    "fi; "
+                    f"rm -f {shlex.quote(self._BRIDGE_PID.as_posix())} "
+                    f"{shlex.quote(self._BRIDGE_READY.as_posix())} "
+                    f"{shlex.quote(self._BRIDGE_SCRIPT.as_posix())}{private_file_cleanup}"
+                ),
+                env={},
+            )
+            self._require_success(cleanup_result, "cleanup")
+            cleanup_complete = True
+        finally:
+            self._nvidia_build_bridge_origin = None
+            if cleanup_complete:
+                self._nvidia_build_bridge_started = False
+                self._nvidia_build_bridge_key_file = None
+                self._nvidia_build_bridge_client_token_file = None
+                self._nvidia_build_bridge_client_token = None
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        client_env = getattr(self, "_nvidia_build_bridge_client_env", None)
+        if client_env is None:
+            return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
+        routed_env = dict(env or {})
+        routed_env.update(client_env)
+        routed_env.pop("NVIDIA_API_KEY", None)
+        routed_command = self._rewrite_bridge_client_command(command)
+        return await super().exec_as_agent(
+            environment,
+            command=f"env -u NVIDIA_API_KEY bash -c {shlex.quote(routed_command)}",
+            env=routed_env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
+    async def run(self, instruction, environment: BaseEnvironment, context) -> None:  # type: ignore[no-untyped-def]
+        self._nvidia_build_bridge_started = False
+        self._nvidia_build_bridge_key_file = None
+        self._nvidia_build_bridge_client_token_file = None
+        self._nvidia_build_bridge_client_token = None
+        self._nvidia_build_bridge_origin = None
+        run_failed = False
+        try:
+            await self._start_bridge(environment)
+            self._nvidia_build_bridge_client_env = self._bridge_client_environment()
+            await self._prepare_bridge_client(environment)
+            await super().run(instruction=instruction, environment=environment, context=context)
+        except BaseException:
+            run_failed = True
+            raise
+        finally:
+            self._nvidia_build_bridge_client_env = None
+            if self._nvidia_build_bridge_started:
+                try:
+                    cleanup_task = asyncio.create_task(self._cleanup_bridge(environment))
+                    await _await_task_uninterruptibly(cleanup_task, preserve_cancellation=not run_failed)
+                except BaseException:
+                    if not run_failed:
+                        raise
+
+
+class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, Codex):
+    """Stock Codex CLI routed through the in-trial NVIDIA Build bridge."""
+
+    def _bridge_client_environment(self) -> dict[str, str]:
+        return {
+            "OPENAI_API_KEY": self._bridge_client_token(),
+        }
+
+    def _get_env(self, key: str) -> str | None:
+        """Expose the sentinel key while suppressing Codex's legacy base-url config."""
+        client_env = getattr(self, "_nvidia_build_bridge_client_env", None)
+        if client_env is not None:
+            if key == "OPENAI_BASE_URL":
+                return None
+            if key in client_env:
+                return client_env[key]
+        return super()._get_env(key)
+
+    async def _prepare_bridge_client(self, environment: BaseEnvironment) -> None:
+        config_path = self._REMOTE_CODEX_HOME / "config.toml"
+        config_text = _codex_config_toml(self._bridge_api_url())
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"mkdir -p {shlex.quote(self._REMOTE_CODEX_HOME.as_posix())} && "
+                f"cat > {shlex.quote(config_path.as_posix())} <<'EOF'\n"
+                f"{config_text}"
+                "EOF\n"
+            ),
+        )
+
+    def _rewrite_bridge_client_command(self, command: str) -> str:
+        model_name = str(self.model_name or "")
+        command = command.replace(
+            'openai_base_url = "${OPENAI_BASE_URL}"',
+            f'openai_base_url = "{self._bridge_api_url()}"',
+        )
+        if not model_name or "/" not in model_name:
+            return command
+        short_model = model_name.rsplit("/", 1)[-1]
+
+        def replace(match: re.Match[str]) -> str:
+            if match.group("model") != short_model:
+                return match.group(0)
+            return f"{match.group('prefix')}{model_name}{match.group('suffix')}"
+
+        return _rewrite_launcher_segment(command, lambda text: _CODEX_MODEL_ARG_RE.sub(replace, text))
+
+
+class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, ClaudeCode):
+    """Stock Claude Code CLI routed through the in-trial NVIDIA Build bridge."""
+
+    def _bridge_client_environment(self) -> dict[str, str]:
+        model_name = str(self.model_name or "")
+        environment = {
+            "ANTHROPIC_API_KEY": self._bridge_client_token(),
+            "ANTHROPIC_BASE_URL": self._bridge_origin(),
+        }
+        if model_name:
+            environment.update(
+                {
+                    "ANTHROPIC_MODEL": model_name,
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": model_name,
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": model_name,
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": model_name,
+                    "CLAUDE_CODE_SUBAGENT_MODEL": model_name,
+                }
+            )
+        return environment
+
+
+class _LocalHostNvidiaBuildBridgeAgent:
+    """Run the authenticated bridge in Harbor's trusted local parent process."""
+
+    async def _start_bridge(self, environment: BaseEnvironment) -> None:
+        _ = environment
+        api_key = self._resolve_bridge_api_key()
+        temp_dir = tempfile.TemporaryDirectory(prefix="skillevaluator-local-nvidia-build-")
+        self._nvidia_build_local_temp_dir = temp_dir
+        log_path = Path(temp_dir.name) / "nvidia-build-bridge.log"
+        self._nvidia_build_local_log_path = log_path
+        startup_task = asyncio.create_task(
+            asyncio.to_thread(
+                start_in_process_bridge,
+                api_key=api_key,
+                build_base_url=_NVIDIA_BUILD_BRIDGE_BASE_URL,
+                log_path=log_path,
+                allowed_model=str(self.model_name or "").strip(),
+            )
+        )
+        try:
+            running = await asyncio.shield(startup_task)
+        except BaseException:
+            # ``to_thread`` keeps running if its awaiter is cancelled. Recover
+            # the eventual handle and close it before propagating cancellation
+            # so no authenticated listener or temporary directory is orphaned.
+            try:
+                abandoned = await _await_task_uninterruptibly(startup_task, preserve_cancellation=False)
+            except BaseException:
+                temp_dir.cleanup()
+                self._nvidia_build_local_temp_dir = None
+                self._nvidia_build_local_log_path = None
+            else:
+                self._nvidia_build_running_bridge = abandoned
+                self._nvidia_build_bridge_client_token = abandoned.client_token
+                self._nvidia_build_bridge_origin = abandoned.origin
+                self._nvidia_build_bridge_started = True
+                try:
+                    await _close_running_bridge(abandoned, preserve_cancellation=False)
+                except BaseException:
+                    # Retain the handle and temp directory so the outer run
+                    # finalizer can retry cleanup instead of hiding a listener.
+                    pass
+                else:
+                    temp_dir.cleanup()
+                    self._nvidia_build_running_bridge = None
+                    self._nvidia_build_local_temp_dir = None
+                    self._nvidia_build_local_log_path = None
+                    self._nvidia_build_bridge_client_token = None
+                    self._nvidia_build_bridge_origin = None
+                    self._nvidia_build_bridge_started = False
+            raise
+        self._nvidia_build_running_bridge = running
+        self._nvidia_build_bridge_client_token = running.client_token
+        self._nvidia_build_bridge_origin = running.origin
+        self._nvidia_build_bridge_started = True
+
+    async def _cleanup_bridge(self, environment: BaseEnvironment) -> None:
+        running: RunningBridge | None = getattr(self, "_nvidia_build_running_bridge", None)
+        log_path: Path | None = getattr(self, "_nvidia_build_local_log_path", None)
+        temp_dir: tempfile.TemporaryDirectory[str] | None = getattr(self, "_nvidia_build_local_temp_dir", None)
+        bridge_closed = running is None
+        try:
+            if running is not None:
+                try:
+                    await _close_running_bridge(running)
+                except asyncio.CancelledError:
+                    bridge_closed = running._closed
+                    raise
+                else:
+                    bridge_closed = True
+            if log_path is not None and log_path.is_file():
+                await environment.upload_file(log_path, _NvidiaBuildBridgeAgent._BRIDGE_LOG.as_posix())
+        finally:
+            if bridge_closed:
+                if temp_dir is not None:
+                    temp_dir.cleanup()
+                self._nvidia_build_running_bridge = None
+                self._nvidia_build_local_log_path = None
+                self._nvidia_build_local_temp_dir = None
+                self._nvidia_build_bridge_client_token = None
+                self._nvidia_build_bridge_origin = None
+                self._nvidia_build_bridge_started = False
+
+
+class SkillEvaluatorLocalNvidiaBuildCodex(
+    _LocalHostNvidiaBuildBridgeAgent,
+    SkillEvaluatorNvidiaBuildCodex,
+    SkillEvaluatorLocalCodex,
+):
+    """Managed local Codex CLI routed through an authenticated host bridge."""
+
+
+class SkillEvaluatorLocalNvidiaBuildClaudeCode(
+    _LocalHostNvidiaBuildBridgeAgent,
+    SkillEvaluatorNvidiaBuildClaudeCode,
+    SkillEvaluatorLocalClaudeCode,
+):
+    """Managed local Claude Code CLI routed through an authenticated host bridge."""
+
+
 LOCAL_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode",
     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex",
     "opencode": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode",
+}
+
+NVIDIA_BUILD_AGENT_IMPORT_PATHS = {
+    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode",
+    "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex",
+}
+
+NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS = {
+    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildClaudeCode",
+    "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildCodex",
 }

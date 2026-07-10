@@ -1,0 +1,8 @@
+{
+  "contract_version": "2026-07-08.1",
+  "provider": "nv_build",
+  "credential_env": "NVIDIA_API_KEY",
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "credential_owner": "operator",
+  "allowed_editions": ["external", "internal"]
+}

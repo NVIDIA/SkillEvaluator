@@ -26,60 +26,63 @@ def _trajectory_with_late_write() -> dict:
 
     for idx in range(12):
         tool_id = f"read-{idx}"
-        steps.append({
+        steps.append(
+            {
+                "source": "agent",
+                "message": f"Executed Read {tool_id}",
+                "tool_calls": [
+                    {
+                        "tool_call_id": tool_id,
+                        "function_name": "Read",
+                        "arguments": {"file_path": f"/workspace/input/file_{idx}.py"},
+                    }
+                ],
+                "observation": {
+                    "results": [
+                        {
+                            "source_call_id": tool_id,
+                            "content": "early exploration output " + ("x" * 700),
+                        }
+                    ]
+                },
+            }
+        )
+
+    steps.append(
+        {
             "source": "agent",
-            "message": f"Executed Read {tool_id}",
+            "message": "Executed Write write-1",
             "tool_calls": [
                 {
-                    "tool_call_id": tool_id,
-                    "function_name": "Read",
-                    "arguments": {"file_path": f"/workspace/input/file_{idx}.py"},
+                    "tool_call_id": "write-1",
+                    "function_name": "Write",
+                    "arguments": {
+                        "file_path": "/workspace/output/test_gpu_engine_selection.py",
+                        "content": (
+                            "import polars as pl\n"
+                            "def test_gpu_engine_strict(lazy_query):\n"
+                            "    engine = pl.GPUEngine(raise_on_fail=True)\n"
+                            '    lazy_query.collect(engine="gpu")\n'
+                        ),
+                    },
                 }
             ],
             "observation": {
                 "results": [
                     {
-                        "source_call_id": tool_id,
-                        "content": "early exploration output " + ("x" * 700),
+                        "source_call_id": "write-1",
+                        "content": ("File created successfully at: /workspace/output/test_gpu_engine_selection.py"),
                     }
                 ]
             },
-        })
-
-    steps.append({
-        "source": "agent",
-        "message": "Executed Write write-1",
-        "tool_calls": [
-            {
-                "tool_call_id": "write-1",
-                "function_name": "Write",
-                "arguments": {
-                    "file_path": "/workspace/output/test_gpu_engine_selection.py",
-                    "content": (
-                        "import polars as pl\n"
-                        "def test_gpu_engine_strict(lazy_query):\n"
-                        "    engine = pl.GPUEngine(raise_on_fail=True)\n"
-                        '    lazy_query.collect(engine="gpu")\n'
-                    ),
-                },
-            }
-        ],
-        "observation": {
-            "results": [
-                {
-                    "source_call_id": "write-1",
-                    "content": (
-                        "File created successfully at: "
-                        "/workspace/output/test_gpu_engine_selection.py"
-                    ),
-                }
-            ]
-        },
-    })
-    steps.append({
-        "source": "agent",
-        "message": "Wrote /workspace/output/test_gpu_engine_selection.py.",
-    })
+        }
+    )
+    steps.append(
+        {
+            "source": "agent",
+            "message": "Wrote /workspace/output/test_gpu_engine_selection.py.",
+        }
+    )
     return {"steps": steps}
 
 
@@ -103,9 +106,7 @@ def test_behavior_evidence_prioritizes_late_write_tool_calls() -> None:
 
 
 def test_harbor_template_behavior_evidence_matches_shared_helper() -> None:
-    template_path = (
-        Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
+    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
     spec = importlib.util.spec_from_file_location("harbor_eval_template", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -134,9 +135,7 @@ def test_metric_evidence_refs_link_judges_to_trajectory_and_expected_artifacts()
 
     assert set(refs) == {"accuracy", "goal_accuracy", "behavior_check"}
     assert any(
-        ref["source"] == "trajectory.json"
-        and ref["json_pointer"] == "/steps/4"
-        and ref["kind"] == "final_response"
+        ref["source"] == "trajectory.json" and ref["json_pointer"] == "/steps/4" and ref["kind"] == "final_response"
         for ref in refs["accuracy"]
     )
     assert any(
@@ -174,9 +173,7 @@ def test_metric_evidence_refs_link_judges_to_trajectory_and_expected_artifacts()
 
 
 def test_harbor_template_metric_evidence_refs_match_shared_helper() -> None:
-    template_path = (
-        Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
+    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
     spec = importlib.util.spec_from_file_location("harbor_eval_template_refs", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -209,7 +206,9 @@ def test_attach_metric_evidence_refs_preserves_existing_judge_details() -> None:
     refs = {
         "accuracy": [{"source": "trajectory.json", "json_pointer": "/steps/4", "kind": "final_response"}],
         "goal_accuracy": [{"source": "trajectory.json", "json_pointer": "/steps/2/tool_calls/0", "kind": "tool_call"}],
-        "behavior_check": [{"source": "evals.json", "json_pointer": "/expected_behavior/0", "kind": "expected_behavior"}],
+        "behavior_check": [
+            {"source": "evals.json", "json_pointer": "/expected_behavior/0", "kind": "expected_behavior"}
+        ],
     }
     details = {
         "accuracy": {"score": 1.0, "reason": "ok"},
@@ -231,7 +230,7 @@ def test_attach_metric_evidence_refs_preserves_existing_judge_details() -> None:
 
 def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
     secret_path = "/logs/agent/nvapi-AbCdEfGh12345678.json"
-    openshift_token = "sha256~abcdefghijklmnop"
+    sha256_token = "sha256~abcdefghijklmnop"
     cursor_token = "crsr_deadbeefcafebabe"
     jwt_token = (
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -248,10 +247,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
                         "function_name": "Write",
                         "arguments": {
                             "file_path": secret_path,
-                            "content": (
-                                "tokens sk-AbCdEfGh12345678 "
-                                f"{openshift_token} {cursor_token} {jwt_token}"
-                            ),
+                            "content": (f"tokens sk-AbCdEfGh12345678 {sha256_token} {cursor_token} {jwt_token}"),
                         },
                     }
                 ],
@@ -259,7 +255,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
                     "results": [
                         {
                             "source_call_id": "write-secret-path",
-                            "content": f"wrote {secret_path} with {openshift_token} and {cursor_token}",
+                            "content": f"wrote {secret_path} with {sha256_token} and {cursor_token}",
                         }
                     ]
                 },
@@ -271,7 +267,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
     refs = atif_helpers.build_metric_evidence_refs(
         traj,
         "Save the result.",
-        ground_truth=f"Save {secret_path} after login {openshift_token}",
+        ground_truth=f"Save {secret_path} after login {sha256_token}",
         expected_behavior=[f"Save {secret_path} using {cursor_token} and {jwt_token}"],
     )
 
@@ -279,7 +275,7 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
     for raw_secret in (
         "nvapi-AbCdEfGh12345678",
         "sk-AbCdEfGh12345678",
-        openshift_token,
+        sha256_token,
         cursor_token,
         jwt_token,
     ):
@@ -292,14 +288,12 @@ def test_metric_evidence_refs_redact_secret_like_values_in_all_fields() -> None:
 
 
 def test_harbor_template_metric_evidence_refs_redact_harbor_secret_shapes() -> None:
-    template_path = (
-        Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
+    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
     spec = importlib.util.spec_from_file_location("harbor_eval_template_secret_refs", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    openshift_token = "sha256~abcdefghijklmnop"
+    sha256_token = "sha256~abcdefghijklmnop"
     cursor_token = "crsr_deadbeefcafebabe"
     jwt_token = (
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -315,24 +309,20 @@ def test_harbor_template_metric_evidence_refs_redact_harbor_secret_shapes() -> N
                         {
                             "tool_call_id": "bash-secret",
                             "function_name": "Bash",
-                            "arguments": {
-                                "command": f"nemo auth --token {openshift_token} --cursor {cursor_token}"
-                            },
+                            "arguments": {"command": f"nemo auth --token {sha256_token} --cursor {cursor_token}"},
                         }
                     ],
-                    "observation": {
-                        "results": [{"source_call_id": "bash-secret", "content": jwt_token}]
-                    },
+                    "observation": {"results": [{"source_call_id": "bash-secret", "content": jwt_token}]},
                 }
             ]
         },
         "Run auth.",
-        ground_truth=f"Do not leak {openshift_token}",
+        ground_truth=f"Do not leak {sha256_token}",
         expected_behavior=[f"Do not leak {cursor_token} or {jwt_token}"],
     )
 
     rendered = json.dumps(refs)
-    assert openshift_token not in rendered
+    assert sha256_token not in rendered
     assert cursor_token not in rendered
     assert jwt_token not in rendered
     assert "sha256~<redacted>" in rendered
@@ -351,9 +341,7 @@ def _trajectory_with_leaked_runtime_key(*key_values: str) -> dict:
                     {
                         "tool_call_id": "bash-runtime-key",
                         "function_name": "Bash",
-                        "arguments": {
-                            "command": f"curl -H 'Authorization: Bearer {joined}' https://api.test"
-                        },
+                        "arguments": {"command": f"curl -H 'Authorization: Bearer {joined}' https://api.test"},
                     }
                 ],
                 "observation": {
@@ -392,9 +380,7 @@ def test_metric_evidence_refs_redact_runtime_api_key_values(monkeypatch, env_var
 
 
 def test_harbor_template_and_shared_redact_runtime_api_key_values_identically(monkeypatch) -> None:
-    template_path = (
-        Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
+    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
     spec = importlib.util.spec_from_file_location("harbor_eval_template_env_keys", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -408,12 +394,8 @@ def test_harbor_template_and_shared_redact_runtime_api_key_values_identically(mo
         "ground_truth": f"Authenticate without echoing {api_key}",
         "expected_behavior": [f"Never print {api_key} to the terminal"],
     }
-    shared_refs = atif_helpers.build_metric_evidence_refs(
-        traj, "Authenticate against the API.", **kwargs
-    )
-    template_refs = module.build_metric_evidence_refs(
-        traj, "Authenticate against the API.", **kwargs
-    )
+    shared_refs = atif_helpers.build_metric_evidence_refs(traj, "Authenticate against the API.", **kwargs)
+    template_refs = module.build_metric_evidence_refs(traj, "Authenticate against the API.", **kwargs)
 
     assert template_refs == shared_refs
     rendered = json.dumps(shared_refs)
@@ -422,9 +404,7 @@ def test_harbor_template_and_shared_redact_runtime_api_key_values_identically(mo
 
 
 def test_harbor_template_main_persists_evidence_refs_in_reward_json(monkeypatch, tmp_path) -> None:
-    template_path = (
-        Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
+    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
     spec = importlib.util.spec_from_file_location("harbor_eval_template_main_refs", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -445,13 +425,15 @@ def test_harbor_template_main_persists_evidence_refs_in_reward_json(monkeypatch,
 
     trajectory_path.write_text(json.dumps(_trajectory_with_metric_refs()), encoding="utf-8")
     entry_path.write_text(
-        json.dumps({
-            "id": "case-1",
-            "question": "Run the evaluator and save /logs/agent/string-check-job-results.json.",
-            "ground_truth": "The agent should complete the job and save /logs/agent/string-check-job-results.json.",
-            "expected_behavior": ["Save /logs/agent/string-check-job-results.json"],
-            "should_trigger": False,
-        }),
+        json.dumps(
+            {
+                "id": "case-1",
+                "question": "Run the evaluator and save /logs/agent/string-check-job-results.json.",
+                "ground_truth": "The agent should complete the job and save /logs/agent/string-check-job-results.json.",
+                "expected_behavior": ["Save /logs/agent/string-check-job-results.json"],
+                "should_trigger": False,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -465,24 +447,28 @@ def test_harbor_template_main_persists_evidence_refs_in_reward_json(monkeypatch,
 
     def fake_call_public_llm(prompt, *args, **kwargs):
         if "For each criterion" in prompt:
-            return json.dumps({
-                "criteria": {
-                    "SKILL_IDENTIFIED": True,
-                    "ACTION_CORRECT": True,
-                    "FACTUALLY_ACCURATE": True,
-                    "TASK_ADDRESSED": True,
-                    "ACTIONABLE": True,
-                },
-                "score": 1.0,
-                "reason": "ok",
-            }), None
+            return json.dumps(
+                {
+                    "criteria": {
+                        "SKILL_IDENTIFIED": True,
+                        "ACTION_CORRECT": True,
+                        "FACTUALLY_ACCURATE": True,
+                        "TASK_ADDRESSED": True,
+                        "ACTIONABLE": True,
+                    },
+                    "score": 1.0,
+                    "reason": "ok",
+                }
+            ), None
         if "Did the agent achieve the expected goal?" in prompt:
             return json.dumps({"achieved": True, "score": 1.0, "reason": "ok"}), None
-        return json.dumps({
-            "results": [{"step": 1, "passed": True, "reason": "file saved"}],
-            "score": 1.0,
-            "summary": "ok",
-        }), None
+        return json.dumps(
+            {
+                "results": [{"step": 1, "passed": True, "reason": "file saved"}],
+                "score": 1.0,
+                "summary": "ok",
+            }
+        ), None
 
     monkeypatch.setattr(module, "_judge_goal_accuracy_ragas", fake_ragas)
     monkeypatch.setattr(module, "call_public_llm", fake_call_public_llm)
@@ -522,9 +508,7 @@ def _trajectory_with_metric_refs() -> dict:
                     {
                         "tool_call_id": "submit-1",
                         "function_name": "Bash",
-                        "arguments": {
-                            "command": "nemo evaluator evaluate submit --config /tmp/string-check.yaml"
-                        },
+                        "arguments": {"command": "nemo evaluator evaluate submit --config /tmp/string-check.yaml"},
                     }
                 ],
                 "observation": {
@@ -638,9 +622,7 @@ def test_behavior_evidence_does_not_treat_read_like_tool_names_as_writes() -> No
 
 
 def test_harbor_template_behavior_judge_keeps_late_tail_evidence(monkeypatch) -> None:
-    template_path = (
-        Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
+    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
     spec = importlib.util.spec_from_file_location("harbor_eval_template_for_judge", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -649,15 +631,15 @@ def test_harbor_template_behavior_judge_keeps_late_tail_evidence(monkeypatch) ->
 
     def fake_call_public_llm(prompt, **kwargs):
         prompts.append(prompt)
-        return json.dumps({
-            "results": [{"step": 1, "passed": True, "reason": "write observed"}],
-            "summary": "ok",
-        }), None
+        return json.dumps(
+            {
+                "results": [{"step": 1, "passed": True, "reason": "write observed"}],
+                "summary": "ok",
+            }
+        ), None
 
     monkeypatch.setattr(module, "call_public_llm", fake_call_public_llm)
-    conversation = ("early exploration\n" * 400) + (
-        'Agent called: Write({"file_path": "/workspace/output/test.py"})\n'
-    )
+    conversation = ("early exploration\n" * 400) + ('Agent called: Write({"file_path": "/workspace/output/test.py"})\n')
 
     result = module.judge_behavior_check(conversation, ["writes the output file"])
 
@@ -677,9 +659,7 @@ def test_behavior_evidence_ignores_non_write_shell_gt() -> None:
                         "arguments": {"command": "python3 -c 'print(3 > 2)' 2>&1"},
                     }
                 ],
-                "observation": {
-                    "results": [{"source_call_id": "bash-1", "content": "True"}]
-                },
+                "observation": {"results": [{"source_call_id": "bash-1", "content": "True"}]},
             },
             {
                 "source": "agent",
@@ -690,9 +670,7 @@ def test_behavior_evidence_ignores_non_write_shell_gt() -> None:
                         "arguments": {"command": "cat <<'EOF' > /workspace/output/result.txt\nok\nEOF"},
                     }
                 ],
-                "observation": {
-                    "results": [{"source_call_id": "bash-2", "content": "wrote file"}]
-                },
+                "observation": {"results": [{"source_call_id": "bash-2", "content": "wrote file"}]},
             },
             {
                 "source": "agent",
@@ -710,9 +688,7 @@ def test_behavior_evidence_ignores_non_write_shell_gt() -> None:
                         },
                     }
                 ],
-                "observation": {
-                    "results": [{"source_call_id": "bash-3", "content": "wrote python file"}]
-                },
+                "observation": {"results": [{"source_call_id": "bash-3", "content": "wrote python file"}]},
             },
         ]
     }

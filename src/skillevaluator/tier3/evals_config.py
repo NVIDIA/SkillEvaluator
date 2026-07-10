@@ -15,20 +15,32 @@ from typing import Any
 
 import yaml
 
+from skillevaluator.tier3.harbor import canonical_agent_name
+
 CONFIG_FILENAMES = ("config.yml", "config.yaml")
 HARBOR_CUSTOM_DOCKERFILE_MODES = {"preserve", "rebase"}
+HARBOR_BASE_IMAGE_MODES = {"reuse", "rebuild", "disabled"}
 SKILL_WORKSPACE_MODES = {"isolated", "group"}
-GRADING_MODES = {"default", "default_plus_custom", "custom_only"}
+# Legacy grading-mode spellings stay accepted API surface; loading normalizes
+# them so the engine only ever sees the current names.
+GRADING_MODE_ALIASES = {
+    "aces_default": "default",
+    "aces_plus_custom": "default_plus_custom",
+}
+GRADING_MODES = {"default", "default_plus_custom", "custom_only", *GRADING_MODE_ALIASES}
 
 _TOP_LEVEL_KEYS = {"schema_version", "harbor", "skill_workspace", "grading"}
 _HARBOR_KEYS = {
     "task_source",
     "custom_dockerfile_mode",
+    "base_image_mode",
     "n_attempts",
     "pass_threshold",
+    "stop_on_pass",
     "n_concurrent",
     "max_agents",
     "timeout_multiplier",
+    "agent_runtime_preflight",
     "agent_workdir",
     "resources",
     "runtime_env",
@@ -119,12 +131,21 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
                 config_path,
                 "harbor.custom_dockerfile_mode",
             )
+        if "base_image_mode" in harbor_raw:
+            harbor["base_image_mode"] = _enum(
+                harbor_raw["base_image_mode"],
+                HARBOR_BASE_IMAGE_MODES,
+                config_path,
+                "harbor.base_image_mode",
+            )
         if "n_attempts" in harbor_raw:
             harbor["n_attempts"] = _int_at_least(harbor_raw["n_attempts"], 1, config_path, "harbor.n_attempts")
         if "pass_threshold" in harbor_raw:
             harbor["pass_threshold"] = _float_between(
                 harbor_raw["pass_threshold"], 0.0, 1.0, config_path, "harbor.pass_threshold"
             )
+        if "stop_on_pass" in harbor_raw:
+            harbor["stop_on_pass"] = _bool(harbor_raw["stop_on_pass"], config_path, "harbor.stop_on_pass")
         if "n_concurrent" in harbor_raw:
             harbor["n_concurrent"] = _int_at_least(harbor_raw["n_concurrent"], 1, config_path, "harbor.n_concurrent")
         if "max_agents" in harbor_raw:
@@ -132,6 +153,12 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
         if "timeout_multiplier" in harbor_raw:
             harbor["timeout_multiplier"] = _float_greater_than(
                 harbor_raw["timeout_multiplier"], 0.0, config_path, "harbor.timeout_multiplier"
+            )
+        if "agent_runtime_preflight" in harbor_raw:
+            harbor["agent_runtime_preflight"] = _bool(
+                harbor_raw["agent_runtime_preflight"],
+                config_path,
+                "harbor.agent_runtime_preflight",
             )
         if "agent_workdir" in harbor_raw:
             harbor["agent_workdir"] = _non_empty_string(
@@ -234,11 +261,20 @@ def _agents(value: Any, config_path: Path) -> dict[str, dict[str, str]]:
         raise EvalsConfigError(f"{config_path}: harbor.agents must be a mapping")
 
     agents: dict[str, dict[str, str]] = {}
+    authored_names: dict[str, str] = {}
     for agent_name, agent_cfg in value.items():
         if not isinstance(agent_name, str) or not agent_name:
             raise EvalsConfigError(f"{config_path}: harbor.agents keys must be non-empty strings")
         if not isinstance(agent_cfg, dict):
             raise EvalsConfigError(f"{config_path}: harbor.agents.{agent_name} must be a mapping")
+
+        canonical_name = canonical_agent_name(agent_name)
+        if canonical_name in agents:
+            previous = authored_names[canonical_name]
+            raise EvalsConfigError(
+                f"{config_path}: harbor.agents.{previous} and harbor.agents.{agent_name} "
+                f"refer to the same agent ({canonical_name}); use only {canonical_name}"
+            )
 
         unknown_agent = set(agent_cfg) - _AGENT_KEYS
         if unknown_agent:
@@ -248,11 +284,12 @@ def _agents(value: Any, config_path: Path) -> dict[str, dict[str, str]]:
 
         model = agent_cfg.get("model")
         if model is None:
-            agents[agent_name] = {}
+            agents[canonical_name] = {}
         elif not isinstance(model, str) or not model.strip():
             raise EvalsConfigError(f"{config_path}: harbor.agents.{agent_name}.model must be a non-empty string")
         else:
-            agents[agent_name] = {"model": model}
+            agents[canonical_name] = {"model": model.strip()}
+        authored_names[canonical_name] = agent_name
 
     return agents
 
@@ -360,5 +397,6 @@ def _grading(value: Any, config_path: Path) -> dict[str, str]:
 
     out: dict[str, str] = {}
     if "mode" in value:
-        out["mode"] = _enum(value["mode"], GRADING_MODES, config_path, "grading.mode")
+        mode = _enum(value["mode"], GRADING_MODES, config_path, "grading.mode")
+        out["mode"] = GRADING_MODE_ALIASES.get(mode, mode)
     return out

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 DEFAULT_METRIC_SET = "skill-evaluator-default-v2"
@@ -95,19 +96,27 @@ _RESERVED_METADATA_KEYS = {
 RESERVED_METRIC_NAMES = frozenset(DEFAULT_METRICS) | _RESERVED_METADATA_KEYS
 
 
+def _finite_number(value: object) -> float | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
+
+
 def metric_value(reward: dict[str, Any], metric: str) -> float | None:
     """Return a numeric metric value from a reward payload, if present."""
-    val = reward.get(metric)
-    if isinstance(val, int | float) and not isinstance(val, bool):
-        return float(val)
+    val = _finite_number(reward.get(metric))
+    if val is not None:
+        return val
 
     metrics = reward.get("metrics")
     if isinstance(metrics, dict):
         raw = metrics.get(metric)
         if isinstance(raw, dict):
             raw = raw.get("score")
-        if isinstance(raw, int | float) and not isinstance(raw, bool):
-            return float(raw)
+        numeric = _finite_number(raw)
+        if numeric is not None:
+            return numeric
 
     return None
 
@@ -124,21 +133,23 @@ def metric_set_for_reward(reward: dict[str, Any]) -> tuple[str, tuple[str, ...]]
         return DEFAULT_METRIC_SET, DEFAULT_METRICS
     if any(metric_value(reward, m) is not None for m in LEGACY_METRICS):
         return LEGACY_METRIC_SET, LEGACY_METRICS
-    if isinstance(reward.get("overall"), int | float) and not isinstance(reward.get("overall"), bool):
+    if _finite_number(reward.get("overall")) is not None:
         return CUSTOM_ONLY_METRIC_SET, ()
     return DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 
 def metric_set_for_rewards(rewards: list[dict[str, Any]]) -> tuple[str, tuple[str, ...]]:
     """Return the metric set for a collection, preferring the new SkillEvaluator set."""
+    declared = {str(reward.get("metric_set") or reward.get("metric_set_version") or "") for reward in rewards}
+    if DEFAULT_METRIC_SET in declared:
+        return DEFAULT_METRIC_SET, DEFAULT_METRICS
+    if LEGACY_METRIC_SET in declared:
+        return LEGACY_METRIC_SET, LEGACY_METRICS
     if any(metric_value(reward, "security") is not None for reward in rewards):
         return DEFAULT_METRIC_SET, DEFAULT_METRICS
     if any(any(metric_value(reward, m) is not None for m in LEGACY_METRICS) for reward in rewards):
         return LEGACY_METRIC_SET, LEGACY_METRICS
-    if any(
-        isinstance(reward.get("overall"), int | float) and not isinstance(reward.get("overall"), bool)
-        for reward in rewards
-    ):
+    if any(_finite_number(reward.get("overall")) is not None for reward in rewards):
         return CUSTOM_ONLY_METRIC_SET, ()
     return DEFAULT_METRIC_SET, DEFAULT_METRICS
 
@@ -161,12 +172,13 @@ def average_metrics(rewards: list[dict[str, Any]]) -> tuple[dict[str, float], st
     averages: dict[str, float] = {}
     for metric in metrics:
         count = metric_counts[metric]
-        averages[metric] = round(metric_sums[metric] / count, 4) if count > 0 else 0.0
+        if count > 0:
+            averages[metric] = round(metric_sums[metric] / count, 4)
 
     return averages, metric_set, metrics
 
 
-def overall_score(reward: dict[str, Any]) -> float:
+def overall_score(reward: dict[str, Any]) -> float | None:
     """Compute pass@k/lift overall score for a reward payload.
 
     SkillEvaluator default rewards use the mean of their active SkillEvaluator metric set.  Custom
@@ -175,14 +187,12 @@ def overall_score(reward: dict[str, Any]) -> float:
     """
     _, metrics = metric_set_for_reward(reward)
     values = [metric_value(reward, m) for m in metrics]
-    if any(v is not None for v in values):
-        filled = [float(v) if v is not None else 0.0 for v in values]
-        return sum(filled) / len(filled)
+    if metrics:
+        if not values or any(value is None for value in values):
+            return None
+        return sum(value for value in values if value is not None) / len(values)
 
-    overall = reward.get("overall")
-    if isinstance(overall, int | float) and not isinstance(overall, bool):
-        return float(overall)
-    return 0.0
+    return _finite_number(reward.get("overall"))
 
 
 def score_definition(metrics: tuple[str, ...] = DEFAULT_METRICS) -> str:
@@ -196,12 +206,12 @@ def dimension_scores(scores: dict[str, float]) -> dict[str, dict[str, Any]]:
     """Compute report-only SkillEvaluator dimension scores from default metric scores."""
     out: dict[str, dict[str, Any]] = {}
     for dimension, sources in DIMENSION_DEFINITIONS.items():
-        if not all(metric in scores for metric in sources):
+        if not all(_finite_number(scores.get(metric)) is not None for metric in sources):
             continue
         total_weight = sum(sources.values())
         if total_weight <= 0:
             continue
-        score = sum(scores[metric] * weight for metric, weight in sources.items()) / total_weight
+        score = sum(float(scores[metric]) * weight for metric, weight in sources.items()) / total_weight
         out[dimension] = {
             "score": round(score, 4),
             "sources": sources,
@@ -220,8 +230,9 @@ def extract_custom_metrics(reward: dict[str, Any]) -> dict[str, float]:
                 continue
             if isinstance(value, dict):
                 value = value.get("score")
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                custom[str(name)] = float(value)
+            numeric = _finite_number(value)
+            if numeric is not None:
+                custom[str(name)] = numeric
 
     metrics = reward.get("metrics")
     if isinstance(metrics, dict):
@@ -230,14 +241,16 @@ def extract_custom_metrics(reward: dict[str, Any]) -> dict[str, float]:
                 continue
             if isinstance(value, dict):
                 value = value.get("score")
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                custom[str(name)] = float(value)
+            numeric = _finite_number(value)
+            if numeric is not None:
+                custom[str(name)] = numeric
 
     for name, value in reward.items():
         if name in RESERVED_METRIC_NAMES or name.startswith("_"):
             continue
-        if isinstance(value, int | float) and not isinstance(value, bool):
-            custom[str(name)] = float(value)
+        numeric = _finite_number(value)
+        if numeric is not None:
+            custom[str(name)] = numeric
 
     return custom
 

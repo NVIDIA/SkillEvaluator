@@ -97,11 +97,11 @@ EVALS_SPEC: list[EntrySpec] = [
         kind="file",
         requirement=Requirement.OPTIONAL,
         scope=Scope.HARBOR,
-        description="SkillEvaluator Harbor execution policy: attempts, pass threshold, Dockerfile mode, runtime env, pre-agent setup, agent models, workspace staging, and grading mode.",
+        description="SkillEvaluator Harbor execution policy: attempts, pass threshold, Dockerfile/base-image modes, runtime env, pre-agent setup, optional agent runtime preflight, agent models, workspace staging, and grading mode.",
         formats=[".yml", ".yaml"],
         validation_notes=[
             "schema_version must be 1.",
-            "Supported harbor keys include task_source (auto|evals_json|native_harbor), custom_dockerfile_mode, n_attempts, pass_threshold, n_concurrent, max_agents, timeout_multiplier, runtime_env, pre_agent_setup, and agents.<name>.model.",
+            "Supported harbor keys include task_source (auto|evals_json|native_harbor), custom_dockerfile_mode, base_image_mode, n_attempts, pass_threshold, stop_on_pass, n_concurrent, max_agents, timeout_multiplier, agent_runtime_preflight, runtime_env, pre_agent_setup, and agents.<name>.model.",
             "passthrough_env and setup_commands are accepted as compatibility aliases for runtime_env and pre_agent_setup.",
             "Supported skill_workspace keys: mode (isolated|group), include.",
             "Supported grading keys: mode (default|default_plus_custom|custom_only).",
@@ -113,8 +113,11 @@ schema_version: 1
 harbor:
   task_source: auto
   custom_dockerfile_mode: preserve
+  base_image_mode: reuse
   n_attempts: 3
   pass_threshold: 0.50
+  stop_on_pass: true
+  agent_runtime_preflight: false
   runtime_env:
     - SERVICE_API_TOKEN
   pre_agent_setup:

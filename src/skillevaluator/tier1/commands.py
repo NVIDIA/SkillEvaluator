@@ -111,6 +111,17 @@ def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | N
     return SchemaValidator(policy=policy)
 
 
+def enabled_check_lineup(checks: str | None) -> list[str]:
+    """Return the resolved check names for a run, in canonical pipeline order.
+
+    Unrecognized names are kept (sorted, at the end) so the printed lineup
+    matches what ``run_validation`` was actually asked to do.
+    """
+    enabled = _enabled_checks(checks)
+    ordered = [check for check in (*DEFAULT_CHECKS, *OPTIONAL_CHECKS) if check in enabled]
+    return ordered + sorted(enabled - set(ordered))
+
+
 def run_validation(
     target_path: Path,
     *,
@@ -122,8 +133,13 @@ def run_validation(
     content_type: str | None = None,
     fail_fast: bool = False,
     continue_on_failure: bool = False,
+    on_check: Callable[[str], None] | None = None,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
+
+    *on_check* is invoked with each canonical check name just before it runs;
+    when provided it replaces the stderr ``[n/total]`` progress lines (the
+    caller owns presentation, e.g. the quiet pipeline view).
 
     *content_type* (``skill`` | ``rules`` | ``workflows`` | ``plugin`` |
     ``unknown`` | ``None``) selects the schema validator and gates skill-only
@@ -205,7 +221,10 @@ def run_validation(
     ]
     with continue_on_failure_scope(continue_on_failure):
         for step_number, (check_name, builder) in enumerate(active, 1):
-            progress_console.print(f"[{step_number}/{len(active)}] {check_name} ...", markup=False, highlight=False)
+            if on_check is not None:
+                on_check(check_name)
+            else:
+                progress_console.print(f"[{step_number}/{len(active)}] {check_name} ...", markup=False, highlight=False)
             started = time.monotonic()
             step_results = builder()
             results.extend(step_results)
@@ -219,11 +238,12 @@ def run_validation(
                 outcome = "ok" if all(r.passed for r in step_results) else f"{error_count} error(s)"
             if warning_count:
                 outcome += f", {warning_count} warning(s)"
-            progress_console.print(
-                f"[{step_number}/{len(active)}] {check_name} done in {time.monotonic() - started:.1f}s ({outcome})",
-                markup=False,
-                highlight=False,
-            )
+            if on_check is None:
+                progress_console.print(
+                    f"[{step_number}/{len(active)}] {check_name} done in {time.monotonic() - started:.1f}s ({outcome})",
+                    markup=False,
+                    highlight=False,
+                )
 
             if fail_fast and not continue_on_failure and any(not r.passed for r in results):
                 return results
@@ -301,6 +321,7 @@ def emit_reports(
     policy: ValidationPolicy | None = None,
     target_path: str | None = None,
     content_label: str = "Skill",
+    announce_paths: bool = True,
 ) -> bool:
     """Render reports and return whether every result passed.
 
@@ -329,6 +350,7 @@ def emit_reports(
             reporter = reporter_cls()
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
         reporter.save(results, output_path)
-        console.print(f"[dim]{fmt} report:[/dim] [cyan]{output_path}[/cyan]")
+        if announce_paths:
+            console.print(f"[dim]{fmt} report:[/dim] [cyan]{output_path}[/cyan]")
 
     return all(result.passed for result in results)

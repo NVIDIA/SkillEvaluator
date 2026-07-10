@@ -774,6 +774,46 @@ class TestGatingSplit:
         assert "Advisory (Tier 2" not in output
         assert "Advisory findings (dedup + agent-eval)" not in output
 
+    def test_tier1_quality_score_warning_and_advisory_rows_render(self) -> None:
+        quality = ValidationResult(validator_name="Quality Score", validator_description="Skill quality")
+        quality.metadata["quality_scores"] = {
+            "skill_name": "demo-skill",
+            "overall_score": 72.5,
+            "grade": "C",
+            "skill_type": "script-based",
+            "dimensions": {
+                "clarity": {"score": 75.0, "weight": 0.5},
+                "safety": {"score": 70.0, "weight": 0.5},
+            },
+            "metrics": {"total_tokens": 123, "recommended_max_tokens": 500, "script_count": 1},
+        }
+        warnings = ValidationResult(validator_name="Schema", validator_description="Schema checks")
+        warnings.add_warning("Metadata author is recommended.")
+        advisory = ValidationResult(validator_name="Code Integrity & Hygiene", validator_description="Advisory checks")
+        advisory.add_finding(
+            Finding(
+                category="HYGIENE",
+                severity=Severity.LOW,
+                check_name="tests_missing",
+                message="Target tests were not executed and coverage was not measured.",
+                file_path="demo-skill/SKILL.md",
+                suggestion="Add a representative test case.",
+            )
+        )
+
+        output = HTMLReporter(include_timestamp=False).render_all([quality, warnings, advisory])
+        report_data = _html_report_data(output)
+
+        assert report_data["quality_scores"]["demo-skill"]["overall_score"] == 72.5
+        assert 'data-quality-skill-name="demo-skill"' in output
+        assert "Quality Score: 72.5/100" in output
+        assert "Type: script-based" in output
+        assert ">clarity</td>" in output
+        assert '<td class="warning-text">1</td>' in output
+        assert "Metadata author is recommended." in output
+        assert "1 advisory finding(s) — not blocking:" in output
+        assert "Target tests were not executed and coverage was not measured." in output
+
     def test_similarity_only_html_uses_tier2_tab_and_renders_the_match(self, tmp_path: Path) -> None:
         result = _similarity_result(severity=Severity.HIGH)
 

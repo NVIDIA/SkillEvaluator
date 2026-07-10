@@ -185,3 +185,65 @@ def test_suggestions_structured_evidence_refs_are_dicts_not_strings(monkeypatch)
             assert isinstance(ref, dict), (
                 f"evidence_ref must be a dict in suggestions_v2, got {type(ref)!r}: {ref!r}"
             )
+
+
+def test_display_findings_report_writes_artifact_and_records_telemetry(tmp_path, monkeypatch):
+    """Smoke the real findings report display path over a temporary run directory."""
+    import json
+
+    trial_dir = tmp_path / "codex" / "with-skill" / "trials" / "case-001"
+    trial_dir.mkdir(parents=True)
+    reward = _reward(0.1)
+    (trial_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    captured = []
+
+    monkeypatch.setattr(
+        report,
+        "_generate_suggestions_structured",
+        lambda _skill, _findings, _rewards: [
+            {
+                "suggestion": "Tighten the workflow around result-file creation.",
+                "dimension": "goal_accuracy",
+                "evidence_refs": [{"source": "trajectory.json", "json_pointer": "/steps/14", "kind": "tool_call"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(report, "record_agent_eval_findings", lambda **kwargs: captured.append(kwargs))
+
+    report.display_findings_report(
+        {
+            "env_mode": "local",
+            "agents": {
+                "codex": {
+                    "model": "gpt-test",
+                    "model_source": "test",
+                    "with_skill": {
+                        "security": 1.0,
+                        "skill_execution": 1.0,
+                        "skill_efficiency": 1.0,
+                        "accuracy": 1.0,
+                        "goal_accuracy": 0.1,
+                        "behavior_check": 1.0,
+                    },
+                }
+            },
+        },
+        "demo-skill",
+        ["codex"],
+        tmp_path,
+    )
+
+    artifact = tmp_path / "codex" / "findings.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert payload["skill_name"] == "demo-skill"
+    assert payload["agent"] == "codex"
+    assert payload["suggestion_mode"] == "remediation"
+    assert payload["suggestions"] == ["Tighten the workflow around result-file creation."]
+    assert payload["suggestions_v2"][0]["dimension"] == "goal_accuracy"
+    assert any(finding["metric"] == "goal_accuracy" for finding in payload["findings"])
+
+    assert captured
+    assert captured[0]["skill_name"] == "demo-skill"
+    assert captured[0]["agent"] == "codex"
+    assert captured[0]["env_mode"] == "local"
+    assert captured[0]["artifact_path"] == artifact

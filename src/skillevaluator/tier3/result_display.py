@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import math
 import os
 from collections.abc import Mapping
@@ -244,9 +245,7 @@ def _render_agent_scores(
     baseline_scores = data.get("without_skill") if isinstance(data.get("without_skill"), Mapping) else {}
     lift = data.get("lift") if isinstance(data.get("lift"), Mapping) else {}
     custom_with = data.get("custom_with_skill") if isinstance(data.get("custom_with_skill"), Mapping) else {}
-    custom_without = (
-        data.get("custom_without_skill") if isinstance(data.get("custom_without_skill"), Mapping) else {}
-    )
+    custom_without = data.get("custom_without_skill") if isinstance(data.get("custom_without_skill"), Mapping) else {}
     custom_lift = data.get("custom_lift") if isinstance(data.get("custom_lift"), Mapping) else {}
     show_baseline = not baseline_skipped and bool(baseline_status or baseline_scores or lift)
 
@@ -274,7 +273,11 @@ def _render_agent_scores(
         row: list[Text] = [label, with_score, with_bar]
         if show_baseline:
             persisted = lift.get(metric) if isinstance(lift.get(metric), Mapping) else {}
-            delta = persisted.get("delta") if _finite_number(with_value) is not None and _finite_number(baseline_value) is not None else None
+            delta = (
+                persisted.get("delta")
+                if _finite_number(with_value) is not None and _finite_number(baseline_value) is not None
+                else None
+            )
             baseline_score, baseline_bar = _score_cell(baseline_value)
             row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
         table.add_row(*row)
@@ -307,9 +310,7 @@ def _render_agent_scores(
     overall = lift.get("overall") if isinstance(lift.get("overall"), Mapping) else {}
     with_overall = overall.get("with_skill") if with_usable else None
     baseline_overall = overall.get("without_skill") if baseline_usable else None
-    if show_baseline and (
-        _finite_number(with_overall) is not None or _finite_number(baseline_overall) is not None
-    ):
+    if show_baseline and (_finite_number(with_overall) is not None or _finite_number(baseline_overall) is not None):
         table.add_section()
         with_score, with_bar = _score_cell(with_overall)
         baseline_score, baseline_bar = _score_cell(baseline_overall)
@@ -347,9 +348,7 @@ def _render_agent_scores(
     run_config = result.get("run_config")
     configured_agents = run_config.get("agents") if isinstance(run_config, Mapping) else None
     configured = configured_agents.get(agent) if isinstance(configured_agents, Mapping) else None
-    model_source = (
-        configured.get("source") if isinstance(configured, Mapping) else data.get("model_source")
-    )
+    model_source = configured.get("source") if isinstance(configured, Mapping) else data.get("model_source")
     if model:
         if subtitle.plain:
             subtitle.append("\n")
@@ -405,7 +404,9 @@ def _render_dimensions(
             with_dimensions = data.get("dimensions_with_skill")
             baseline_dimensions = data.get("dimensions_without_skill")
             with_dimension = with_dimensions.get(dimension) if isinstance(with_dimensions, Mapping) else None
-            baseline_dimension = baseline_dimensions.get(dimension) if isinstance(baseline_dimensions, Mapping) else None
+            baseline_dimension = (
+                baseline_dimensions.get(dimension) if isinstance(baseline_dimensions, Mapping) else None
+            )
             with_score = (
                 with_dimension.get("score")
                 if _condition_usable(data, "with_skill") and isinstance(with_dimension, Mapping)
@@ -425,9 +426,7 @@ def _render_dimensions(
             else:
                 baseline_cell, baseline_bar = _score_cell(baseline_numeric)
             delta = (
-                with_numeric - baseline_numeric
-                if with_numeric is not None and baseline_numeric is not None
-                else None
+                with_numeric - baseline_numeric if with_numeric is not None and baseline_numeric is not None else None
             )
             row = [
                 Text(DIMENSION_DISPLAY.get(dimension, dimension.title()), style="bold"),
@@ -567,6 +566,22 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
                 safe=safe,
             )
         _render_dimensions(console=console, agents=agents, safe=safe)
+
+        # The per-evaluator findings report — evaluator reasonings, evidence
+        # pointers, and next-step suggestions — is the feedback surface that
+        # follows the score tables.
+        run_dir = result.get("run_dir") or result.get("output_dir")
+        try:
+            from skillevaluator.tier3.harbor.report import display_findings_report
+
+            display_findings_report(
+                dict(result),
+                str(result.get("skill_name") or ""),
+                [str(agent) for agent in agents],
+                Path(str(run_dir)) if run_dir else Path(),
+            )
+        except Exception:  # advisory panel: never break the run summary
+            logging.getLogger(__name__).debug("Findings report skipped", exc_info=True)
 
     errors = result.get("execution_errors") or result.get("error") or []
     if isinstance(errors, str):

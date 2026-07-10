@@ -1353,9 +1353,38 @@
               "param_type": "option"
             },
             {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "full",
+              "opts": [
+                "--full"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "verbose",
+              "opts": [
+                "--verbose"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
               "name": "checks",
               "opts": [
-                "--checks"
+                "--checks",
+                "--tier1-checks"
               ],
               "param_type": "option",
               "type": "text"
@@ -1386,11 +1415,13 @@
               "is_flag": true,
               "name": "llm",
               "opts": [
-                "--llm"
+                "--llm",
+                "--tier1-llm"
               ],
               "param_type": "option",
               "secondary_opts": [
-                "--no-llm"
+                "--no-llm",
+                "--no-tier1-llm"
               ],
               "type": "boolean"
             },
@@ -1444,11 +1475,13 @@
               "is_flag": true,
               "name": "dedup",
               "opts": [
-                "--dedup"
+                "--dedup",
+                "--tier2"
               ],
               "param_type": "option",
               "secondary_opts": [
-                "--no-dedup"
+                "--no-dedup",
+                "--no-tier2"
               ],
               "type": "boolean"
             },
@@ -1457,7 +1490,18 @@
               "is_flag": true,
               "name": "agent_eval",
               "opts": [
-                "--agent-eval"
+                "--agent-eval",
+                "--tier3"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "autopilot",
+              "opts": [
+                "--autopilot"
               ],
               "param_type": "option",
               "type": "boolean"
@@ -2538,9 +2582,38 @@
           "param_type": "option"
         },
         {
+          "name": "tiers",
+          "opts": [
+            "--tiers"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "full",
+          "opts": [
+            "--full"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "verbose",
+          "opts": [
+            "--verbose"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
           "name": "checks",
           "opts": [
-            "--checks"
+            "--checks",
+            "--tier1-checks"
           ],
           "param_type": "option",
           "type": "text"
@@ -2571,11 +2644,13 @@
           "is_flag": true,
           "name": "llm",
           "opts": [
-            "--llm"
+            "--llm",
+            "--tier1-llm"
           ],
           "param_type": "option",
           "secondary_opts": [
-            "--no-llm"
+            "--no-llm",
+            "--no-tier1-llm"
           ],
           "type": "boolean"
         },
@@ -2629,11 +2704,13 @@
           "is_flag": true,
           "name": "dedup",
           "opts": [
-            "--dedup"
+            "--dedup",
+            "--tier2"
           ],
           "param_type": "option",
           "secondary_opts": [
-            "--no-dedup"
+            "--no-dedup",
+            "--no-tier2"
           ],
           "type": "boolean"
         },
@@ -2642,7 +2719,18 @@
           "is_flag": true,
           "name": "agent_eval",
           "opts": [
-            "--agent-eval"
+            "--agent-eval",
+            "--tier3"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "autopilot",
+          "opts": [
+            "--autopilot"
           ],
           "param_type": "option",
           "type": "boolean"

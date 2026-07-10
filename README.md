@@ -227,10 +227,10 @@ skillevaluator create-eval-dataset ./my-skill --full
 skillevaluator create-eval-dataset ./my-skill --full --refine
 
 # Or replace steps 2 and 3 with one non-destructive autopilot command
-skillevaluator evaluate ./my-skill --autopilot --agents opencode --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --autopilot --agents opencode --env-mode docker
 
 # 3. Run the with-skill vs. without-skill evaluation
-skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
 
 # 4. Read the results
 skillevaluator view ./my-skill      # HTML report

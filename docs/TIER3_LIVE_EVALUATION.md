@@ -55,7 +55,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 skillevaluator doctor --agents codex --env-mode docker
 
 # 6. Run the live comparison
-skillevaluator evaluate ./my-skill --agents codex --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
 
 # 7. Open the HTML report
 skillevaluator view ./my-skill
@@ -90,7 +90,7 @@ runs; `report.html`, `result.json`, and collected summaries remain. Pass
 | Use case | Command | When to use |
 | --- | --- | --- |
 | Full validation | `skillevaluator validate ./my-skill --agent-eval` | Add advisory Tier 3 results after the standard validation stages |
-| Focused evaluation | `skillevaluator evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
+| Focused evaluation | `skillevaluator tier3 evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
 
 Tier 3 remains advisory when attached to `validate`: it is included in the
 combined reports but does not change the validation exit code. Focused live
@@ -126,7 +126,7 @@ Public NVIDIA Build at [build.nvidia.com](https://build.nvidia.com/) uses the
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
 skillevaluator doctor --agents opencode --env-mode docker --verify-models
-skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
 ```
 
 For Codex with a Build evaluator, additionally export an independent
@@ -151,7 +151,7 @@ Security notes:
 ### `evaluate`
 
 ```bash
-skillevaluator evaluate <SKILL_PATH> [OPTIONS]
+skillevaluator tier3 evaluate <SKILL_PATH> [OPTIONS]
 ```
 
 | Option | Default | Purpose |
@@ -196,16 +196,16 @@ Examples:
 
 ```bash
 # Generate one case only when needed, then run the evaluation
-skillevaluator evaluate ./my-skill --autopilot --agents opencode
+skillevaluator tier3 evaluate ./my-skill --autopilot --agents opencode
 
 # NVIDIA Build + OpenCode
-skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
 
 # Faster iteration without the baseline arm
-skillevaluator evaluate ./my-skill --agents opencode --skip-baseline
+skillevaluator tier3 evaluate ./my-skill --agents opencode --skip-baseline
 
 # Three attempts per case for pass@k context
-skillevaluator evaluate ./my-skill --agents opencode \
+skillevaluator tier3 evaluate ./my-skill --agents opencode \
   --n-attempts 3 --pass-threshold 0.7
 ```
 
@@ -270,7 +270,7 @@ uv tool install --with 'harbor[daytona]' \
   "skillevaluator[tier3] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 
 export DAYTONA_API_KEY='...'
-skillevaluator evaluate ./my-skill --agents codex --env-mode daytona
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode daytona
 ```
 
 ### Local mode (`--env-mode local`)
@@ -297,7 +297,7 @@ host developer tools.
 ```bash
 # opencode works with NVIDIA Build and other OpenAI-compatible endpoints
 export NVIDIA_API_KEY='nvapi-...'
-skillevaluator evaluate ./my-skill --agents opencode \
+skillevaluator tier3 evaluate ./my-skill --agents opencode \
   --env-mode local --model nvidia/openai/gpt-oss-120b
 ```
 
@@ -506,7 +506,7 @@ payloads may leave some of those sections empty.
 Keep raw Harbor artifacts for debugging and open them with the bundled viewer:
 
 ```bash
-skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
   --harbor-keep-jobs
 skillevaluator tier3 harbor-view ./my-results/<run-id>/_harbor-jobs
 ```

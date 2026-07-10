@@ -241,3 +241,38 @@ def test_explicit_chat_model_is_trimmed() -> None:
 
     assert config.model == "openai/gpt-oss-120b"
     assert config.litellm_model == "openai/openai/gpt-oss-120b"
+
+
+def test_no_credential_llm_error_lists_every_setup_option() -> None:
+    # The error is the setup documentation for a fresh environment: every
+    # variable it names must actually work as claimed.
+    with pytest.raises(ProviderConfigurationError) as err:
+        resolve_llm_provider({})
+    message = str(err.value)
+    assert "NVIDIA_API_KEY" in message
+    assert "build.nvidia.com" in message
+    assert "OPENAI_API_KEY" in message
+    assert "ANTHROPIC_API_KEY" in message
+    # openai-compatible needs all three extras, including the model.
+    assert "SKILL_EVAL_LLM_BASE_URL" in message
+    assert "SKILL_EVAL_LLM_API_KEY" in message
+    assert "SKILL_EVAL_LLM_MODEL" in message
+
+
+def test_no_credential_embedding_error_omits_non_embedding_providers() -> None:
+    # Anthropic/Bedrock are rejected by the embedding resolver, so the
+    # no-credential message must not recommend them (or the ANTHROPIC key).
+    with pytest.raises(ProviderConfigurationError) as err:
+        resolve_embedding_provider({})
+    message = str(err.value)
+    assert "ANTHROPIC_API_KEY" not in message
+    assert "anthropic" not in message
+    assert "bedrock" not in message
+    assert "NVIDIA_API_KEY" in message
+    assert "OPENAI_API_KEY" in message
+    assert "SKILL_EVAL_EMBEDDING_MODEL" in message
+
+
+def test_embedding_rejection_of_llm_only_providers_names_the_fix() -> None:
+    with pytest.raises(ProviderConfigurationError, match=r"nv_build\|openai\|openai-compatible"):
+        resolve_embedding_provider({"ANTHROPIC_API_KEY": "test-anthropic-key"})

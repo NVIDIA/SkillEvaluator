@@ -135,7 +135,9 @@ def resolve_embedding_provider(environ: Mapping[str, str] | None = None) -> Prov
     ).lower()
     if provider in {"anthropic", "bedrock"}:
         raise ProviderConfigurationError(
-            f"SKILL_EVAL_EMBEDDING_PROVIDER is required because {provider} does not provide embeddings."
+            f"SKILL_EVAL_EMBEDDING_PROVIDER is required because {provider} does not provide embeddings. "
+            "Set SKILL_EVAL_EMBEDDING_PROVIDER=nv_build|openai|openai-compatible (NVIDIA_API_KEY or "
+            "OPENAI_API_KEY supply the first two)."
         )
     _validate_provider(provider, variable="SKILL_EVAL_EMBEDDING_PROVIDER")
 
@@ -200,7 +202,23 @@ def _selected_provider(environ: Mapping[str, str], variable: str) -> str:
         return "openai"
     if environ.get("ANTHROPIC_API_KEY", "").strip():
         return "anthropic"
-    raise ProviderConfigurationError(f"{variable} is required when no public provider credential is configured.")
+    prefix = variable.removesuffix("_PROVIDER")
+    if "EMBEDDING" in variable:
+        # Anthropic/Bedrock have no embedding models: recommending them (or the
+        # ANTHROPIC_API_KEY auto-detection) here would send the user straight
+        # into the "does not provide embeddings" rejection below.
+        raise ProviderConfigurationError(
+            f"No provider is configured ({variable} unset and no credential found). Set one of: "
+            "NVIDIA_API_KEY for NVIDIA Build (build.nvidia.com) or OPENAI_API_KEY (auto-detected) — "
+            f"or set {variable}=openai|nv_build|openai-compatible explicitly "
+            f"(openai-compatible also needs {prefix}_BASE_URL, {prefix}_API_KEY, and {prefix}_MODEL)."
+        )
+    raise ProviderConfigurationError(
+        f"No provider is configured ({variable} unset and no credential found). Set one of: "
+        "NVIDIA_API_KEY for NVIDIA Build (build.nvidia.com), OPENAI_API_KEY, or ANTHROPIC_API_KEY "
+        f"(auto-detected) — or set {variable}=openai|anthropic|nv_build|bedrock|openai-compatible "
+        f"explicitly (openai-compatible also needs {prefix}_BASE_URL, {prefix}_API_KEY, and {prefix}_MODEL)."
+    )
 
 
 def _validate_provider(provider: str, *, variable: str) -> None:

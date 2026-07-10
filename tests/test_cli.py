@@ -28,7 +28,9 @@ def test_top_level_help_lists_primary_commands() -> None:
     assert tier3_result.exit_code == 0
     assert "validate" in result.output
     assert "create-eval-dataset" in result.output
-    assert "evaluate" in result.output
+    # `evaluate` is intentionally hidden at top level: `tier3 evaluate` is the
+    # advertised spelling (the top-level alias keeps working for scripts).
+    assert "\n  evaluate" not in result.output
     assert "evaluate" in tier3_result.output
     assert "tier1" in result.output
     assert "tier2" in result.output
@@ -547,7 +549,7 @@ def test_validate_help_is_detailed() -> None:
 
     assert result.exit_code == 0
     # Grouped Tier 3 options under their own heading.
-    assert "Tier 3: Live Agent Evaluation:" in result.output
+    assert "Tier 3 · Live Agent Evaluation:" in result.output
     # Sectioned epilog (parity with skill-evaluator validate -h).
     for section in ("Content types", "Report formats", "Tiers:", "LLM analysis", "Examples:"):
         assert section in result.output
@@ -560,7 +562,7 @@ def test_tier1_validate_alias_shares_detailed_help() -> None:
     result = CliRunner().invoke(cli, ["tier1", "validate", "-h"])
 
     assert result.exit_code == 0
-    assert "Tier 3: Live Agent Evaluation:" in result.output
+    assert "Tier 3 · Live Agent Evaluation:" in result.output
     assert "Examples:" in result.output
 
 
@@ -621,6 +623,7 @@ def test_validate_code_integrity_reports_only_static_test_evidence(tmp_path: Pat
         [
             "validate",
             str(skill),
+            "--verbose",
             "--checks",
             "code-integrity",
             "--no-dedup",

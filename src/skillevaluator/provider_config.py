@@ -13,9 +13,9 @@ PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 _CHAT_DEFAULT_MODELS = {
-    "openai": "gpt-4.1-mini",
+    "openai": "gpt-5.4-mini",
     "anthropic": "claude-sonnet-4-5",
-    "nv_build": "openai/gpt-oss-120b",
+    "nv_build": "nvidia/nemotron-3-nano-30b-a3b",
     "bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
 }
 _EMBEDDING_DEFAULT_MODELS = {
@@ -196,12 +196,21 @@ def _selected_provider(environ: Mapping[str, str], variable: str) -> str:
     configured = environ.get(variable, "").strip().lower()
     if configured:
         return configured
-    if environ.get("NVIDIA_API_KEY", "").strip():
-        return "nv_build"
-    if environ.get("OPENAI_API_KEY", "").strip():
-        return "openai"
-    if environ.get("ANTHROPIC_API_KEY", "").strip():
-        return "anthropic"
+    available = [
+        provider
+        for provider, credential in (
+            ("nv_build", "NVIDIA_API_KEY"),
+            ("openai", "OPENAI_API_KEY"),
+            ("anthropic", "ANTHROPIC_API_KEY"),
+        )
+        if environ.get(credential, "").strip()
+    ]
+    if len(available) > 1:
+        raise ProviderConfigurationError(
+            f"{variable} is required when multiple public provider credentials are configured."
+        )
+    if available:
+        return available[0]
     prefix = variable.removesuffix("_PROVIDER")
     if "EMBEDDING" in variable:
         # Anthropic/Bedrock have no embedding models: recommending them (or the

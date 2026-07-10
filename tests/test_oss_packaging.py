@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -36,6 +39,11 @@ PUBLIC_REQUIRED_FILES = (
     ".github/workflows/security.yml",
 )
 PUBLIC_TEXT_SUFFIXES = {"", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yml", ".yaml", ".j2"}
+PACKAGED_NVIDIA_BUILD_RUNTIME_FILES = {
+    "skillevaluator/tier3/harbor/local_agents.py",
+    "skillevaluator/tier3/harbor/nvidia_build_bridge.py",
+    "skillevaluator/tier3/harbor/secure_docker_environment.py",
+}
 SOURCE_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".nox",
@@ -207,6 +215,33 @@ def test_public_sources_use_the_public_nvidia_build_contract() -> None:
     assert "https://integrate.api.nvidia.com/v1" in provider_config
 
 
+def test_public_distributions_include_nvidia_build_runtime_bridges(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "build", "--outdir", str(tmp_path)],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"distribution build failed:\n{result.stdout}\n{result.stderr}"
+
+    wheels = list(tmp_path.glob("*.whl"))
+    sdists = list(tmp_path.glob("*.tar.gz"))
+    assert len(wheels) == 1
+    assert len(sdists) == 1
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        wheel_members = set(archive.namelist())
+    missing_from_wheel = PACKAGED_NVIDIA_BUILD_RUNTIME_FILES - wheel_members
+    assert not missing_from_wheel, f"wheel is missing runtime bridge files: {sorted(missing_from_wheel)}"
+
+    with tarfile.open(sdists[0], "r:gz") as archive:
+        sdist_members = {member.name.partition("/")[2] for member in archive.getmembers()}
+    expected_sdist_members = {f"src/{path}" for path in PACKAGED_NVIDIA_BUILD_RUNTIME_FILES}
+    missing_from_sdist = expected_sdist_members - sdist_members
+    assert not missing_from_sdist, f"sdist is missing runtime bridge files: {sorted(missing_from_sdist)}"
+
+
 def test_removed_benchmark_authoring_surface_stays_absent() -> None:
     source_text = "\n".join(path.read_text(encoding="utf-8") for path in _public_source_files(REPO_ROOT)).lower()
     forbidden = (
@@ -333,12 +368,8 @@ def test_github_actions_are_pinned_to_commit_shas() -> None:
 def test_ci_scans_source_and_built_distributions_for_oss_boundary_violations() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     scanner_command = "python scripts/check_oss_boundary.py"
-    source_scan = (
-        f"{scanner_command} --root . --allowlist config/oss_boundary_allowlist.json"
-    )
-    artifact_scan = (
-        f"{source_scan} --archive dist/*.whl --archive dist/*.tar.gz"
-    )
+    source_scan = f"{scanner_command} --root . --allowlist config/oss_boundary_allowlist.json"
+    artifact_scan = f"{source_scan} --archive dist/*.whl --archive dist/*.tar.gz"
 
     assert source_scan in workflow
     assert artifact_scan in workflow
@@ -389,3 +420,27 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert "Only candidate clusters found by the embedding stage are" in public_docs
     assert "sent to the configured chat LLM for classification" in public_docs
     assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs
+
+
+def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    configuration = (REPO_ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "TIER3_LIVE_EVALUATION.md").read_text(encoding="utf-8")
+    public_docs = f"{readme}\n{configuration}\n{tier3}"
+
+    assert "gpt-5.4-mini" in public_docs
+    assert "nvidia/nemotron-3-nano-30b-a3b" in public_docs
+    assert "nvidia/nvidia/nemotron-3-nano-30b-a3b" in public_docs
+    assert "Nemotron Super" in public_docs
+    assert "meta/llama-3.1-8b-instruct" in public_docs
+    assert "--agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model codex=nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model claude-code=nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model opencode=nvidia/meta/llama-3.1-8b-instruct" in public_docs
+    assert "skillevaluator evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
+    assert "skillevaluator evaluate ./my-skill --agents codex --env-mode docker\n" in tier3
+    assert "skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker\n" in tier3
+    assert "never changes models silently" in public_docs
+    assert "direct OpenCode" in public_docs
+    assert "Docker or local compatibility bridge" in public_docs
+    assert "experimental Claude Code" in public_docs

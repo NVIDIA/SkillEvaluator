@@ -214,13 +214,9 @@ def _contains_detached_process_launcher(command: str, *, _depth: int = 0) -> boo
             for offset in range(index + 1, segment_end - 1):
                 option = tokens[offset]
                 is_command_option = option == "-c" or (
-                    option.startswith("-")
-                    and not option.startswith("--")
-                    and "c" in option[1:]
+                    option.startswith("-") and not option.startswith("--") and "c" in option[1:]
                 )
-                if is_command_option and _contains_detached_process_launcher(
-                    tokens[offset + 1], _depth=_depth + 1
-                ):
+                if is_command_option and _contains_detached_process_launcher(tokens[offset + 1], _depth=_depth + 1):
                     return True
         command_position = False
         index += 1

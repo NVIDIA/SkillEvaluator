@@ -561,7 +561,7 @@ TOKEN_EFFICIENCY_EVALUATOR_NAME: str = "token_efficiency"
 # LLM-AS-JUDGE: TIER 3 DIMENSION + INSIGHTS
 # =============================================================================
 
-DIMENSION_JUDGE_MODEL = "gpt-4.1-mini"
+DIMENSION_JUDGE_MODEL = "gpt-5.4-mini"
 DIMENSION_JUDGE_MAX_TOKENS = 2048
 DIMENSION_JUDGE_TEMPERATURE: float | None = 0.0
 DIMENSION_VERDICT_PASS_THRESHOLD = 0.7

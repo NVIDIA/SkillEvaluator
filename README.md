@@ -206,14 +206,13 @@ In `custom_only` mode, the user-owned grader defines the score instead.
 | **Effectiveness** | Is it better with the skill than without? |
 | **Efficiency** | Does it use tools and tokens efficiently? |
 
-Live evaluation has **two credential roles**: the evaluator provider generates
-tasks and performs standard grading, while the selected agent needs credentials
-compatible with its own API. Operator credentials come only from the host
-environment; a checked-out skill cannot replace, alias, or reroute them through
-`evals/config.yml`. NVIDIA Build can directly power OpenCode. With NVIDIA Build
-as evaluator, Codex needs an independent OpenAI-compatible Responses key/base
-and explicit model; Claude Code similarly needs an independent Anthropic key
-and explicit model.
+Live evaluation normally has **two credential roles**: the evaluator provider
+generates tasks and performs standard grading, while the selected agent uses
+its native provider credential. NVIDIA Build is an explicit Docker and local
+exception: one `NVIDIA_API_KEY` powers direct OpenCode and SkillEvaluator's
+compatibility bridges for Codex and experimental Claude Code. Operator
+credentials come only from the host environment; a checked-out skill cannot
+replace, alias, or reroute them through `evals/config.yml`.
 
 This external-user path needs only a Build key from
 [build.nvidia.com](https://build.nvidia.com/):
@@ -237,9 +236,33 @@ skillevaluator view ./my-skill      # HTML report
 skillevaluator compare ./my-skill   # side-by-side comparison
 ```
 
-For Codex instead, export `OPENAI_API_KEY` and `OPENAI_BASE_URL` on the host,
-then add `--agents codex --agent-model codex=MODEL` to both `doctor` and
-`evaluate`. Do not put agent credentials in skill-owned `harbor.runtime_env`.
+For Docker or local NVIDIA Build runs, change `--agents opencode` to
+`--agents codex` or `--agents claude-code`; no second provider key is needed.
+Direct OpenCode defaults to `nvidia/nemotron-3-nano-30b-a3b` (rendered as
+`nvidia/nvidia/nemotron-3-nano-30b-a3b`). Bridged Codex and experimental Claude
+Code default to `nvidia/nemotron-3-super-120b-a12b`, the verified model for
+their larger tool surfaces. Choose a different model explicitly when comparison
+requirements justify it:
+
+```bash
+# Nemotron Super: explicit higher-quality override for each harness.
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker \
+  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+
+# Llama remains an explicit direct-OpenCode alternative.
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
+```
+
+SkillEvaluator never changes explicit model overrides silently. The bridges are
+available in Docker and local modes. Harbor cloud modes still require an
+independent OpenAI Responses credential for Codex or a native Anthropic
+credential for Claude Code. Do not put agent credentials in skill-owned
+`harbor.runtime_env`.
 
 Results are written under `evals/results` by default. Use `--results-dir` or
 `SKILLEVALUATOR_RESULTS_DIR` to place them elsewhere. The `--refine` option

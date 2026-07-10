@@ -69,6 +69,7 @@ _AGENT_RUNTIME_FAILURE_PATTERNS = (
     "model not found",
     "NotFoundError",
     "ProviderException",
+    "ResourceExhausted",
     "context_management: Extra inputs are not permitted",
     "isApiErrorMessage",
     "Model Group Fallbacks=None",
@@ -338,9 +339,6 @@ def _agent_log_runtime_failure_reason(
             if reason:
                 return reason
 
-    if not include_text_logs:
-        return ""
-
     for path in (
         trial_dir / "agent" / "claude-code.txt",
         trial_dir / "claude-code.txt",
@@ -352,11 +350,20 @@ def _agent_log_runtime_failure_reason(
         if not path.exists():
             continue
         try:
-            reason = _text_contains_agent_runtime_failure(path.read_text(encoding="utf-8", errors="replace"))
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if reason:
-            return reason
+        for line in text.splitlines():
+            parsed = _read_json_text(line.strip())
+            if not isinstance(parsed, dict) or str(parsed.get("type") or "").casefold() != "error":
+                continue
+            reason = _text_contains_agent_runtime_failure(line)
+            if reason:
+                return reason.strip('"')
+        if include_text_logs:
+            reason = _text_contains_agent_runtime_failure(text)
+            if reason:
+                return reason
 
     return ""
 
@@ -869,7 +876,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
                 data = json.loads(reward_file.read_text(encoding="utf-8"))
                 _merge_reward_sidecars(data, reward_file.parent)
                 trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
-                if _trial_failure_reason(trial_dir):
+                if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
                     logger.debug(
                         "Skipping reward for failed Harbor trial: %s",
                         trial_dir,
@@ -900,7 +907,11 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
 
     for result_file in sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
-        if trial_dir in scored_trial_roots or _trial_failure_reason(trial_dir):
+        if (
+            trial_dir in scored_trial_roots
+            or _trial_failure_reason(trial_dir)
+            or _is_agent_runtime_failure_trial(trial_dir)
+        ):
             continue
         result = _read_json(result_file)
         if not isinstance(result, dict):
@@ -1050,6 +1061,9 @@ def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) ->
     stripped = _strip_attempt_suffix(value)
     if expected_case_ids and stripped in expected_case_ids:
         return stripped
+    generated_prefix_stripped = stripped.removeprefix("skillevaluator-")
+    if expected_case_ids and generated_prefix_stripped in expected_case_ids:
+        return generated_prefix_stripped
     return stripped
 
 
@@ -1522,6 +1536,7 @@ def _condition_execution_summary(
     expected_cases: int | None,
     n_attempts: int,
     job_failure: str,
+    runtime_failures: list[dict[str, str]] | None = None,
     skipped: bool = False,
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
@@ -1544,6 +1559,10 @@ def _condition_execution_summary(
         }
 
     errors: list[str] = [job_failure] if job_failure else []
+    errors.extend(
+        f"Agent runtime failed in {failure.get('trial', 'unknown trial')}: {failure.get('reason', 'unknown error')}"
+        for failure in (runtime_failures or [])
+    )
     expected_set = set(expected_ids)
     logical_passed: dict[str, bool] = {}
     for reward in _logical_attempt_rewards(rewards):
@@ -1761,6 +1780,7 @@ def collect_harbor_results(
                 expected_cases=expected_cases,
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
+                runtime_failures=with_runtime_failures,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
             )
@@ -1835,6 +1855,7 @@ def collect_harbor_results(
                 expected_cases=expected_cases,
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
+                runtime_failures=with_runtime_failures,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
             )
@@ -1902,6 +1923,7 @@ def collect_harbor_results(
                     expected_cases=expected_cases,
                     n_attempts=n_attempts,
                     job_failure=without_job_failure,
+                    runtime_failures=without_runtime_failures,
                     stop_on_pass=stop_on_pass,
                     pass_threshold=pass_threshold,
                 )
@@ -1978,6 +2000,7 @@ def collect_harbor_results(
                 expected_cases=expected_cases,
                 n_attempts=n_attempts,
                 job_failure=without_job_failure,
+                runtime_failures=without_runtime_failures,
                 skipped=skip_baseline,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,

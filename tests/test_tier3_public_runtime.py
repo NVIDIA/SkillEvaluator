@@ -21,6 +21,7 @@ from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_confi
 from skillevaluator.tier3.harbor.adapter import _write_task_toml
 from skillevaluator.tier3.harbor.runner import (
     _model_for_agent,
+    _nvidia_build_agent_import_path,
     _provider_environment,
     _validate_agent_provider_credentials,
     build_harbor_run_command,
@@ -111,6 +112,74 @@ def test_native_environment_is_forwarded_to_harbor() -> None:
     assert "--environment-import-path" not in command
 
 
+def test_nvidia_build_agent_import_selection_includes_local_bridge_agents() -> None:
+    provider = ProviderConfig(
+        provider="nv_build",
+        model="openai/gpt-oss-120b",
+        api_key="nvidia-build-key",
+        base_url="https://integrate.api.nvidia.com/v1",
+        litellm_model="openai/openai/gpt-oss-120b",
+    )
+
+    assert _nvidia_build_agent_import_path(provider, "codex", "docker") == (
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"
+    )
+    assert _nvidia_build_agent_import_path(provider, "claude-code", "docker") == (
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode"
+    )
+    assert _nvidia_build_agent_import_path(provider, "opencode", "docker") is None
+    assert _nvidia_build_agent_import_path(provider, "codex", "local") == (
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildCodex"
+    )
+    assert _nvidia_build_agent_import_path(provider, "claude-code", "local") == (
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildClaudeCode"
+    )
+    assert _nvidia_build_agent_import_path(provider, "opencode", "local") is None
+
+
+def test_docker_bridge_command_combines_custom_agent_and_secure_environment() -> None:
+    import_path = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"
+
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="bridge-test",
+        env_mode="docker",
+        agent_import_path=import_path,
+    )
+
+    assert command[command.index("--agent-import-path") + 1] == import_path
+    assert "-a" not in command
+    assert "--environment-import-path" in command
+
+
+def test_local_bridge_command_uses_custom_agent_import_path() -> None:
+    import_path = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildCodex"
+
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="local-bridge-test",
+        env_mode="local",
+        agent_import_path=import_path,
+    )
+
+    assert command[command.index("--agent-import-path") + 1] == import_path
+    assert "--environment-import-path" in command
+    assert "-a" not in command
+
+
+def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
+    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker or local"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="bridge-test",
+            env_mode="e2b",
+            agent_import_path="example:Agent",
+        )
+
+
 def test_evaluate_forwards_native_environment_without_legacy_sandbox_configuration(monkeypatch, tmp_path) -> None:
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -172,8 +241,9 @@ def test_evaluate_forwards_claude_alias_as_canonical_agent(monkeypatch, tmp_path
     monkeypatch.setattr(
         tier3_commands,
         "run_harbor_eval",
-        lambda **kwargs: captured.update(kwargs)
-        or {"execution_status": "succeeded", "execution_errors": [], "agents": {}},
+        lambda **kwargs: (
+            captured.update(kwargs) or {"execution_status": "succeeded", "execution_errors": [], "agents": {}}
+        ),
     )
 
     result = CliRunner().invoke(
@@ -315,7 +385,7 @@ def test_nvidia_build_provider_mapping_does_not_supply_an_openai_agent_credentia
     assert "OPENAI_BASE_URL" not in environment
 
 
-def test_doctor_rejects_nvidia_build_codex_without_openai_runtime_credential(monkeypatch) -> None:
+def test_doctor_accepts_nvidia_build_codex_without_openai_runtime_credential(monkeypatch) -> None:
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -330,14 +400,12 @@ def test_doctor_rejects_nvidia_build_codex_without_openai_runtime_credential(mon
 
     result = CliRunner().invoke(cli, ["doctor", "--agents", "codex"])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     assert "Codex runtime credential" in result.output
-    assert "codex requires a full OpenAI Responses API" in result.output
-    assert "--agent-model" not in result.output
-    assert "harbor.agents.codex.model" not in result.output
+    assert "OPENAI_API_KEY" not in result.output
 
 
-def test_doctor_reports_only_the_nvidia_build_codex_runtime_credential(monkeypatch) -> None:
+def test_doctor_nvidia_build_codex_ignores_incomplete_openai_runtime_credential(monkeypatch) -> None:
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -352,16 +420,12 @@ def test_doctor_reports_only_the_nvidia_build_codex_runtime_credential(monkeypat
 
     result = CliRunner().invoke(cli, ["doctor", "--agents", "codex"])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     assert "Codex runtime credential" in result.output
-    assert "OPENAI_API_KEY + OPENAI_BASE_URL" in result.output
-    assert "host environment" in result.output
-    assert "harbor.runtime_env" not in result.output
-    assert "--agent-model" not in result.output
-    assert "harbor.agents.codex.model" not in result.output
+    assert "OPENAI_API_KEY + OPENAI_BASE_URL" not in result.output
 
 
-def test_doctor_accepts_independent_codex_pair_with_explicit_model(monkeypatch) -> None:
+def test_doctor_build_codex_ignores_native_pair_and_accepts_build_model(monkeypatch) -> None:
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -376,7 +440,13 @@ def test_doctor_accepts_independent_codex_pair_with_explicit_model(monkeypatch) 
 
     result = CliRunner().invoke(
         cli,
-        ["doctor", "--agents", "codex", "--agent-model", "codex=gpt-5.3-codex"],
+        [
+            "doctor",
+            "--agents",
+            "codex",
+            "--agent-model",
+            "codex=nvidia/nemotron-3-super-120b-a12b",
+        ],
     )
 
     assert result.exit_code == 0
@@ -418,7 +488,7 @@ def test_doctor_verify_models_probes_the_resolved_agent_provider(monkeypatch) ->
     assert probed_provider.model == "meta/llama-3.1-8b-instruct"
 
 
-def test_doctor_rejects_incompatible_public_provider_agent_pair(monkeypatch) -> None:
+def test_doctor_reports_missing_independent_cross_provider_credential(monkeypatch) -> None:
     provider = ProviderConfig(
         provider="openai",
         model="gpt-4.1-mini",
@@ -426,16 +496,21 @@ def test_doctor_rejects_incompatible_public_provider_agent_pair(monkeypatch) -> 
         base_url="https://api.openai.com/v1",
         litellm_model="openai/gpt-4.1-mini",
     )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(tier3_commands, "resolve_llm_provider", lambda: provider)
     monkeypatch.setattr(tier3_commands, "_check_prerequisites", lambda **_kwargs: [])
 
-    result = CliRunner().invoke(cli, ["doctor", "--agents", "claude-code", "--verify-models"])
+    result = CliRunner().invoke(
+        cli,
+        ["doctor", "--agents", "claude-code", "--verify-models"],
+        terminal_width=240,
+    )
 
     assert result.exit_code == 1
-    assert "does not support live agent" in result.output
+    assert "ANTHROPIC_API_KEY" in result.output
 
 
-def test_nvidia_build_requires_an_independent_codex_credential() -> None:
+def test_nvidia_build_docker_codex_uses_the_compatibility_bridge() -> None:
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -444,12 +519,7 @@ def test_nvidia_build_requires_an_independent_codex_credential() -> None:
         litellm_model="openai/meta/llama-3.1-8b-instruct",
     )
 
-    errors = _validate_agent_provider_credentials(provider, ["codex"], {})
-
-    assert len(errors) == 1
-    assert "codex requires a full OpenAI Responses API credential" in errors[0]
-    assert "does not support codex's tool schema" in errors[0]
-    assert "OPENAI_API_KEY" in errors[0]
+    assert _validate_agent_provider_credentials(provider, ["codex"], {}, env_mode="docker") == []
 
 
 def test_nvidia_build_rejects_agents_without_a_credential_contract() -> None:
@@ -466,7 +536,7 @@ def test_nvidia_build_rejects_agents_without_a_credential_contract() -> None:
     assert errors and "does not support live agent" in errors[0]
 
 
-def test_nvidia_build_codex_rejects_an_openai_key_without_base_url() -> None:
+def test_nvidia_build_local_codex_uses_the_compatibility_bridge() -> None:
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -475,16 +545,10 @@ def test_nvidia_build_codex_rejects_an_openai_key_without_base_url() -> None:
         litellm_model="openai/meta/llama-3.1-8b-instruct",
     )
 
-    errors = _validate_agent_provider_credentials(
-        provider,
-        ["codex"],
-        {"OPENAI_API_KEY": "openai-key"},
-    )
-
-    assert errors and "OPENAI_API_KEY + OPENAI_BASE_URL" in errors[0]
+    assert _validate_agent_provider_credentials(provider, ["codex"], {}, env_mode="local") == []
 
 
-def test_nvidia_build_claude_requires_an_independent_anthropic_credential() -> None:
+def test_nvidia_build_local_claude_uses_the_compatibility_bridge() -> None:
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -493,9 +557,27 @@ def test_nvidia_build_claude_requires_an_independent_anthropic_credential() -> N
         litellm_model="openai/meta/llama-3.1-8b-instruct",
     )
 
-    errors = _validate_agent_provider_credentials(provider, ["claude-code"], {}, env_mode="local")
+    assert _validate_agent_provider_credentials(provider, ["claude-code"], {}, env_mode="local") == []
 
-    assert errors and "ANTHROPIC_API_KEY" in errors[0]
+
+@pytest.mark.parametrize("agent", ["opencode", "codex", "claude-code"])
+def test_nvidia_build_local_agents_require_network_access(
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+) -> None:
+    provider = ProviderConfig(
+        provider="nv_build",
+        model="nvidia/nemotron-3-nano-30b-a3b",
+        api_key="nvidia-build-key",
+        base_url="https://integrate.api.nvidia.com/v1",
+        litellm_model="openai/nvidia/nemotron-3-nano-30b-a3b",
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_LOCAL_ALLOW_NET", "0")
+
+    errors = _validate_agent_provider_credentials(provider, [agent], {}, env_mode="local")
+
+    assert errors and "network" in errors[0].lower()
+    assert "SKILLEVALUATOR_LOCAL_ALLOW_NET" in errors[0]
 
 
 def test_nvidia_build_claude_accepts_explicit_anthropic_credential_and_model() -> None:
@@ -507,13 +589,16 @@ def test_nvidia_build_claude_accepts_explicit_anthropic_credential_and_model() -
         litellm_model="openai/meta/llama-3.1-8b-instruct",
     )
 
-    assert _validate_agent_provider_credentials(
-        provider,
-        ["claude-code"],
-        {"ANTHROPIC_API_KEY": "anthropic-key"},
-        {"claude-code": "CLI"},
-        env_mode="local",
-    ) == []
+    assert (
+        _validate_agent_provider_credentials(
+            provider,
+            ["claude-code"],
+            {"ANTHROPIC_API_KEY": "anthropic-key"},
+            {"claude-code": "CLI"},
+            env_mode="local",
+        )
+        == []
+    )
 
 
 def test_nvidia_build_opencode_default_model_is_prefixed_for_local_runtime() -> None:
@@ -586,27 +671,27 @@ def test_opencode_provider_default_preserves_raw_ids_that_begin_with_runtime_nam
 @pytest.mark.parametrize(
     ("provider_name", "cli_model", "config_agents", "expected", "source"),
     [
-        ("nv_build", "meta/llama-3.1-8b-instruct", {}, "nvidia/meta/llama-3.1-8b-instruct", "CLI"),
-        ("nv_build", "openai/gpt-oss-120b", {}, "nvidia/openai/gpt-oss-120b", "CLI"),
+        ("nv_build", "meta/llama-3.1-8b-instruct", {}, "meta/llama-3.1-8b-instruct", "CLI"),
+        ("nv_build", "openai/gpt-oss-120b", {}, "openai/gpt-oss-120b", "CLI"),
         ("nv_build", "nvidia/openai/gpt-oss-120b", {}, "nvidia/openai/gpt-oss-120b", "CLI"),
-        ("openai", "gpt-4.1-mini", {}, "openai/gpt-4.1-mini", "CLI"),
+        ("openai", "gpt-4.1-mini", {}, "gpt-4.1-mini", "CLI"),
         (
             "anthropic",
             None,
             {"opencode": {"model": "claude-sonnet-test"}},
-            "anthropic/claude-sonnet-test",
+            "claude-sonnet-test",
             "evals/config.yml",
         ),
         (
             "openai-compatible",
             None,
             {"opencode": {"model": "vendor/custom-model"}},
-            "openai/vendor/custom-model",
+            "vendor/custom-model",
             "evals/config.yml",
         ),
     ],
 )
-def test_opencode_explicit_model_is_provider_qualified(
+def test_opencode_explicit_model_is_preserved_exactly(
     provider_name: str,
     cli_model: str | None,
     config_agents: dict,
@@ -690,7 +775,7 @@ def test_nvidia_build_local_opencode_uses_evaluator_provider_mapping() -> None:
     assert _validate_agent_provider_credentials(provider, ["opencode"], {}, env_mode="local") == []
 
 
-def test_nvidia_build_requires_an_explicit_codex_model() -> None:
+def test_nvidia_build_local_codex_uses_the_provider_default_model() -> None:
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -699,15 +784,7 @@ def test_nvidia_build_requires_an_explicit_codex_model() -> None:
         litellm_model="openai/meta/llama-3.1-8b-instruct",
     )
 
-    errors = _validate_agent_provider_credentials(
-        provider,
-        ["codex"],
-        {"OPENAI_API_KEY": "openai-key", "OPENAI_BASE_URL": "https://api.openai.com/v1"},
-    )
-
-    assert errors == [
-        "codex needs an explicit OpenAI-compatible model when NVIDIA Build is the evaluator provider; set --agent-model codex=MODEL or harbor.agents.codex.model."
-    ]
+    assert _validate_agent_provider_credentials(provider, ["codex"], {}, env_mode="local") == []
 
 
 def test_nvidia_build_codex_accepts_explicit_independent_credential_and_model() -> None:
@@ -719,12 +796,16 @@ def test_nvidia_build_codex_accepts_explicit_independent_credential_and_model() 
         litellm_model="openai/meta/llama-3.1-8b-instruct",
     )
 
-    assert _validate_agent_provider_credentials(
-        provider,
-        ["codex"],
-        {"OPENAI_API_KEY": "openai-key", "OPENAI_BASE_URL": "https://api.openai.com/v1"},
-        {"codex": "CLI"},
-    ) == []
+    assert (
+        _validate_agent_provider_credentials(
+            provider,
+            ["codex"],
+            {"OPENAI_API_KEY": "openai-key", "OPENAI_BASE_URL": "https://api.openai.com/v1"},
+            {"codex": "CLI"},
+            env_mode="local",
+        )
+        == []
+    )
 
 
 def test_generated_verifier_rejects_non_http_provider_base_urls(monkeypatch) -> None:

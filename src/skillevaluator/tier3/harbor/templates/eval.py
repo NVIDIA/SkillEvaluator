@@ -77,7 +77,21 @@ SKILL_EVALUATOR_REWARD_JSON = _env_path(
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_JUDGE_MODEL = "gpt-4.1-mini"
+DEFAULT_JUDGE_MODEL = "gpt-5.4-mini"
+
+_ERROR_REDACTION_MARKER = "[REDACTED]"
+# Shorter placeholders are not credible provider credentials and can corrupt report schema keys.
+_MIN_EXACT_SECRET_LENGTH = 8
+_CREDENTIAL_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "NVIDIA_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "SKILL_EVAL_LLM_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SECURITY_TOKEN",
+    "AWS_SESSION_TOKEN",
+)
 
 WASTE_INDICATORS = [
     "--help",
@@ -137,7 +151,7 @@ LOG_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-
 def redact_secrets_in_log_line(line, *, extra_secret_values=None):
     """Best-effort mask common key shapes in Harbor verifier output text."""
     for secret in sorted(set(extra_secret_values or ()), key=len, reverse=True):
-        if secret and len(secret) >= 8:
+        if secret and len(secret) >= _MIN_EXACT_SECRET_LENGTH:
             line = line.replace(secret, "<redacted>")
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
@@ -1025,15 +1039,61 @@ def _validate_http_url(url):
     return url
 
 
-def _format_http_error(error):
+def _configured_secret_values(extra_secret_values=()):
+    values = {
+        value
+        for name in _CREDENTIAL_ENV_VARS
+        if (value := os.environ.get(name, "")) and len(value) >= _MIN_EXACT_SECRET_LENGTH
+    }
+    for value in extra_secret_values:
+        text = str(value) if value else ""
+        if len(text) >= _MIN_EXACT_SECRET_LENGTH:
+            values.add(text)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact_configured_credentials(text, extra_secret_values=()):
+    redacted = str(text)
+    for secret in _configured_secret_values(extra_secret_values):
+        redacted = redacted.replace(secret, _ERROR_REDACTION_MARKER)
+    return redacted
+
+
+def _sanitize_error_value(value, extra_secret_values=()):
+    secrets = _configured_secret_values(extra_secret_values)
+
+    def sanitize(item):
+        if isinstance(item, str):
+            redacted = item
+            for secret in secrets:
+                redacted = redacted.replace(secret, _ERROR_REDACTION_MARKER)
+            return redacted
+        if isinstance(item, dict):
+            return {sanitize(key): sanitize(nested) for key, nested in item.items()}
+        if isinstance(item, list):
+            return [sanitize(nested) for nested in item]
+        if isinstance(item, tuple):
+            return tuple(sanitize(nested) for nested in item)
+        return item
+
+    return sanitize(value)
+
+
+def _format_http_error_with_fallback(error):
     try:
         body = error.read().decode("utf-8", "replace").strip()
     except Exception:
         body = ""
-    detail = f"HTTP {error.code}: {error.reason}"
+    raw_detail = f"HTTP {error.code}: {error.reason}"
+    safe_detail = raw_detail
     if body:
-        detail = f"{detail} - {body[:500]}"
-    return detail
+        raw_detail = f"{raw_detail} - {body}"
+        safe_detail = f"{safe_detail} - {_redact_configured_credentials(body)[:500]}"
+    return _redact_configured_credentials(safe_detail), _should_try_fallback(raw_detail)
+
+
+def _format_http_error(error):
+    return _format_http_error_with_fallback(error)[0]
 
 
 def _should_try_fallback(error):
@@ -1051,10 +1111,49 @@ def _supports_custom_temperature(model):
     return not lowered.startswith("openai/openai/gpt-5")
 
 
-def _chat_completion_payload(model, prompt, max_tokens, temperature):
+def _is_native_openai_chat_url(provider, request_url):
+    if str(provider or "").strip().casefold() != "openai":
+        return False
+
+    raw_url = str(request_url or "")
+    if raw_url != raw_url.strip() or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw_url):
+        return False
+    try:
+        parsed = urlparse(raw_url)
+        port = parsed.port
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme.casefold() == "https"
+        and parsed.hostname is not None
+        and parsed.hostname.casefold() == "api.openai.com"
+        and parsed.netloc.casefold() in {"api.openai.com", "api.openai.com:443"}
+        and port in {None, 443}
+        and parsed.path in {"/v1/chat/completions", "/v1/chat/completions/"}
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and ";" not in raw_url
+        and "?" not in raw_url
+        and "#" not in raw_url
+    )
+
+
+def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=None, request_url=None):
+    resolved_provider = _public_provider() if provider is None else provider
+    resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
+    token_key = (
+        "max_completion_tokens"
+        if str(model or "").casefold().startswith("gpt-5")
+        and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+        else "max_tokens"
+    )
     payload = {
         "model": model,
-        "max_tokens": max_tokens,
+        token_key: max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     if _supports_custom_temperature(model):
@@ -1066,15 +1165,28 @@ def _public_provider():
     configured = os.environ.get("SKILL_EVAL_LLM_PROVIDER", "").strip().lower()
     if configured:
         return configured
+    providers = _configured_public_providers()
+    return providers[0] if len(providers) == 1 else ""
+
+
+def _configured_public_providers():
+    providers = []
     if os.environ.get("OPENAI_API_KEY"):
-        return "openai"
+        providers.append("openai")
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
+        providers.append("anthropic")
     if os.environ.get("NVIDIA_API_KEY"):
-        return "nv_build"
+        providers.append("nv_build")
     if os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_PROFILE"):
-        return "bedrock"
-    return ""
+        providers.append("bedrock")
+    return providers
+
+
+def _public_provider_error():
+    providers = _configured_public_providers()
+    if len(providers) > 1:
+        return "Set SKILL_EVAL_LLM_PROVIDER because multiple provider credentials are configured"
+    return "Configure SKILL_EVAL_LLM_PROVIDER and a public provider credential"
 
 
 def _anthropic_url():
@@ -1136,17 +1248,21 @@ def _call_bedrock(prompt, model, max_tokens, temperature):
         return None, f"Bedrock request failed: {exc}"
 
 
-def call_public_llm(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
-    provider = _public_provider()
-    if not provider:
-        return None, "Configure SKILL_EVAL_LLM_PROVIDER and a public provider credential"
-    requested_model = (
+def _selected_judge_model(model=None):
+    return (
         model
         or os.environ.get("LLM_JUDGE_MODEL")
         or os.environ.get("SKILL_EVAL_JUDGE_MODEL")
         or os.environ.get("SKILL_EVAL_LLM_MODEL")
         or DEFAULT_JUDGE_MODEL
     )
+
+
+def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+    provider = _public_provider()
+    if not provider:
+        return None, _public_provider_error(), {}
+    requested_model = _selected_judge_model(model)
     models = _fallback_models(requested_model) if allow_model_fallback else [requested_model]
     errors = []
     for candidate_model in models:
@@ -1154,13 +1270,13 @@ def call_public_llm(prompt, model=None, max_tokens=1024, temperature=0.0, allow_
             if provider == "anthropic":
                 content, error = _call_anthropic(prompt, candidate_model, max_tokens, temperature)
                 if error:
-                    return None, error
-                return content, None
+                    return None, _redact_configured_credentials(error), {}
+                return content, None, {"provider": provider, "model": candidate_model}
             if provider == "bedrock":
                 content, error = _call_bedrock(prompt, candidate_model, max_tokens, temperature)
                 if error:
-                    return None, error
-                return content, None
+                    return None, _redact_configured_credentials(error), {}
+                return content, None, {"provider": provider, "model": candidate_model}
 
             api_key = (
                 os.environ.get("NVIDIA_API_KEY", "")
@@ -1168,27 +1284,50 @@ def call_public_llm(prompt, model=None, max_tokens=1024, temperature=0.0, allow_
                 else os.environ.get("SKILL_EVAL_LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
             )
             if not api_key:
-                return None, f"No API key configured for {provider}"
+                return None, f"No API key configured for {provider}", {}
+            request_url = _resolve_url(provider)
             request = urllib.request.Request(
-                _resolve_url(provider),
-                data=json.dumps(_chat_completion_payload(candidate_model, prompt, max_tokens, temperature)).encode(),
+                request_url,
+                data=json.dumps(
+                    _chat_completion_payload(
+                        candidate_model,
+                        prompt,
+                        max_tokens,
+                        temperature,
+                        provider=provider,
+                        request_url=request_url,
+                    )
+                ).encode(),
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
             )
-            # _resolve_url() validates the configured base URL before this request.
+            # request_url was validated by _resolve_url() before this request.
             with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
                 body = json.loads(response.read())
             content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
             if candidate_model != requested_model:
                 logger.warning("LLM judge model %s failed; using fallback model %s", requested_model, candidate_model)
-            return content.strip(), None
+            return content.strip(), None, {"provider": provider, "model": candidate_model}
         except urllib.error.HTTPError as error:
-            detail = _format_http_error(error)
+            detail, should_try_fallback = _format_http_error_with_fallback(error)
             errors.append(f"{candidate_model}: {detail}")
-            if not allow_model_fallback or not _should_try_fallback(detail):
-                return None, detail
+            if not allow_model_fallback or not should_try_fallback:
+                return None, detail, {}
         except Exception as exc:
-            return None, f"Public provider call failed for {candidate_model}: {exc}"
-    return None, "LLM judge model fallback exhausted: " + " | ".join(errors)
+            detail = f"Public provider call failed for {candidate_model}: {exc}"
+            return None, _redact_configured_credentials(detail), {}
+    detail = "LLM judge model fallback exhausted: " + " | ".join(errors)
+    return None, _redact_configured_credentials(detail), {}
+
+
+def call_public_llm(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+    content, error, _provenance = _call_public_llm_with_provenance(
+        prompt,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        allow_model_fallback=allow_model_fallback,
+    )
+    return content, error
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -2283,11 +2422,23 @@ def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
     if not ground_truth:
         return {"score": 1.0, "reason": "No ground_truth -- skipped"}
 
+    if _ragas_goal_accuracy_enabled():
+        try:
+            return _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
+        except Exception as e:
+            logger.info("RAGAS not available (%s), using custom prompt", e)
+    return _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary)
+
+
+def _ragas_goal_accuracy_enabled():
+    """RAGAS is an OpenAI-only optimization, never an agent-key fallback."""
+    if _public_provider() != "openai":
+        return False
     try:
-        return _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
-    except Exception as e:
-        logger.info("RAGAS not available (%s), using custom prompt", e)
-        return _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary)
+        request_url = _resolve_url("openai")
+    except ValueError:
+        return False
+    return _is_native_openai_chat_url("openai", request_url)
 
 
 def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary):
@@ -2301,12 +2452,18 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     from ragas.messages import HumanMessage as RagasHuman
     from ragas.metrics.collections import AgentGoalAccuracyWithReference
 
+    if not _ragas_goal_accuracy_enabled():
+        raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("No OPENAI_API_KEY")
 
-    client = AsyncOpenAI(api_key=api_key, base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-    llm = llm_factory(DEFAULT_JUDGE_MODEL, client=client)
+    request_url = _resolve_url("openai").rstrip("/")
+    suffix = "/chat/completions"
+    if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
+        raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
+    client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
+    llm = llm_factory(_selected_judge_model(), client=client)
 
     metric = AgentGoalAccuracyWithReference(llm=llm)
     user_input = [
@@ -2323,7 +2480,13 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
         loop.close()
 
     score = float(result.value) if hasattr(result, "value") else float(result)
-    return {"score": max(0.0, min(1.0, score)), "reason": "RAGAS AgentGoalAccuracyWithReference", "method": "ragas"}
+    return {
+        "score": max(0.0, min(1.0, score)),
+        "reason": "RAGAS AgentGoalAccuracyWithReference",
+        "method": "ragas",
+        "provider": "openai",
+        "model": _selected_judge_model(),
+    }
 
 
 def _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary):
@@ -2350,16 +2513,16 @@ Did the agent achieve the expected goal?
 Respond with ONLY a JSON object:
 {{"user_goal": "...", "end_state": "...", "achieved": true/false, "score": 1.0, "reason": "..."}}"""
 
-    content, error = call_public_llm(prompt)
+    content, error, provenance = _call_public_llm_with_provenance(prompt)
     if error:
-        return {"score": 0.0, "reason": f"LLM judge error: {error}"}
+        return {"score": 0.0, "reason": f"LLM judge error: {error}", **provenance}
     parsed = extract_json(content) if content else None
     if not parsed:
-        return {"score": 0.0, "reason": "Could not parse judge response"}
+        return {"score": 0.0, "reason": "Could not parse judge response", **provenance}
     score = 1.0 if parsed.get("achieved", False) else 0.0
     if "score" in parsed and isinstance(parsed["score"], (int, float)):
         score = max(0.0, min(1.0, float(parsed["score"])))
-    return {"score": score, "reason": parsed.get("reason", ""), "method": "custom"}
+    return {"score": score, "reason": parsed.get("reason", ""), "method": "custom", **provenance}
 
 
 # ── LLM Judge: Behavior Check ────────────────────────────────────────────────
@@ -2476,6 +2639,10 @@ def _numeric_reward_payload(result, overall):
 
 
 def write_reward_outputs(result, overall):
+    # Top-level result keys are the fixed verifier schema. Sanitize their values
+    # recursively so credential text cannot rename Harbor's reward metrics.
+    sanitized_result = {key: _sanitize_error_value(value) for key, value in result.items()}
+    sanitized_overall = _sanitize_error_value(overall)
     REWARD_JSON.parent.mkdir(parents=True, exist_ok=True)
     skill_evaluator_reward_json = SKILL_EVALUATOR_REWARD_JSON
     if (
@@ -2484,9 +2651,9 @@ def write_reward_outputs(result, overall):
     ):
         skill_evaluator_reward_json = REWARD_JSON.parent / skill_evaluator_reward_json.name
     skill_evaluator_reward_json.parent.mkdir(parents=True, exist_ok=True)
-    skill_evaluator_reward_json.write_text(json.dumps(result, indent=2))
-    REWARD_JSON.write_text(json.dumps(_numeric_reward_payload(result, overall), indent=2))
-    REWARD_TXT.write_text(str(overall))
+    skill_evaluator_reward_json.write_text(json.dumps(sanitized_result, indent=2))
+    REWARD_JSON.write_text(json.dumps(_numeric_reward_payload(sanitized_result, sanitized_overall), indent=2))
+    REWARD_TXT.write_text(str(sanitized_overall))
 
 
 def main():

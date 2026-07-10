@@ -168,8 +168,7 @@ def require_supported_platform() -> str:
             f"{SANDBOX_MODE_ENV}=prefer or off. Use WSL2 for Linux local mode or --env-mode docker."
         )
     raise SandboxUnavailable(
-        f"Local mode is unsupported on platform {system!r}. "
-        "Use Linux, macOS, WSL2, or --env-mode docker."
+        f"Local mode is unsupported on platform {system!r}. Use Linux, macOS, WSL2, or --env-mode docker."
     )
 
 
@@ -646,8 +645,45 @@ def _minimal_roots(paths: Iterable[Path]) -> list[Path]:
     return minimal
 
 
+def _seatbelt_read_deny_rule(
+    operation: str,
+    scope: Path,
+    read_roots: Iterable[Path],
+    *,
+    exact_traversal_paths: Iterable[Path] = (),
+) -> str:
+    """Deny one read operation outside full roots and exact traversal nodes."""
+    full_roots = _minimal_roots(read_roots)
+    exact_ancestors = sorted(set(exact_traversal_paths).difference(full_roots), key=lambda path: len(path.parts))
+    filters = [f'        ({"literal" if path.is_file() else "subpath"} "{_sbpl_quote(path)}")' for path in full_roots]
+    filters.extend(f'        (literal "{_sbpl_quote(path)}")' for path in exact_ancestors)
+    if not filters:
+        return f'(deny {operation} (subpath "{_sbpl_quote(scope)}"))\n'
+    return (
+        f"(deny {operation}\n"
+        "  (require-all\n"
+        f'    (subpath "{_sbpl_quote(scope)}")\n'
+        "    (require-not\n"
+        "      (require-any\n"
+        f"{'\n'.join(filters)}))))\n"
+    )
+
+
+def _seatbelt_metadata_ancestors(scope: Path, read_roots: Iterable[Path]) -> set[Path]:
+    """Return exact existing ancestors needed to traverse to approved roots."""
+    ancestors: set[Path] = set()
+    for root in read_roots:
+        for ancestor in root.parents:
+            if not _is_within(ancestor, scope):
+                break
+            ancestors.add(ancestor)
+            if ancestor == scope:
+                break
+    return ancestors
+
+
 def _seatbelt_home_read_rule(host_home: Path, read_roots: Iterable[Path]) -> str:
-    """Deny host-HOME reads except canonical run/runtime paths."""
+    """Deny host-HOME reads while allowing metadata-only path traversal."""
     try:
         home = host_home.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -670,10 +706,23 @@ def _seatbelt_home_read_rule(host_home: Path, read_roots: Iterable[Path]) -> str
             if _is_within(exception, home):
                 exceptions.append(exception)
 
-    read_roots = _minimal_roots(exceptions)
-    filters = "\n".join(_seatbelt_path_filter(path) for path in read_roots)
+    full_roots = _minimal_roots(exceptions)
+    metadata_ancestors = _seatbelt_metadata_ancestors(home, full_roots)
+    operation_rules = "".join(
+        (
+            _seatbelt_read_deny_rule("file-read-data", home, full_roots),
+            _seatbelt_read_deny_rule("file-read-xattr", home, full_roots),
+            _seatbelt_read_deny_rule(
+                "file-read-metadata",
+                home,
+                full_roots,
+                exact_traversal_paths=metadata_ancestors,
+            ),
+        )
+    )
+    filters = "\n".join(_seatbelt_path_filter(path) for path in full_roots)
     if filters:
-        read_rule = (
+        broad_read_rule = (
             "(deny file-read*\n"
             "  (require-all\n"
             f'    (subpath "{_sbpl_quote(home)}")\n'
@@ -682,25 +731,13 @@ def _seatbelt_home_read_rule(host_home: Path, read_roots: Iterable[Path]) -> str
             f"{filters}))))\n"
         )
     else:
-        read_rule = f'(deny file-read* (subpath "{_sbpl_quote(home)}"))\n'
+        broad_read_rule = f'(deny file-read* (subpath "{_sbpl_quote(home)}"))\n'
 
-    # Tools such as Apple Git canonicalize an allowed nested workspace one
-    # component at a time. Permit metadata-only traversal of those ancestor
-    # directories while the broad deny still blocks entries, xattrs, and file
-    # contents. Never promote an ancestor to a subpath exception.
-    traversal_roots = sorted(
-        {
-            ancestor
-            for read_root in read_roots
-            for ancestor in read_root.parents
-            if _is_within(ancestor, home)
-        },
-        key=lambda path: len(path.parts),
-    )
     traversal_allows = "\n".join(
-        f'(allow file-read-metadata (literal "{_sbpl_quote(path)}"))' for path in traversal_roots
+        f'(allow file-read-metadata (literal "{_sbpl_quote(path)}"))'
+        for path in sorted(metadata_ancestors, key=lambda path: len(path.parts))
     )
-    return f"{read_rule}{traversal_allows}\n"
+    return f"{operation_rules}{broad_read_rule}{traversal_allows}\n"
 
 
 def _seatbelt_argv(
@@ -726,16 +763,42 @@ def _seatbelt_argv(
     if strict_reads:
         extra_ro = _strict_read_root_variants(extra_ro)
         strict_extra_roots = {
-            Path(root) if Path(root).is_symlink() else Path(root).resolve()
-            for root in extra_ro
-            if Path(root).exists()
+            Path(root) if Path(root).is_symlink() else Path(root).resolve() for root in extra_ro if Path(root).exists()
         }
         explicit_read_roots = {
             *(Path(root).resolve() for root in write_roots_sorted),
             Path(home).resolve(),
             *strict_extra_roots,
-            *(variant for root in _SEATBELT_SYSTEM_READ_ROOTS if Path(root).exists() for variant in (Path(root), Path(root).resolve())),
+            *(
+                variant
+                for root in _SEATBELT_SYSTEM_READ_ROOTS
+                if Path(root).exists()
+                for variant in (Path(root), Path(root).resolve())
+            ),
         }
+        root_scope = Path("/")
+        metadata_traversal_roots = _seatbelt_metadata_ancestors(root_scope, explicit_read_roots)
+        operation_rules = "".join(
+            (
+                # sandbox-exec aborts before launching even an approved binary
+                # unless it can read the exact filesystem root node. Keep that
+                # one fixed bootstrap literal; all derived ancestors remain
+                # metadata-only so their directory entries cannot be listed.
+                _seatbelt_read_deny_rule(
+                    "file-read-data",
+                    root_scope,
+                    explicit_read_roots,
+                    exact_traversal_paths=(root_scope,),
+                ),
+                _seatbelt_read_deny_rule("file-read-xattr", root_scope, explicit_read_roots),
+                _seatbelt_read_deny_rule(
+                    "file-read-metadata",
+                    root_scope,
+                    explicit_read_roots,
+                    exact_traversal_paths=metadata_traversal_roots,
+                ),
+            )
+        )
         traversal_roots = {ancestor for root in explicit_read_roots for ancestor in root.parents}
         exception_filters = "\n".join(
             [
@@ -749,7 +812,8 @@ def _seatbelt_argv(
                 ),
             ]
         )
-        read_policy = f'(deny file-read*\n  (require-all\n    (subpath "/")\n{exception_filters}\n  ))\n'
+        broad_read_rule = f'(deny file-read*\n  (require-all\n    (subpath "/")\n{exception_filters}\n  ))\n'
+        read_policy = f"{operation_rules}{broad_read_rule}"
     else:
         host_homes = _safe_host_homes()
         if host_homes is None:

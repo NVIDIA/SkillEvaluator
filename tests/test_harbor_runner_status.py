@@ -97,6 +97,74 @@ def test_agent_pair_assigns_the_full_concurrency_budget_when_baseline_is_skipped
     assert budgets == [4]
 
 
+@pytest.mark.parametrize(
+    ("env_mode", "agent", "import_path"),
+    [
+        (
+            "docker",
+            "codex",
+            "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex",
+        ),
+        (
+            "docker",
+            "claude-code",
+            "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode",
+        ),
+        (
+            "local",
+            "codex",
+            "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildCodex",
+        ),
+        (
+            "local",
+            "claude-code",
+            "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildClaudeCode",
+        ),
+    ],
+)
+def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_mode: str,
+    agent: str,
+    import_path: str,
+) -> None:
+    launches: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        runner,
+        "_run_harbor",
+        lambda **kwargs: launches.append(kwargs) or (True, ""),
+    )
+    monkeypatch.setattr(runner, "_job_passed", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(runner, "_merge_attempt_jobs", lambda *_args, **_kwargs: None)
+
+    errors = runner._run_agent_pair(
+        skill_name="demo",
+        agent=agent,
+        model="nvidia/nemotron-3-super-120b-a12b",
+        env_mode=env_mode,
+        with_skill=tmp_path / "with",
+        baseline=None,
+        jobs_dir=tmp_path / "jobs",
+        run_env={},
+        n_attempts=2,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+        expected_trials=2,
+        agent_import_path=import_path,
+        stop_on_pass=True,
+        task_names=["case-001"],
+    )
+
+    assert errors == []
+    assert len(launches) == 1
+    assert launches[0]["agent_import_path"] == import_path
+    assert launches[0]["include_task_names"] == ["case-001"]
+
+
 def _run(
     monkeypatch: pytest.MonkeyPatch,
     jobs_dir: Path,

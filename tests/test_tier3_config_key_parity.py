@@ -81,9 +81,10 @@ def _run_engine(
     monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
     monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
 
+    agents = engine_kwargs.pop("agents", ["opencode"])
     result = runner.run_harbor_eval(
         skill,
-        ["opencode"],
+        agents,
         output_dir=tmp_path / "results",
         env_mode="docker",
         agent_runtime_preflight=engine_kwargs.pop("agent_runtime_preflight", False),
@@ -134,6 +135,27 @@ harbor:
     # Early-stopped cases legitimately use fewer trials than the maximum, so
     # the exact-count trial validation is replaced by per-case coverage.
     assert captured["collect"]["expected_trials"] is None
+
+
+def test_stop_on_pass_routes_nvidia_build_codex_through_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = """\
+schema_version: 1
+harbor:
+  task_source: evals_json
+  n_attempts: 2
+  stop_on_pass: true
+"""
+
+    result, captured = _run_engine(monkeypatch, tmp_path, config, agents=["codex"])
+
+    assert "error" not in result
+    assert captured["pair"]["stop_on_pass"] is True
+    assert captured["pair"]["agent_import_path"] == (
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"
+    )
 
 
 def test_cli_stop_on_pass_overrides_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

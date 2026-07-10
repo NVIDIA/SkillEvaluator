@@ -19,15 +19,81 @@ provider-native credential. Importing this module never requires a key.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from typing import Any
+from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_MODEL, LLM_VERIFY_TEMPERATURE
 from skillevaluator.inference.types import LLMClientError
 from skillevaluator.logging_config import get_logger
-from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.provider_config import (
+    OPENAI_BASE_URL,
+    ProviderConfig,
+    ProviderConfigurationError,
+    resolve_llm_provider,
+)
 
 logger = get_logger(__name__)
+
+_NATIVE_OPENAI_AUTHORITIES = frozenset({"api.openai.com", "api.openai.com:443"})
+_NATIVE_OPENAI_PATHS = frozenset({"/v1", "/v1/"})
+
+
+def _effective_openai_base_url(explicit_base_url: str | None) -> str:
+    if explicit_base_url is not None:
+        return explicit_base_url
+    return os.environ.get("OPENAI_BASE_URL", OPENAI_BASE_URL)
+
+
+def _is_canonical_openai_base_url(base_url: str | None) -> bool:
+    if (
+        not isinstance(base_url, str)
+        or base_url != base_url.strip()
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in base_url)
+        or any(delimiter in base_url for delimiter in ("?", "#", ";", "\\"))
+    ):
+        return False
+
+    try:
+        endpoint = urlsplit(base_url)
+        endpoint_port = endpoint.port
+    except (TypeError, ValueError):
+        return False
+
+    return (
+        endpoint.scheme.casefold() == "https"
+        and endpoint.netloc.casefold() in _NATIVE_OPENAI_AUTHORITIES
+        and endpoint.hostname is not None
+        and endpoint.hostname.casefold() == "api.openai.com"
+        and endpoint_port in {None, 443}
+        and endpoint.path in _NATIVE_OPENAI_PATHS
+        and endpoint.username is None
+        and endpoint.password is None
+        and not endpoint.query
+        and not endpoint.fragment
+    )
+
+
+def _is_native_openai_endpoint(config: ProviderConfig) -> bool:
+    return config.provider.casefold() == "openai" and _is_canonical_openai_base_url(config.base_url)
+
+
+def _sdk_targets_native_openai(client: Any) -> bool:
+    try:
+        request_url = str(client.base_url.join("chat/completions"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    suffix = "/chat/completions"
+    return request_url.endswith(suffix) and _is_canonical_openai_base_url(request_url[: -len(suffix)])
+
+
+def _token_limit_kwargs(config: ProviderConfig, max_tokens: int | None) -> dict[str, int]:
+    if max_tokens is None:
+        return {}
+    if _is_native_openai_endpoint(config) and config.model.lower().startswith("gpt-5"):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens}
 
 
 class LLMClient:
@@ -94,11 +160,12 @@ class LLMClient:
 
         if self._api_key or self._base_url:
             model = self._model or self.default_model
+            base_url = _effective_openai_base_url(self._base_url)
             self._provider_config = ProviderConfig(
-                provider="openai-compatible",
+                provider="openai" if _is_canonical_openai_base_url(base_url) else "openai-compatible",
                 model=model,
                 api_key=self._api_key,
-                base_url=self._base_url,
+                base_url=base_url,
                 litellm_model=f"openai/{model}",
             )
             return self._provider_config
@@ -146,7 +213,17 @@ class LLMClient:
                 "The 'openai' package is required for LLM operations. Install it with: pip install openai"
             ) from exc
 
-        self._client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+        client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+        if (
+            config.base_url is not None
+            and not _is_canonical_openai_base_url(config.base_url)
+            and _sdk_targets_native_openai(client)
+        ):
+            client.close()
+            raise LLMClientError(
+                f"OpenAI base URL is a noncanonical alias for the native OpenAI endpoint. Use {OPENAI_BASE_URL}."
+            )
+        self._client = client
         return self._client
 
     # -- direct-use methods -----------------------------------------------
@@ -198,9 +275,8 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": self._temperature,
+            **_token_limit_kwargs(config, self._max_tokens),
         }
-        if self._max_tokens is not None:
-            call_kwargs["max_tokens"] = self._max_tokens
 
         response = client.chat.completions.create(**call_kwargs)
         content = response.choices[0].message.content

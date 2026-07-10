@@ -74,6 +74,7 @@ def test_opencode_runtime_plan_separates_runtime_and_catalog_model_names(
         models={"opencode": runtime_model},
         configured_runtime_env={},
         env_mode="docker",
+        model_sources={"opencode": "CLI"},
     )["opencode"]
 
     assert plan.model == runtime_model
@@ -115,43 +116,20 @@ def test_non_opencode_runtime_plan_preserves_slash_prefixed_raw_model_ids(
     assert plan.provider.litellm_model == f"{litellm_prefix}/{model}"
 
 
-@pytest.mark.parametrize(
-    ("agent", "runtime_model", "catalog_model", "litellm_prefix"),
-    [
-        ("codex", "openai/gpt-5.3-codex", "gpt-5.3-codex", "openai"),
-        ("claude-code", "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5", "anthropic"),
-    ],
-)
-def test_nvidia_build_independent_agent_plan_dequalifies_runtime_model_for_catalog(
-    monkeypatch: pytest.MonkeyPatch,
-    agent: str,
-    runtime_model: str,
-    catalog_model: str,
-    litellm_prefix: str,
-) -> None:
-    monkeypatch.setattr(
-        runner.os,
-        "environ",
-        {
-            "PATH": "/usr/bin",
-            "ANTHROPIC_API_KEY": "anthropic-key",
-            "OPENAI_API_KEY": "openai-key",
-            "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        },
-    )
-
+@pytest.mark.parametrize("agent", ["codex", "claude-code"])
+def test_nvidia_build_docker_bridge_plan_keeps_provider_key_out_of_task_env(agent: str) -> None:
     plan = runner._resolve_agent_runtime_plan(
         provider=_provider("nv_build"),
         agents=[agent],
-        models={agent: runtime_model},
+        models={agent: "openai/gpt-oss-120b"},
         configured_runtime_env={},
         env_mode="docker",
-        model_sources={agent: "CLI"},
     )[agent]
 
-    assert plan.model == runtime_model
-    assert plan.provider.model == catalog_model
-    assert plan.provider.litellm_model == f"{litellm_prefix}/{catalog_model}"
+    assert plan.staged_env == {}
+    assert plan.subprocess_env["NVIDIA_API_KEY"] == "provider-key"
+    assert plan.provider.provider == "nv_build"
+    assert plan.provider.model == "openai/gpt-oss-120b"
 
 
 @pytest.mark.parametrize(
@@ -229,9 +207,9 @@ def test_mixed_agents_receive_disjoint_credentials(monkeypatch: pytest.MonkeyPat
         provider=_provider("nv_build"),
         agents=["opencode", "claude-code", "codex"],
         models={
-            "opencode": "nvidia/model",
-            "claude-code": "claude-opus-4-6",
-            "codex": "gpt-5.3-codex",
+            "opencode": "nvidia/nvidia/nemotron-3-nano-30b-a3b",
+            "claude-code": "nvidia/nemotron-3-super-120b-a12b",
+            "codex": "nvidia/nemotron-3-nano-30b-a3b",
         },
         configured_runtime_env={},
         env_mode="docker",
@@ -239,14 +217,11 @@ def test_mixed_agents_receive_disjoint_credentials(monkeypatch: pytest.MonkeyPat
     )
 
     assert plans["opencode"].staged_env == {"NVIDIA_API_KEY": "${NVIDIA_API_KEY}"}
-    assert plans["claude-code"].staged_env == {"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}
-    assert plans["codex"].staged_env == {
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "OPENAI_BASE_URL": "${OPENAI_BASE_URL}",
-    }
+    assert plans["claude-code"].staged_env == {}
+    assert plans["codex"].staged_env == {}
     assert plans["opencode"].provider.provider == "nv_build"
-    assert plans["claude-code"].provider.provider == "anthropic"
-    assert plans["codex"].provider.provider == "openai-compatible"
+    assert plans["claude-code"].provider.provider == "nv_build"
+    assert plans["codex"].provider.provider == "nv_build"
     assert "ANTHROPIC_API_KEY" not in plans["opencode"].subprocess_env
     assert "OPENAI_API_KEY" not in plans["opencode"].subprocess_env
     assert "NVIDIA_API_KEY" in plans["claude-code"].subprocess_env  # evaluator verifier only
@@ -259,9 +234,6 @@ def test_mixed_agents_receive_disjoint_credentials(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     ("provider_name", "agent"),
     [
-        ("openai", "claude-code"),
-        ("openai-compatible", "claude-code"),
-        ("anthropic", "codex"),
         ("bedrock", "codex"),
         ("bedrock", "opencode"),
     ],
@@ -276,6 +248,74 @@ def test_incompatible_provider_agent_pairs_fail_before_harbor(provider_name: str
             env_mode="docker",
             model_sources={agent: "CLI"},
         )
+
+
+def test_openai_mixed_agents_receive_isolated_native_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "anthropic-agent-key",
+        },
+    )
+
+    plans = runner._resolve_agent_runtime_plan(
+        provider=_provider("openai"),
+        agents=["codex", "claude-code"],
+        models={"codex": "test-model", "claude-code": "anthropic/claude-sonnet-4-5"},
+        configured_runtime_env={},
+        env_mode="docker",
+        model_sources={"codex": "public provider default", "claude-code": "CLI"},
+    )
+
+    assert plans["codex"].staged_env == {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "OPENAI_BASE_URL": "${OPENAI_BASE_URL}",
+    }
+    assert plans["claude-code"].staged_env == {"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}
+    assert plans["codex"].provider.provider == "openai"
+    assert plans["claude-code"].provider.provider == "anthropic"
+    assert plans["claude-code"].provider.model == "claude-sonnet-4-5"
+    assert "ANTHROPIC_API_KEY" not in plans["codex"].subprocess_env
+    assert plans["claude-code"].subprocess_env["ANTHROPIC_API_KEY"] == "anthropic-agent-key"
+    assert plans["claude-code"].subprocess_env["OPENAI_API_KEY"] == "provider-key"
+
+
+def test_anthropic_mixed_agents_receive_isolated_native_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "OPENAI_API_KEY": "openai-agent-key",
+            "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        },
+    )
+
+    plans = runner._resolve_agent_runtime_plan(
+        provider=_provider("anthropic"),
+        agents=["claude-code", "codex"],
+        models={"claude-code": "test-model", "codex": "openai/gpt-5.4-mini"},
+        configured_runtime_env={},
+        env_mode="docker",
+        model_sources={"claude-code": "public provider default", "codex": "CLI"},
+    )
+
+    assert plans["claude-code"].staged_env == {
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+        "ANTHROPIC_BASE_URL": "${ANTHROPIC_BASE_URL}",
+    }
+    assert plans["codex"].staged_env == {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "OPENAI_BASE_URL": "${OPENAI_BASE_URL}",
+    }
+    assert plans["claude-code"].provider.provider == "anthropic"
+    assert plans["codex"].provider.provider == "openai-compatible"
+    assert plans["codex"].provider.model == "gpt-5.4-mini"
+    assert "OPENAI_API_KEY" not in plans["claude-code"].subprocess_env
+    assert plans["codex"].subprocess_env["OPENAI_API_KEY"] == "openai-agent-key"
+    assert plans["codex"].subprocess_env["ANTHROPIC_API_KEY"] == "provider-key"
 
 
 def test_openai_compatible_codex_stages_selected_provider_pair() -> None:
@@ -353,7 +393,6 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     emitted: list[tuple[str, bool, dict[str, str]]] = []
     launched: dict[str, tuple[str, str, dict[str, str]]] = {}
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
     monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
     monkeypatch.setattr(
         runner,
@@ -390,7 +429,10 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     result = runner.run_harbor_eval(
         skill,
         ["opencode", "claude-code"],
-        agent_models={"opencode": "nvidia/model", "claude-code": "claude-opus-4-6"},
+        agent_models={
+            "opencode": "nvidia/nvidia/nemotron-3-nano-30b-a3b",
+            "claude-code": "nvidia/nemotron-3-super-120b-a12b",
+        },
         output_dir=tmp_path / "results",
         env_mode="docker",
         keep_harbor_jobs=True,
@@ -406,12 +448,12 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     }
     staged = {(path.split("/")[-2], path.split("/")[-1]): env for path, _with_skill, env in emitted}
     assert staged[("opencode", "with")] == {"NVIDIA_API_KEY": "${NVIDIA_API_KEY}"}
-    assert staged[("claude-code", "with")] == {"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}
+    assert staged[("claude-code", "with")] == {}
     assert launched["opencode"][0].endswith("_harbor-tasks/opencode/with")
     assert launched["claude-code"][1].endswith("_harbor-tasks/claude-code/without")
     assert "ANTHROPIC_API_KEY" not in launched["opencode"][2]
     assert "OPENAI_API_KEY" not in launched["opencode"][2]
-    assert launched["claude-code"][2]["ANTHROPIC_API_KEY"] == "anthropic-test"
+    assert launched["claude-code"][2]["NVIDIA_API_KEY"] == "provider-key"
 
 
 def test_harbor_subprocess_environment_excludes_arbitrary_host_secrets(

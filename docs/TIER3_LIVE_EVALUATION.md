@@ -45,8 +45,8 @@ export SKILL_EVAL_LLM_PROVIDER=openai
 export OPENAI_API_KEY='...'
 
 # 3. Configure the live-agent credential role on the host (see below).
-#    For Codex this is an OpenAI Responses API key and base URL. Do not put
-#    credentials or credential aliases in evals/config.yml.
+#    NVIDIA Build Docker/local paths can reuse NVIDIA_API_KEY. Do not put credentials
+#    or credential aliases in evals/config.yml.
 
 # 4. Generate eval cases for your skill
 skillevaluator create-eval-dataset ./my-skill --full
@@ -105,7 +105,8 @@ Tier 3 needs:
    file, or native tasks under `evals/harbor/`.
 2. The `tier3` extra, which installs Harbor and the evaluator dependencies.
 3. A configured evaluator LLM provider.
-4. The selected live agent's native credential.
+4. The selected live agent credential (or the shared `NVIDIA_API_KEY` for
+   Build-backed Docker/local agents).
 5. A configured environment, such as Docker, local OS isolation, or a supported
    Harbor cloud backend.
 
@@ -120,25 +121,62 @@ cannot replace, alias, or reroute provider/agent/backend credentials through
 | Live agent credential | The agent actually performing the task | Export the agent's credential in the host environment before `doctor`/`evaluate` |
 
 Public NVIDIA Build at [build.nvidia.com](https://build.nvidia.com/) uses the
-`nv_build` provider and `NVIDIA_API_KEY`; it directly powers OpenCode:
+`nv_build` provider and `NVIDIA_API_KEY`. The same key powers direct OpenCode
+and SkillEvaluator's Docker/local compatibility bridges:
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
 skillevaluator doctor --agents opencode --env-mode docker --verify-models
-skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
+
+# Codex Responses -> NVIDIA Build Chat Completions
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker
+
+# Experimental Claude Code Messages -> NVIDIA Build Chat Completions
+skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker
+
+# The same three paths are available under the trusted local OS sandbox
+skillevaluator doctor --agents opencode,codex,claude-code --env-mode local --verify-models
+skillevaluator evaluate ./my-skill --agents codex --env-mode local
 ```
 
-For Codex with a Build evaluator, additionally export an independent
-`OPENAI_API_KEY` and `OPENAI_BASE_URL`, then pass
-`--agent-model codex=MODEL`. For Claude Code, export `ANTHROPIC_API_KEY` and
-pass `--agent-model claude-code=MODEL`.
+OpenCode talks to Build directly. Codex and Claude Code use loopback protocol
+bridges owned by SkillEvaluator. In Docker, the vendor CLI receives only a
+sentinel key and the real key crosses a short-lived file handoff. In local mode,
+the bridge runs in Harbor's trusted parent process and the CLI receives a unique
+per-trial capability token. The experimental Claude Code bridge keeps executable
+core and compatible MCP tools but omits Claude-specific tools that Build cannot
+execute. Harbor cloud Codex/Claude Code continue to use native provider
+credentials.
+
+Direct OpenCode defaults to `nvidia/nemotron-3-nano-30b-a3b`, rendered as
+`nvidia/nvidia/nemotron-3-nano-30b-a3b`. Bridged Codex and experimental Claude
+Code default to `nvidia/nemotron-3-super-120b-a12b`, the verified default for
+their larger tool surfaces. For an explicit Nemotron Super override or a manual
+Llama comparison, use:
+
+```bash
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker \
+  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
+```
+
+SkillEvaluator never changes models silently. Explicit CLI/config overrides
+remain exact, and an unavailable model fails rather than switching to Llama.
 
 Security notes:
 
-- Do not commit credentials. Prefer scoped, short-lived credentials and an
-  isolated host. OpenCode can access its scoped Build key while executing a
-  task, so use Docker for untrusted skills.
+- Do not commit credentials. NVIDIA Build Docker runs use a host-only key file
+  plus short-lived container handoffs. Local bridges retain the real key only
+  in Harbor's trusted parent and authenticate each CLI with a unique capability
+  token. Bridge vendor CLIs never receive the real key. Use scoped, short-lived
+  keys.
 - `runtime_env` is only for non-credential task values. Credential names,
   provider routing, backend controls, and aliases such as
   `SAFE_NAME=${NVIDIA_API_KEY}` are rejected.
@@ -295,10 +333,13 @@ and system exceptions. This is stricter but may expose compatibility issues in
 host developer tools.
 
 ```bash
-# opencode works with NVIDIA Build and other OpenAI-compatible endpoints
+# All three harnesses work with NVIDIA Build in local mode
 export NVIDIA_API_KEY='nvapi-...'
-skillevaluator tier3 evaluate ./my-skill --agents opencode \
-  --env-mode local --model nvidia/openai/gpt-oss-120b
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+skillevaluator doctor --agents opencode,codex,claude-code \
+  --env-mode local --verify-models
+skillevaluator evaluate ./my-skill --agents opencode,codex,claude-code \
+  --env-mode local
 ```
 
 Requirements and behavior:

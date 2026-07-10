@@ -665,3 +665,97 @@ def test_duplicate_logical_attempt_ordinals_fail(tmp_path: Path) -> None:
 
     assert result["execution_status"] == "failed"
     assert any("duplicate attempt ordinals" in str(error) for error in result["execution_errors"])
+
+
+def test_structured_opencode_resource_exhaustion_invalidates_no_trajectory_reward(tmp_path: Path) -> None:
+    """A provider error event is an agent failure even when Harbor exits cleanly."""
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = "managing-teams-001__attempt"
+    trial_dir = job_dir / trial_name
+    (trial_dir / "agent").mkdir(parents=True)
+    (trial_dir / "verifier").mkdir()
+    (trial_dir / "agent" / "opencode.txt").write_text(
+        json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "name": "UnknownError",
+                    "data": {"message": '"ResourceExhausted: Worker local total request limit reached (32/32)"'},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (trial_dir / "verifier" / "reward.json").write_text(
+        json.dumps(
+            {
+                "overall": 0.0,
+                "entry_id": "skillevaluator-managing-teams-001",
+                "error": "No trajectory or reconstructible agent log",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "nvidia/skillevaluator-managing-teams-001",
+                "trial_name": trial_name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["managing-teams-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert opencode["num_trials_with"] == 0
+    assert opencode["agent_runtime_failures"]["with_skill"] == [
+        {
+            "trial": trial_name,
+            "reason": "ResourceExhausted: Worker local total request limit reached (32/32)",
+        }
+    ]
+    errors = opencode["conditions"]["with_skill"]["execution_errors"]
+    assert any("ResourceExhausted: Worker local total request limit reached (32/32)" in error for error in errors)
+    assert not any("Unexpected scored cases" in error for error in errors)
+
+
+def test_expected_case_normalizes_generated_skillevaluator_task_prefix(tmp_path: Path) -> None:
+    """Fallback task metadata must not replace the original staged case id."""
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = "managing-teams-001__attempt"
+    verifier_dir = job_dir / trial_name / "verifier"
+    verifier_dir.mkdir(parents=True)
+    (verifier_dir / "reward.json").write_text(
+        json.dumps({"overall": 0.5, "entry_id": "skillevaluator-managing-teams-001"}),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["managing-teams-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"]["pass_at_k"]["with_skill"]["extra_cases"] == []

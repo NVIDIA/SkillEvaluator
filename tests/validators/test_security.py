@@ -951,6 +951,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         """The public key reaches SkillSpector without creating a second NVIDIA credential."""
         public_key = "unit-test-nvidia-build-key"
         retired_name = "NVI" + "DIA" + "_INFERENCE_KEY"
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
         monkeypatch.setenv("NVIDIA_API_KEY", public_key)
         monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "unrelated-anthropic-key")
@@ -977,7 +978,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert child_env["OPENAI_API_KEY"] == public_key
         assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
         assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
-        assert child_env["SKILLSPECTOR_MODEL"] == "openai/gpt-oss-120b"
+        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-nano-30b-a3b"
         assert "NVIDIA_API_KEY" not in child_env
         assert "ANTHROPIC_API_KEY" not in child_env
         assert retired_name not in child_env
@@ -1032,7 +1033,7 @@ Call us at 555-123-4567 or +1-555-987-6543
     @pytest.mark.parametrize(
         ("provider", "credential", "model"),
         (
-            ("openai", "OPENAI_API_KEY", "gpt-4.1-mini"),
+            ("openai", "OPENAI_API_KEY", "gpt-5.4-mini"),
             ("anthropic", "ANTHROPIC_API_KEY", "claude-sonnet-4-5"),
         ),
     )

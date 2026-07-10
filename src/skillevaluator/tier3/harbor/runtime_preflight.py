@@ -18,7 +18,7 @@ import httpx
 from botocore.exceptions import BotoCoreError, ClientError
 
 from skillevaluator.tier3.harbor.progress import redact_progress_detail
-from skillevaluator.tier3.harbor.runner import build_harbor_run_command
+from skillevaluator.tier3.harbor.runner import _nvidia_build_key_handoff, build_harbor_run_command
 
 if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
@@ -86,7 +86,9 @@ def _first_trial_exception_detail(job_dir: Path) -> str:
                 continue
             exception_type = exception_info.get("exception_type")
             exception_message = exception_info.get("exception_message")
-            parts = [part.strip() for part in (exception_type, exception_message) if isinstance(part, str) and part.strip()]
+            parts = [
+                part.strip() for part in (exception_type, exception_message) if isinstance(part, str) and part.strip()
+            ]
             if parts:
                 detail = " | ".join(" ".join(part.split()) for part in parts)
                 return f"{result_path.parent.name}: {detail}"[:1500]
@@ -223,8 +225,7 @@ def validate_harbor_agent_only_job_result(
                 )
             if step_result["exception_info"] is not None:
                 return False, (
-                    f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} "
-                    "recorded an exception"
+                    f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} recorded an exception"
                 )
             if not isinstance(step_result.get("agent_result"), dict):
                 return False, (
@@ -308,11 +309,7 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
         return ModelProbeResult(False, provider.provider, provider.model, "model catalog response has no data list")
-    available = {
-        str(item["id"])
-        for item in data
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
+    available = {str(item["id"]) for item in data if isinstance(item, dict) and isinstance(item.get("id"), str)}
     if provider.model not in available:
         return ModelProbeResult(False, provider.provider, provider.model, f"model {provider.model} is not listed")
     return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")
@@ -331,6 +328,7 @@ def run_agent_runtime_preflight(
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
+    agent_import_path: str | None = None,
 ) -> PreflightResult:
     """Start one real agent task and stop before the full A/B matrix."""
     task_name = _first_task_name(dataset)
@@ -353,16 +351,18 @@ def run_agent_runtime_preflight(
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
+        agent_import_path=agent_import_path,
     )
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            env=dict(run_env),
-            timeout=timeout_seconds,
-            check=False,
-        )
+        with _nvidia_build_key_handoff(run_env, env_mode=env_mode) as subprocess_env:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=subprocess_env,
+                timeout=timeout_seconds,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         return PreflightResult(
             False,

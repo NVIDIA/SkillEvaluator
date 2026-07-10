@@ -14,12 +14,27 @@ import re
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_JUDGE_MODEL = "gpt-4.1-mini"
+DEFAULT_JUDGE_MODEL = "gpt-5.4-mini"
+
+_ERROR_REDACTION_MARKER = "[REDACTED]"
+# Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
+_MIN_EXACT_SECRET_LENGTH = 8
+_CREDENTIAL_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "NVIDIA_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "SKILL_EVAL_LLM_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SECURITY_TOKEN",
+    "AWS_SESSION_TOKEN",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,15 +78,72 @@ def _resolve_url(provider: str) -> str:
     return base_url.rstrip("/") + "/chat/completions" if base_url else OPENAI_CHAT_URL
 
 
-def _format_http_error(error: urllib.error.HTTPError) -> str:
+def _is_native_openai_chat_url(provider: str, request_url: str) -> bool:
+    if str(provider or "").strip().casefold() != "openai":
+        return False
+
+    raw_url = str(request_url or "")
+    if raw_url != raw_url.strip() or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw_url):
+        return False
+    try:
+        parsed = urlparse(raw_url)
+        port = parsed.port
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme.casefold() == "https"
+        and parsed.hostname is not None
+        and parsed.hostname.casefold() == "api.openai.com"
+        and parsed.netloc.casefold() in {"api.openai.com", "api.openai.com:443"}
+        and port in {None, 443}
+        and parsed.path in {"/v1/chat/completions", "/v1/chat/completions/"}
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and ";" not in raw_url
+        and "?" not in raw_url
+        and "#" not in raw_url
+    )
+
+
+def _configured_secret_values(extra_secret_values: tuple[str | None, ...] = ()) -> list[str]:
+    values = {
+        value
+        for name in _CREDENTIAL_ENV_VARS
+        if (value := os.environ.get(name, "")) and len(value) >= _MIN_EXACT_SECRET_LENGTH
+    }
+    for value in extra_secret_values:
+        text = str(value) if value else ""
+        if len(text) >= _MIN_EXACT_SECRET_LENGTH:
+            values.add(text)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact_configured_credentials(text: str, extra_secret_values: tuple[str | None, ...] = ()) -> str:
+    redacted = str(text)
+    for secret in _configured_secret_values(extra_secret_values):
+        redacted = redacted.replace(secret, _ERROR_REDACTION_MARKER)
+    return redacted
+
+
+def _format_http_error_with_fallback(error: urllib.error.HTTPError) -> tuple[str, bool]:
     try:
         body = error.read().decode("utf-8", "replace").strip()
     except Exception:
         body = ""
-    detail = f"HTTP {error.code}: {error.reason}"
+    raw_detail = f"HTTP {error.code}: {error.reason}"
+    safe_detail = raw_detail
     if body:
-        detail = f"{detail} - {body[:500]}"
-    return detail
+        raw_detail = f"{raw_detail} - {body}"
+        safe_detail = f"{safe_detail} - {_redact_configured_credentials(body)[:500]}"
+    return _redact_configured_credentials(safe_detail), _should_try_fallback(raw_detail)
+
+
+def _format_http_error(error: urllib.error.HTTPError) -> str:
+    return _format_http_error_with_fallback(error)[0]
 
 
 def _should_try_fallback(error: str) -> bool:
@@ -96,10 +168,20 @@ def _chat_completion_payload(
     prompt: str,
     max_tokens: int,
     temperature: float,
+    provider: str | None = None,
+    request_url: str | None = None,
 ) -> dict[str, Any]:
+    resolved_provider = _provider() if provider is None else provider
+    resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
+    token_key = (
+        "max_completion_tokens"
+        if str(model or "").casefold().startswith("gpt-5")
+        and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+        else "max_tokens"
+    )
     payload: dict[str, Any] = {
         "model": model,
-        "max_tokens": max_tokens,
+        token_key: max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     if _supports_custom_temperature(model):
@@ -135,7 +217,8 @@ def call_public_llm(
         )
         return client.completions("You are a precise evaluation judge.", prompt), None
     except Exception as exc:
-        return None, f"Public provider call failed: {exc}"
+        detail = f"Public provider call failed: {exc}"
+        return None, _redact_configured_credentials(detail, (api_key,))
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)

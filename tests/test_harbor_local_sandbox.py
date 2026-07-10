@@ -174,11 +174,7 @@ class TestResolveModeAndFlags:
 class TestBwrapArgv:
     @staticmethod
     def _option_operands(argv: list[str], option: str, count: int = 2) -> set[tuple[str, ...]]:
-        return {
-            tuple(argv[index + 1 : index + count + 1])
-            for index, value in enumerate(argv)
-            if value == option
-        }
+        return {tuple(argv[index + 1 : index + count + 1]) for index, value in enumerate(argv) if value == option}
 
     @staticmethod
     def _pretend_absolute_paths_exist(
@@ -533,8 +529,8 @@ class TestSeatbeltArgv:
             strict_reads=True,
         )[2]
 
-        assert '(require-not (subpath "/usr"))' not in profile
-        assert '(require-not (subpath "/usr/bin"))' in profile
+        assert '(subpath "/usr")' not in profile
+        assert '(subpath "/usr/bin")' in profile
 
     def test_reads_deny_host_home_except_run_and_runtime_roots(
         self,
@@ -561,13 +557,44 @@ class TestSeatbeltArgv:
         )[2]
 
         assert "(allow default)" in profile
-        assert "(deny file-read*" in profile
+        assert "(deny file-read-data" in profile
+        assert "(deny file-read-xattr" in profile
+        assert "(deny file-read-metadata" in profile
         assert "require-all" in profile
         assert "require-not" in profile
         assert "require-any" in profile
         assert f'(subpath "{local_sandbox._sbpl_quote(host_home)}")' in profile
         assert f'(subpath "{local_sandbox._sbpl_quote(run_root)}")' in profile
         assert f'(literal "{local_sandbox._sbpl_quote(runtime_file)}")' in profile
+
+    def test_host_home_ancestor_exceptions_are_metadata_only(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host_home = (tmp_path / "host-home").resolve()
+        run_root = host_home / "projects" / "nested" / "run"
+        (run_root / "tmp").mkdir(parents=True)
+        (run_root / "home").mkdir()
+        monkeypatch.setenv("HOME", str(host_home))
+
+        profile = local_sandbox._seatbelt_argv(
+            ["/bin/true"],
+            write_roots=[run_root],
+            tmp=run_root / "tmp",
+            home=run_root / "home",
+            extra_ro=[],
+            allow_net=False,
+        )[2]
+
+        assert "(deny file-read-data" in profile
+        assert "(deny file-read-xattr" in profile
+        assert "(deny file-read-metadata" in profile
+        metadata_policy = profile.split("(deny file-read-metadata", maxsplit=1)[1]
+        for ancestor in (host_home, host_home / "projects", host_home / "projects" / "nested"):
+            literal = f'(literal "{local_sandbox._sbpl_quote(ancestor)}")'
+            assert literal in metadata_policy
+            assert literal not in profile.split("(deny file-read-metadata", maxsplit=1)[0]
 
     @pytest.mark.parametrize("broad_root", ["home", "parent"])
     def test_rejects_exception_that_exposes_host_home(
@@ -1228,10 +1255,7 @@ class TestSeatbeltLive:
     def test_python_write_outside_run_root_blocked(self, run_root: Path, tmp_path: Path) -> None:
         escape = tmp_path / "escape.txt"
         started = run_root / "python-started.txt"
-        code = (
-            f"open({str(started)!r}, 'w').write('started'); "
-            f"open({str(escape)!r}, 'w').write('pwned')"
-        )
+        code = f"open({str(started)!r}, 'w').write('started'); open({str(escape)!r}, 'w').write('pwned')"
         result = self._run([_CANONICAL_PYTHON, "-B", "-c", code], run_root)
         assert result.returncode != 0
         assert started.read_text(encoding="utf-8") == "started"
@@ -1339,6 +1363,59 @@ class TestSeatbeltLive:
             assert output.read_text(encoding="utf-8") == "ok"
         finally:
             shutil.rmtree(run_root, ignore_errors=True)
+
+    @pytest.mark.parametrize("strict_reads", [False, True])
+    def test_git_init_nested_below_host_home_uses_metadata_only_ancestor_traversal(
+        self,
+        strict_reads: bool,
+    ) -> None:
+        ancestor = Path(tempfile.mkdtemp(prefix=".skillevaluator-git-traversal-", dir=Path.home())).resolve()
+        run_root = ancestor / "projects" / "nested" / "run"
+        workspace = run_root / "workspace"
+        sibling_secret = ancestor / "sibling-secret.txt"
+        (run_root / "tmp").mkdir(parents=True)
+        (run_root / "home").mkdir()
+        workspace.mkdir()
+        sibling_secret.write_text("DO-NOT-READ", encoding="utf-8")
+        run = self._run_strict if strict_reads else self._run
+        try:
+            git = run(["/usr/bin/git", "-C", str(workspace), "init", "-q"], run_root, extra_ro=[])
+            assert git.returncode == 0, git.stderr
+            assert (workspace / ".git" / "HEAD").is_file()
+
+            stat = run(["/usr/bin/stat", "-f", "%N", str(ancestor)], run_root, extra_ro=[])
+            assert stat.returncode == 0, stat.stderr
+
+            listing = run(["/bin/ls", str(ancestor)], run_root, extra_ro=[])
+            assert listing.returncode != 0
+
+            secret = run(["/bin/cat", str(sibling_secret)], run_root, extra_ro=[])
+            assert secret.returncode != 0
+            assert "DO-NOT-READ" not in secret.stdout
+        finally:
+            shutil.rmtree(ancestor, ignore_errors=True)
+
+    def test_strict_runtime_outside_home_does_not_expose_ancestor_siblings(self, run_root: Path) -> None:
+        ancestor = Path(tempfile.mkdtemp(prefix="skillevaluator-strict-runtime-", dir="/tmp")).resolve()
+        runtime = ancestor / "tools" / "nested" / "opencode"
+        sibling_secret = ancestor / "sibling-secret-name.txt"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("#!/bin/sh\nprintf approved-runtime-ok\n", encoding="utf-8")
+        runtime.chmod(0o755)
+        sibling_secret.write_text("DO-NOT-READ", encoding="utf-8")
+        try:
+            launched = self._run_strict([str(runtime)], run_root, extra_ro=[runtime])
+            assert launched.returncode == 0, launched.stderr
+            assert launched.stdout == "approved-runtime-ok"
+
+            listing = self._run_strict(["/bin/ls", "-1", str(ancestor)], run_root, extra_ro=[runtime])
+            assert sibling_secret.name not in listing.stdout
+
+            secret = self._run_strict(["/bin/cat", str(sibling_secret)], run_root, extra_ro=[runtime])
+            assert secret.returncode != 0
+            assert "DO-NOT-READ" not in secret.stdout
+        finally:
+            shutil.rmtree(ancestor, ignore_errors=True)
 
     def test_network_blocked_by_default(self, run_root: Path) -> None:
         code = (

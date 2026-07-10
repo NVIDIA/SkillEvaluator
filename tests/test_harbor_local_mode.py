@@ -10,13 +10,17 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 from harbor.agents.installed.opencode import OpenCode
@@ -30,7 +34,12 @@ from skillevaluator.tier3.harbor import (
     LOCAL_ENV_IMPORT_PATH,
     local_sandbox,
 )
-from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorLocalOpenCode
+from skillevaluator.tier3.harbor.local_agents import (
+    NVIDIA_BUILD_AGENT_IMPORT_PATHS,
+    SkillEvaluatorLocalOpenCode,
+    SkillEvaluatorNvidiaBuildClaudeCode,
+    SkillEvaluatorNvidiaBuildCodex,
+)
 from skillevaluator.tier3.harbor.local_environment import SkillEvaluatorLocalEnvironment
 from skillevaluator.tier3.harbor.local_runtime import ensure_local_runtimes, validate_local_agents
 from skillevaluator.tier3.harbor.runner import (
@@ -133,6 +142,594 @@ def test_build_command_docker_mode_uses_secure_import_path() -> None:
     assert "--environment-import-path" in cmd
 
 
+def test_docker_bridge_command_uses_custom_agent_import_without_native_agent_flag() -> None:
+    import_path = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"
+
+    cmd = build_harbor_run_command(
+        dataset_path="/tmp/ds",
+        agent="codex",
+        job_name="nvidia-build-codex",
+        env_mode="docker",
+        agent_import_path=import_path,
+    )
+
+    assert "--env" not in cmd
+    assert "--environment-import-path" in cmd
+    assert "--agent-import-path" in cmd
+    assert cmd[cmd.index("--agent-import-path") + 1] == import_path
+    assert "-a" not in cmd
+
+
+def test_nvidia_build_bridge_agents_are_not_local_mode_agents() -> None:
+    assert NVIDIA_BUILD_AGENT_IMPORT_PATHS == {
+        "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex",
+        "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildClaudeCode",
+    }
+    assert "codex" in LOCAL_AGENT_IMPORT_PATHS
+    assert LOCAL_AGENT_IMPORT_PATHS["codex"] != NVIDIA_BUILD_AGENT_IMPORT_PATHS["codex"]
+
+
+def test_local_claude_uses_noninteractive_permissions_and_trial_temp_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.agents.installed.claude_code import ClaudeCode
+
+    from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorLocalClaudeCode
+
+    agent = object.__new__(SkillEvaluatorLocalClaudeCode)
+    captured: dict[str, object] = {}
+
+    async def raw_exec(
+        _self: ClaudeCode,
+        _environment: object,
+        command: str,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        captured["command"] = command
+        captured["env"] = dict(env or {})
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(ClaudeCode, "exec_as_agent", raw_exec)
+
+    asyncio.run(
+        agent.exec_as_agent(
+            object(),
+            "claude --permission-mode bypassPermissions -- 'do not rewrite --permission-mode bypassPermissions'",
+            env={"CLAUDE_CODE_TMPDIR": "/private/tmp/unsafe"},
+        )
+    )
+
+    command = str(captured["command"])
+    launcher = command.partition(" -- ")[0]
+    assert "--permission-mode bypassPermissions" in launcher
+    assert "--permission-mode=auto" not in launcher
+    assert command.endswith("'do not rewrite --permission-mode bypassPermissions'")
+    assert command.startswith("mkdir -p /logs/agent/claude-tmp && ")
+    assert captured["env"] == {"CLAUDE_CODE_TMPDIR": "/logs/agent/claude-tmp"}
+
+
+def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    from skillevaluator.tier3.harbor import local_agents
+
+    agent_class = getattr(local_agents, "SkillEvaluatorLocalNvidiaBuildCodex", None)
+    assert agent_class is not None
+    agent = object.__new__(agent_class)
+    agent.model_name = "nvidia/nemotron-3-nano-30b-a3b"
+    agent._extra_env = {}
+    agent.render_instruction = lambda instruction: instruction
+    agent._resolve_auth_json_path = lambda: None
+    agent._build_register_skills_command = lambda: None
+    agent._build_register_mcp_servers_command = lambda: None
+    agent.build_cli_flags = lambda: ""
+    agent.logger = SimpleNamespace(debug=lambda *_args, **_kwargs: None)
+    calls: list[tuple[str, dict[str, str]]] = []
+    retained_logs: list[tuple[str, str]] = []
+    origins: list[str] = []
+
+    class Environment:
+        async def upload_file(self, source: object, destination: object) -> None:
+            retained_logs.append((str(destination), Path(source).read_text(encoding="utf-8")))
+
+    async def raw_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        calls.append((command, dict(env or {})))
+        return SimpleNamespace(return_code=0)
+
+    async def upstream_run(
+        self: object,
+        *,
+        instruction: str,
+        environment: object,
+        context: object,
+    ) -> None:
+        _ = (instruction, context)
+        origins.append(self._bridge_origin())
+        await self.exec_as_agent(
+            environment,
+            command="codex exec --model nemotron-3-nano-30b-a3b -- test",
+            env={"NVIDIA_API_KEY": "must-not-leak"},
+        )
+
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
+    monkeypatch.setattr(Codex, "run", upstream_run)
+    monkeypatch.setenv("NVIDIA_API_KEY", "real-nvidia-key")
+
+    asyncio.run(agent.run("test", Environment(), None))
+
+    assert len(origins) == 1
+    parsed = urlsplit(origins[0])
+    assert parsed.hostname == "127.0.0.1"
+    assert parsed.port is not None
+    setup_commands = [(command, env) for command, env in calls if "model_provider" in command]
+    assert len(setup_commands) == 1
+    setup_command, setup_env = setup_commands[0]
+    assert f'base_url = "{origins[0]}/v1"' in setup_command
+    assert "api.openai.com" not in setup_command
+    assert "real-nvidia-key" not in setup_command
+    assert setup_env["OPENAI_API_KEY"] not in {"real-nvidia-key", "nvidia-build-loopback"}
+    client_command, client_env = next((command, env) for command, env in calls if "codex exec" in command)
+    assert "env -u NVIDIA_API_KEY" in client_command
+    assert "NVIDIA_API_KEY" not in client_env
+    assert client_env["OPENAI_API_KEY"] == setup_env["OPENAI_API_KEY"]
+    assert retained_logs and retained_logs[0][0].endswith("nvidia-build-bridge.log")
+
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", parsed.port))
+
+
+def test_local_nvidia_build_bridge_closes_if_cancelled_during_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    agent = object.__new__(local_agents.SkillEvaluatorLocalNvidiaBuildClaudeCode)
+    agent.model_name = "nvidia/nemotron-3-super-120b-a12b"
+    agent._extra_env = {}
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    closed = threading.Event()
+
+    class Running:
+        origin = "http://127.0.0.1:54321"
+        client_token = "per-trial-capability"
+
+        def close(self) -> None:
+            closed.set()
+
+    def delayed_start(**_kwargs: object) -> Running:
+        worker_started.set()
+        assert release_worker.wait(timeout=5)
+        return Running()
+
+    async def should_not_run(
+        _self: object,
+        *,
+        instruction: str,
+        environment: object,
+        context: object,
+    ) -> None:
+        _ = (instruction, environment, context)
+        pytest.fail("agent execution started after startup cancellation")
+
+    class Environment:
+        async def upload_file(self, _source: object, _destination: object) -> None:
+            return None
+
+    monkeypatch.setattr(local_agents, "start_in_process_bridge", delayed_start)
+    monkeypatch.setattr(local_agents.SkillEvaluatorLocalClaudeCode, "run", should_not_run)
+    monkeypatch.setenv("NVIDIA_API_KEY", "real-nvidia-key")
+
+    async def exercise() -> None:
+        task = asyncio.create_task(agent.run("test", Environment(), None))
+        assert await asyncio.to_thread(worker_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert closed.is_set()
+    assert getattr(agent, "_nvidia_build_local_temp_dir", None) is None
+
+
+def test_local_nvidia_build_bridge_cleanup_preserves_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_finished = threading.Event()
+
+    class Running:
+        def close(self) -> None:
+            close_started.set()
+            assert release_close.wait(timeout=5)
+            close_finished.set()
+
+    async def exercise() -> None:
+        task = asyncio.create_task(local_agents._close_running_bridge(Running()))
+        assert await asyncio.to_thread(close_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert close_finished.is_set()
+
+
+def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent.model_name = "nvidia/meta/llama-3.1-8b-instruct"
+    calls: list[tuple[str, dict[str, str]]] = []
+    root_calls: list[tuple[str, dict[str, str]]] = []
+    uploads: list[tuple[str, str, int]] = []
+
+    class Environment:
+        async def upload_file(self, source: object, destination: object) -> None:
+            source_path = Path(source)
+            uploads.append(
+                (str(destination), source_path.read_text(encoding="utf-8"), source_path.stat().st_mode & 0o777)
+            )
+
+    async def raw_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        calls.append((command, dict(env or {})))
+        return SimpleNamespace(return_code=0)
+
+    async def root_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        root_calls.append((command, dict(env or {})))
+        stdout = "http://127.0.0.1:43123\n" if "--check-ready-file" in command else ""
+        return SimpleNamespace(return_code=0, stdout=stdout)
+
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
+    monkeypatch.setattr(Codex, "exec_as_root", root_exec)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-secret")
+    agent._extra_env = {}
+    agent.render_instruction = lambda instruction: instruction
+    agent._resolve_auth_json_path = lambda: None
+    agent._build_register_skills_command = lambda: None
+    agent._build_register_mcp_servers_command = lambda: None
+    agent.build_cli_flags = lambda: ""
+    agent.logger = SimpleNamespace(debug=lambda *_args, **_kwargs: None)
+
+    asyncio.run(agent.run("test", Environment(), None))
+
+    assert any(destination.endswith("nvidia-build-bridge.py") for destination, _, _ in uploads)
+    key_upload = next(upload for upload in uploads if "skillevaluator-nvidia-build-" in upload[0])
+    assert key_upload[1] == "nvidia-secret"
+    assert key_upload[2] == 0o600
+    assert key_upload[0].startswith("/tmp/")
+    assert "/logs/" not in key_upload[0]
+    bridge_start = next(
+        (command, env) for command, env in root_calls if "nvidia-build-bridge.py" in command and "&" in command
+    )
+    assert bridge_start[1] == {}
+    assert "--api-key-file" in bridge_start[0]
+    assert "skillevaluator-nvidia-build-" in bridge_start[0]
+    assert "nvidia-secret" not in bridge_start[0]
+    assert "--port 0" in bridge_start[0]
+    assert "--ready-file" in bridge_start[0]
+    assert "18080" not in bridge_start[0]
+    health_command = next(command for command, _env in root_calls if "--check-ready-file" in command)
+    assert "kill -0" in health_command
+    assert "/healthz" not in health_command
+    assert all("NVIDIA_API_KEY" not in env for _, env in [*calls, *root_calls])
+    setup_command, setup_env = next((command, env) for command, env in calls if "model_provider" in command)
+    assert 'model_provider = "openai_compatible"' in setup_command
+    assert "[model_providers.openai_compatible]" in setup_command
+    assert 'base_url = "http://127.0.0.1:43123/v1"' in setup_command
+    assert 'wire_api = "responses"' in setup_command
+    assert "openai_base_url" not in setup_command
+    assert all("openai_base_url" not in command for command, _ in calls)
+    assert "nvidia-secret" not in setup_command
+    assert setup_env["OPENAI_API_KEY"] == "nvidia-build-loopback"
+    assert "OPENAI_BASE_URL" not in setup_env
+    client_command, client_env = next((command, env) for command, env in calls if "codex exec" in command)
+    assert "NVIDIA_API_KEY" not in client_env
+    assert "OPENAI_BASE_URL" not in client_env
+    assert client_env["OPENAI_API_KEY"] != "nvidia-secret"
+    assert "env -u NVIDIA_API_KEY" in client_command
+    assert "--model nvidia/meta/llama-3.1-8b-instruct" in client_command
+    cleanup = next(command for command, _ in root_calls if 'kill "$(cat' in command)
+    assert "skillevaluator-nvidia-build-" in cleanup
+    assert "nvidia-build-bridge.ready" in cleanup
+    assert "nvidia-build-bridge.py" in cleanup
+
+
+def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent._nvidia_build_bridge_started = False
+    agent._nvidia_build_bridge_key_file = None
+    commands: list[str] = []
+    uploads: list[tuple[str, str]] = []
+    host_key_file = tmp_path / "nvidia-build-host-key"
+    host_key_file.write_text("real-nvidia-secret", encoding="utf-8")
+
+    class Environment:
+        async def upload_file(self, source: object, destination: object) -> None:
+            uploads.append((str(destination), Path(source).read_text(encoding="utf-8")))
+
+    async def root_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        commands.append(command)
+        stdout = "http://127.0.0.1:43123\n" if "--check-ready-file" in command else ""
+        return SimpleNamespace(return_code=0, stdout=stdout)
+
+    monkeypatch.setattr(Codex, "exec_as_root", root_exec)
+    monkeypatch.setenv("NVIDIA_API_KEY", "skillevaluator-file-backed-nvidia-key")
+    monkeypatch.setenv("SKILLEVALUATOR_NVIDIA_API_KEY_FILE", str(host_key_file))
+
+    asyncio.run(agent._start_bridge(Environment()))
+    asyncio.run(agent._cleanup_bridge(Environment()))
+
+    key_upload = next(content for destination, content in uploads if destination.startswith("/tmp/"))
+    assert key_upload == "real-nvidia-secret"
+    assert host_key_file.exists()
+    assert all("real-nvidia-secret" not in command for command in commands)
+    assert all("skillevaluator-file-backed-nvidia-key" not in command for command in commands)
+
+
+def test_nvidia_build_bridge_rejects_file_backed_sentinel_without_host_key_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    monkeypatch.setenv("NVIDIA_API_KEY", "skillevaluator-file-backed-nvidia-key")
+    monkeypatch.delenv("SKILLEVALUATOR_NVIDIA_API_KEY_FILE", raising=False)
+
+    with pytest.raises(RuntimeError, match="SKILLEVALUATOR_NVIDIA_API_KEY_FILE"):
+        asyncio.run(agent._start_bridge(object()))
+
+
+def test_nvidia_build_bridge_health_failure_cleans_up_before_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent.model_name = "nvidia/model"
+    commands: list[str] = []
+
+    class Environment:
+        async def upload_file(self, _source: object, _destination: object) -> None:
+            return None
+
+    async def raw_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        commands.append(command)
+        is_health = "/healthz" in command or "--check-ready-file" in command
+        return SimpleNamespace(return_code=1 if is_health else 0, stdout="")
+
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
+    monkeypatch.setattr(Codex, "exec_as_root", raw_exec)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-secret")
+
+    with pytest.raises(RuntimeError, match="health check"):
+        asyncio.run(agent.run("test", Environment(), None))
+
+    assert any("--check-ready-file" in command for command in commands)
+    assert any('kill "$(cat' in command for command in commands)
+
+
+def test_nvidia_build_bridge_start_failure_removes_uploaded_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent.model_name = "nvidia/model"
+    commands: list[str] = []
+
+    class Environment:
+        async def upload_file(self, _source: object, _destination: object) -> None:
+            return None
+
+    async def raw_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        commands.append(command)
+        is_start = "nvidia-build-bridge.py" in command and "&" in command
+        return SimpleNamespace(return_code=1 if is_start else 0)
+
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
+    monkeypatch.setattr(Codex, "exec_as_root", raw_exec)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-secret")
+
+    with pytest.raises(RuntimeError, match="startup"):
+        asyncio.run(agent.run("test", Environment(), None))
+
+    cleanup = next(command for command in commands if 'kill "$(cat' in command)
+    assert "skillevaluator-nvidia-build-" in cleanup
+    assert "nvidia-build-bridge.ready" in cleanup
+
+
+def test_nvidia_build_bridge_start_exception_removes_uploaded_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent.model_name = "nvidia/model"
+    commands: list[str] = []
+
+    class Environment:
+        async def upload_file(self, _source: object, _destination: object) -> None:
+            return None
+
+    async def raw_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        commands.append(command)
+        if "nvidia-build-bridge.py" in command and "&" in command:
+            raise RuntimeError("docker exec failed")
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
+    monkeypatch.setattr(Codex, "exec_as_root", raw_exec)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-secret")
+
+    with pytest.raises(RuntimeError, match="docker exec failed"):
+        asyncio.run(agent.run("test", Environment(), None))
+
+    cleanup = next(command for command in commands if 'kill "$(cat' in command)
+    assert "skillevaluator-nvidia-build-" in cleanup
+    assert "nvidia-build-bridge.ready" in cleanup
+
+
+def test_nvidia_build_bridge_wraps_compound_codex_shell_commands_before_unsetting_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.agents.installed.codex import Codex
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
+    agent.model_name = "nvidia/model"
+    agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
+    agent._nvidia_build_bridge_client_env = {
+        "OPENAI_API_KEY": "nvidia-build-loopback",
+        "OPENAI_BASE_URL": "http://127.0.0.1:43123/v1",
+    }
+    captured: list[tuple[str, dict[str, str]]] = []
+    simple_command = "codex exec --model model -- test"
+    compound_command = 'if [ -d "$CODEX_HOME/sessions" ]; then cp -R "$CODEX_HOME/sessions" /logs/agent/sessions; fi'
+
+    async def raw_exec(
+        _self: Codex,
+        _environment: object,
+        command: str,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        captured.append((command, dict(env or {})))
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
+
+    for original_command in (simple_command, compound_command):
+        asyncio.run(agent.exec_as_agent(object(), command=original_command, env={"NVIDIA_API_KEY": "must-not-leak"}))
+
+    assert [command for command, _ in captured] == [
+        f"env -u NVIDIA_API_KEY bash -c {shlex.quote('codex exec --model nvidia/model -- test')}",
+        f"env -u NVIDIA_API_KEY bash -c {shlex.quote(compound_command)}",
+    ]
+    assert all("NVIDIA_API_KEY" not in env for _, env in captured)
+
+
+def test_nvidia_build_claude_bridge_configures_origin_and_full_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.agents.installed.claude_code import ClaudeCode
+
+    agent = object.__new__(SkillEvaluatorNvidiaBuildClaudeCode)
+    agent.model_name = "nvidia/meta/llama-3.1-8b-instruct"
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class Environment:
+        async def upload_file(self, _source: object, _destination: object) -> None:
+            return None
+
+    async def raw_exec(
+        _self: ClaudeCode,
+        _environment: object,
+        command: str,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        calls.append((command, dict(env or {})))
+        stdout = "http://127.0.0.1:43123\n" if "--check-ready-file" in command else ""
+        return SimpleNamespace(return_code=0, stdout=stdout)
+
+    async def parent_run(
+        self: ClaudeCode,
+        *,
+        instruction: str,
+        environment: object,
+        context: object,
+    ) -> None:
+        _ = (instruction, context)
+        await self.exec_as_agent(environment, command="claude --print -- test", env={})
+
+    monkeypatch.setattr(ClaudeCode, "exec_as_agent", raw_exec)
+    monkeypatch.setattr(ClaudeCode, "exec_as_root", raw_exec)
+    monkeypatch.setattr(ClaudeCode, "run", parent_run)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-secret")
+
+    asyncio.run(agent.run("test", Environment(), None))
+
+    client_command, client_env = next((command, env) for command, env in calls if "claude --print" in command)
+    assert "env -u NVIDIA_API_KEY" in client_command
+    assert "NVIDIA_API_KEY" not in client_env
+    # This is configuration-only: a live Docker smoke test is required to
+    # verify the installed Claude CLI's actual request construction.
+    assert client_env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:43123"
+    assert client_env["ANTHROPIC_API_KEY"] != "nvidia-secret"
+    assert client_env["ANTHROPIC_MODEL"] == "nvidia/meta/llama-3.1-8b-instruct"
+
+
+@pytest.mark.live
+@pytest.mark.skip(
+    reason=(
+        "Manual Docker E2E only: requires NVIDIA_API_KEY, Docker, and the installed Claude Code CLI; "
+        "do not run in the unit suite."
+    )
+)
+def test_nvidia_build_claude_bridge_live_smoke() -> None:
+    """Manual scope: prove a Docker Claude CLI request reaches bridge /v1/messages."""
+    pytest.fail("run the documented manual Docker E2E smoke with a real NVIDIA Build credential")
+
+
 def test_local_agent_credentials_map_provider_to_agent_env() -> None:
     nv = _local_agent_credentials(
         _provider("nv_build", api_key="nvapi-x", base_url="https://integrate.api.nvidia.com/v1")
@@ -144,7 +741,7 @@ def test_local_agent_credentials_map_provider_to_agent_env() -> None:
     assert openai == {"OPENAI_API_KEY": "sk-o", "OPENAI_BASE_URL": "https://api.openai.com/v1"}
 
 
-def test_local_subprocess_environment_routes_mixed_nvidia_agents_independently() -> None:
+def test_local_subprocess_environment_keeps_only_the_trusted_nvidia_parent_key() -> None:
     provider = _provider("nv_build", api_key="nvapi-x", base_url="https://integrate.api.nvidia.com/v1")
     configured = {
         "OPENAI_API_KEY": "openai-key",
@@ -167,7 +764,7 @@ def test_local_subprocess_environment_routes_mixed_nvidia_agents_independently()
         configured_runtime_env=configured,
         provider_env=provider_env,
         agent="codex",
-        agent_model="gpt-4.1-mini",
+        agent_model="nvidia/nemotron-3-nano-30b-a3b",
     )
     claude = _harbor_subprocess_environment(
         env_mode="local",
@@ -175,16 +772,18 @@ def test_local_subprocess_environment_routes_mixed_nvidia_agents_independently()
         configured_runtime_env=configured,
         provider_env=provider_env,
         agent="claude-code",
-        agent_model="claude-sonnet-4-5",
+        agent_model="nvidia/nemotron-3-nano-30b-a3b",
     )
 
     assert opencode["OPENAI_API_KEY"] == "nvapi-x"
     assert opencode["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
     assert "ANTHROPIC_API_KEY" not in opencode
-    assert codex["OPENAI_API_KEY"] == "openai-key"
-    assert codex["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+    assert codex["NVIDIA_API_KEY"] == "nvapi-x"
+    assert "OPENAI_API_KEY" not in codex
+    assert "OPENAI_BASE_URL" not in codex
     assert "ANTHROPIC_API_KEY" not in codex
-    assert claude["ANTHROPIC_API_KEY"] == "anthropic-key"
+    assert claude["NVIDIA_API_KEY"] == "nvapi-x"
+    assert "ANTHROPIC_API_KEY" not in claude
     assert "OPENAI_API_KEY" not in claude
     assert "OPENAI_BASE_URL" not in claude
 
@@ -1949,7 +2548,7 @@ def test_local_prerequisite_reports_missing_host_home_as_readiness_error(
     assert "host HOME" in errors[0]
 
 
-def test_doctor_uses_local_credential_semantics_for_mixed_agents(
+def test_doctor_uses_local_build_bridge_for_mixed_agents(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1968,14 +2567,14 @@ def test_doctor_uses_local_credential_semantics_for_mixed_agents(
     monkeypatch.setenv("OPENAI_API_KEY", "independent-openai-key")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
-    assert tier3_commands.doctor(agents="codex,opencode", env_mode="local") == 1
+    assert tier3_commands.doctor(agents="codex,opencode", env_mode="local") == 0
     output = capsys.readouterr().out
     assert "Agent runtime credential" in output
     assert "Codex runtime credential" not in output
     assert "agent container" not in output
 
 
-def test_doctor_rejects_nvidia_only_credentials_for_claude(
+def test_doctor_accepts_nvidia_only_credentials_for_local_claude_bridge(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1993,11 +2592,11 @@ def test_doctor_rejects_nvidia_only_credentials_for_claude(
     monkeypatch.setattr(tier3_commands, "_check_prerequisites", lambda **_kwargs: [])
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    assert tier3_commands.doctor(agents="claude-code", env_mode="local") == 1
-    assert "ANTHROPIC_API_KEY" in capsys.readouterr().out
+    assert tier3_commands.doctor(agents="claude-code", env_mode="local") == 0
+    assert "runtime credential" in capsys.readouterr().out
 
 
-def test_doctor_accepts_available_independent_codex_credential_and_explicit_model(
+def test_doctor_local_codex_ignores_native_credentials_and_accepts_explicit_build_model(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -2020,7 +2619,7 @@ def test_doctor_accepts_available_independent_codex_credential_and_explicit_mode
         tier3_commands.doctor(
             agents="codex",
             env_mode="local",
-            agent_model=("codex=gpt-5",),
+            agent_model=("codex=nvidia/nemotron-3-super-120b-a12b",),
         )
         == 0
     )
@@ -2028,7 +2627,7 @@ def test_doctor_accepts_available_independent_codex_credential_and_explicit_mode
     assert "operator credential and model plan resolved" in " ".join(output.split())
 
 
-def test_doctor_preserves_docker_rejection_for_mixed_agents(
+def test_doctor_accepts_isolated_docker_bridge_and_direct_agents(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -2052,13 +2651,13 @@ def test_doctor_preserves_docker_rejection_for_mixed_agents(
         tier3_commands.doctor(
             agents="codex,opencode",
             env_mode="docker",
-            agent_model=("codex=gpt-5",),
+            agent_model=("codex=nvidia/nemotron-3-super-120b-a12b",),
         )
-        == 1
+        == 0
     )
     output = capsys.readouterr().out
     assert "Agent runtime credential" in output
-    assert "OPENAI_API_KEY + OPENAI_BASE_URL" in " ".join(output.split())
+    assert "operator credential and model plan resolved" in " ".join(output.split())
 
 
 def test_harbor_preflight_system_exit_becomes_a_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:

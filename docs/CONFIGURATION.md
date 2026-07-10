@@ -29,9 +29,9 @@ each ships a default model that `SKILL_EVAL_LLM_MODEL` overrides:
 
 | Provider (`SKILL_EVAL_LLM_PROVIDER`) | Credential | Endpoint | Default model |
 | --- | --- | --- | --- |
-| `nv_build` | `NVIDIA_API_KEY` | integrate.api.nvidia.com | `openai/gpt-oss-120b` |
+| `nv_build` | `NVIDIA_API_KEY` | integrate.api.nvidia.com | `nvidia/nemotron-3-nano-30b-a3b` |
 | `anthropic` | `ANTHROPIC_API_KEY` | api.anthropic.com | `claude-sonnet-4-5` |
-| `openai` | `OPENAI_API_KEY` | api.openai.com | `gpt-4.1-mini` |
+| `openai` | `OPENAI_API_KEY` | api.openai.com | `gpt-5.4-mini` |
 | `bedrock` | Standard AWS credential chain; `AWS_REGION` (defaults to `us-west-2`) | AWS Bedrock Runtime | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` |
 | `openai-compatible` | `SKILL_EVAL_LLM_API_KEY` + `SKILL_EVAL_LLM_BASE_URL` + `SKILL_EVAL_LLM_MODEL` | Any OpenAI-compatible URL | _(explicit)_ |
 
@@ -107,27 +107,35 @@ stronger local model for verdicts you intend to act on.
 
 ## Live Agent Credentials
 
-The evaluator provider is used for dataset generation and verifier-side
-judging. It is not automatically an agent credential. Configure credentials
-for the agent you select separately.
+The evaluator provider and live agent normally use separate credential roles.
+NVIDIA Build is an explicit Docker and local exception: one `NVIDIA_API_KEY`
+powers the evaluator plus direct OpenCode and SkillEvaluator's compatibility
+bridges.
 
-NVIDIA Build directly supports OpenCode. Codex instead requires an independent
-OpenAI credential compatible with the Responses API, and Claude Code requires
-an independent Anthropic credential. Export operator credentials on the host;
-never place them in a checked-out skill's configuration:
+| Agent path | Credential and model behavior |
+| --- | --- |
+| Direct OpenCode + NVIDIA Build | One `NVIDIA_API_KEY`; the default is `nvidia/nvidia/nemotron-3-nano-30b-a3b` (`nvidia/` provider namespace plus the raw Build model ID) |
+| Codex + NVIDIA Build | Docker or local compatibility bridge; one `NVIDIA_API_KEY`; defaults to `nvidia/nemotron-3-super-120b-a12b` |
+| Experimental Claude Code + NVIDIA Build | Docker or local compatibility bridge; one `NVIDIA_API_KEY`; defaults to `nvidia/nemotron-3-super-120b-a12b` and uses the bridge's reduced executable tool set |
+| Native Codex | `OPENAI_API_KEY` + `OPENAI_BASE_URL` for a full Responses provider; the OpenAI default is `gpt-5.4-mini` |
+| Native Claude Code | `ANTHROPIC_API_KEY` and an Anthropic-compatible endpoint/model |
+
+Export operator credentials on the host; never place them in a checked-out
+skill's configuration. For Build-backed Docker or local agents:
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
-export OPENAI_API_KEY='sk-...'
-export OPENAI_BASE_URL='https://api.openai.com/v1'
-skillevaluator doctor --agents codex --env-mode docker \
-  --agent-model codex=gpt-4.1-mini
+skillevaluator doctor --agents opencode,codex,claude-code --env-mode docker
+skillevaluator doctor --agents opencode,codex,claude-code --env-mode local
 ```
 
-This lets an NVIDIA Build provider supply evaluator-owned chat, embeddings, and
-verifier calls while Codex uses its own OpenAI credential and model. You can
-also supply that model at invocation time with `--agent-model codex=MODEL`.
+Build-backed Codex and Claude Code start a loopback bridge. Their vendor CLI
+never receives the real Build key. Docker uses a short-lived file handoff and a
+sentinel client key. Local mode keeps the key in Harbor's trusted parent process
+and gives the vendor CLI a unique per-trial capability token. Cloud
+Codex/Claude Code continue to require their native provider credentials and
+explicit model selection where applicable.
 
 For a Bedrock evaluator with the Claude Code live agent, Docker/cloud mode
 requires either an explicit `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair

@@ -766,8 +766,13 @@ def display_findings_report(
     skill_name: str,
     harbor_agents: list[str],
     results_dir: Path,
-) -> None:
-    """Display the findings report panel after the score table."""
+) -> bool:
+    """Display the findings report panel after the score table.
+
+    Returns True when the panel was actually printed, so callers can fall
+    back to the compact payload-based feedback panel instead of rendering
+    both (the duplicate-feedback bug).
+    """
     from rich.console import Console
     from rich.panel import Panel
 
@@ -788,7 +793,7 @@ def display_findings_report(
         best_agent = harbor_agents[0] if harbor_agents else ""
 
     if not best_agent or best_agent not in agents_data:
-        return
+        return False
 
     agent_reports: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
     report_agents = list(dict.fromkeys([*harbor_agents, *agents_data.keys()]))
@@ -803,7 +808,7 @@ def display_findings_report(
             agent_reports[agent] = (findings_for_agent, rewards_for_agent)
 
     if best_agent not in agent_reports:
-        return
+        return False
 
     findings, rewards = agent_reports[best_agent]
     body = _render_findings_body(findings)
@@ -864,3 +869,4 @@ def display_findings_report(
         )
     )
     console.print()
+    return True

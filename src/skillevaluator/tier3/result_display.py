@@ -545,6 +545,7 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     def safe(value: object) -> str:
         return redact_progress_detail(value, secret_values=secret_values)
 
+    findings_rendered = False
     status = str(result.get("execution_status") or "unknown")
     warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
     display_status = "degraded" if status == "succeeded" and warnings else status
@@ -574,11 +575,13 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
         try:
             from skillevaluator.tier3.harbor.report import display_findings_report
 
-            display_findings_report(
-                dict(result),
-                str(result.get("skill_name") or ""),
-                [str(agent) for agent in agents],
-                Path(str(run_dir)) if run_dir else Path(),
+            findings_rendered = bool(
+                display_findings_report(
+                    dict(result),
+                    str(result.get("skill_name") or ""),
+                    [str(agent) for agent in agents],
+                    Path(str(run_dir)) if run_dir else Path(),
+                )
             )
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("Findings report skipped", exc_info=True)
@@ -615,7 +618,11 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
             )
         )
 
-    _render_feedback_and_suggestions(console=console, result=result, safe=safe)
+    # The compact payload-based panel is a FALLBACK: when the detailed
+    # per-evaluator findings report rendered above, repeating the same
+    # suggestions here is the duplicate-feedback bug.
+    if not findings_rendered:
+        _render_feedback_and_suggestions(console=console, result=result, safe=safe)
 
     artifact_rows: list[tuple[str, str]] = []
     report_path = result.get("report_path")

@@ -733,3 +733,57 @@ def test_tier3_evaluate_visible_copy_owns_its_params() -> None:
 
     assert cli_module._tier3_evaluate_visible.params is not cli_module.evaluate.params
     assert [p.name for p in cli_module._tier3_evaluate_visible.params] == [p.name for p in cli_module.evaluate.params]
+
+
+def test_compact_feedback_panel_only_renders_as_fallback(monkeypatch) -> None:
+    # Regression (live duplicate-feedback bug): the detailed per-evaluator
+    # findings report and the compact payload panel both rendered after the
+    # score tables. The compact panel is now a FALLBACK for when the detailed
+    # report cannot render (no reward files on disk).
+    import io
+
+    from rich.console import Console
+
+    from skillevaluator.tier3.harbor import report as harbor_report
+    from skillevaluator.tier3.result_display import render_evaluation_result
+
+    result = {
+        "skill_name": "simple",
+        "run_dir": "/tmp/run",
+        "execution_status": "succeeded",
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "num_trials_with": 1,
+                "with_skill": {"security": 1.0},
+                "without_skill": {"security": 1.0},
+                "lift": {"overall": {"with_skill": 1.0, "without_skill": 0.5, "delta": 0.5}},
+            }
+        },
+        "tier3_feedback": {"recommendations": [{"suggestion": "Add more eval cases"}]},
+    }
+
+    monkeypatch.setattr(harbor_report, "display_findings_report", lambda *_a, **_k: True)
+    stream = io.StringIO()
+    render_evaluation_result(result, console=Console(file=stream, width=200))
+    assert "Feedback & Suggestions" not in stream.getvalue()
+
+    monkeypatch.setattr(harbor_report, "display_findings_report", lambda *_a, **_k: False)
+    stream = io.StringIO()
+    render_evaluation_result(result, console=Console(file=stream, width=200))
+    assert "Feedback & Suggestions" in stream.getvalue()
+    assert "Add more eval cases" in stream.getvalue()
+
+
+def test_display_findings_report_reports_whether_it_rendered(tmp_path) -> None:
+    # The dedup gating relies on the return value: no reward files on disk
+    # means nothing rendered and the caller must fall back.
+    from skillevaluator.tier3.harbor.report import display_findings_report
+
+    rendered = display_findings_report(
+        {"agents": {"codex": {}}},
+        "simple",
+        ["codex"],
+        tmp_path,
+    )
+    assert rendered is False

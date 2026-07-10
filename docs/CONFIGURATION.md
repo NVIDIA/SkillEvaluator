@@ -41,6 +41,21 @@ it covers LLM judging and Tier 2 embeddings with one credential. For a custom
 OpenAI-compatible endpoint, select `openai-compatible` and set its explicit
 base URL; the public `nv_build` endpoint is fixed and cannot be redirected.
 
+Show a filtered, bounded view of model candidates visible to the selected
+authenticated provider:
+
+```bash
+skillevaluator models
+skillevaluator models --limit 25 --json
+```
+
+The command uses the same provider, configured model, credential, and endpoint
+resolution as evaluation. It does not choose a different provider, rewrite
+model IDs for an agent, or probe a harness. Catalog visibility alone is not
+runtime or end-to-end proof; use `doctor --verify-models` and a live Tier 3 run
+for those checks. Bedrock catalog verification remains in `doctor` because it
+uses the AWS SDK rather than an HTTP `/models` endpoint.
+
 The `--llm` security analysis runs
 [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own
 provider environment (`SKILLSPECTOR_PROVIDER` plus per-provider credential

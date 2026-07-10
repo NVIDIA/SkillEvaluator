@@ -127,6 +127,7 @@ and SkillEvaluator's Docker/local compatibility bridges:
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
+skillevaluator models
 skillevaluator doctor --agents opencode --env-mode docker --verify-models
 skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
 
@@ -140,6 +141,10 @@ skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker
 skillevaluator doctor --agents opencode,codex,claude-code --env-mode local --verify-models
 skillevaluator evaluate ./my-skill --agents codex --env-mode local
 ```
+
+`models` only shows a filtered, bounded view of the authenticated Build
+catalog. The following `doctor` and `evaluate` commands provide runtime and
+end-to-end evidence; the listing itself does not claim harness compatibility.
 
 OpenCode talks to Build directly. Codex and Claude Code use loopback protocol
 bridges owned by SkillEvaluator. In Docker, the vendor CLI receives only a

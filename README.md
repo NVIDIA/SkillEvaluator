@@ -132,7 +132,14 @@ Tier 2 embeddings with one variable:
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
+skillevaluator models
 ```
+
+`skillevaluator models` shows a filtered, bounded view of model candidates
+visible to the selected provider key; add `--json` for machine-readable
+output. Catalog visibility is not proof that an agent harness can execute the
+model. Use `doctor` and a live Tier 3 evaluation for runtime and end-to-end
+verification.
 
 OpenAI, Anthropic, Bedrock, any OpenAI-compatible endpoint, and fully local
 servers work too: [configuration guide](docs/CONFIGURATION.md).

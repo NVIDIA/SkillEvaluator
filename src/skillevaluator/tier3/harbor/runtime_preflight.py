@@ -11,12 +11,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 import boto3
-import httpx
 from botocore.exceptions import BotoCoreError, ClientError
 
+from skillevaluator.model_catalog import ModelCatalogError, fetch_model_records
 from skillevaluator.tier3.harbor.progress import redact_progress_detail
 from skillevaluator.tier3.harbor.runner import _nvidia_build_key_handoff, build_harbor_run_command
 
@@ -235,26 +234,6 @@ def validate_harbor_agent_only_job_result(
     return True, ""
 
 
-def _catalog_url(provider: ProviderConfig) -> tuple[str, dict[str, str]]:
-    base_url = provider.base_url
-    if provider.provider == "anthropic":
-        base_url = base_url or "https://api.anthropic.com"
-    if not base_url:
-        raise ValueError(f"{provider.provider} does not expose an HTTP model catalog")
-    parsed = urlparse(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("model catalog base URL must be absolute HTTP or HTTPS")
-
-    base_url = base_url.rstrip("/")
-    if provider.provider == "anthropic":
-        url = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
-        return url, {
-            "x-api-key": provider.api_key or "",
-            "anthropic-version": "2023-06-01",
-        }
-    return f"{base_url}/models", {"Authorization": f"Bearer {provider.api_key or ''}"}
-
-
 def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> ModelProbeResult:
     """Verify that the selected provider catalog lists the requested model."""
     if provider.provider == "bedrock":
@@ -282,34 +261,10 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
         return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")
 
     try:
-        url, headers = _catalog_url(provider)
-    except ValueError as exc:
+        records = fetch_model_records(provider, timeout_seconds=timeout_seconds)
+    except ModelCatalogError as exc:
         return ModelProbeResult(False, provider.provider, provider.model, str(exc))
-
-    try:
-        response = httpx.get(url, headers=headers, timeout=timeout_seconds)
-    except httpx.HTTPError as exc:
-        return ModelProbeResult(
-            False,
-            provider.provider,
-            provider.model,
-            f"model catalog request failed: {type(exc).__name__}",
-        )
-    if not 200 <= response.status_code < 300:
-        return ModelProbeResult(
-            False,
-            provider.provider,
-            provider.model,
-            f"model catalog returned HTTP {response.status_code}",
-        )
-    try:
-        payload = response.json()
-    except ValueError:
-        return ModelProbeResult(False, provider.provider, provider.model, "model catalog returned invalid JSON")
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        return ModelProbeResult(False, provider.provider, provider.model, "model catalog response has no data list")
-    available = {str(item["id"]) for item in data if isinstance(item, dict) and isinstance(item.get("id"), str)}
+    available = {record.id for record in records}
     if provider.model not in available:
         return ModelProbeResult(False, provider.provider, provider.model, f"model {provider.model} is not listed")
     return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")

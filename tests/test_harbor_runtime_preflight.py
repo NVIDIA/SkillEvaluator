@@ -10,9 +10,9 @@ import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
-import httpx
 import pytest
 
+from skillevaluator.model_catalog import ModelCatalogError, ModelRecord
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.harbor import runtime_preflight
 from skillevaluator.tier3.harbor.collector import validate_harbor_job_result
@@ -544,14 +544,14 @@ def test_task_timeout_plan_uses_largest_staged_timeout(tmp_path: Path) -> None:
     assert runner._task_timeout_plan([root], 2.0) == 600.0
 
 
-def test_model_probe_calls_selected_build_catalog_without_exposing_key(monkeypatch) -> None:
+def test_model_probe_delegates_to_shared_catalog_client_without_exposing_key(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def get(url, **kwargs):
-        captured.update({"url": url, **kwargs})
-        return httpx.Response(200, json={"data": [{"id": "meta/llama-3.1-8b-instruct"}]})
+    def fetch(provider, *, timeout_seconds):
+        captured.update(provider=provider, timeout_seconds=timeout_seconds)
+        return (ModelRecord("meta/llama-3.1-8b-instruct"),)
 
-    monkeypatch.setattr(runtime_preflight.httpx, "get", get)
+    monkeypatch.setattr(runtime_preflight, "fetch_model_records", fetch)
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",
@@ -560,19 +560,18 @@ def test_model_probe_calls_selected_build_catalog_without_exposing_key(monkeypat
         litellm_model="openai/meta/llama-3.1-8b-instruct",
     )
 
-    result = runtime_preflight.probe_model(provider)
+    result = runtime_preflight.probe_model(provider, timeout_seconds=4.5)
 
     assert result.ok is True
-    assert captured["url"] == "https://integrate.api.nvidia.com/v1/models"
-    assert captured["headers"] == {"Authorization": "Bearer nvapi-secret"}
+    assert captured == {"provider": provider, "timeout_seconds": 4.5}
     assert "nvapi-secret" not in result.detail
 
 
 def test_model_probe_preserves_raw_catalog_id_that_begins_with_nvidia(monkeypatch) -> None:
     monkeypatch.setattr(
-        runtime_preflight.httpx,
-        "get",
-        lambda *_args, **_kwargs: httpx.Response(200, json={"data": [{"id": "nvidia/llama-test"}]}),
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: (ModelRecord("nvidia/llama-test"),),
     )
     provider = ProviderConfig(
         provider="nv_build",
@@ -590,9 +589,9 @@ def test_model_probe_preserves_raw_catalog_id_that_begins_with_nvidia(monkeypatc
 
 def test_model_probe_reports_unlisted_model(monkeypatch) -> None:
     monkeypatch.setattr(
-        runtime_preflight.httpx,
-        "get",
-        lambda *_args, **_kwargs: httpx.Response(200, json={"data": [{"id": "different-model"}]}),
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: (ModelRecord("different-model"),),
     )
     provider = ProviderConfig(
         provider="openai-compatible",
@@ -609,11 +608,11 @@ def test_model_probe_reports_unlisted_model(monkeypatch) -> None:
     assert "not listed" in result.detail
 
 
-def test_model_probe_reports_http_status_without_response_body(monkeypatch) -> None:
+def test_model_probe_reports_safe_shared_catalog_error(monkeypatch) -> None:
     monkeypatch.setattr(
-        runtime_preflight.httpx,
-        "get",
-        lambda *_args, **_kwargs: httpx.Response(401, text="credential secret-key was rejected"),
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModelCatalogError("model catalog returned HTTP 401")),
     )
     provider = ProviderConfig(
         provider="openai",

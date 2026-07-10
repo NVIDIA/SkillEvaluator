@@ -770,6 +770,29 @@
         }
       ]
     },
+    "models": {
+      "params": [
+        {
+          "default": "10",
+          "name": "limit",
+          "opts": [
+            "--limit"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        }
+      ]
+    },
     "pii-scan": {
       "params": [
         {

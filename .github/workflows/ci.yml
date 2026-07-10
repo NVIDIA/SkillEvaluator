@@ -61,10 +61,11 @@ jobs:
           uv venv --python 3.13 "$venv"
           uv pip install --python "$venv/bin/python" "${wheel}[tier3,llm]"
           cd "$RUNNER_TEMP"
-          "$venv/bin/python" -c 'import anthropic, harbor, openai, skillevaluator'
+          "$venv/bin/python" -c 'import anthropic, harbor, openai, skillevaluator, skillevaluator.model_catalog, skillevaluator.model_commands'
           "$venv/bin/python" -c 'from importlib.resources import files; assert files("skillevaluator.tier3.harbor").joinpath("templates/eval.py").is_file()'
           "$venv/bin/skillevaluator" --version
           "$venv/bin/skillevaluator" --help >/dev/null
+          "$venv/bin/skillevaluator" models --help >/dev/null
           SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
             "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
           "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'

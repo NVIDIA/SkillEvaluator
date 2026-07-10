@@ -1881,6 +1881,16 @@ def view(skill_path: Path, results_dir: Path | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+@cli.command("models")
+@click.option("--limit", type=click.IntRange(min=1, max=100), default=10, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def models_command(limit: int, as_json: bool) -> None:
+    """List a filtered view of the selected provider's authenticated catalog."""
+    from skillevaluator.model_commands import run_models_command
+
+    raise SystemExit(run_models_command(limit=limit, as_json=as_json))
+
+
 @cli.command()
 @click.option(
     "-a",

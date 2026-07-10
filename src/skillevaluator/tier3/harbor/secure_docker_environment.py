@@ -14,13 +14,16 @@ container copy before running the requested command.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import shlex
+import signal
 import tempfile
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from harbor.environments.base import ExecResult
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
@@ -32,6 +35,30 @@ SECURE_DOCKER_ENV_IMPORT_PATH = (
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+_COMPOSE_TERMINATE_SECONDS = 5.0
+_COMPOSE_KILL_SECONDS = 5.0
+_COMPOSE_CANCEL_SECONDS = 0.1
+
+
+async def _await_task_uninterruptibly(
+    task: asyncio.Task[Any],
+    *,
+    preserve_cancellation: bool = True,
+) -> Any:
+    """Await process cleanup to completion despite repeated cancellation."""
+    cancellation_requested = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            if task.done():
+                result = task.result()
+                break
+    if cancellation_requested and preserve_cancellation:
+        raise asyncio.CancelledError
+    return result
 
 
 def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
@@ -64,6 +91,54 @@ def _redact(text: str | None, secret_values: set[str]) -> str | None:
     for value in sorted((value for value in secret_values if value), key=len, reverse=True):
         redacted = redacted.replace(value, "[REDACTED]")
     return redacted
+
+
+def _redact_result(result: ExecResult, secret_values: set[str]) -> ExecResult:
+    return ExecResult(
+        stdout=_redact(result.stdout, secret_values),
+        stderr=_redact(result.stderr, secret_values),
+        return_code=result.return_code,
+    )
+
+
+def _signal_process_tree(process: asyncio.subprocess.Process, value: signal.Signals) -> None:
+    if process.returncode is not None:
+        return
+    if os.name == "posix":
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, value)
+    elif value == signal.SIGTERM:
+        process.terminate()
+    else:
+        process.kill()
+
+
+async def _terminate_process_tree(
+    process: asyncio.subprocess.Process,
+    communication: asyncio.Task[tuple[bytes, bytes]],
+    *,
+    preserve_cancellation: bool,
+) -> None:
+    async def reap() -> None:
+        _signal_process_tree(process, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(asyncio.shield(communication), timeout=_COMPOSE_TERMINATE_SECONDS)
+            return
+        except TimeoutError:
+            pass
+
+        _signal_process_tree(process, signal.SIGKILL)
+        try:
+            await asyncio.wait_for(asyncio.shield(communication), timeout=_COMPOSE_KILL_SECONDS)
+        except TimeoutError:
+            communication.cancel()
+            done, _pending = await asyncio.wait({communication}, timeout=_COMPOSE_CANCEL_SECONDS)
+            if communication in done:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    communication.result()
+
+    cleanup = asyncio.create_task(reap())
+    await _await_task_uninterruptibly(cleanup, preserve_cancellation=preserve_cancellation)
 
 
 def _file_backed_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -147,37 +222,51 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         process_environment = self._compose_env_vars(include_os_env=True)
         process_environment.update(env_overrides or {})
         secret_values = {value for value in (env_overrides or {}).values() if value}
-        process = await asyncio.create_subprocess_exec(
-            *full_command,
-            env=process_environment,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+        creation = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                *full_command,
+                env=process_environment,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=os.name == "posix",
+            )
         )
         try:
+            process = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            process = await _await_task_uninterruptibly(creation, preserve_cancellation=False)
+            communication = asyncio.create_task(process.communicate())
+            await _terminate_process_tree(process, communication, preserve_cancellation=False)
+            raise
+
+        communication = asyncio.create_task(process.communicate())
+        try:
             if timeout_sec:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout_sec)
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    asyncio.shield(communication),
+                    timeout=timeout_sec,
+                )
             else:
-                stdout_bytes, stderr_bytes = await process.communicate()
+                stdout_bytes, stderr_bytes = await asyncio.shield(communication)
         except TimeoutError:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.communicate(), timeout=5)
-            except TimeoutError:
-                process.kill()
-                await process.communicate()
+            await _terminate_process_tree(process, communication, preserve_cancellation=True)
             raise RuntimeError(f"Command timed out after {timeout_sec} seconds") from None
+        except asyncio.CancelledError:
+            await _terminate_process_tree(process, communication, preserve_cancellation=False)
+            raise
 
         stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else None
         stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else None
-        result = ExecResult(stdout=stdout, stderr=stderr, return_code=process.returncode or 0)
+        result = _redact_result(
+            ExecResult(stdout=stdout, stderr=stderr, return_code=process.returncode or 0),
+            secret_values,
+        )
         if check and result.return_code != 0:
-            safe_stdout = _redact(result.stdout, secret_values)
-            safe_stderr = _redact(result.stderr, secret_values)
             raise RuntimeError(
                 f"Docker compose command failed for environment {self.environment_name}. "
                 f"Command: {' '.join(full_command)}. Return code: {result.return_code}. "
-                f"Stdout: {safe_stdout}. Stderr: {safe_stderr}."
+                f"Stdout: {result.stdout}. Stderr: {result.stderr}."
             )
         return result
 
@@ -192,6 +281,7 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
         cwd: str | None,
         timeout_sec: int | None,
         user: str | int | None,
+        secret_values: set[str] | None = None,
     ) -> ExecResult:
         exec_command = ["exec"]
         effective_cwd = cwd or self.task_env_config.workdir
@@ -201,7 +291,8 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
             exec_command.extend(["-u", str(user)])
         exec_command.append("main")
         exec_command.extend(self._platform.exec_shell_args(command))
-        return await self._run_docker_compose_command(exec_command, check=False, timeout_sec=timeout_sec)
+        result = await self._run_docker_compose_command(exec_command, check=False, timeout_sec=timeout_sec)
+        return _redact_result(result, secret_values or set())
 
     async def _remove_handoff(self, remote_path: str) -> None:
         result = await self._run_docker_compose_command(
@@ -263,13 +354,18 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
                 cwd=cwd,
                 timeout_sec=timeout_sec,
                 user=user,
+                secret_values={value for value in merged.values() if value},
             )
         except BaseException as exc:
             primary_error = exc
             raise
         finally:
+            cleanup = asyncio.create_task(self._remove_handoff(remote_path))
             try:
-                await self._remove_handoff(remote_path)
+                await _await_task_uninterruptibly(
+                    cleanup,
+                    preserve_cancellation=primary_error is None,
+                )
             except Exception as cleanup_error:
                 message = f"could not confirm removal of Docker environment handoff {remote_path}"
                 if primary_error is not None:

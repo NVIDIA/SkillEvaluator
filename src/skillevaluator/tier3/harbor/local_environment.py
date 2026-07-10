@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import EnvironmentCapabilities
@@ -97,6 +98,7 @@ _SHELL_COMMANDS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
 _COMMAND_PREFIXES = frozenset({"command", "do", "elif", "env", "exec", "if", "then", "until", "while"})
 _REAP_TERM_SECONDS = 1.0
 _REAP_KILL_SECONDS = 1.0
+_REAP_CANCEL_SECONDS = 0.1
 _PATH_START_BOUNDARY_RE = r"(?<![A-Za-z0-9_.-])"
 _PATH_BOUNDARY_RE = r"(?=$|[\s'\";&|<>])"
 _HOST_HOME_PREFIX_RE = r"(?:~|\$HOME|\$\{HOME\}|/Users/[^\s/;'\"&|<>]+|/home/[^\s/;'\"&|<>]+|/root)"
@@ -121,6 +123,27 @@ _SENSITIVE_HOST_PATH_RES = (
     _SENSITIVE_HOME_SUBPATH_RE,
     _SENSITIVE_ABSOLUTE_PATH_RE,
 )
+
+
+async def _await_task_uninterruptibly(
+    task: asyncio.Task[Any],
+    *,
+    preserve_cancellation: bool = True,
+) -> Any:
+    """Await a cleanup task to completion despite repeated cancellation."""
+    cancellation_requested = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            if task.done():
+                result = task.result()
+                break
+    if cancellation_requested and preserve_cancellation:
+        raise asyncio.CancelledError
+    return result
 
 
 def _looks_like_path_token(token: str) -> bool:
@@ -529,7 +552,9 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         try:
             proc = await asyncio.shield(creation)
         except asyncio.CancelledError:
-            proc = await creation
+            # A second cancellation must not propagate into ``creation`` after
+            # the OS process exists but before asyncio returns its handle.
+            proc = await _await_task_uninterruptibly(creation, preserve_cancellation=False)
             await self._terminate_process_tree(proc)
             raise
         self._active_processes[proc] = None
@@ -567,36 +592,43 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         proc: asyncio.subprocess.Process,
         communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
     ) -> tuple[bytes, bytes]:
-        if communication is None:
-            communication = asyncio.create_task(proc.communicate())
+        async def reap() -> tuple[bytes, bytes]:
+            active_communication = communication
+            if active_communication is None:
+                active_communication = asyncio.create_task(proc.communicate())
 
-        def send(sig: signal.Signals) -> None:
-            if os.name == "posix":
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, sig)
-            elif proc.returncode is None:
-                if sig == signal.SIGTERM:
-                    proc.terminate()
-                else:
-                    proc.kill()
+            def send(sig: signal.Signals) -> None:
+                if os.name == "posix":
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, sig)
+                elif proc.returncode is None:
+                    if sig == signal.SIGTERM:
+                        proc.terminate()
+                    else:
+                        proc.kill()
 
-        async def bounded_wait(seconds: float) -> tuple[bytes, bytes] | None:
-            try:
-                return await asyncio.wait_for(asyncio.shield(communication), timeout=seconds)
-            except TimeoutError:
-                return None
+            async def bounded_wait(seconds: float) -> tuple[bytes, bytes] | None:
+                try:
+                    return await asyncio.wait_for(asyncio.shield(active_communication), timeout=seconds)
+                except TimeoutError:
+                    return None
 
-        send(signal.SIGTERM)
-        if output := await bounded_wait(_REAP_TERM_SECONDS):
-            return output
-        send(signal.SIGKILL)
-        if output := await bounded_wait(_REAP_KILL_SECONDS):
-            return output
+            send(signal.SIGTERM)
+            if output := await bounded_wait(_REAP_TERM_SECONDS):
+                return output
+            send(signal.SIGKILL)
+            if output := await bounded_wait(_REAP_KILL_SECONDS):
+                return output
 
-        communication.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await communication
-        return b"", b""
+            active_communication.cancel()
+            done, _pending = await asyncio.wait({active_communication}, timeout=_REAP_CANCEL_SECONDS)
+            if active_communication in done:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    active_communication.result()
+            return b"", b""
+
+        cleanup = asyncio.create_task(reap())
+        return await _await_task_uninterruptibly(cleanup)
 
     def _launcher_env(self) -> dict[str, str]:
         """Return the minimal environment visible before confinement starts."""

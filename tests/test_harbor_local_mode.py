@@ -1298,6 +1298,52 @@ def test_process_tree_cleanup_is_bounded_and_escalates(monkeypatch: pytest.Monke
     assert signals == [signal.SIGTERM, signal.SIGKILL]
 
 
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_process_tree_cleanup_stays_bounded_when_communication_ignores_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    monkeypatch.setattr(local_environment, "_REAP_TERM_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_KILL_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_CANCEL_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(local_environment.os, "killpg", lambda *_args: None)
+
+    async def run_cleanup() -> bool:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stubborn_communication() -> tuple[bytes, bytes]:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            return b"", b""
+
+        communication = asyncio.create_task(stubborn_communication())
+        await started.wait()
+
+        class FakeProcess:
+            pid = 4242
+            returncode = None
+
+        cleanup = asyncio.create_task(
+            SkillEvaluatorLocalEnvironment._terminate_process_tree(  # type: ignore[arg-type]
+                FakeProcess(),
+                communication,
+            )
+        )
+        done, _pending = await asyncio.wait({cleanup}, timeout=0.1)
+        finished_within_bound = cleanup in done
+        release.set()
+        await communication
+        await cleanup
+        return finished_within_bound
+
+    assert asyncio.run(run_cleanup()) is True
+
+
 def test_stop_reaps_all_tracked_processes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     environment = _local_environment(tmp_path)
     first = object()
@@ -1357,6 +1403,91 @@ def test_exec_cancellation_during_process_creation_terminates_descendants(
                 await created[0].communicate()
 
     asyncio.run(run_cancelled_during_create())
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_repeated_cancellation_during_process_creation_still_reaps_launcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _local_environment(tmp_path)
+    create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def run_repeated_cancellation() -> None:
+        process_created = asyncio.Event()
+        release_process = asyncio.Event()
+        created: list[asyncio.subprocess.Process] = []
+
+        async def delayed_create(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            proc = await create_subprocess_exec(*args, **kwargs)
+            created.append(proc)
+            process_created.set()
+            await release_process.wait()
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_create)
+        task = asyncio.create_task(environment.exec("sleep 30"))
+        await asyncio.wait_for(process_created.wait(), timeout=5)
+        task.cancel()
+        # Let exec enter its cancellation handler and start waiting for the
+        # still-running creation task before delivering a second cancellation.
+        await asyncio.sleep(0)
+        task.cancel()
+        release_process.set()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+            for _ in range(100):
+                if created[0].returncode is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert created[0].returncode is not None, "repeated cancellation orphaned the spawned launcher"
+        finally:
+            if created and created[0].returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(created[0].pid, signal.SIGKILL)
+                await created[0].communicate()
+
+    asyncio.run(run_repeated_cancellation())
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_process_tree_cleanup_finishes_after_repeated_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    monkeypatch.setattr(local_environment, "_REAP_TERM_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_KILL_SECONDS", 0.01)
+
+    async def run_cleanup() -> list[signal.Signals]:
+        signals: list[signal.Signals] = []
+        term_sent = asyncio.Event()
+        communication: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+
+        def killpg(_pid: int, value: signal.Signals) -> None:
+            signals.append(value)
+            if value == signal.SIGTERM:
+                term_sent.set()
+            elif not communication.done():
+                communication.set_result((b"", b""))
+
+        monkeypatch.setattr(local_environment.os, "killpg", killpg)
+
+        class FakeProcess:
+            pid = 4242
+            returncode = None
+
+        task = asyncio.create_task(
+            SkillEvaluatorLocalEnvironment._terminate_process_tree(FakeProcess(), communication)  # type: ignore[arg-type]
+        )
+        await asyncio.wait_for(term_sent.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        return signals
+
+    assert asyncio.run(run_cleanup()) == [signal.SIGTERM, signal.SIGKILL]
 
 
 @pytest.mark.parametrize(

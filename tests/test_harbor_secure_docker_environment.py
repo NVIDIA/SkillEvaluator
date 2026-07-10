@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
@@ -169,6 +170,157 @@ def test_compose_process_receives_value_only_in_env_and_redacts_failure(
     assert captured["env"]["DATABASE_URL"] == _SENTINEL
     assert _SENTINEL not in str(caught.value)
     assert "[REDACTED]" in str(caught.value)
+
+
+def test_compose_check_false_redacts_success_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = object.__new__(SkillEvaluatorDockerEnvironment)
+    environment.session_id = "secure-output-test"
+    environment.environment_name = "secure-output-test"
+    environment.environment_dir = tmp_path
+    environment._resources_compose_path = None
+    environment._mounts_compose_path = None
+    environment._use_prebuilt = True
+    environment._is_windows_container = False
+    environment.extra_docker_compose_paths = []
+    environment._network_policy = SimpleNamespace(network_mode="public")
+    environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return f"stdout {_SENTINEL}".encode(), f"stderr {_SENTINEL}".encode()
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> Process:
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    result = asyncio.run(
+        environment._run_docker_compose_command(
+            ["exec", "-e", "DATABASE_URL", "main", "true"],
+            check=False,
+            env_overrides={"DATABASE_URL": _SENTINEL},
+        )
+    )
+
+    assert result.stdout == "stdout [REDACTED]"
+    assert result.stderr == "stderr [REDACTED]"
+
+
+def test_compose_cancellation_reaps_process_tree_even_when_repeated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = object.__new__(SkillEvaluatorDockerEnvironment)
+    environment.session_id = "secure-cancellation-test"
+    environment.environment_name = "secure-cancellation-test"
+    environment.environment_dir = tmp_path
+    environment._resources_compose_path = None
+    environment._mounts_compose_path = None
+    environment._use_prebuilt = True
+    environment._is_windows_container = False
+    environment.extra_docker_compose_paths = []
+    environment._network_policy = SimpleNamespace(network_mode="public")
+    environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_TERMINATE_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_KILL_SECONDS", 0.01, raising=False)
+
+    async def run_cancelled() -> list[str]:
+        actions: list[str] = []
+        communicating = asyncio.Event()
+        completed: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+
+        class FakeProcess:
+            pid = 4343
+            returncode: int | None = None
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                communicating.set()
+                return await asyncio.shield(completed)
+
+            def terminate(self) -> None:
+                actions.append("terminate")
+
+            def kill(self) -> None:
+                actions.append("kill")
+                self.returncode = -9
+                if not completed.done():
+                    completed.set_result((b"", b""))
+
+        process = FakeProcess()
+
+        async def create_subprocess(*_args: object, **_kwargs: object) -> FakeProcess:
+            return process
+
+        def killpg(_pid: int, value: signal.Signals) -> None:
+            if value == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+        monkeypatch.setattr(secure_docker_environment.os, "killpg", killpg, raising=False)
+        task = asyncio.create_task(environment._run_docker_compose_command(["exec", "main", "sleep", "30"]))
+        await asyncio.wait_for(communicating.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        return actions
+
+    assert asyncio.run(run_cancelled()) == ["terminate", "kill"]
+
+
+def test_compose_process_cleanup_remains_bounded_when_communication_ignores_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_TERMINATE_SECONDS", 0.01)
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_KILL_SECONDS", 0.01)
+    monkeypatch.setattr(secure_docker_environment, "_COMPOSE_CANCEL_SECONDS", 0.01, raising=False)
+
+    async def run_cleanup() -> bool:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stubborn_communication() -> tuple[bytes, bytes]:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            return b"", b""
+
+        communication = asyncio.create_task(stubborn_communication())
+        await started.wait()
+
+        class FakeProcess:
+            pid = 4444
+            returncode = None
+
+        monkeypatch.setattr(secure_docker_environment.os, "killpg", lambda *_args: None, raising=False)
+        cleanup = asyncio.create_task(
+            secure_docker_environment._terminate_process_tree(
+                FakeProcess(),  # type: ignore[arg-type]
+                communication,
+                preserve_cancellation=False,
+            )
+        )
+        done, _pending = await asyncio.wait({cleanup}, timeout=0.1)
+        finished_within_bound = cleanup in done
+        release.set()
+        await communication
+        await cleanup
+        return finished_within_bound
+
+    assert asyncio.run(run_cleanup()) is True
 
 
 @pytest.mark.parametrize(

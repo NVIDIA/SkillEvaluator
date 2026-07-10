@@ -60,6 +60,60 @@ def test_secure_docker_exec_hands_environment_over_by_file_without_argv_values(
     assert any("rm -f" in part for command in docker_commands for part in command)
 
 
+def test_secure_docker_exec_redacts_persistent_and_per_call_credentials_from_all_output(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_docker_environment")
+    environment = object.__new__(module.SkillEvaluatorSecureDockerEnvironment)
+    persistent_secret = "persistent-credential-for-redaction"
+    per_call_secret = "per-call-credential-for-redaction"
+    environment._persistent_env = {"PERSISTENT_TOKEN": persistent_secret}
+    environment.default_user = "1000"
+    environment.task_env_config = SimpleNamespace(workdir="/workspace")
+    environment._platform = SimpleNamespace(exec_shell_args=lambda command: ["bash", "-c", command])
+    environment.session_id = "secure-redaction-test"
+    environment.environment_name = "secure-redaction-test"
+    environment.environment_dir = tmp_path
+    environment._resources_compose_path = None
+    environment._mounts_compose_path = None
+    environment._use_prebuilt = True
+    environment._is_windows_container = False
+    environment.extra_docker_compose_paths = []
+    environment._network_policy = SimpleNamespace(network_mode="public")
+    environment._compose_env_vars = lambda **_kwargs: {"PATH": "/usr/bin"}
+
+    async def fake_upload_file(_source_path: Path | str, _target_path: str) -> None:
+        return None
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, *, expose_secrets: bool) -> None:
+            self._expose_secrets = expose_secrets
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            if not self._expose_secrets:
+                return b"", b""
+            output = f"stdout {persistent_secret} {per_call_secret}".encode()
+            error = f"stderr {per_call_secret} {persistent_secret}".encode()
+            return output, error
+
+    async def create_subprocess(*args: object, **_kwargs: object) -> FakeProcess:
+        rendered = " ".join(str(arg) for arg in args)
+        return FakeProcess(expose_secrets="if ! ." in rendered)
+
+    monkeypatch.setattr(environment, "upload_file", fake_upload_file)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    result = asyncio.run(environment.exec("printf done", env={"NVIDIA_API_KEY": per_call_secret}))
+
+    rendered = f"{result.stdout}\n{result.stderr}"
+    assert persistent_secret not in rendered
+    assert per_call_secret not in rendered
+    assert rendered.count("[REDACTED]") == 4
+
+
 def test_nvidia_build_docker_command_uses_secure_environment_and_bridge() -> None:
     from skillevaluator.tier3.harbor import runner
 
@@ -105,6 +159,48 @@ def test_secure_docker_exec_cleans_remote_handoff_when_upload_reports_failure(
         asyncio.run(environment.exec("true", env={"NVIDIA_API_KEY": "secret-for-test"}))
 
     assert len(removed) == 1
+
+
+def test_secure_docker_exec_repeated_cancellation_does_not_interrupt_handoff_cleanup(
+    monkeypatch,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_docker_environment")
+    environment = object.__new__(module.SkillEvaluatorSecureDockerEnvironment)
+    environment._persistent_env = {}
+    environment.default_user = "1000"
+    environment.task_env_config = SimpleNamespace(workdir="/workspace")
+    environment._platform = SimpleNamespace(exec_shell_args=lambda command: ["bash", "-c", command])
+
+    async def run_cancelled() -> bool:
+        upload_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleanup_finished = False
+
+        async def blocked_upload(_source_path: Path | str, _target_path: str) -> None:
+            upload_started.set()
+            await asyncio.Event().wait()
+
+        async def remove_handoff(_remote_path: str) -> None:
+            nonlocal cleanup_finished
+            cleanup_started.set()
+            await release_cleanup.wait()
+            cleanup_finished = True
+
+        monkeypatch.setattr(environment, "upload_file", blocked_upload)
+        monkeypatch.setattr(environment, "_remove_handoff", remove_handoff)
+
+        task = asyncio.create_task(environment.exec("true", env={"NVIDIA_API_KEY": "secret-for-test"}))
+        await asyncio.wait_for(upload_started.wait(), timeout=1)
+        task.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        task.cancel()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        return cleanup_finished
+
+    assert asyncio.run(run_cancelled()) is True
 
 
 def test_secure_docker_exec_fails_closed_when_final_secret_cleanup_fails(monkeypatch) -> None:

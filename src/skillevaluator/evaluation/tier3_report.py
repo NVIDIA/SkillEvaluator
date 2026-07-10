@@ -63,6 +63,7 @@ _MAX_EVIDENCE_ENTRIES_TOTAL = 256
 _MAX_RAW_TRIAL_REWARDS_TOTAL = 256
 _MAX_RAW_METRICS_PER_REWARD = 64
 _MAX_RAW_REWARD_FIELDS = 96
+_MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD = 128
 _MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
 
 
@@ -120,6 +121,7 @@ class _ReportBudget:
                 "evidence_entries": _MAX_EVIDENCE_ENTRIES_TOTAL,
                 "raw_trial_rewards": _MAX_RAW_TRIAL_REWARDS_TOTAL,
                 "raw_metrics_per_reward": _MAX_RAW_METRICS_PER_REWARD,
+                "custom_metric_name_visits_per_reward": _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD,
             },
             "omitted": dict(sorted(self.omitted.items())),
         }
@@ -1147,14 +1149,72 @@ def _compact_evidence_refs(raw_refs: object) -> list[str]:
     return refs
 
 
+def _custom_metric_value(reward: dict[str, Any], metric: str) -> float | None:
+    """Read one custom metric without materializing every custom metric in a reward."""
+    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+
+    if metric in RESERVED_METRIC_NAMES:
+        return None
+
+    numeric: float | None = None
+    sources = (reward.get("custom_metrics"), reward.get("metrics"), reward)
+    for source in sources:
+        if not isinstance(source, dict) or metric not in source:
+            continue
+        value = source.get(metric)
+        if isinstance(value, dict):
+            value = value.get("score")
+        candidate = _finite_float(value)
+        if candidate is not None:
+            numeric = candidate
+    return numeric
+
+
+def _bounded_custom_metric_names(
+    reward: dict[str, Any],
+    *,
+    excluded: set[str],
+    limit: int,
+) -> tuple[list[str], bool]:
+    """Return a bounded custom-name sample and whether more names may exist."""
+    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+
+    if limit <= 0:
+        return [], False
+
+    sources = [
+        source for source in (reward.get("custom_metrics"), reward.get("metrics"), reward) if isinstance(source, dict)
+    ]
+    total_items = sum(len(source) for source in sources)
+    names: list[str] = []
+    seen: set[str] = set()
+    visits = 0
+    for source in sources:
+        for raw_name, raw_value in source.items():
+            visits += 1
+            name = str(raw_name)
+            value = raw_value.get("score") if isinstance(raw_value, dict) else raw_value
+            if (
+                name not in RESERVED_METRIC_NAMES
+                and name not in excluded
+                and name not in seen
+                and _finite_float(value) is not None
+            ):
+                seen.add(name)
+                names.append(name)
+                if len(names) >= limit:
+                    return names, visits < total_items
+            if visits >= _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD:
+                return names, visits < total_items
+    return names, False
+
+
 def _metric_evidence(
     metric: str,
     rewards: list[dict[str, Any]],
     report_budget: _ReportBudget,
     sampling: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
-
     if report_budget.evidence_remaining <= 0:
         report_budget.omit("evidence_entries", len(rewards))
         return []
@@ -1182,7 +1242,7 @@ def _metric_evidence(
 
         raw_score = _finite_float(reward.get(metric))
         if raw_score is None:
-            raw_score = _finite_float(extract_custom_metrics(reward).get(metric))
+            raw_score = _custom_metric_value(reward, metric)
 
         notes: list[str] = []
         reason = detail.get("reason")
@@ -1252,8 +1312,6 @@ def _metric_evidence(
 
 
 def _custom_metric_score(metric: str, configured: dict[str, Any], rewards: list[dict[str, Any]]) -> float | None:
-    from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
-
     value = configured.get(metric)
     if isinstance(value, dict):
         value = value.get("score")
@@ -1261,9 +1319,9 @@ def _custom_metric_score(metric: str, configured: dict[str, Any], rewards: list[
     if configured_score is not None:
         return configured_score
     values = [
-        metrics[metric]
+        score
         for reward in rewards
-        if isinstance(reward, dict) and (metrics := extract_custom_metrics(reward)) and metric in metrics
+        if isinstance(reward, dict) and (score := _custom_metric_value(reward, metric)) is not None
     ]
     return _mean(values)
 
@@ -1276,8 +1334,6 @@ def _discover_custom_metric_scores(
     report_budget: _ReportBudget,
 ) -> dict[str, float]:
     """Discover at most ``limit`` custom names and aggregate reward scores once."""
-    from skillevaluator.tier3.harbor.metrics import extract_custom_metrics
-
     if limit <= 0:
         report_budget.omit("evaluator_cards", len(custom_with_skill))
         report_budget.omit("custom_metric_discovery_trials", len(rewards))
@@ -1304,21 +1360,28 @@ def _discover_custom_metric_scores(
     for reward in rewards:
         if not isinstance(reward, dict):
             continue
-        for raw_name, raw_value in extract_custom_metrics(reward).items():
-            name = str(raw_name)
-            if name in excluded:
-                continue
-            if name not in candidates:
-                if len(candidates) >= limit:
-                    omitted_name_seen = True
-                    continue
-                candidates[name] = None
-                sums[name] = 0.0
-                counts[name] = 0
-            numeric = _finite_float(raw_value)
+        for name in tuple(candidates):
+            numeric = _custom_metric_value(reward, name)
             if numeric is not None:
                 sums[name] += numeric
                 counts[name] += 1
+
+        remaining = limit - len(candidates)
+        discovered, truncated = _bounded_custom_metric_names(
+            reward,
+            excluded=excluded | set(candidates),
+            limit=remaining + 1 if remaining > 0 else 1,
+        )
+        if truncated or len(discovered) > remaining:
+            omitted_name_seen = True
+        for name in sorted(discovered)[:remaining]:
+            candidates[name] = None
+            sums[name] = 0.0
+            counts[name] = 0
+            numeric = _custom_metric_value(reward, name)
+            if numeric is not None:
+                sums[name] = numeric
+                counts[name] = 1
 
     if omitted_name_seen:
         report_budget.omit("evaluator_cards", max(1, configured_total - len(candidates)))

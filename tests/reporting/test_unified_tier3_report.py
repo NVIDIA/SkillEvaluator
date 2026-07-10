@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import math
 import re
@@ -99,18 +98,13 @@ def test_package_loader_fallback_reads_template_resources_as_utf8(monkeypatch: p
     def unavailable_files(_package: str) -> None:
         raise AttributeError
 
-    def open_utf8(_package: str, _path: str, *, encoding: str):
-        assert encoding == "utf-8"
-        return io.StringIO("Per-trial evidence \u00d72")
-
     monkeypatch.setattr(html_module.resources, "files", unavailable_files)
-    monkeypatch.setattr(html_module.resources, "open_text", open_utf8)
 
     source, _, _ = PackageLoader("skillevaluator.reporting", "templates").get_source(
         html_module.Environment(), "report.html.j2"
     )
 
-    assert source == "Per-trial evidence \u00d72"
+    assert "\u00d7" in source
 
 
 def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None:
@@ -462,6 +456,37 @@ def test_custom_metric_name_discovery_is_capped_before_sorting() -> None:
     assert len(cards) == 1
     assert cards[0]["id"] == "metric-a"
     assert budget.omitted["evaluator_cards"] == 2
+
+
+def test_reward_custom_metric_discovery_and_evidence_do_not_materialize_full_maps() -> None:
+    class ExplodingMetricMap(dict[str, float]):
+        def items(self):
+            yield "metric-b", 0.9
+            yield "metric-a", 0.8
+            raise AssertionError("custom metric discovery must stop before a third reward-derived metric")
+
+    custom_metrics = ExplodingMetricMap({"metric-a": 0.8, "metric-b": 0.9, "metric-c": 1.0})
+    budget = _ReportBudget(cards_remaining=1)
+
+    cards = _evaluator_cards(
+        {},
+        rewards=[
+            {
+                "entry_id": "case-1",
+                "custom_metrics": custom_metrics,
+                "custom_details": {"metric-a": {"reason": "bounded evidence"}},
+            }
+        ],
+        custom_with_skill={},
+        custom_without_skill={},
+        custom_lift={},
+        report_budget=budget,
+    )
+
+    assert len(cards) == 1
+    assert cards[0]["id"] == "metric-a"
+    assert cards[0]["evidence"][0]["score"] == 0.8
+    assert budget.omitted["evaluator_cards"] > 0
 
 
 def test_raw_reward_projection_bulk_stops_when_field_budget_is_full() -> None:

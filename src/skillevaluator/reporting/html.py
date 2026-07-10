@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import pkgutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import resources
@@ -174,9 +175,11 @@ class PackageLoader(BaseLoader):
         template_path = f"{self.path}/{template}"
         try:
             source = resources.files(self.package).joinpath(template_path).read_text(encoding="utf-8")
-        except AttributeError:
-            with resources.open_text(self.package, template_path, encoding="utf-8") as f:
-                source = f.read()
+        except AttributeError as exc:
+            encoded = pkgutil.get_data(self.package, template_path)
+            if encoded is None:
+                raise FileNotFoundError(template_path) from exc
+            source = encoded.decode("utf-8")
         return source, template, lambda: True
 
 

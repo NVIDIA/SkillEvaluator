@@ -101,6 +101,9 @@ Repository = "https://github.com/NVIDIA/SkillEvaluator"
 # Single console script for the consolidated distribution.
 skillevaluator = "skillevaluator.cli:cli"
 
+[tool.uv]
+managed = true
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["skillevaluator*"]

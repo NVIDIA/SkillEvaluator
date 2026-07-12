@@ -73,6 +73,8 @@ telemetry = [
 # Static security scanners (floors raised to the established release baseline).
 security = [
     "bandit>=1.9.4",
+    # CVE-2026-45134 / BDSA-2026-10450 fixed floor.
+    "langchain-core>=1.4.9",
     "pip-audit>=2.10.0",
     "protobuf>=6.33.5",
     "semgrep>=1.162.0",

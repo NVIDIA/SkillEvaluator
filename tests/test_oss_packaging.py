@@ -444,3 +444,11 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert "direct OpenCode" in public_docs
     assert "Docker or local compatibility bridge" in public_docs
     assert "experimental Claude Code" in public_docs
+
+
+def test_security_extra_enforces_patched_langchain_core() -> None:
+    project = _project()
+    versions = {package["name"]: Version(package["version"]) for package in _lock()["package"]}
+
+    assert "langchain-core>=1.4.9" in project["project"]["optional-dependencies"]["security"]
+    assert versions["langchain-core"] >= Version("1.4.9")

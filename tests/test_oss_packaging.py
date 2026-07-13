@@ -141,7 +141,7 @@ def test_public_sources_exclude_retired_internal_runtime_paths() -> None:
 
 
 def test_public_docs_explain_the_single_nvidia_credential_skillspector_path() -> None:
-    configuration = (REPO_ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+    configuration = (REPO_ROOT / "docs" / "configuration.mdx").read_text(encoding="utf-8")
 
     assert "SkillSpector's OpenAI-compatible provider path" in configuration
     assert "does not create a second NVIDIA credential name" in configuration
@@ -424,8 +424,8 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
 
 def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    configuration = (REPO_ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
-    tier3 = (REPO_ROOT / "docs" / "TIER3_LIVE_EVALUATION.md").read_text(encoding="utf-8")
+    configuration = (REPO_ROOT / "docs" / "configuration.mdx").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
     public_docs = f"{readme}\n{configuration}\n{tier3}"
 
     assert "gpt-5.4-mini" in public_docs

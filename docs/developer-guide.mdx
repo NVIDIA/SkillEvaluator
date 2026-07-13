@@ -1,36 +1,147 @@
 ---
-title: "Developer Guide"
-description: "Contributor setup for SkillEvaluator — development environment, tooling, and local checks."
+title: "Contributing"
+description: "Set up a Skill Evaluator development environment, run the test suite, preview the docs locally, and submit a pull request that passes review."
 ---
 
-## Development Setup
+This guide gets you from a fresh clone to a mergeable pull request. You need Python 3.12 or 3.13 and Git; no API keys are required for the default development loop.
 
-Use Python 3.12 or later, then install the project with its development tools:
+## Set up a development environment
 
-```bash
-pip install -e '.[all,dev]'
+<Steps>
+  ### Clone the repository
+
+  ```bash title="Clone Skill Evaluator"
+  git clone https://github.com/NVIDIA/SkillEvaluator.git
+  cd SkillEvaluator
+  ```
+
+  ### Install with all extras
+
+  ```bash title="Sync the dev environment"
+  uv sync --python 3.13 --all-extras
+  ```
+
+  If you prefer pip, `make install` runs the equivalent editable install:
+
+  ```bash title="pip alternative"
+  pip install -e '.[all,dev]'
+  ```
+
+  ### Run the contribution gate
+
+  These three commands must pass locally before you open a pull request:
+
+  ```bash title="The contribution gate"
+  make lint && make test && make build
+  ```
+</Steps>
+
+The Makefile wraps the standard tools, so you can run the underlying commands directly if you prefer:
+
+| Target | Runs | Purpose |
+| --- | --- | --- |
+| `make install` | `pip install -e '.[all,dev]'` | Editable install with every extra plus dev tooling |
+| `make test` | `pytest` | Default (fast) test suite |
+| `make lint` | `ruff check src tests` | Lint the source and tests |
+| `make build` | `python -m build` | Build the wheel and sdist |
+| `make clean` | removes `build`, `dist`, and tool caches | Reset build state |
+
+## Running tests
+
+`make test` runs the fast suite. Two pytest markers are excluded by default, so slow and credentialed tests never block the everyday loop:
+
+| Marker | What it covers | Run it with |
+| --- | --- | --- |
+| *(none)* | Fast unit tests — the default selection | `pytest` |
+| `integration` | End-to-end integration tests; may need fixtures or longer runtime | `pytest -m integration` |
+| `live` | Live tests against the in-process Harbor backend; requires the `tier3` extra and `NVIDIA_API_KEY` | `pytest -m live` |
+
+The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
+
+```bash title="Run tests in parallel"
+pytest -n auto
 ```
 
-## Required Checks
+## Code style and dependencies
 
-Run these commands before opening a pull request:
+Ruff owns linting — `make lint` is the project's lint gate. CI runs `ruff check` over the whole repository, so lint the files you touch even outside `src` and `tests`.
 
-```bash
-make lint
-make test
-make build
+Linting is only the first gate. CI also runs an OSS source-boundary scan (`python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json`), which fails closed if the source tree or built distributions contain private integrations. The packaging job repeats that scan over the wheel and sdist, installs the wheel into a clean environment, and smoke-tests the CLI — including `skillevaluator models --help` and a `doctor` run with placeholder `nv_build` credentials. Platform jobs round out the matrix: a macOS runner executes the Tier 3 local-mode, progress, and preflight test files, and a native-Windows runner asserts local mode fails closed, with `doctor` required to exit non-zero for every `SKILLEVALUATOR_LOCAL_SANDBOX` value.
+
+Follow the existing Python typing and test patterns, keep changes scoped, and add regression coverage for behavior changes.
+
+For dependency changes: update `pyproject.toml`, `uv.lock`, and [THIRD_PARTY_NOTICES.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/THIRD_PARTY_NOTICES.md) together — the notices file lists every direct dependency and its license, and `uv.lock` records the exact resolved set for the release.
+
+## Work on the docs
+
+The documentation site is built with [Fern](https://buildwithfern.com/) from the MDX pages in `docs/`. You only need a local build when you are editing docs; publishing happens automatically from `main`.
+
+<Steps>
+  ### Install the Fern CLI
+
+  Requires Node.js 22+ and npm 10+.
+
+  ```bash title="Install fern-api"
+  npm install -g fern-api
+  ```
+
+  ### Preview with live reload
+
+  ```bash title="Local docs preview"
+  fern docs dev
+  ```
+
+  The site serves at `http://localhost:3000` and reloads on changes to `.mdx` files or `fern/docs.yml`.
+
+  ### Validate before pushing
+
+  ```bash title="Check config and links"
+  fern check
+  ```
+
+  `fern check` must pass — it is the same gate the site build relies on.
+</Steps>
+
+New pages must be registered under `navigation` in [fern/docs.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/fern/docs.yml), or they will not appear on the site. The full authoring rules — MDX gotchas, link conventions, the page-adding checklist — live in [docs/AGENTS.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/docs/AGENTS.md).
+
+## Submit a change
+
+Contributions flow through GitHub pull requests:
+
+1. **Discuss substantial changes in an issue first**, before you invest in an implementation.
+2. **Keep each pull request focused.** Use the pull request template and explain the user-visible behavior and the verification you performed.
+3. **Add focused tests** for behavioral changes.
+4. **Update [CHANGELOG.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/CHANGELOG.md)** when the change affects users.
+5. **Keep provider credentials, customer data, and private benchmark material out of the repository.** Tier 3 live evaluation reads provider and agent credentials from your environment, never from the repo (with NVIDIA Build, one `NVIDIA_API_KEY` covers both roles) — see [Providers & Credentials](configuration.mdx).
+
+<Warning>
+Every commit needs a Developer Certificate of Origin sign-off — commit with `git commit -s`. Pull requests containing unsigned commits are not accepted. By contributing, you confirm you have the right to submit the work under the Apache License 2.0.
+</Warning>
+
+## Project resources
+
+| Resource | What it covers |
+| --- | --- |
+| [CONTRIBUTING.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/CONTRIBUTING.md) | Full contribution policy, including the DCO text |
+| [CODE_OF_CONDUCT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/CODE_OF_CONDUCT.md) | Contributor Covenant code of conduct |
+| [GOVERNANCE.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/GOVERNANCE.md) | Project governance — maintained by NVIDIA |
+| [SECURITY.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SECURITY.md) | Report vulnerabilities privately via NVIDIA PSIRT — the [submission form](https://www.nvidia.com/object/submit-security-vulnerability.html) or psirt@nvidia.com — never through public GitHub issues |
+| [SUPPORT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md) | Support level: Experimental — best-effort via GitHub Issues, no SLA |
+| [LICENSE](https://github.com/NVIDIA/SkillEvaluator/blob/main/LICENSE) | Apache License 2.0 |
+| [THIRD_PARTY_NOTICES.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/THIRD_PARTY_NOTICES.md) | Third-party license notices |
+| [CHANGELOG.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/CHANGELOG.md) | User-visible changes per release |
+| [CITATION.cff](https://github.com/NVIDIA/SkillEvaluator/blob/main/CITATION.cff) | How to cite Skill Evaluator |
+
+If you use Skill Evaluator in academic or technical work, please cite it:
+
+```yaml title="CITATION.cff"
+cff-version: 1.2.0
+message: "If you use Skill Evaluator in academic or technical work, please cite this software."
+title: "Skill Evaluator"
+type: software
+version: "0.1.0"
+authors:
+  - name: "NVIDIA Corporation"
+license: Apache-2.0
+repository-code: "https://github.com/NVIDIA/SkillEvaluator"
 ```
-
-Tier 3 live evaluation requires separately configured public provider and agent
-credentials. Do not add credentials or private datasets to the repository.
-
-## Code Style
-
-Use the existing Python typing and test patterns. Keep changes scoped, add
-regression coverage for behavior changes, and use Ruff for formatting and lint.
-
-## Dependency Changes
-
-Add only publicly available dependencies with compatible licenses. Update
-`pyproject.toml`, `uv.lock`, and [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)
-together, then verify the release SBOM and license scan before publishing.

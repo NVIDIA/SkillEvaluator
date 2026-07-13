@@ -13,6 +13,10 @@ All notable changes to Skill Evaluator are documented in this file.
 - Fern documentation site published to `docs.nvidia.com/skillevaluator`,
   building the `docs/` guides (installation, configuration, and the three
   evaluation tiers) as MDX pages.
+- Expanded the documentation site to fifteen pages — quickstart, eval
+  datasets, agents and sandboxes, custom graders, reports, CI integration,
+  CLI reference, and environment variables — under a task-oriented
+  navigation, with every command verified against the current CLI.
 
 ### Security
 

@@ -1,0 +1,460 @@
+---
+title: "CLI Reference"
+description: "Every Skill Evaluator command, flag, and default — validate, quality-check, similarity-check, tier3 evaluate, and the tier1/tier2/tier3 expert groups."
+layout: reference
+---
+
+{/* Maintenance note: this page is generated from the `skillevaluator --help` output.
+    Regenerate the help dump and re-verify every flag table against it each release. */}
+
+This page lists every `skillevaluator` command with its full flag set and exact defaults. If you want task-oriented guidance instead, start from the tier guides: [Tier 1: Validation](tier1-validation.mdx), [Tier 2: Deduplication](tier2-deduplication.mdx), and [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+
+## Command map
+
+| Command | Purpose | Needs |
+| --- | --- | --- |
+| [validate](#validate) | Run Tier 1 checks plus Tier 2 dedup by default (both gate the exit code), optional advisory Tier 3 | Nothing by default |
+| [quality-check](#quality-check) | Score skill quality across four weighted categories | Nothing |
+| [rubric-eval](#rubric-eval) | LLM-as-judge rubric evaluation | LLM provider key |
+| [security-scan](#security-scan) | Scan for security vulnerabilities | Nothing (key only with `--llm`/`--llm-verify`) |
+| [pii-scan](#pii-scan) | Scan for PII and local identifiers | Nothing (key only with `--llm-verify`) |
+| [lint-scripts](#lint-scripts) | Advisory lint checks on skill scripts | Nothing |
+| [context-optimization-check](#context-optimization-check) | Detect redundant content within one skill | Embeddings + LLM provider key |
+| [dedup-scan](#dedup-scan) | Alias of `context-optimization-check` | Embeddings + LLM provider key |
+| [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
+| [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
+| [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
+| [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
+| [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
+| [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
+| [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
+| [doctor](#doctor) | Live-evaluation readiness check | Nothing |
+| [health-check](#health-check) | Quick CLI + backend readiness check | Nothing |
+| [models](#models) | List a filtered view of the selected provider's authenticated catalog | Provider key |
+| [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
+
+## Global conventions
+
+**Reports.** Every Tier 1 and Tier 2 command accepts the same two report options:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-r, --report [cli\|json\|html\|markdown]` | `cli` | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
+| `-o, --output-dir DIRECTORY` | `reports` | Directory for generated reports. |
+
+In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The standalone commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Filename conventions and report anatomy live in [Reports & Results](reports.mdx).
+
+**Exit codes.** Commands communicate through a small exit-code contract — this is what your CI gates on (see [Gate Your CI](ci-integration.mdx)):
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Validation failed, or the run could not complete |
+| `2` | Configuration error — bad flags or an unreadable target |
+| `3` | Runtime error — an unexpected internal failure |
+
+**Version.** `skillevaluator --version` prints the installed version.
+
+## Expert tier groups
+
+Most commands are also reachable under a tier-prefixed group — `skillevaluator tier1 validate` behaves exactly like `skillevaluator validate`. The groups exist so you can discover a tier's commands in one place:
+
+| Group | Members |
+| --- | --- |
+| `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
+| `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
+| `tier3` | `evaluate`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
+
+The exceptions run in both directions. `health-check` and [models](#models) are top-level only, with no tier-prefixed twin. And two commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
+
+### tier3 validate
+
+Validate the Tier 3 `evals/` directory and the optional Harbor bring-your-own-task contract before you spend money on a live run. The dataset and directory rules it enforces are documented in [Eval Datasets](eval-datasets.mdx).
+
+```bash title="Check evals/ before a live run"
+skillevaluator tier3 validate ./my-skill --strict
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--json` | off | Emit JSON output. |
+| `--strict` | off | Treat warnings as failures. |
+| `--harbor-contract` | off | Validate the Harbor task and reward contract (see [Custom Graders & Tasks](custom-graders.mdx)). |
+
+## validate
+
+Validate a skill, rule, workflow, or plugin. Tier 1 static, security, and quality checks gate the exit code — and so do Tier 2 deduplication findings when that pass runs (on by default, degrading gracefully without embedding access); Tier 3 live evaluation attaches as an advisory pass when enabled with `--tier3`, `--autopilot`, `--full`, or the `--agent-eval` alias.
+
+```bash title="Common invocations"
+skillevaluator validate ./my-skill                        # Tier 1 + Tier 2
+skillevaluator validate ./my-skill --llm                  # add LLM security analysis
+skillevaluator validate ./my-skill -r cli,json,html       # multiple report formats
+skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
+skillevaluator validate ./my-skill --external             # strict publication profile
+skillevaluator validate ./my-skill --tier3 -a codex       # add advisory Tier 3 eval
+skillevaluator validate ./my-skill --autopilot            # Tier 3, generating evals if missing
+skillevaluator validate ./my-skill --full -a codex        # everything, one shot
+skillevaluator validate ./my-skill --tiers 1,3            # explicit tier selection
+skillevaluator validate ./skills-folder --full            # whole catalog, serially
+skillevaluator validate ./my-skill --tier3 -a codex,claude-code \
+    --env-mode docker --harbor-keep-jobs                  # Tier 3, retain Harbor jobs
+```
+
+Pointing `validate` at a directory of skills (one with no root `SKILL.md`) runs the whole pipeline serially for each skill inside it and finishes with a per-skill summary — catalog validation in one command. By default the terminal shows a compact pipeline view; `--verbose` switches to the full per-check detail stream.
+
+`--help` groups the flags into four panels, mirrored by the subsections below.
+
+### Run & Reports
+
+Applies to the whole run: target typing, policy profile, reports, tier selection.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--type [skill\|rules\|workflows\|plugin\|auto]` | `auto` | Force the content type instead of auto-detecting it from the target path. |
+| `--tiers TEXT` | unset | Explicit tier selection, e.g. `--tiers 1,3`. Tier 1 always runs. |
+| `--full` | off | One-shot validation: Tier 1+2+3 with `--autopilot` dataset generation. |
+| `--verbose` | off | Print the full per-check detail stream instead of the compact pipeline view. |
+| `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `external` | Validation profile: `external` or a custom name. |
+| `--external` | — | Shortcut for `--profile external` (validate for public publication). |
+| `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
+
+Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
+
+`validate` also takes the standard `-r/--report` and `-o/--output-dir` options described under [Global conventions](#global-conventions).
+
+### Tier 1 · Static & Security
+
+Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Choices: `schema`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `version`, `dependency`. `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--fail-fast` | off | Stop on the first failing check instead of collecting all issues. |
+| `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
+| `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
+| `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
+| `--min-score INTEGER` | `70` | Minimum quality score (0–100) required to pass when the `quality` check runs. |
+
+### Tier 2 · Deduplication
+
+Embedding + LLM dedup; on by default, skips gracefully without a provider key.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--dedup, --tier2 / --no-dedup, --no-tier2` | `dedup` | Run Tier 2 intra-skill semantic-overlap checks. On by default; skipped gracefully without public embedding access. Use `--no-tier2` (or `--no-dedup`) to disable. |
+
+### Tier 3 · Live Agent Evaluation
+
+<Note>
+The following flags are forwarded to the live-eval engine **only when Tier 3 is enabled** — with `--tier3`, `--autopilot`, `--full`, or the `--agent-eval` alias. On their own they have no effect. The Dockerfile-, workspace-, resource-, preflight-, and progress-tuning flags (`--custom-dockerfile-mode`, `--skill-workspace-mode`, the `--override-*` flags, `--agent-runtime-preflight`, and `--progress`) are not forwardable — use the standalone [tier3 evaluate](#tier3-evaluate) command for those.
+</Note>
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--tier3, --agent-eval` | off | Also run Tier 3 live agent evaluation (requires `evals/evals.json`). Advisory: it never changes the exit code. `--tier3` is the primary name; `--agent-eval` is a retained alias. |
+| `--autopilot` | off | Generate an evaluation source automatically when missing, then run Tier 3 (implies `--tier3`). |
+| `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents to evaluate. |
+| `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |
+| `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
+| `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
+| `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
+| `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
+| `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
+| `--model TEXT` | unset | Global agent model override. |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
+| `--grading-mode [default\|default_plus_custom\|custom_only]` | unset | Reward/grading mode for live eval. |
+| `--results-dir DIRECTORY` | unset | Directory for Harbor live-eval results. |
+| `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode, set via `skill_workspace.mode: group` in `evals/config.yml`. |
+| `--copy-repo` | off | Copy the surrounding repo into the eval environment. |
+| `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
+| `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
+
+Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults ([Eval Datasets](eval-datasets.mdx) documents the config keys and precedence). The exception is `--results-dir`, which resolves independently of `evals/config.yml` (see [Reports & Results](reports.mdx)).
+
+## quality-check
+
+Score skill quality across correctness, discoverability, reliability, and efficiency. Runs entirely offline — no API key.
+
+```bash title="Keyless quality score"
+skillevaluator quality-check ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--min-score INTEGER` | `70` | Minimum score required to pass. |
+
+Plus the standard report options. Scoring weights and grade bands are documented in [Tier 1: Validation](tier1-validation.mdx).
+
+## rubric-eval
+
+Run LLM-as-judge rubric evaluation for a skill against nine weighted criteria. Requires a configured LLM provider.
+
+```bash title="LLM rubric evaluation"
+skillevaluator rubric-eval ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--min-score INTEGER` | `70` | Minimum score required to pass. |
+
+Plus the standard report options.
+
+## security-scan
+
+Scan for security vulnerabilities using the static scanner stack. Keyless by default; the LLM flags require a configured provider.
+
+```bash title="Static security scan"
+skillevaluator security-scan ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--llm / --no-llm` | `no-llm` | Enable LLM security analysis. |
+| `--llm-verify` | off | Use LLM verification to reduce false positives. |
+
+Plus the standard report options.
+
+## pii-scan
+
+Scan for PII and local identifiers (emails, credentials, home paths, and more).
+
+```bash title="PII scan"
+skillevaluator pii-scan ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--llm-verify` | off | Use LLM verification to reduce false positives. |
+
+Plus the standard report options.
+
+## lint-scripts
+
+Run advisory lint checks on skill scripts. Takes only the standard report options.
+
+```bash title="Advisory script lint"
+skillevaluator lint-scripts ./my-skill
+```
+
+## context-optimization-check
+
+Detect redundant content within one skill (intra-skill deduplication). Needs an embeddings-capable provider plus a chat LLM for the verification stage — see [Tier 2: Deduplication](tier2-deduplication.mdx).
+
+```bash title="Intra-skill redundancy check"
+skillevaluator context-optimization-check ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--threshold FLOAT` | `0.8` | Similarity threshold for clustering candidate duplicates. |
+| `--model TEXT` | provider default | Embedding model override. |
+| `--llm-model TEXT` | provider default | LLM model override for the verification stage. |
+
+Plus the standard report options.
+
+## dedup-scan
+
+Alias of [context-optimization-check](#context-optimization-check) — same behavior, same flags (`--threshold` default `0.8`, `--model`, `--llm-model`, plus the standard report options).
+
+```bash title="Same check, alias name"
+skillevaluator dedup-scan ./my-skill
+```
+
+## similarity-check
+
+Detect duplicate content across a collection with embedding similarity (inter-skill deduplication). Takes a content path — a single item or a folder of them.
+
+```bash title="Compare a collection"
+skillevaluator similarity-check ./skills
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--type [skill\|rules\|workflows\|auto]` | `auto` | Content type of the target. |
+| `--threshold FLOAT` | `0.75` | Minimum similarity to report. |
+| `--full-body` | off | Embed full file bodies instead of descriptions. |
+| `--model TEXT` | provider default | Embedding model override. |
+| `--catalog FILE` | none | Compare exactly one skill against a local catalog. |
+| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. |
+
+Plus the standard report options. Classification tiers and catalog rules are in [Tier 2: Deduplication](tier2-deduplication.mdx).
+
+## tier3 evaluate
+
+Run Tier 3 live agent evaluation: real agents attempt your eval cases with and without the skill, and the difference becomes Skill Lift. Requires the `tier3` extra, a provider key for grading, a credential the selected agents can use — with NVIDIA Build in `--env-mode docker` or `local`, the one `NVIDIA_API_KEY` covers both roles — and a running backend (Docker by default). The full walkthrough is [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+
+```bash title="Live evaluation with codex in Docker"
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
+```
+
+<Note>
+The old top-level spelling `skillevaluator evaluate` still works for existing scripts, but no longer appears in `--help`; `tier3 evaluate` is the advertised name.
+</Note>
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `--env-mode` | `docker` | Where trials run. All 16 values: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `gke`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `local`. Cloud modes are provider-managed Harbor backends enabled by the matching Harbor extra; `local` runs on your host. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
+| `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
+| `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
+| `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
+| `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
+| `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
+| `--model TEXT` | unset | Global agent model override. |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-5.4-mini`. Accepts the `claude` alias for `claude-code`. |
+| `--custom-dockerfile-mode [preserve\|rebase]` | unset | How a custom `evals/environment/Dockerfile` is applied: `rebase` (built-in default) swaps its `FROM` line onto the eval base image; `preserve` keeps your `FROM` and appends the eval dependencies. |
+| `--skill-workspace-mode [isolated\|group]` | unset | `isolated` (built-in default) stages only the target skill in the agent workspace; `group` also stages the skills from `--include-skills` / `skill_workspace.include`. |
+| `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode (`--skill-workspace-mode group` or `skill_workspace.mode: group` in `evals/config.yml`). |
+| `--copy-repo` | off | Copy the surrounding repo into the eval environment. |
+| `--grading-mode [default\|default_plus_custom\|custom_only]` | unset | Reward/grading mode — see [Custom Graders & Tasks](custom-graders.mdx). The legacy aliases `aces_default` (→ `default`) and `aces_plus_custom` (→ `default_plus_custom`) are still accepted. |
+| `--results-dir DIRECTORY` | unset | Directory for live-eval results (precedence rules in [Reports & Results](reports.mdx)). |
+| `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts for inspection with [harbor-view](#harbor-view). |
+| `--agent-runtime-preflight / --no-agent-runtime-preflight` | enabled | Run one real, bounded agent smoke task before the full A/B evaluation matrix. |
+| `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
+| `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation (passed through to Harbor). |
+| `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB (passed through to Harbor). |
+| `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB (passed through to Harbor). |
+| `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
+
+Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.4-mini` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.
+
+Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
+
+## create-eval-dataset
+
+Create synthetic eval datasets for agent skill evaluation, written to `evals/evals.json`. Uses the configured LLM provider unless you pass `--no-llm`. Dataset anatomy and the four case buckets are documented in [Eval Datasets](eval-datasets.mdx).
+
+```bash title="Generate the full dataset"
+skillevaluator create-eval-dataset ./my-skill --full
+```
+
+<Warning>
+`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases. Use `--dry-run` first if you are unsure.
+</Warning>
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--full` | off | Generate the full 4-bucket dataset. |
+| `--no-llm` | off | Use local templates only (no API key needed). |
+| `--dry-run` | off | Preview without writing. |
+| `--force` | off | Overwrite existing `evals/evals.json`. |
+| `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
+| `--refine` | off | Refine cases using existing or collected trajectories. |
+| `--from-results PATH` | none | With `--refine`: results path containing agent trajectories (default: latest results). |
+| `--results-dir DIRECTORY` | unset | With `--refine`: external results root to search for trajectories. |
+
+## init-custom-grader
+
+Create a bring-your-own-grader (BYOG) starter under `evals/`. The grader contract it scaffolds is documented in [Custom Graders & Tasks](custom-graders.mdx).
+
+```bash title="Scaffold a Python grader"
+skillevaluator init-custom-grader ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--mode [default_plus_custom\|custom_only]` | `default_plus_custom` | How the custom grader combines with the default graders. |
+| `--language [python\|shell]` | `python` | Grader language. |
+| `--force` | off | Overwrite an existing top-level custom grader. |
+| `--no-config` | off | Only create the grader file; do not create or update `evals/config.yml`. |
+
+## init-harbor-task
+
+Create a bring-your-own-task (BYOT) Harbor starter template under `evals/harbor/`. See [Custom Graders & Tasks](custom-graders.mdx) for how case IDs map to eval entries.
+
+```bash title="Scaffold a Harbor task"
+skillevaluator init-harbor-task ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--force` | off | Overwrite an existing starter case. |
+| `--case-id TEXT` | `case-001` | Harbor case directory and eval entry id. |
+| `--mode [default\|default_plus_custom\|custom_only]` | `custom_only` | Grading mode the starter configures. |
+| `--language [python\|shell]` | `python` | Grader language. |
+| `--with-config` | off | Create or update `evals/config.yml` for native Harbor mode. |
+
+## view
+
+Open the latest HTML live-evaluation report for a skill. If the results exist but `report.html` is missing, `view` regenerates it before opening.
+
+```bash title="Open the latest report"
+skillevaluator view ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--results-dir DIRECTORY` | unset | Results directory to read from (default resolution in [Reports & Results](reports.mdx)). |
+
+## compare
+
+Compare live-evaluation results across agents from previous runs.
+
+```bash title="Compare agents"
+skillevaluator compare ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--results-dir DIRECTORY` | unset | Results directory to read from. |
+
+## harbor-view
+
+Open retained Harbor job artifacts with Harbor's trajectory browser. Takes a jobs directory as its argument and has no options. Jobs are only retained when the original run passed `--harbor-keep-jobs`. `skillevaluator tier3 harbor-view` is an identical tier-prefixed spelling.
+
+```bash title="Browse retained trajectories"
+skillevaluator harbor-view ./path/to/jobs-dir
+```
+
+## doctor
+
+Check live-evaluation runtime readiness: the CLI install, the configured provider, the requested agents and their credentials, and the selected backend. Run it before your first `tier3 evaluate` — see [Agents & Sandboxes](agents-and-sandboxes.mdx) for what each check means.
+
+```bash title="Deep readiness check"
+skillevaluator doctor --agents codex --env-mode docker
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
+| `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
+| `--verify-models` | off | Live per-agent model probe: verifies each agent's resolved model against the provider catalog and prints a pass/fail row per agent, so you can catch a bad model selection before a long run. |
+
+`skillevaluator tier3 doctor` takes the same flags, including `--agent-model` and `--verify-models`.
+
+## health-check
+
+Quick readiness check for the CLI and the selected live-eval backend. Use it as an install smoke test or a fast CI preflight. It differs from [doctor](#doctor) by two flags: `health-check` has no `--agent-model` and no `--verify-models`.
+
+```bash title="Quick readiness check"
+skillevaluator health-check
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
+| `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
+
+## models
+
+List a filtered view of the selected provider's authenticated catalog. Uses the same provider and credential resolution as evaluation (see [Providers & Credentials](configuration.mdx)), so it doubles as a quick check that your key works. A model appearing in the catalog is **not** proof it is compatible with the evaluation harness — use [doctor](#doctor) `--verify-models` for that. Top-level only; there is no tier-prefixed twin.
+
+```bash title="List the provider's models"
+skillevaluator models --limit 20
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--limit INTEGER RANGE` | `10` | Maximum number of catalog entries to show (`1<=x<=100`). |
+| `--json` | off | Emit machine-readable JSON. |
+
+## See also
+
+- [Environment Variables](environment-variables.mdx) — every `SKILL_EVAL_*` and `SKILLEVALUATOR_*` variable
+- [Gate Your CI](ci-integration.mdx) — exit codes and JSON reports as a merge gate
+- [Providers & Credentials](configuration.mdx) — which commands need which key

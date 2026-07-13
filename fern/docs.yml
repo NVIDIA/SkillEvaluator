@@ -21,24 +21,57 @@ navigation:
   - page: Overview
     path: ../docs/index.mdx
     slug: /
-  - section: Documentation
+  - section: Get Started
     skip-slug: true
     contents:
+      - page: Quickstart
+        path: ../docs/quickstart.mdx
+        slug: quickstart
       - page: Installation
         path: ../docs/installation.mdx
         slug: installation
-      - page: Configuration
+      - page: Providers & Credentials
         path: ../docs/configuration.mdx
         slug: configuration
-      - page: "Tier 1: Static and Security Validation"
+  - section: Evaluate Your Skill
+    skip-slug: true
+    contents:
+      - page: "Tier 1: Validation"
         path: ../docs/tier1-validation.mdx
         slug: tier1-validation
-      - page: "Tier 2: Semantic Deduplication"
+      - page: "Tier 2: Deduplication"
         path: ../docs/tier2-deduplication.mdx
         slug: tier2-deduplication
-      - page: "Tier 3: Live Agent Evaluation"
+      - page: "Tier 3: Live Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
-      - page: Developer Guide
+      - page: Eval Datasets
+        path: ../docs/eval-datasets.mdx
+        slug: eval-datasets
+      - page: Agents & Sandboxes
+        path: ../docs/agents-and-sandboxes.mdx
+        slug: agents-and-sandboxes
+      - page: Custom Graders & Tasks
+        path: ../docs/custom-graders.mdx
+        slug: custom-graders
+  - section: Results & CI
+    skip-slug: true
+    contents:
+      - page: Reports & Results
+        path: ../docs/reports.mdx
+        slug: reports
+      - page: Gate Your CI
+        path: ../docs/ci-integration.mdx
+        slug: ci-integration
+  - section: Reference
+    skip-slug: true
+    contents:
+      - page: CLI Reference
+        path: ../docs/cli-reference.mdx
+        slug: cli-reference
+      - page: Environment Variables
+        path: ../docs/environment-variables.mdx
+        slug: environment-variables
+      - page: Contributing
         path: ../docs/developer-guide.mdx
         slug: developer-guide

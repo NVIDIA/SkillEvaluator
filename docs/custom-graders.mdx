@@ -1,0 +1,276 @@
+---
+title: "Custom Graders & Tasks"
+description: "Bring your own grader (BYOG) or a complete Harbor task (BYOT) when Skill Evaluator's default graders can't express what success means for your skill."
+---
+
+When your skill's success criteria can't be expressed by the default graders —
+a domain-specific output format, a service that must end up in a particular
+state, a scoring rule only you can define — you can bring your own grader, or
+your own complete Harbor task. Scaffolding is keyless and takes one command;
+running a custom-graded evaluation needs the same Tier 3 stack as any live
+eval — see [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+
+## Grading modes
+
+Every live evaluation runs in one of three grading modes:
+
+| Mode | What scores the run | Use when |
+| --- | --- | --- |
+| `default` | Skill Evaluator's standard graders — the five dimensions, Skill Lift, and pass@k | The standard graders express success for your skill |
+| `default_plus_custom` | Standard grading runs first, then your grader adds domain-specific `custom_metrics` alongside it | You want the standard view **plus** your own checks — the safe extension point |
+| `custom_only` | Your grader alone defines the score; the standard dimension rows stay visible but show `NO SCORE` | Success can only be measured by your own logic |
+
+Set the mode with `--grading-mode` on `tier3 evaluate` (or on `validate`
+together with `--tier3`), or persist it in `evals/config.yml`:
+
+```yaml title="evals/config.yml"
+schema_version: 1
+grading:
+  mode: default_plus_custom
+```
+
+CLI flags override the config file. The aliases `aces_default` and
+`aces_plus_custom` are accepted — on the CLI and in `evals/config.yml` — as
+spellings of `default` and `default_plus_custom`.
+
+<Tip>
+Skill Lift — including lift on your custom metrics — is computed from the
+with-skill and without-skill arms. Don't pass `--skip-baseline` on runs whose
+custom lift you want to keep.
+</Tip>
+
+## Bring your own grader (BYOG)
+
+A BYOG grader is a single `evals/grader.py` (or `evals/grader.sh`) that Skill
+Evaluator stages into every generated task container and runs after the agent
+finishes.
+
+<Steps>
+
+### Scaffold the starter
+
+```bash title="Create evals/grader.py with a working contract"
+skillevaluator init-custom-grader ./my-skill
+```
+
+This writes an executable starter grader under `evals/`, creates a starter
+`evals/evals.json` if none exists, and sets `grading.mode` in
+`evals/config.yml`. Flags:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--mode` | `default_plus_custom` | Grading mode written to `evals/config.yml` (`default_plus_custom` or `custom_only`) |
+| `--language` | `python` | Generate `grader.py` (`python`) or `grader.sh` (`shell`) |
+| `--force` | off | Overwrite an existing top-level custom grader |
+| `--no-config` | off | Only create the grader file; do not create or update `evals/config.yml` |
+
+### Implement the contract
+
+Edit `evals/grader.py`. The starter already reads the trajectory and eval
+case, writes a well-formed reward, and documents the reserved metric names —
+replace its placeholder logic with your real checks.
+
+### Run with a custom grading mode
+
+```bash title="Evaluate with default grading plus your custom metrics"
+skillevaluator tier3 evaluate ./my-skill --agents codex --grading-mode default_plus_custom
+```
+
+With `evals/config.yml` in place from step 1, the `--grading-mode` flag is
+optional — the config already selects it.
+
+</Steps>
+
+### The reward contract
+
+Inside the container, your grader reads two inputs and writes one result:
+
+1. **Read** `/logs/agent/trajectory.json` — the agent's trajectory.
+2. **Read** `/tests/entry.json` — the eval case metadata (`id`, `prompt`,
+   `expected_output`, and the rest).
+3. **Write** `/logs/verifier/reward.json` — your scores, each in the range
+   0.0–1.0 — and also write the overall score as plain text to
+   `/logs/verifier/reward.txt` for compatibility. In `custom_only` mode, a
+   numeric `overall` in `reward.json` or a numeric `reward.txt` is required.
+
+```json title="/logs/verifier/reward.json"
+{
+  "overall": 0.85,
+  "custom_metrics": {
+    "custom_check": 0.85
+  },
+  "details": {
+    "custom_check": {
+      "score": 0.85,
+      "reason": "Replace this with real custom grading logic."
+    }
+  }
+}
+```
+
+<Note>
+In `default_plus_custom` mode, put your scores under `custom_metrics`. Your
+grader must not overwrite the reserved standard metric names — `security`,
+`skill_execution`, `skill_efficiency`, `accuracy`, `goal_accuracy`, and
+`behavior_check` — or grading fails with a collision error.
+</Note>
+
+Rather than hard-coding the paths, read them from the `HARBOR_*` environment
+variables and fall back to the defaults below when a variable is unset — the
+starter grader already does:
+
+| Variable | Default | Carries |
+| --- | --- | --- |
+| `HARBOR_ATIF_PATH` | `/logs/agent/trajectory.json` | Agent trajectory to grade |
+| `HARBOR_ENTRY_JSON` | `/tests/entry.json` | Eval case metadata |
+| `HARBOR_REWARD_JSON` | `/logs/verifier/reward.json` | Where to write your scores |
+| `HARBOR_REWARD_TXT` | `/logs/verifier/reward.txt` | Where to write the plain-text overall score |
+| `HARBOR_LOGS_DIR` | `/logs` | Root of the log tree |
+| `HARBOR_TESTS_DIR` | `/tests` | Root of the staged test files |
+| `HARBOR_GRADER` | `/tests/grader.py` | Where your staged grader runs from |
+
+## Bring your own task (BYOT)
+
+BYOG replaces the scoring; BYOT replaces the whole task — instruction,
+container environment, and grader — with a native Harbor task you own under
+`evals/harbor/`.
+
+```bash title="Scaffold a native Harbor task"
+skillevaluator init-harbor-task ./my-skill
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--case-id` | `case-001` | Harbor case directory name and eval entry id |
+| `--mode` | `custom_only` | Grading mode (`default`, `default_plus_custom`, or `custom_only`) |
+| `--language` | `python` | Grader language for the starter (`python` or `shell`) |
+| `--with-config` | off | Create or update `evals/config.yml` for native Harbor mode |
+| `--force` | off | Overwrite an existing starter case |
+
+Exact defaults for both scaffolding commands are in the
+[CLI Reference](cli-reference.mdx#init-custom-grader).
+
+The scaffold produces a complete, runnable task source:
+
+<FileTree>
+- evals/
+  - harbor/
+    - README.md
+    - dataset.toml
+    - case-001/
+      - task.toml
+      - instruction.md
+      - environment/
+        - Dockerfile
+      - tests/
+        - grader.py
+        - test.sh
+</FileTree>
+
+Edit `instruction.md` for the agent-facing task, `environment/Dockerfile` for
+the container, and `tests/grader.py` for the scoring — the same reward
+contract as BYOG applies.
+
+Two rules keep BYOT predictable:
+
+- **Case IDs must match dataset entries.** When the grading mode is `default`
+  or `default_plus_custom`, each case's entry id — `entry_id` under
+  `[metadata]` in `task.toml`, falling back to the case directory name — must
+  match an entry `id` in `evals/evals.json`, or the run refuses to start.
+  `custom_only` has no such requirement. See
+  [Eval Datasets](eval-datasets.mdx).
+- **Your source is never mutated in place.** Skill Evaluator stages with-skill
+  and baseline copies of `evals/harbor/` under the results directory for each
+  run; the files you author stay untouched.
+
+## Validate the contract
+
+Check your `evals/` tree and the Harbor task and reward contract before
+spending compute:
+
+```bash title="Validate the BYOT contract"
+skillevaluator tier3 validate ./my-skill --harbor-contract
+```
+
+Add `--strict` to treat warnings as failures and `--json` for
+machine-readable output.
+
+## Debug retained jobs
+
+Harbor job artifacts are transient — deleted by default whether the run
+succeeds or fails. Pass `--harbor-keep-jobs` to retain them, then browse the
+trajectories and grader output with Harbor's own viewer (when a retained jobs
+directory exists, the Artifacts panel at the end of the run prints the exact
+`harbor-view` command to paste):
+
+```bash title="Keep the job artifacts, then inspect them"
+skillevaluator tier3 evaluate ./my-skill --agents codex --harbor-keep-jobs
+skillevaluator harbor-view <jobs-dir>
+```
+
+Grader stdout, the written `reward.json`, and the full trajectory are all in
+the retained job tree — the fastest way to find out why a score isn't what
+you expected. [Agents & Sandboxes](agents-and-sandboxes.mdx) covers the
+debugging workflow in depth.
+
+## What reports show
+
+Custom scores flow into the same results tree as everything else:
+
+- In `result.json`, each agent carries per-arm custom metric averages
+  (`custom_with_skill`, `custom_without_skill`) and a per-metric
+  `custom_lift` — with-skill minus without-skill, per custom metric. The lift
+  is also written to `custom_lift.json` next to the standard `lift.json`.
+- In `default_plus_custom` mode, reports keep the standard metric and
+  dimension view and add your scores as clearly labeled `Custom:` entries
+  alongside it, each with its own lift; custom metrics never change the
+  standard dimension scores.
+- In `custom_only` mode, your `overall` reward drives pass@k and the overall
+  lift. The standard dimension rows stay visible but render `NO SCORE` —
+  unscored metrics are never coerced to 0.0, and your custom metrics are
+  never re-labeled as standard dimensions.
+
+Custom lift needs both arms — a `--skip-baseline` run reports your custom
+scores but no lift. [Reports & Results](reports.mdx) covers the full on-disk
+layout and the machine-readable contract.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="grading.mode=custom_only requires evals/grader.py or evals/grader.sh">
+    `custom_only` refuses to run without a grader. Scaffold one with
+    `skillevaluator init-custom-grader ./my-skill --mode custom_only`, or for
+    a native Harbor task provide `tests/grader.py` or `tests/test.sh` in the
+    case directory.
+  </Accordion>
+  <Accordion title="custom_only requires a numeric overall score">
+    In `custom_only` mode your grader must write a numeric `overall` between
+    0.0 and 1.0 in `reward.json`, or a numeric value in `reward.txt`. Without
+    one the run fails rather than guessing.
+  </Accordion>
+  <Accordion title="Custom metric collides with a reserved name">
+    Your grader wrote a metric named after a standard one (`security`,
+    `accuracy`, and the rest). Rename it and keep custom scores under
+    `custom_metrics`.
+  </Accordion>
+  <Accordion title="Custom scores don't appear in the report">
+    Confirm the grading mode: `default` ignores custom graders entirely. Set
+    `--grading-mode default_plus_custom` or `custom_only`, or the matching
+    `grading.mode` in `evals/config.yml`, then re-run
+    `skillevaluator tier3 validate ./my-skill --harbor-contract` to confirm
+    the grader is picked up.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Eval Datasets" icon="book" href="eval-datasets.mdx">
+    The full evals/ contract — dataset format, config.yml run policy, and
+    fixtures your custom task can build on.
+  </Card>
+  <Card title="Reports & Results" icon="terminal" href="reports.mdx">
+    Everything a run writes to disk and how to read it, including where
+    custom metrics and custom lift surface.
+  </Card>
+</CardGroup>

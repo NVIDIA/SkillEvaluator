@@ -1,0 +1,106 @@
+---
+title: Quickstart
+description: Install Skill Evaluator and get your first skill evaluation result in about two minutes — no API key required.
+---
+
+Get your first evaluation result in about two minutes, with no API key. This page walks you from install to a scored skill, then adds a provider key to unlock the LLM-backed checks.
+
+## Evaluate your first skill
+
+<Steps>
+  ### Install
+
+  One command installs the CLI with every Python feature. [uv](https://docs.astral.sh/uv/) provisions Python 3.13 automatically:
+
+  ```bash title="Install with uv"
+  uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+  ```
+
+  Confirm the install:
+
+  ```bash title="Verify"
+  skillevaluator --version
+  ```
+
+  You should see `skillevaluator, version 0.1.0` (or newer).
+
+  <Tip>
+  If the shell can't find `skillevaluator`, run `uv tool update-shell` and open a new terminal — uv installs tools to `~/.local/bin`, which may not be on your PATH yet.
+  </Tip>
+
+  ### Run the keyless quality check
+
+  Point Skill Evaluator at any skill directory (a folder with a `SKILL.md`):
+
+  ```bash title="No API key required"
+  skillevaluator quality-check ./my-skill
+  ```
+
+  You get a deterministic quality score from 0–100 and an A–F grade; the check passes at 70 (a C) or above by default.
+
+  ### Run the complete offline Tier 1 validation
+
+  `validate` runs the full static and security check suite. Install Gitleaks once for a complete security result, and pass `--no-dedup` to skip the Tier 2 pass that needs an embeddings key:
+
+  ```bash title="Complete offline Tier 1"
+  brew install gitleaks   # macOS; other platforms: https://github.com/gitleaks/gitleaks/releases
+  skillevaluator validate ./my-skill --no-dedup
+  ```
+
+  The terminal shows a compact pipeline view, and HTML and JSON reports land in `reports/` — pass `-r cli` explicitly for terminal-only output, or `--verbose` for the full per-check detail stream. The command exits `0` when every check passes and `1` when a check fails — ready to drop into CI as-is. See [Gate Your CI](ci-integration.mdx) for the full recipe.
+
+  ### Add an LLM provider
+
+  LLM-backed features — rubric judging, deeper security analysis, and Tier 2 deduplication — use whichever provider you configure. A free [NVIDIA API Catalog](https://build.nvidia.com/) key covers both LLM judging and embeddings with one variable:
+
+  ```bash title="Configure a provider"
+  export SKILL_EVAL_LLM_PROVIDER=nv_build
+  export NVIDIA_API_KEY='nvapi-...'
+  ```
+
+  <Note>
+  If `SKILL_EVAL_LLM_PROVIDER` is unset and exactly one of `NVIDIA_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` is present, that provider is auto-selected; with more than one key set, you must name the provider explicitly. OpenAI, Anthropic, Bedrock, OpenAI-compatible endpoints, and fully local servers all work; see [Providers & Credentials](configuration.mdx).
+  </Note>
+
+  ### Check for redundancy
+
+  With a provider configured, find repeated guidance inside your skill, or compare every skill in a collection for overlap:
+
+  ```bash title="Tier 2 deduplication"
+  skillevaluator context-optimization-check ./my-skill   # inside one skill
+  skillevaluator similarity-check ./skills               # across a collection
+  ```
+
+  Cross-skill matches are classified by similarity, from `EXACT_DUPLICATE` down to `LOOSELY_RELATED`; intra-skill duplicate findings include a suggested fix. See [Tier 2: Deduplication](tier2-deduplication.mdx).
+</Steps>
+
+{/* Distinctive touch — Fern <Prompt> component. Verify it renders under the
+    nvidia global theme in `fern docs dev` before enabling; delete this block
+    if it does not.
+
+<Prompt>evaluate my skill with skillevaluator</Prompt>
+
+*/}
+
+## Where to go next
+
+| Your goal | Command | Guide | What success looks like |
+| --- | --- | --- | --- |
+| Gate skill quality and security | `validate` | [Tier 1: Validation](tier1-validation.mdx) | Exit code `0`, no CRITICAL findings |
+| Find overlapping or duplicate skills | `similarity-check` | [Tier 2: Deduplication](tier2-deduplication.mdx) | No `EXACT_DUPLICATE` or `HIGH_SIMILARITY` findings |
+| Prove the skill helps a real agent | `tier3 evaluate` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) | Positive Skill Lift across the five dimensions |
+| Run all three tiers in one shot | `validate --full` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) | Exit code `0` plus an auto-generated dataset and advisory Tier 3 results |
+| Block bad skills at merge time | `validate` in CI | [Gate Your CI](ci-integration.mdx) | A red check on failing PRs |
+| Look up every flag and default | — | [CLI Reference](cli-reference.mdx) | — |
+
+## What each tier needs
+
+Every tier is an independent entry point — nothing requires running the earlier tiers first.
+
+| Tier | CLI only | Provider key | Gitleaks | Docker + agent CLI |
+| --- | --- | --- | --- | --- |
+| **Tier 1** — validation | All deterministic checks | Only `rubric-eval` and the optional `--llm`/`--llm-verify` flags | For a complete security result | — |
+| **Tier 2** — deduplication | — | Embeddings; intra-skill analysis also needs a chat LLM | — | — |
+| **Tier 3** — live evaluation | Keyless dataset templates (`--no-llm`) and report viewing | LLM dataset generation and grading | — | Live runs need a sandbox plus the agent CLI and its credential |
+
+Ready for the deeper install options — extras, pip, source, Docker? Head to [Installation](installation.mdx).

@@ -1,0 +1,71 @@
+<svg viewBox="0 0 800 260" width="800" height="260" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pipeline-title pipeline-desc" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <style>
+    svg { color: #3a3f45; }
+    @media (prefers-color-scheme: dark) { svg { color: #b0b6bd; } }
+  </style>
+  <title id="pipeline-title">Skill Evaluator three-tier pipeline</title>
+  <desc id="pipeline-desc">A skill directory flows through Tier 1 static validation, Tier 2 semantic deduplication, and Tier 3 live agent evaluation, producing reports and a verdict.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0.5 0.8 L7.2 4 L0.5 7.2" fill="none" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Input: skill directory -->
+  <g>
+    <rect x="10" y="98" width="84" height="64" rx="10" fill="currentColor" fill-opacity="0.05" stroke="currentColor" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="52" y="126" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Skill</text>
+    <text x="52" y="144" text-anchor="middle" font-size="10" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="currentColor" fill-opacity="0.6">SKILL.md</text>
+  </g>
+
+  <!-- Tier 1 -->
+  <g>
+    <rect x="114" y="60" width="178" height="140" rx="12" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.4" stroke-width="1"/>
+    <text x="203" y="88" text-anchor="middle" font-size="10" font-weight="600" letter-spacing="1.6" fill="currentColor" fill-opacity="0.5">TIER 1</text>
+    <text x="203" y="111" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Static validation</text>
+    <text x="203" y="134" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">Deterministic quality gates</text>
+    <text x="203" y="150" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">security, PII — offline</text>
+    <line x1="132" y1="166" x2="274" y2="166" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>
+    <text x="203" y="184" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="currentColor" fill-opacity="0.7">validate · rubric-eval</text>
+  </g>
+
+  <!-- Tier 2 -->
+  <g>
+    <rect x="311" y="60" width="178" height="140" rx="12" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.4" stroke-width="1"/>
+    <text x="400" y="88" text-anchor="middle" font-size="10" font-weight="600" letter-spacing="1.6" fill="currentColor" fill-opacity="0.5">TIER 2</text>
+    <text x="400" y="111" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Semantic dedup</text>
+    <text x="400" y="134" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">Embedding-based overlap</text>
+    <text x="400" y="150" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">within and across skills</text>
+    <line x1="329" y1="166" x2="471" y2="166" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>
+    <text x="400" y="184" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="currentColor" fill-opacity="0.7">dedup-scan · similarity-check</text>
+  </g>
+
+  <!-- Tier 3 -->
+  <g>
+    <rect x="508" y="60" width="178" height="140" rx="12" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.4" stroke-width="1"/>
+    <text x="597" y="88" text-anchor="middle" font-size="10" font-weight="600" letter-spacing="1.6" fill="currentColor" fill-opacity="0.5">TIER 3</text>
+    <text x="597" y="111" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Live agent evaluation</text>
+    <text x="597" y="134" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">Sandboxed A/B runs</text>
+    <text x="597" y="150" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">with skill vs. without</text>
+    <line x1="526" y1="166" x2="668" y2="166" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>
+    <text x="597" y="184" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="currentColor" fill-opacity="0.7">evaluate · compare</text>
+  </g>
+
+  <!-- Output: reports and verdict -->
+  <g>
+    <rect x="705" y="98" width="85" height="64" rx="10" fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-opacity="0.45" stroke-width="1"/>
+    <text x="747.5" y="126" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Reports</text>
+    <text x="747.5" y="144" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.6">verdict · lift</text>
+  </g>
+
+  <!-- Arrows -->
+  <g stroke="currentColor" stroke-opacity="0.5" stroke-width="1.4">
+    <line x1="96" y1="130" x2="110" y2="130" marker-end="url(#arrow)"/>
+    <line x1="294" y1="130" x2="307" y2="130" marker-end="url(#arrow)"/>
+    <line x1="491" y1="130" x2="504" y2="130" marker-end="url(#arrow)"/>
+    <line x1="688" y1="130" x2="701" y2="130" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Caption -->
+  <text x="400" y="234" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.5">Each tier is an independent entry point — run any command directly</text>
+</svg>

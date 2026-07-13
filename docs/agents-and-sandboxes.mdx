@@ -1,0 +1,318 @@
+---
+title: Agents & Sandboxes
+description: Every agent Tier 3 can drive and every environment it can run them in — Docker tuning, local-mode sandbox policy, workspace modes, and readiness checks.
+---
+
+Tier 3 runs real agent CLIs against your eval cases, so two choices shape every
+run: which agents attempt the tasks (`--agents`) and where the trials execute
+(`--env-mode`). This page is the complete matrix for both, plus the resource,
+safety, and workspace controls around them and the readiness checks that tell
+you a run will work before you spend compute. The run workflow itself is
+[Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+
+## Supported agents
+
+Pass agents as a comma-separated list with `-a/--agents`. The default is
+`codex`. Three agents are supported:
+
+| Agent | Notes |
+| --- | --- |
+| `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. |
+| `codex` | OpenAI's Codex CLI. The default agent. |
+| `opencode` | The OpenCode CLI. |
+
+The `claude` alias is canonicalized to `claude-code` everywhere an agent
+name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in
+`evals/config.yml` — so both spellings always name the same agent.
+Naming both `claude` and `claude-code` in `--agent-model` or in
+`harbor.agents` is rejected as a duplicate; in `-a/--agents` the repeated
+agent is simply deduplicated.
+
+Each agent runs on a model, and the evaluator provider's default model is not
+automatically valid for every agent. Override the model per agent with
+`--agent-model AGENT=MODEL` (repeatable), or globally with `--model`:
+
+```bash title="Per-agent model override"
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+```
+
+To make an override persistent, set it in `evals/config.yml` under
+`harbor.agents.<name>.model` — see [Eval Datasets](eval-datasets.mdx).
+
+<Note>
+Agent CLIs are user-supplied: Skill Evaluator never installs an agent.
+Operator credentials come only from the host environment — a
+`harbor.runtime_env` entry in `evals/config.yml` that sets an operator-owned
+credential name (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
+`CLAUDE_CODE_USE_BEDROCK`, `NVIDIA_API_KEY`, `OPENAI_API_KEY`,
+`OPENAI_BASE_URL`) or references one with `${...}` is rejected at run time.
+See the two credential roles in [Providers & Credentials](configuration.mdx).
+</Note>
+
+## One NVIDIA Build key for everything
+
+When the evaluator provider is NVIDIA Build (`nv_build`) and trials run in
+`--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
+evaluator and all three agents:
+
+- **OpenCode** calls NVIDIA Build directly through its `nvidia` provider
+  adapter.
+- **Codex** runs against a Skill Evaluator-owned loopback compatibility
+  bridge that translates the OpenAI Responses API into NVIDIA Build Chat
+  Completions calls.
+- **Claude Code** (experimental on this path) runs against an equivalent
+  Messages-to-Chat-Completions bridge.
+
+Both bridges support multi-turn tool-call continuation, so agents complete
+real tool loops against Build models. The Claude Code bridge drops
+orchestration and server tools Build cannot execute — `WebFetch`,
+`WebSearch`, `Task`, and similar — before forwarding a request.
+
+### Models on the one-key path
+
+With `nv_build` and no explicit override, the bridged agents (`codex` and
+`claude-code`) default to `nvidia/nemotron-3-super-120b-a12b`. Direct
+OpenCode defaults to `nvidia/nemotron-3-nano-30b-a3b` and is automatically
+qualified with the `nvidia/` adapter namespace, so it renders as
+`nvidia/nvidia/nemotron-3-nano-30b-a3b` in run output — the doubled prefix
+is the adapter namespace plus the catalog publisher, not a bug.
+
+An explicit `--agent-model` value with NVIDIA Build must be a full
+`publisher/model` catalog ID; an explicit OpenCode override also carries the
+adapter namespace (`nvidia/publisher/model`). Overrides are never rewritten
+silently, and an unavailable model fails the run rather than falling back.
+
+### Key protection
+
+The bridged CLIs — Codex and Claude Code — never see the real Build key:
+
+- **Docker mode** hands the key to the trial through a host-only key file —
+  values never appear on `docker exec` argv.
+- **Local mode** keeps the real key in Harbor's trusted parent process; each
+  bridged CLI receives a unique per-trial capability token that only the
+  loopback bridge accepts.
+
+OpenCode is the exception: it calls NVIDIA Build directly, so it necessarily
+receives the key itself.
+
+NVIDIA Build local agents require network access. When
+`SKILLEVALUATOR_LOCAL_ALLOW_NET` is disabled, the run is rejected with
+`NVIDIA Build local agents require network access; unset
+SKILLEVALUATOR_LOCAL_ALLOW_NET or set it to 1`.
+
+### Other backends still need native credentials
+
+The bridges exist only in `docker` and `local` mode. On any other Harbor
+backend, each agent calls its native provider:
+
+| Agent | Requirement with `nv_build` on other backends |
+| --- | --- |
+| `claude-code` | Its own `ANTHROPIC_API_KEY` in the host environment, plus an explicit model (`--agent-model claude-code=MODEL`). |
+| `codex` | A full OpenAI Responses credential — `OPENAI_API_KEY` + `OPENAI_BASE_URL`, distinct from Build's — plus an explicit model. NVIDIA Build's `/responses` endpoint does not support Codex's tool schema. |
+| `opencode` | Works with `NVIDIA_API_KEY` directly. |
+
+Two provider-agent pairings are restricted regardless of NVIDIA Build: a
+Bedrock evaluator with `claude-code` requires an explicit
+`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair or
+`AWS_BEARER_TOKEN_BEDROCK` and does not support local mode at all, and an
+Anthropic evaluator with `opencode` also does not support local mode.
+
+## Where trials run
+
+`--env-mode` accepts 16 values. Docker is the default; `local` is Skill
+Evaluator's own host-execution mode; everything else is a Harbor-native
+backend, enabled by installing the matching Harbor extra and supplying any
+credentials that backend requires.
+
+| Mode | Type | Notes |
+| --- | --- | --- |
+| `docker` | Container | Default. Runs on your local Docker daemon — see [Docker mode](#docker-mode). |
+| `daytona` | Harbor-native | Enabled by the matching Harbor extra. |
+| `e2b` | Harbor-native | Enabled by the matching Harbor extra. |
+| `modal` | Harbor-native | Enabled by the matching Harbor extra. |
+| `runloop` | Harbor-native | Enabled by the matching Harbor extra. |
+| `langsmith` | Harbor-native | Enabled by the matching Harbor extra. |
+| `gke` | Harbor-native | Enabled by the matching Harbor extra. |
+| `novita` | Harbor-native | Enabled by the matching Harbor extra. |
+| `apple-container` | Harbor-native | Enabled by the matching Harbor extra. |
+| `singularity` | Harbor-native | Enabled by the matching Harbor extra. |
+| `islo` | Harbor-native | Enabled by the matching Harbor extra. |
+| `tensorlake` | Harbor-native | Enabled by the matching Harbor extra. |
+| `cwsandbox` | Harbor-native | Enabled by the matching Harbor extra. |
+| `wandb` | Harbor-native | Enabled by the matching Harbor extra. |
+| `use-computer` | Harbor-native | Enabled by the matching Harbor extra. |
+| `local` | Host | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
+
+<Tip>
+Skill Evaluator documents setup for `docker` and `local`. For any other
+backend, install the matching Harbor environment extra, set the credentials
+that backend requires, and confirm readiness with
+`skillevaluator doctor --env-mode <mode>` before a full run.
+</Tip>
+
+## Docker mode
+
+The default path needs a running Docker daemon and Docker Compose v2 —
+`skillevaluator doctor --env-mode docker` checks both. Each trial runs in its
+own container, and both arms of the comparison are staged from the same
+environment definition — the baseline image differs only by not containing
+the skill — so the skill stays the only variable.
+
+### Resource tuning
+
+If an agent's work is heavier than the defaults allow — large builds,
+memory-hungry test suites — override the per-container allocation. The flags
+pass straight through to Harbor:
+
+```bash title="Give each trial more headroom"
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
+  --override-cpus 4 --override-memory-mb 8192 --override-storage-mb 16384
+```
+
+To make the sizing part of the skill's run policy instead of a flag, set
+`harbor.resources` (`cpus`, `memory_mb`, `storage_mb`) in `evals/config.yml`
+— see [Eval Datasets](eval-datasets.mdx). A trial that dies mid-run with the
+agent process killed is the classic out-of-memory symptom; raise
+`--override-memory-mb` first.
+
+### Custom Dockerfiles
+
+When a skill ships its own `evals/environment/Dockerfile`,
+`--custom-dockerfile-mode` decides how it combines with the eval image:
+
+| Value | Effect |
+| --- | --- |
+| `rebase` (built-in default) | Swaps your `FROM` line onto the eval base image, keeping the rest of your Dockerfile. |
+| `preserve` | Keeps your `FROM` exactly as written and appends the eval dependencies on top. |
+
+Environment rules — size limits, auto-generated fallbacks, and sidecar
+containers — are part of the `evals/` contract in
+[Eval Datasets](eval-datasets.mdx).
+
+## Local mode
+
+<Warning>
+Local mode is experimental and executes the agent directly on your host
+rather than in a container. Its OS sandbox is designed for trusted skills
+and workspaces on a developer machine — use Docker or a remote Harbor backend for
+untrusted code. Every local run prints a "Local mode · Experimental"
+warning panel.
+</Warning>
+
+`--env-mode local` skips containers entirely: the agent CLI already installed
+on your machine runs the trials, wrapped in an OS-level sandbox. On Linux that
+is Bubblewrap — kernel namespace isolation, a read-only view of the system,
+writes confined to the run directories, and a network namespace that is
+isolated when the run is airgapped and shared for model egress when network
+is allowed. On macOS it is Seatbelt, which confines reads and writes and —
+even when network is allowed — denies inbound connections, socket binding,
+and Unix sockets (except the `mDNSResponder` DNS socket); it cannot provide
+full process isolation, so it is the weaker of the two. Native Windows is
+hard-unsupported and fails closed before agent-runtime discovery —
+`SKILLEVALUATOR_LOCAL_SANDBOX=prefer` or `off` is not a bypass; the error
+directs you to WSL2 or `--env-mode docker`. Only `claude-code`, `codex`,
+and `opencode` can run in local mode.
+
+The sandbox policy is controlled by environment variables:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILLEVALUATOR_LOCAL_SANDBOX` | `require` | `require` fails closed when no OS sandbox backend is usable; `prefer` degrades to advisory-only guardrails with a loud warning; `off` skips the sandbox entirely — only for skills you fully trust. No value enables native Windows: the platform check rejects the run first. |
+| `SKILLEVALUATOR_LOCAL_ALLOW_NET` | `true` | Network egress for trials. Set to `0` to airgap a skill that must not reach the network — this also blocks NVIDIA Build local agents entirely, since they require network access. |
+| `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |
+| `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read them — agents receive credentials per-exec instead. |
+| `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
+
+Full semantics for each variable are in
+[Environment Variables](environment-variables.mdx). `doctor --env-mode local`
+verifies the sandbox backend and the installed agent CLIs before you commit to
+a run.
+
+## Workspace modes
+
+Skill Evaluator stages the agent's workspace itself, in both arms, so the
+skill under test never leaks into the without-skill baseline — that isolation
+is what keeps Skill Lift trustworthy. Three flags control what else the agent
+can see:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--skill-workspace-mode [isolated\|group]` | `isolated` | `isolated` stages only the target skill; `group` also stages the sibling skills you name. |
+| `--include-skills PATH` | none | Additional skill directories to stage (repeatable). Requires group mode, via the flag or `skill_workspace.mode: group` in `evals/config.yml`. |
+| `--copy-repo` | off | Copy the surrounding repository into the task environment, for skills that operate on their own repo's files. |
+
+Use group mode when the skill delegates to companion skills and evaluating it
+alone would be unfair; keep the default otherwise — a smaller workspace is a
+cleaner experiment.
+
+## Readiness checks
+
+`doctor` and `health-check` run the same readiness checks and exit `0` only
+when every check passes, so either can gate a script or CI job.
+
+### doctor
+
+```bash title="Readiness check before the first run"
+skillevaluator doctor --agents codex --env-mode docker
+```
+
+`doctor` prints a check-by-check table and names exactly what is missing:
+
+| Check | What it verifies |
+| --- | --- |
+| CLI package | Skill Evaluator is installed, with its version. |
+| Public LLM provider | The evaluator provider resolves — the key that powers dataset generation and grading. |
+| Agent runtime credential | The full credential and model plan for each selected agent resolves — the same plan a real run would use, including the host credentials the agents need. |
+| Harbor agents | Every requested agent name is known. |
+| `<env-mode>` prerequisite | The selected `--env-mode` is usable — Docker Compose responds, the local sandbox and agent CLIs are ready, or the selected Harbor backend's prerequisites are met. |
+
+`doctor` also accepts `--agent-model AGENT=MODEL` (repeatable), so you can
+check the exact model plan a run would use. Add `--verify-models` to probe
+each agent's resolved model live against the provider's catalog — one extra
+pass/fail row per agent, catching a bad model selection before a long run.
+When a probe fails, browse what your credential can actually see with
+`skillevaluator models` (top 10 of the authenticated catalog by default;
+`--limit` and `--json` to adjust).
+
+### health-check
+
+```bash title="Quick readiness check"
+skillevaluator health-check
+```
+
+`health-check` runs the same checks and prints the same table as a plain
+`doctor` run — the only difference is that it lacks two of doctor's flags:
+`--verify-models` and `--agent-model`. Use it as an install smoke test or a
+CI preflight.
+
+## Debug a run
+
+Staged-task and raw Harbor job directories are transient: they are deleted
+by default when a run finishes, on success and on failure alike. Retain them
+with `--harbor-keep-jobs`, then open them with Harbor's own trajectory
+browser — the final Artifacts panel prints the exact `harbor-view` command
+whenever a retained jobs directory exists:
+
+```bash title="Retain job artifacts, then browse them"
+skillevaluator tier3 evaluate ./my-skill --agents codex --harbor-keep-jobs
+skillevaluator harbor-view <jobs-dir>
+```
+
+The retained tree holds the full agent trajectory and grader output for every
+trial — the fastest way to see what an agent actually did. The results layout
+and where `<jobs-dir>` lands on disk are in
+[Reports & Results](reports.mdx); debugging custom graders this way is
+covered in [Custom Graders & Tasks](custom-graders.mdx).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Tier 3: Live Evaluation" icon="flask" href="tier3-live-evaluation.mdx">
+    The end-to-end run workflow — readiness, dataset, evaluation, and results.
+  </Card>
+  <Card title="Custom Graders & Tasks" icon="terminal" href="custom-graders.mdx">
+    Bring your own grader or Harbor task when the defaults can't express
+    success.
+  </Card>
+</CardGroup>

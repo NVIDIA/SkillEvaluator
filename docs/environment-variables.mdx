@@ -1,0 +1,152 @@
+---
+title: "Environment Variables"
+description: "The complete reference of every environment variable Skill Evaluator reads — providers, embeddings, validation, live evaluation, and telemetry."
+layout: reference
+---
+
+Every environment variable Skill Evaluator reads, grouped by feature area. Each group links to the guide that explains the workflow the variables belong to — this page is the inventory, not the tutorial.
+
+Boolean variables accept `1`, `true`, `yes`, or `on` (case-insensitive) as true, and `0`, `false`, `no`, or `off` as false.
+
+## LLM provider
+
+These variables select and configure the provider used for LLM-backed checks and judging. The setup walkthrough, including per-provider export blocks and default models, is in [Providers & Credentials](configuration.mdx).
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILL_EVAL_LLM_PROVIDER` | auto-selected (see below) | Provider for chat and judging: `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. |
+| `SKILL_EVAL_LLM_MODEL` | provider default | Chat model override. Required for `openai-compatible` — that provider has no default. Setting it to an empty string is a configuration error. |
+| `SKILL_EVAL_LLM_BASE_URL` | provider default endpoint | Endpoint override; takes precedence over `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`. Required for `openai-compatible`. Ignored by `nv_build`, whose endpoint is fixed to `https://integrate.api.nvidia.com/v1` — point a custom endpoint at the `openai-compatible` provider instead. |
+| `SKILL_EVAL_LLM_API_KEY` | — | API key for the `openai-compatible` provider (local servers still require it to be set). |
+| `NVIDIA_API_KEY` | — | Credential for the `nv_build` provider (NVIDIA Build). |
+| `OPENAI_API_KEY` | — | Credential for the `openai` provider. |
+| `ANTHROPIC_API_KEY` | — | Credential for the `anthropic` provider. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Alternate OpenAI endpoint; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
+| `ANTHROPIC_BASE_URL` | Anthropic SDK default | Alternate Anthropic endpoint; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
+| `AWS_REGION` | `us-west-2` | Region for the `bedrock` provider. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, ... | — | Standard AWS credential chain, used as-is by the `bedrock` provider. |
+
+### Auto-selection
+
+When `SKILL_EVAL_LLM_PROVIDER` is unset, auto-selection only happens when exactly one public credential is exported:
+
+- `NVIDIA_API_KEY` → `nv_build`
+- `OPENAI_API_KEY` → `openai`
+- `ANTHROPIC_API_KEY` → `anthropic`
+
+If none is set, LLM-backed commands fail with a configuration error. If more than one is set, that is also a configuration error — there is no silent preference order, so set `SKILL_EVAL_LLM_PROVIDER` explicitly when multiple keys are exported.
+
+### SkillSpector bridge
+
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. Skill Evaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILLSPECTOR_PROVIDER` | bridged from your provider | Overrides the provider SkillSpector uses. Must name a supported public provider (`openai`, `anthropic`, `bedrock`, or `nv_build`) — only that provider's credential variables are forwarded. Any other value fails closed: SkillSpector runs without a credential. |
+| `SKILLSPECTOR_MODEL` | bridged from your configured model | Model SkillSpector uses for its LLM analysis. |
+
+## Embeddings
+
+Tier 2 semantic checks use an OpenAI-compatible embeddings API. Workflow context lives in [Providers & Credentials](configuration.mdx#embeddings) and [Tier 2: Deduplication](tier2-deduplication.mdx).
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILL_EVAL_EMBEDDING_PROVIDER` | falls back to `SKILL_EVAL_LLM_PROVIDER` | Embedding provider: `openai`, `nv_build`, or `openai-compatible`. `anthropic` and `bedrock` are rejected — they provide no embeddings API. |
+| `SKILL_EVAL_EMBEDDING_MODEL` | provider default | Embedding model override. Required for `openai-compatible`. |
+| `SKILL_EVAL_EMBEDDING_BASE_URL` | provider default endpoint | Embedding endpoint override; for `openai-compatible` it falls back to `SKILL_EVAL_LLM_BASE_URL`. Ignored by `nv_build`, whose endpoint is fixed to `https://integrate.api.nvidia.com/v1` — use `openai-compatible` for a custom endpoint. |
+| `SKILL_EVAL_EMBEDDING_API_KEY` | falls back to `SKILL_EVAL_LLM_API_KEY` | API key for `openai-compatible` embeddings. `openai` and `nv_build` use their own provider keys. |
+
+## Validation (Tier 1)
+
+These variables tune the static and security checks. The check-by-check guide is [Tier 1: Validation](tier1-validation.mdx).
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILLEVALUATOR_PROFILE` | `external` | Default validation profile when no `--profile` flag is passed. The CLI flag always wins. |
+| `SKILLEVALUATOR_BANDIT_PATH` | auto-discovered | Absolute path to the Bandit executable. |
+| `SKILLEVALUATOR_SEMGREP_PATH` | auto-discovered | Absolute path to the Semgrep executable. |
+| `SKILLEVALUATOR_SKILLSPECTOR_PATH` | auto-discovered | Absolute path to the SkillSpector executable. |
+| `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` | — | Extra allowed skill-root directory names (comma- or whitespace-separated), e.g. `data,fixtures`. Additive only — names extend the built-in allowlist and never replace it. |
+| `SKILLEVALUATOR_SUBMITTER` | auto-detected | Explicit submitter identity for the home-path PII check. It is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected. If none resolves, the home-path check is disabled with a warning. |
+| `SKILLEVALUATOR_PREVIOUS_VERSION` | — | The previously published skill version that the opt-in version check (`--checks version`) compares against. |
+
+<Warning>
+The scanner path overrides fail closed: a value that is not an absolute, executable file is treated as a configuration error rather than silently falling back to another same-named binary on `PATH`. This prevents a planted executable from hijacking a security scan.
+</Warning>
+
+## Live evaluation (Tier 3)
+
+These variables control where results land and how Harbor local mode is confined. The run workflow is [Tier 3: Live Evaluation](tier3-live-evaluation.mdx); execution environments are covered in [Agents & Sandboxes](agents-and-sandboxes.mdx).
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILLEVALUATOR_RESULTS_DIR` | `<skill>/evals/results` | External root for run results. Precedence for writes: the `--results-dir` flag, then this variable, then the legacy in-skill location. Read commands (`view`, `compare`) honor the same order and also fall back to the legacy location so older runs stay visible. |
+| `SKILLEVALUATOR_LOCAL_SANDBOX` | `require` | Local-mode sandbox policy. `require` fails closed when no OS sandbox backend (Bubblewrap on Linux, Seatbelt on macOS) is usable; `prefer` degrades to advisory-only guardrails with a loud warning; `off` skips sandbox probing entirely — for skills you fully trust. No value enables native Windows: local mode fails closed there before anything runs — use WSL2 or `--env-mode docker`. |
+| `SKILLEVALUATOR_LOCAL_ALLOW_NET` | `true` | Network egress for local-mode trials. Set to `0` to airgap a skill that must not reach the network. Incompatible with the `nv_build` provider — NVIDIA Build local agents require network access, so airgapped runs are rejected up front. |
+| `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |
+| `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
+| `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
+| `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
+| `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory; oversized artifacts are skipped and recorded in the artifact manifest. |
+
+## Telemetry
+
+Telemetry is opt-in and off by default — nothing is exported until both the enable flag and an OTLP endpoint are set. The privacy model is explained in [Providers & Credentials](configuration.mdx#telemetry).
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILLEVALUATOR_TELEMETRY_ENABLED` | `false` | Master opt-in switch. |
+| `SKILLEVALUATOR_TELEMETRY_DISABLED` | — | Force-off switch; when true it always wins over the enable flag. |
+| `SKILLEVALUATOR_TELEMETRY_IDENTITY_MODE` | `team_only` | `team_only` exports no user identity; `hashed` exports a salted SHA-256 hash of the login; any other value (`raw`) exports the hash plus the raw login. |
+| `SKILLEVALUATOR_TELEMETRY_HASH_SALT` | empty | Salt for the hashed identity mode. |
+| `SKILLEVALUATOR_TELEMETRY_MAX_ATTR_LEN` | `2048` | Maximum length of any exported attribute value; longer values are truncated. |
+| `SKILLEVALUATOR_TELEMETRY_METRIC_EXPORT_MS` | `1000` | Metric export interval in milliseconds. |
+| `SKILLEVALUATOR_TELEMETRY_METRIC_USER_TAGS` | `false` | When true, user identity attributes are also attached to metrics (not just traces). |
+| `SKILLEVALUATOR_ENV` | `local` | Deployment-environment tag stamped on telemetry resources. |
+
+### Honored OTEL variables
+
+Export is configured through the standard OpenTelemetry environment:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Base OTLP endpoint; required (or a per-signal endpoint) for any export to happen. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | derived from base | Per-signal endpoint overrides. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | — | Comma-separated `key=value` headers for the exporter; `OTEL_EXPORTER_OTLP_TRACES_HEADERS` and `OTEL_EXPORTER_OTLP_METRICS_HEADERS` add per-signal headers. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | Export protocol. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `2` | Export timeout in seconds. |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | `delta` | Metric aggregation temporality; set `cumulative` to switch. |
+| `OTEL_SERVICE_NAME` | `skillevaluator` | Service name on exported resources. |
+| `OTEL_SERVICE_VERSION` | installed package version | Service version on exported resources. |
+| `OTEL_RESOURCE_ATTRIBUTES` | — | Comma-separated `key=value` resource attributes merged into every export. |
+| `OTEL_DEPLOYMENT_ENVIRONMENT` | — | Deployment-environment tag; precedence is `OTEL_DEPLOYMENT_ENVIRONMENT`, then the Datadog-style `DD_ENV`, then `SKILLEVALUATOR_ENV`. |
+
+<Note>
+Subprocesses that Skill Evaluator launches for live evaluation — Docker builds and Harbor runs, including the agent CLIs — never receive your `OTEL_*` or `SKILLEVALUATOR_TELEMETRY_*` variables and get telemetry force-disabled, so they cannot export their own spans or inherit your exporter credentials.
+</Note>
+
+## In-container grader contract
+
+The `HARBOR_*` variables are read by your custom grader *inside* the task container — you never set them yourself, and each has a fixed in-container default. The full reward contract, with defaults and examples, lives in [Custom Graders & Tasks](custom-graders.mdx).
+
+| Variable | What it carries |
+| --- | --- |
+| `HARBOR_REWARD_JSON` | Path where your grader writes its `reward.json` score. |
+| `HARBOR_REWARD_TXT` | Path for the compatibility `reward.txt` dual-write. |
+| `HARBOR_ENTRY_JSON` | Path to the eval case entry being graded. |
+| `HARBOR_ATIF_PATH` | Path to the agent trajectory to grade. |
+| `HARBOR_LOGS_DIR` | Root of the in-container log tree; the agent trajectory lives under its `agent/` subdirectory. |
+| `HARBOR_TESTS_DIR` | Directory holding the staged grader and test assets. |
+| `HARBOR_GRADER` | Path to the staged `grader.py`. |
+
+## Set at runtime, not committed
+
+<Warning>
+Keep credentials out of skill repositories and CI configuration files. Export provider keys as masked secrets at runtime. Agent credentials for Tier 3 come only from the host environment — `evals/config.yml` `runtime_env` carries non-credential values, and any entry that names or references an operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, their base-URL variables, `CLAUDE_CODE_USE_BEDROCK`, and the `AWS_*` credential variables) is rejected at run time, as are names that control the host process (`PATH`, `DOCKER_*`, proxy variables, `SKILLEVALUATOR_*`, and similar). See the blocked-names table in [Providers & Credentials](configuration.mdx#tier-3-credentials-two-roles). With NVIDIA Build, one exported `NVIDIA_API_KEY` covers both the evaluator and the agents in the `docker` and `local` env-modes.
+</Warning>
+
+## See also
+
+- [Providers & Credentials](configuration.mdx) — the setup walkthrough behind the provider and telemetry variables
+- [CLI Reference](cli-reference.mdx) — the per-run flags that override many of these variables
+- [Gate Your CI](ci-integration.mdx) — supplying these variables as masked CI secrets

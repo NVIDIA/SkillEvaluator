@@ -1,0 +1,226 @@
+---
+title: Gate Your CI
+description: Make Skill Evaluator a merge gate — exit codes, a copy-paste GitHub Actions workflow, collection validation, progressive adoption, and machine-readable results.
+---
+
+Turn Skill Evaluator into a merge gate for your skill repository. The recommended gate runs entirely offline — no API key, no network calls beyond installing the tools — so you can adopt it in any CI system today and layer LLM-backed checks on later.
+
+## Exit codes
+
+`skillevaluator validate` communicates pass/fail through its exit code, so a plain `run:` step is already a gate — no output parsing required.
+
+| Exit code | Meaning | What to do |
+| --- | --- | --- |
+| `0` | Success — every gating check passed | Merge |
+| `1` | Validation failed — one or more gating checks failed | Fix the skill; read the report |
+| `2` | Configuration error — bad flags or an unreadable target | Fix the pipeline, not the skill |
+
+Tier 1 checks gate the exit code — and so do Tier 2 deduplication findings when dedup runs (the recommended gate below disables it with `--no-dedup`). Tier 3 live-evaluation results are always advisory inside `validate`: they appear in the reports but never flip a passing run to `1`. That means you can layer Tier 3 on later without destabilizing the gate.
+
+## The recommended gate
+
+```bash title="Keyless CI gate"
+skillevaluator validate ./skills --external --no-dedup -r json,markdown -o reports --min-score 70
+```
+
+Each flag earns its place:
+
+- **`--external`** pins the public-publication profile explicitly instead of relying on the environment, so the gate behaves identically on every runner. The active profile name is stamped into the HTML report and `BENCHMARK.md` (and printed in the run banner with `--verbose`), so a run always records which gate was applied.
+- **`--no-dedup`** skips Tier 2, which needs an embedding-capable provider key (`--no-tier2` is an equivalent alias). Without it the run is fully keyless and hermetic. Drop this flag once you add a provider secret.
+- **`-r json,markdown`** writes a machine-readable report for your pipeline and a Markdown report you can post as a PR comment.
+- **`-o reports`** collects everything in one directory for artifact upload.
+- **`--min-score 70`** is the default quality bar, written out explicitly so raising it later is a visible one-line diff.
+
+## GitHub Actions recipe
+
+A complete workflow: install with uv, add Gitleaks for a complete security result, validate, upload the reports, and post the Markdown report on the pull request.
+
+```yaml title="ci.yml"
+name: Validate skills
+
+on:
+  pull_request:
+    paths:
+      - "skills/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: "3.13"
+
+      - name: Install Skill Evaluator
+        run: uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+
+      - name: Install Gitleaks
+        run: |
+          GITLEAKS_VERSION=8.30.0
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Validate skills
+        run: |
+          skillevaluator validate ./skills --external --no-dedup \
+            -r json,markdown -o reports --min-score 70
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: skillevaluator-reports
+          path: reports/
+
+      - name: Post the Markdown report as a PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require("fs");
+            const [latest] = fs.readdirSync("reports")
+              .filter((f) => f.endsWith(".md"))
+              .sort()
+              .reverse();
+            if (!latest) return;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: fs.readFileSync(`reports/${latest}`, "utf8"),
+            });
+```
+
+The `security` extra installs the Python-packaged scanners (Bandit, Semgrep, pip-audit, SkillSpector); Gitleaks is a Go binary, so it is installed separately from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases). Report filenames embed a sortable timestamp (`skillevaluator-output-<timestamp>.md`), which is why a lexicographic sort finds the newest one. The `if: always()` conditions keep reports flowing even when validation fails — which is exactly when you want them.
+
+The same shape ports to any CI system: install, run `validate`, gate on the exit code, archive `reports/`.
+
+## Validating collections
+
+Point `validate` at a folder of skills and it validates each one:
+
+```bash title="Validate a whole collection"
+skillevaluator validate ./skills --external --no-dedup -c -r json,markdown -o reports
+```
+
+Two flags control how a multi-skill run behaves:
+
+| Flag | Behavior | Use it when |
+| --- | --- | --- |
+| `-c`, `--continue-on-failure` | Runs the full pipeline without stopping early and records every issue; for folder targets, keeps scanning every skill past a CRITICAL finding | You want one complete report per CI run (recommended for gates) |
+| `--fail-fast` | Stops on the first failing check | You want the fastest possible red signal |
+
+`-c` overrides `--fail-fast` if both are passed. For a merge gate, prefer `-c`: contributors get the complete picture in one run instead of a fix-push-repeat loop.
+
+## Adopt progressively
+
+You do not have to turn on the strictest gate on day one. A path that works well:
+
+<Steps>
+  ### Start advisory
+
+  Run the gate but never fail the build. Contributors see reports and get used to the findings before anything blocks a merge.
+
+  ```bash title="Report-only mode"
+  skillevaluator validate ./skills --external --no-dedup -r markdown -o reports || true
+  ```
+
+  ### Gate on Tier 1
+
+  Remove the `|| true`. Exit code `1` now blocks merges on schema, security, PII, license, code-integrity, Unicode, and quality failures — all still keyless. (The `lint` check also runs, but its findings are advisory warnings and never fail validation.)
+
+  ### Raise the quality bar
+
+  Bump `--min-score` above the default `70` once your collection consistently clears it. The score and grade in each report tell you where the collection stands before you move the line.
+
+  ### Add LLM-backed checks
+
+  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and drop `--no-dedup` so Tier 2 overlap checks run too. Note that once dedup runs, its findings gate the exit code alongside Tier 1. See [Providers & Credentials](configuration.mdx) for provider setup.
+
+  ### Add an advisory Tier 3 job
+
+  Run live agent evaluation as a separate, non-blocking job — either `skillevaluator tier3 evaluate` on its own or `validate --tier3` (`--agent-eval` still works as an alias, and `validate --full` runs Tier 1+2+3 in one shot). Tier 3 results never gate `validate`'s exit code; the standalone `tier3 evaluate` exits non-zero only when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because Skill Evaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+</Steps>
+
+<Note>
+Keep provider and agent keys as masked CI secrets in the job environment — never in the repo or in `evals/config.yml`. Skill Evaluator enforces this: a `harbor.runtime_env` entry that names or `${VAR}`-references an operator-owned credential (such as `OPENAI_API_KEY` or `NVIDIA_API_KEY`) fails the Tier 3 run with a hard error. Telemetry is opt-in and off by default, so CI runs send nothing unless you explicitly enable it.
+</Note>
+
+## Custom policy in CI
+
+If the default `external` profile is too loose or too strict for your repository, commit a policy overlay next to your skills and pin it in the gate. Severity decisions then get reviewed like code:
+
+```yaml title="policy.yaml"
+profile: community-strict
+identity:
+  author_email_regex: '<[^>]+@example\.org>'
+severity_overrides:
+  SCHEMA.author_missing: critical
+  LICENSE.*: critical
+```
+
+```bash title="Gate with a pinned policy"
+skillevaluator validate ./skills --external --policy ./policy.yaml --no-dedup -r json,markdown -o reports
+```
+
+The policy overlays the external profile, and the resulting profile name is stamped into the HTML report and `BENCHMARK.md` (and printed in the run banner with `--verbose`) — so a run always tells you which gate produced it. Full overlay syntax is on the [Tier 1: Validation](tier1-validation.mdx) page.
+
+## Parse the JSON
+
+When the exit code is not enough — dashboards, custom thresholds, badge generation — read `reports/skillevaluator-output-<timestamp>.json`. The fields CI cares about sit at the top level:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `overall_passed` | boolean | `true` when every check passed |
+| `overall_status` | string | `passed`, `failed`, or `incomplete` (a required scanner produced no evidence) |
+| `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
+| `total_errors`, `total_warnings` | number | Aggregate counts across all validators |
+| `skills` | array | Per-skill `{ name, passed, issue_count }` |
+| `quality_summary` | array | Quality details with `overall_score` (0–100) and `grade` (A–F); a folder target reports the collection average plus a `skill_count` |
+
+A step that enforces a stricter score than the built-in gate:
+
+```bash title="Gate on quality score with jq"
+report=$(ls -t reports/skillevaluator-output-*.json | head -1)
+jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
+```
+
+`jq -e` exits non-zero when the expression is false, so the step fails the job on its own. For Tier 3 payloads and the full results-on-disk layout, see [Reports & Results](reports.mdx).
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The run exits 2 instead of 1">
+    Exit code `2` is a configuration error — a bad flag or an unreadable target path. Fix the pipeline; the skill was never judged. (Passing `--llm` without a configured provider does not exit `2`: the LLM-backed scanner is marked incomplete and the run fails with `1`.)
+  </Accordion>
+  <Accordion title="overall_status is 'incomplete'">
+    A required scanner is missing or returned no evidence — most often Gitleaks is not installed on the runner. The scanners fail closed: `validate` exits non-zero and the report stays non-green until the scanner is installed and returns valid evidence (see the workflow above).
+  </Accordion>
+  <Accordion title="The report artifact is empty">
+    Make sure the artifact `path` matches your `-o` directory and that the upload step carries `if: always()` — otherwise a failed gate skips the upload, and you lose the report exactly when you need it.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Reports & Results" icon="book" href="reports.mdx">
+    What every report format contains and how to read scores, severities, and Tier 3 payloads.
+  </Card>
+  <Card title="Tier 1: Validation" icon="shield" href="tier1-validation.mdx">
+    Every check behind the gate — what it inspects and how to fix findings.
+  </Card>
+  <Card title="Providers & Credentials" icon="flask" href="configuration.mdx">
+    Add an LLM provider to unlock `--llm`, Tier 2 dedup, and Tier 3.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+    The complete flag reference for `validate` and every other command.
+  </Card>
+</CardGroup>

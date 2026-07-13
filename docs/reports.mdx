@@ -1,0 +1,293 @@
+---
+title: "Reports & Results"
+description: "Every file Skill Evaluator writes — report formats, file naming, BENCHMARK.md, the Tier 3 results tree, and how to read dimensions, Skill Lift, and pass@k."
+---
+
+This page maps everything Skill Evaluator writes to disk and how to read it.
+Nothing here requires an API key — it is the output contract for every command,
+from a keyless `quality-check` to a full live evaluation.
+
+Two kinds of artifacts exist. Tier 1 and Tier 2 commands render **reports** —
+one per format, selected with `-r`. Tier 3 (`tier3 evaluate`) additionally
+writes a **results tree**: a timestamped directory of raw scores, trials, and
+lift data that `view` and `compare` read back later.
+
+## Report formats
+
+Every Tier 1 and Tier 2 command accepts `-r`/`--report` and `-o`/`--output-dir`.
+The flag is repeatable and accepts comma- or space-separated values
+(`-r cli,json,html` or `-r cli json html`). By default — with no `-r` at all —
+the terminal shows a compact summary and the run writes `html` and `json`
+report files. An explicit `-r` is honored exactly, including `-r cli`, which
+prints the full terminal report and writes no files. Files land in `reports/`
+unless you override it with `-o`.
+
+For `validate`, that compact default is a pipeline view — a per-check ticker
+plus a summary. Pass `--verbose` to get the full per-check detail stream in
+the terminal instead.
+
+| Format | What it is | Reach for it when |
+| --- | --- | --- |
+| `cli` | Full Rich terminal report | You want every finding at the keyboard, no files written |
+| `json` | Machine-readable JSON (default) | CI needs to parse scores and findings |
+| `html` | Standalone HTML report (default) | A human needs to review or archive a run |
+| `markdown` | Markdown for PR comments | You want the result posted on a pull request |
+
+```bash title="One run, three report files"
+skillevaluator validate ./my-skill -r json,html,markdown -o reports
+```
+
+For gating a pipeline on the JSON output, see [Gate Your CI](ci-integration.mdx).
+
+## File naming
+
+Report filenames follow two patterns, both under the output directory:
+
+| Command | Basename | Overwrites? |
+| --- | --- | --- |
+| `validate` (full run) | `skillevaluator-output-<timestamp>` | No — each run gets a new, sortable name |
+| `quality-check` | `skillevaluator-quality` | Yes — fixed name per format |
+| `rubric-eval` | `skillevaluator-rubric` | Yes |
+| `security-scan` | `skillevaluator-security` | Yes |
+| `pii-scan` | `skillevaluator-pii` | Yes |
+| `lint-scripts` | `skillevaluator-script-lint` | Yes |
+| `similarity-check` | `skillevaluator-similarity` | Yes |
+| `context-optimization-check` | `skillevaluator-context` | Yes |
+| `dedup-scan` | `skillevaluator-dedup` | Yes |
+
+The extension matches the format (`.json`, `.html`, `.md`); the `cli` format
+prints to the terminal and never writes a file. A full `validate` run's
+timestamp is `YYYYMMDDHHMMSS`, so
+`-r json` produces something like `skillevaluator-output-20260709141530.json`
+and never clobbers the previous run.
+
+## BENCHMARK.md
+
+When the target is a skill, `validate` always writes `BENCHMARK.md` to the
+output directory — regardless of which `-r` formats you picked, and even when
+validation fails. It is a publication card: evaluation date, the active
+validation profile, per-tier summaries, and (when Tier 3 ran) agents, dataset
+composition, and the dimension-by-dimension results table.
+
+The card carries one overall verdict — `PASS`, `FAIL`, or `INCOMPLETE`. It
+fails closed: if a required scanner produced no trustworthy evidence, the
+verdict is `INCOMPLETE` and the card explicitly says not to use it to recommend
+publication. A Publication Recommendation section appears only on a clean
+`PASS`. An advisory Tier 3 run that was skipped doesn't fail the combined
+verdict: the card adds an explicit `Tier 3 live evaluation: SKIPPED — <reason>`
+line and adjusts the publication recommendation to say the live evaluation
+didn't run. Keep the file with the skill and refresh it whenever the skill or
+its eval dataset materially changes.
+
+## Safety guarantees
+
+Report writes are hardened: every file is written atomically (a temporary file
+renamed into place), and Skill Evaluator refuses to write through symlinks,
+Windows junctions, or paths with parent traversal. A run that is interrupted
+mid-write never leaves a half-written report, and a report path can't be used
+to redirect output somewhere unexpected.
+
+## Tier 3 results on disk
+
+`tier3 evaluate` does not use `-r`/`-o`. It writes a results tree to the first
+of:
+
+1. `--results-dir <dir>` on the command line
+2. the `SKILLEVALUATOR_RESULTS_DIR` environment variable
+3. `<skill>/evals/results/` (the default)
+
+With an external root (the first two options), each skill gets its own
+subdirectory — runs land under `<dir>/<skill-name>/`, not directly under
+`<dir>`.
+
+Each run creates a directory named by its run ID (`YYYYMMDD_HHMMSS`), and a
+`latest` symlink points at the newest run:
+
+<FileTree>
+- evals/
+  - results/
+    - latest/
+    - 20260709_141530/
+      - result.json
+      - run_config.json
+      - attempt_policy.json
+      - report.html
+      - comparison.json
+      - codex/
+        - lift.json
+        - pass_at_k_lift.json
+        - with-skill/
+          - summary.json
+          - trials/
+        - without-skill/
+          - summary.json
+          - trials/
+</FileTree>
+
+- **`result.json`** — the run summary: run ID, per-agent scores and lift,
+  pass@k, the resolved run configuration, and execution status.
+- **`run_config.json`** / **`attempt_policy.json`** — exactly how the run was
+  configured: environment, attempts, concurrency, grading mode, pass threshold.
+- **`report.html`** — the human-readable report, generated automatically at
+  the end of every run.
+- **`comparison.json`** — the cross-agent comparison table; written only when
+  you ran more than one agent.
+- **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
+  deltas between the two arms; written only when both arms produced scores
+  (a `--skip-baseline` run has neither).
+- **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
+  (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
+  per-trial artifacts.
+
+<Note>
+  Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
+  same precedence, then fall back to the legacy `<skill>/evals/results/`
+  location — so old runs stay visible after you configure
+  `SKILLEVALUATOR_RESULTS_DIR`. The results tree is generated output: don't
+  commit it.
+</Note>
+
+## Reading a live-eval report
+
+### The terminal summary
+
+A finished `tier3 evaluate` run prints two tables and closes with a compact
+**Artifacts** panel. **Results by Evaluator** lists each evaluation signal
+with its per-arm scores and Skill Lift; **Results by Dimension** rolls those
+signals up into the five dimensions below. A metric the run couldn't score
+renders as `NO SCORE` — it is never coerced to 0.0 — and unscored metrics are
+omitted from the averages, so `overall_score` can be `null` in the JSON. The
+Artifacts panel shows the HTML report path, the output directory, and — only
+when a retained Harbor jobs directory exists — a ready-to-paste `harbor-view`
+command.
+
+### The five dimensions
+
+With `default` or `default_plus_custom` grading, reports lead with five
+dimensions, each answering one question:
+
+| Dimension | Question answered |
+| --- | --- |
+| Security | Is it safe to use? |
+| Correctness | Does it do what it's supposed to? |
+| Discoverability | Is it loaded when it should be? |
+| Effectiveness | Is it better with the skill than without? |
+| Efficiency | Does it use fewer tool calls and tokens? |
+
+Dimension scores are 0.0–1.0 rollups of the underlying evaluation signals. The
+LLM judge's verdict bands are fixed: a dimension **passes** at 0.7 or above, is
+**neutral** from 0.4 up to 0.7, and **fails** below 0.4. The judge runs on the
+configured provider model; override it per run as described in
+[Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+
+### Skill Lift
+
+Skill Lift is the with-skill score minus the without-skill baseline — the
+direct measurement of what your skill contributes. Because live agent runs are
+noisy (especially at low attempt counts), small deltas are deliberately kept
+neutral. The verdict bands:
+
+| Lift | Verdict | Read it as |
+| --- | --- | --- |
+| ≥ +0.05 | Pass | The skill measurably helps — publishable signal |
+| between −0.10 and +0.05 | Neutral | Within run noise; raise `--n-attempts` before concluding anything |
+| ≤ −0.10 | Fail | The skill makes the agent worse — investigate before shipping |
+
+These are the bands the reports color-code, with one exception: the single
+overall Tier 3 verdict in the combined `validate --tier3` report (and in
+`BENCHMARK.md`) is stricter, flipping to fail at −0.05 or below.
+
+So a +0.03 lift isn't a pass — it's noise until more attempts say otherwise.
+Lift requires both arms; if you ran with `--skip-baseline`, there is no lift to
+report. In `custom_only` grading, your own grader defines the score and lift —
+see [Custom Graders & Tasks](custom-graders.mdx).
+
+### pass@k
+
+pass@k is the reliability signal, reported separately from the dimension
+scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
+counts as passed when at least one attempt clears the `--pass-threshold`
+score. Comparing pass@k across arms (in `pass_at_k_lift.json`) tells you
+whether the skill makes success more *repeatable*, not just whether the average
+score moved.
+
+## Browse results
+
+### view
+
+Opens the newest `report.html` for a skill in your browser, regenerating it
+from the stored run data if the file is missing.
+
+```bash title="Open the latest HTML report"
+skillevaluator view ./my-skill
+```
+
+### compare
+
+Prints a side-by-side terminal table of the most recent stored results per
+agent — score and lift per evaluator — across everything under the results
+root. Summaries whose execution status is anything other than `succeeded`
+are ignored, so a failed run can't masquerade as a score.
+
+```bash title="Compare stored results across agents"
+skillevaluator compare ./my-skill
+```
+
+Both commands accept `--results-dir` to read from a non-default location.
+
+### harbor-view
+
+Opens retained Harbor job artifacts in Harbor's own trajectory browser — the
+deepest debugging view, down to individual agent transcripts. Staged-task and
+raw Harbor job directories are transient: they are deleted after collection by
+default, on success and failure alike. Pass `--harbor-keep-jobs` to retain
+them — the retention outcome is recorded in the results, and the Artifacts
+panel prints this command only when a retained jobs directory actually exists.
+Retained jobs live under `_harbor-jobs/` inside the run directory.
+
+```bash title="Browse retained trajectories"
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker --harbor-keep-jobs
+skillevaluator harbor-view ./my-skill/evals/results/20260709_141530/_harbor-jobs
+```
+
+(`skillevaluator tier3 harbor-view` is the same command under its expert
+alias.)
+
+## Machine-readable contract
+
+For CI and tooling, two JSON entry points matter:
+
+- **Standalone `tier3 evaluate` runs** — parse `result.json` in the run
+  directory (or follow `latest`). It carries per-agent scores, dimensions,
+  lift, pass@k, trial counts, the attempt policy, and execution status.
+  Unscored metrics stay unscored rather than defaulting to 0.0, so
+  `overall_score` can be `null`.
+- **`validate --tier3` runs** — the combined
+  `skillevaluator-output-<timestamp>.json` report embeds the Tier 3 payload
+  alongside the Tier 1 and Tier 2 results, so one file covers all three
+  tiers. Tier 3 findings are advisory there: they never change the exit code.
+
+Both paths speak the same dialect: standalone `tier3 evaluate` and
+`validate --tier3` share one HTML renderer for `report.html`, and both embed
+the Tier 3 payload at schema version `2.0`.
+
+Exit codes and a ready-made JSON gating recipe live in
+[Gate Your CI](ci-integration.mdx).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Gate Your CI" icon="shield" href="ci-integration.mdx">
+    Turn the JSON report and exit codes into a merge gate, with a copy-paste
+    GitHub Actions workflow.
+  </Card>
+  <Card title="Tier 3: Live Evaluation" icon="flask" href="tier3-live-evaluation.mdx">
+    Run the evaluation that produces the results tree on this page.
+  </Card>
+  <Card title="Custom Graders & Tasks" icon="book" href="custom-graders.mdx">
+    Define your own scoring when the default graders can't express success.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+    Every flag for view, compare, and the report options, with exact defaults.
+  </Card>
+</CardGroup>

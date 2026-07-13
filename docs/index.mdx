@@ -1,75 +1,84 @@
 ---
-title: "SkillEvaluator"
-description: "A multi-tier framework for evaluating AI agent skills — deterministic quality gates, semantic overlap detection, synthetic eval datasets, and live agent A/B evaluation."
+title: "Skill Evaluator"
+description: "A multi-tier framework for evaluating AI agent skills — offline quality and security gates, semantic overlap detection, and live agent A/B evaluation, from one CLI."
+layout: overview
 ---
 
-SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent
-skills — deterministic quality gates, semantic overlap detection, synthetic eval
-dataset generation, and live agent evaluation. A skill is a folder of
-instructions and scripts (a `SKILL.md` plus supporting files) that extends an AI
-agent — see the [Agent Skills specification](https://agentskills.io/).
-SkillEvaluator gates skills through three progressively deeper tiers, from free
-offline checks to live agent A/B evaluation.
+Skill Evaluator measures whether an AI agent skill is safe, unique, and actually useful — a skill being a folder of instructions and scripts (a `SKILL.md` plus supporting files) that extends an AI agent, per the [Agent Skills specification](https://agentskills.io/). It gates skills through three progressively deeper tiers, from free offline checks to live agent A/B evaluation.
 
-Each tier is an independent entry point — run any command directly; nothing
-requires running the earlier tiers first. With no keys configured and the Tier 1
-scanners installed, `validate` runs without an API credential (its dedup pass
-skips gracefully); the [credential map](configuration.mdx#what-needs-credentials-and-what-runs-offline)
-lists exactly what each command needs.
+<Note>
+  Skill Evaluator's support level is **Experimental**: community-supported on a best-effort basis through [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues), with no SLA. See [SUPPORT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md).
+</Note>
 
-## Three-tier overview
+## The three tiers
 
-| Tier | Purpose | Representative commands | Requires |
-| --- | --- | --- | --- |
-| [Tier 1](tier1-validation.mdx) | Validate schema, quality, security, secrets, PII, licenses, code integrity, Unicode safety, and scripts; optionally add LLM judging and deeper security analysis | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | Deterministic checks need no API key; full scanner coverage needs the `security` extra and Gitleaks; LLM checks need a provider key |
-| [Tier 2](tier2-deduplication.mdx) | Detect redundant content within one skill and overlapping skills across a collection or local catalog | `context-optimization-check` / `dedup-scan` (intra-skill), `similarity-check` (inter-skill) | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
-| [Tier 3](tier3-live-evaluation.mdx) | Create evaluation datasets and measure agent behavior with and without a skill | `create-eval-dataset`, `evaluate`, `compare` | Keyless templates and report inspection need no credential; LLM generation needs a provider key; live evaluation also needs the agent credential and a Docker, local OS, or cloud sandbox |
+Each tier answers one question about your skill.
 
-## Quickstart
+<CardGroup cols={3}>
+  <Card title="Tier 1: Validation" href="tier1-validation.mdx">
+    **Is this skill safe and well-formed?** Deterministic schema, quality, security, PII, license, and script checks that run offline — plus optional LLM-as-judge scoring.
+  </Card>
+  <Card title="Tier 2: Deduplication" href="tier2-deduplication.mdx">
+    **Does it overlap with what exists?** Embedding similarity finds repeated guidance inside one skill and overlapping skills across a collection or catalog.
+  </Card>
+  <Card title="Tier 3: Live Evaluation" href="tier3-live-evaluation.mdx">
+    **Does it actually help the agent?** A real agent runs generated tasks with and without the skill, inside a sandbox, and the difference is measured.
+  </Card>
+</CardGroup>
 
-Install every SkillEvaluator Python feature with one command.
-[uv](https://docs.astral.sh/uv/) automatically provisions Python 3.13; if uv is
-not installed yet, follow its
-[one-command installation](https://docs.astral.sh/uv/getting-started/installation/):
+Every tier is an independent entry point — run any command directly; nothing requires running the earlier tiers first.
 
-```bash
+| Tier | Representative commands | Requires |
+| --- | --- | --- |
+| [Tier 1](tier1-validation.mdx) | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra and Gitleaks for full scanner coverage; a provider key for LLM checks |
+| [Tier 2](tier2-deduplication.mdx) | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
+| [Tier 3](tier3-live-evaluation.mdx) | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
+
+## Try it in two minutes
+
+Install with [uv](https://docs.astral.sh/uv/) and run the keyless quality check against your own skill — no API key, Docker, Gitleaks, or repository clone required:
+
+```bash title="No API key required"
 uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-```
-
-Run the first offline check directly against your own skill — **no API key,
-Docker, Gitleaks, or repository clone required**:
-
-```bash
 skillevaluator quality-check ./my-skill
 ```
 
-For a complete offline Tier 1 run, install Gitleaks once, then use `validate`:
+You get a 0–100 quality score with an A–F grade. From there, the [Quickstart](quickstart.mdx) walks through a complete offline Tier 1 run and wiring up a provider for the LLM-backed parts.
 
-```bash
-brew install gitleaks                         # macOS
-skillevaluator validate ./my-skill --no-dedup
-```
+## How a run flows
 
-See [Installation](installation.mdx) for per-tier extras, plain pip, and Docker, and
-[Configuration](configuration.mdx) to wire up a provider for the LLM-backed parts.
+<Frame background="subtle" caption="The Skill Evaluator three-tier pipeline">
+  <img src="./assets/pipeline-overview.svg" alt="Skill Evaluator pipeline: skill directory through Tier 1 static validation, Tier 2 semantic deduplication, and Tier 3 live agent evaluation, producing reports and a verdict" />
+</Frame>
 
-## The tiers
+Tier 1's deterministic gates run offline. Tier 2 and the optional Tier 1 LLM checks need a provider key, and Tier 3 adds the agent credential and a sandbox. Every run ends in [reports](reports.mdx) — CLI, JSON, HTML, or Markdown.
 
-- **[Tier 1: Static and Security Validation](tier1-validation.mdx)** — the everyday
-  command and a ready-made CI gate. Deterministic schema, quality, security,
-  PII, license, code-integrity, Unicode, and script checks that run offline,
-  plus optional LLM-as-judge scoring.
-- **[Tier 2: Semantic Deduplication](tier2-deduplication.mdx)** — find duplicated
-  guidance inside one skill or compare skills across a collection with embedding
-  similarity.
-- **[Tier 3: Live Agent Evaluation](tier3-live-evaluation.mdx)** — measure whether a
-  skill actually makes an agent better by running a real agent against generated
-  tasks, with and without the skill, inside Harbor sandboxes.
+## What Tier 3 measures
 
-## More
+- **Five dimensions** — Security, Correctness, Discoverability, Effectiveness, and Efficiency: human-readable scores that lead every standard grading report.
+- **Skill Lift** — the measured difference between the with-skill and without-skill runs; the number that says whether the skill earns its place.
+- **pass@k** — multi-attempt reliability, reported separately from the dimension scores.
 
-- [Developer Guide](developer-guide.mdx) — contributor setup
-- [SkillSpector](https://github.com/NVIDIA/SkillSpector) — the skill security
-  scanner used by the `security` extra
-- [Harbor](https://github.com/harbor-framework/harbor) — the sandbox framework
-  behind Tier 3
+How to read all three, and the on-disk results contract, live in [Reports & Results](reports.mdx).
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="quickstart.mdx">
+    First evaluation result in about two minutes, no API key.
+  </Card>
+  <Card title="Gate Your CI" icon="shield" href="ci-integration.mdx">
+    Make Skill Evaluator a merge gate — exit codes, a GitHub Actions recipe, and progressive adoption.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+    Every command, every flag, exact defaults.
+  </Card>
+  <Card title="Contributing" icon="book" href="developer-guide.mdx">
+    Dev environment, tests, docs workflow, and how to submit a change.
+  </Card>
+</CardGroup>
+
+- [SkillEvaluator on GitHub](https://github.com/NVIDIA/SkillEvaluator)
+- [Support](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md) — best-effort, through GitHub Issues
+- [Security policy](https://github.com/NVIDIA/SkillEvaluator/blob/main/SECURITY.md) — report vulnerabilities privately, never in a public issue
+- [License](https://github.com/NVIDIA/SkillEvaluator/blob/main/LICENSE) — Apache-2.0

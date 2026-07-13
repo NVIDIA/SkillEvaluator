@@ -1,0 +1,316 @@
+---
+title: "Eval Datasets"
+description: "Author the evals/ directory that powers Tier 3 — the dataset format, generation with create-eval-dataset, the config.yml run policy, fixtures, and custom container environments."
+---
+
+Everything a live evaluation runs on lives in one directory: `evals/` inside
+your skill. This page is the contract for that directory — what goes in it,
+the dataset format `tier3 evaluate` reads, and how to generate and refine
+cases.
+You can generate a starter dataset with no API key; LLM-backed generation and
+refinement need a configured provider (see
+[Providers & Credentials](configuration.mdx)).
+
+## The evals/ directory
+
+Skill Evaluator recognizes this tree inside your skill:
+
+<FileTree>
+- my-skill/
+  - SKILL.md
+  - scripts/
+    - requirements.txt
+    - apt-packages.txt
+  - evals/
+    - evals.json
+    - config.yml
+    - EVAL.md
+    - files/
+    - environment/
+      - Dockerfile
+      - docker-compose.yaml
+      - mcp_servers.toml
+    - harbor/
+    - grader.py
+    - results/
+</FileTree>
+
+Only the dataset is required. Everything else is optional and additive:
+
+| Path | Purpose | Commit it? |
+| --- | --- | --- |
+| `evals/evals.json` | The eval dataset. Without it, live evaluation cannot run. | Yes — required |
+| `evals/config.yml` | Run policy: attempts, thresholds, runtime env, agent models, grading mode. | Yes |
+| `evals/EVAL.md` | Developer guidance that steers dataset generation. | Yes |
+| `evals/files/` | Input fixtures, staged into `/workspace/input/` in the container. | Yes |
+| `evals/environment/` | Custom container environment: Dockerfile, sidecars, MCP servers. | Yes |
+| `evals/harbor/` | Bring-your-own-task native Harbor tasks — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
+| `evals/grader.py` or `evals/grader.sh` | Bring-your-own-grader script — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
+| `evals/results/` | Run output, written by `tier3 evaluate`. Never author it by hand. | No — output only |
+
+Unrecognized files in `evals/` are ignored, and the validator warns about them
+so typos don't silently drop a fixture.
+
+## Dataset format
+
+New datasets use the [agentskills.io](https://agentskills.io) shape: a
+top-level object with `skill_name` and an `evals` array.
+
+```json title="evals/evals.json"
+{
+  "skill_name": "my-skill",
+  "evals": [
+    {
+      "id": "my-skill-001",
+      "prompt": "Use my-skill to do the thing",
+      "expected_output": "Expected outcome description",
+      "assertions": [
+        "Read my-skill/SKILL.md",
+        "Returned correct result"
+      ]
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `skill_name` | Yes | Name of the skill under evaluation. |
+| `evals` | Yes | Array of eval cases. |
+| `id` | Yes | Unique case ID. Start with a letter or digit; ASCII letters, digits, `.`, `_`, `-` only; at most 128 characters. Integer IDs are accepted and canonicalized to strings. |
+| `prompt` | Yes | The user request the agent receives. |
+| `expected_output` | Yes | Outcome-oriented description of what a successful agent produced. |
+| `assertions` | No | Observable agent behaviors to verify, one per entry. |
+| `expected_skill` | No | Skill the agent should route to; `null` for negative cases. |
+| `expected_script` | No | Script the agent should run; `null` if none applies. |
+| `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
+
+The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
+`evals.yml` — `tier3 evaluate` accepts all four.
+
+<AccordionGroup>
+  <Accordion title="Legacy flat format">
+    Older datasets are a flat array of entries with `question` instead of
+    `prompt`. They still run, but the validator emits a deprecation warning —
+    migrate to the agentskills.io shape for new work.
+
+    | Legacy field | agentskills.io equivalent |
+    | --- | --- |
+    | `question` (required, with `id`) | `prompt` |
+    | `ground_truth` (recommended) | `expected_output` |
+    | `expected_behavior` (recommended) | `assertions` |
+    | `expected_skill` (recommended) | `expected_skill` (unchanged) |
+    | `acceptable_alternates` | `acceptable_skills` |
+  </Accordion>
+</AccordionGroup>
+
+## Generate a dataset
+
+`create-eval-dataset` writes `evals/evals.json` for you, grounded in your
+`SKILL.md` name, description, body, and script filenames:
+
+```bash title="Generate the full four-case dataset"
+skillevaluator create-eval-dataset ./my-skill --full
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--full` | Generate the full 4-bucket dataset (four cases) instead of one. |
+| `--no-llm` | Use local templates only — no API key required. |
+| `--dry-run` | Preview without writing. |
+| `--force` | Overwrite existing `evals/evals.json`. |
+| `--prompt PATH` | Use a developer guidance file instead of auto-detected `evals/EVAL.md`. |
+| `--refine` | Refine cases using existing or collected trajectories. |
+| `--from-results PATH` | With `--refine`: read trajectories from a specific results directory. |
+| `--results-dir DIRECTORY` | With `--refine`: external results root to search first. |
+
+Without an LLM provider configured, generation automatically falls back to the
+same templates `--no-llm` uses, so the command always succeeds. Exact defaults
+for every flag are in the
+[CLI Reference](cli-reference.mdx#create-eval-dataset).
+
+You don't have to generate a dataset up front at all: `tier3 evaluate
+--autopilot` (and `validate --full` or `validate --autopilot`) creates exactly
+one eval case when no evaluation source exists — LLM-generated with your
+configured provider, falling back to a deterministic template case when no
+key is available. Autopilot never overwrites an existing source; if
+`evals/evals.json` (or `evals/harbor/`) is already there, it runs with what
+you wrote.
+
+<Warning>
+  `--force` overwrites `evals/evals.json` without a backup. `--refine` implies
+  overwrite too — it produces the final version of the dataset.
+</Warning>
+
+### The four case buckets
+
+`--full` generates one case per bucket. The mix matters: the negative case
+protects against a skill that triggers when it shouldn't.
+
+| Bucket | Intent |
+| --- | --- |
+| Explicit | The user names the skill directly. |
+| Implicit | The user describes the task without naming the skill. |
+| Contextual | The task appears inside a realistic project scenario. |
+| Negative | A request that should not activate the skill. |
+
+### Guide generation with EVAL.md
+
+Place an `EVAL.md` in `evals/` and the generator picks it up automatically.
+Three headings are parsed as structured hints; everything else is general
+context:
+
+```markdown title="evals/EVAL.md"
+## Questions
+- Sample user prompts to use as eval questions
+
+## Behaviors
+- Expected agent behaviors to verify
+
+## Notes
+- General context and constraints
+```
+
+Author guidance is the highest-priority input: behaviors you list here are
+preserved in the generated cases even when a trial agent skipped them — that
+is exactly the regression the eval should catch.
+
+### Refine from real runs
+
+`--refine` grounds the dataset in real agent behavior. It looks for existing
+trajectories from a previous evaluation (checking `--from-results` or the
+latest resolved results first); if none exist, it runs the `claude-code` agent
+via Harbor to collect one, then rewrites `expected_output` and assertions from
+what the agent actually did:
+
+```bash title="Agent-refined generation"
+skillevaluator create-eval-dataset ./my-skill --full --refine
+```
+
+Collecting a fresh trajectory needs Docker, the `tier3` extra, and a configured
+provider. With `--no-llm`, refinement still works — it applies template-based
+updates from the trajectory instead of an LLM rewrite.
+
+## Run policy: evals/config.yml
+
+The dataset says *what* to evaluate; `evals/config.yml` (or `config.yaml`)
+says *how* to run it. CLI flags always override config values.
+
+```yaml title="evals/config.yml"
+schema_version: 1
+
+harbor:
+  task_source: auto              # auto | evals_json | native_harbor
+  custom_dockerfile_mode: preserve   # preserve | rebase
+  n_attempts: 3
+  pass_threshold: 0.50
+  n_concurrent: 2
+  timeout_multiplier: 1.5
+  resources:
+    cpus: 2
+    memory_mb: 4096
+  runtime_env:
+    - SERVICE_API_TOKEN          # expands to ${SERVICE_API_TOKEN} at run time
+  pre_agent_setup:
+    - service-cli auth login --token "$SERVICE_API_TOKEN"
+    - service-cli whoami >/dev/null
+  agents:
+    claude-code:
+      model: your-model-id       # any model your agent CLI accepts
+
+skill_workspace:
+  mode: isolated                 # isolated | group
+  include: []
+
+grading:
+  mode: default                  # default | default_plus_custom | custom_only
+```
+
+| Key | Accepts | Effect |
+| --- | --- | --- |
+| `schema_version` | `1` | Required. Only version 1 is supported. |
+| `harbor.task_source` | `auto`, `evals_json`, `native_harbor` | Where cases come from: auto-detect, the eval dataset, or native Harbor tasks. |
+| `harbor.custom_dockerfile_mode` | `preserve`, `rebase` | How your custom Dockerfile is handled. |
+| `harbor.base_image_mode` | `reuse`, `rebuild`, `disabled` | Shared pre-built eval base image (Docker env mode only): reuse it across tasks, force a rebuild, or ship self-contained per-task Dockerfiles. Default: `disabled`. |
+| `harbor.n_attempts` | integer ≥ 1 | Attempts per case (drives pass@k). |
+| `harbor.pass_threshold` | 0.0–1.0 | Minimum score for an attempt to count as a pass. |
+| `harbor.stop_on_pass` | boolean | Stop a case's remaining attempts after the first pass. Requires `n_attempts` > 1. |
+| `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
+| `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
+| `harbor.timeout_multiplier` | number > 0 | Scales task timeouts. |
+| `harbor.agent_runtime_preflight` | boolean | Bounded one-task smoke run that checks agent runtime readiness before the full evaluation. Default: `true`. |
+| `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
+| `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
+| `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
+| `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. Alias: `setup_commands`. |
+| `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
+| `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
+| `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
+
+<Note>
+  Unknown keys are rejected, not ignored — a typo like `n_attemps` fails the
+  config load instead of silently running with defaults. Use only one of each
+  alias pair. Agent and provider credentials never go through `runtime_env` —
+  they come only from your host environment; see the two-credential-roles
+  section in [Providers & Credentials](configuration.mdx).
+</Note>
+
+## Fixtures and custom environments
+
+Two optional directories shape the world the agent works in.
+
+**`evals/files/`** holds input fixtures — test data, configs, sample
+documents. The entire directory is copied into `/workspace/input/` inside the
+container, so prompts can reference those paths directly.
+
+**`evals/environment/`** customizes the container itself:
+
+| File | Rules |
+| --- | --- |
+| `Dockerfile` | At most 20 KB; the first non-comment line must be `FROM`. The build context is `environment/` itself, so `COPY` paths are relative to it (`COPY skills/`, not `COPY environment/skills/`). If absent, an image is auto-generated from `scripts/requirements.txt` and `scripts/apt-packages.txt` on a `python:3.12-slim` base. |
+| `docker-compose.yaml` | Sidecar services only (databases, APIs, mock servers) launched alongside the agent container. A strict allowlist applies: host port mappings are removed, and host mounts, privileged access, and unrecognized keys are rejected. Also accepted as `docker-compose.yml`. |
+| `mcp_servers.toml` | MCP servers injected into the container. TOML array-of-tables `[[mcp_servers]]`; each entry needs `name` plus `url` or `command`. Command-based servers use `transport = "stdio"` (auto-inferred); URL-based servers default to `sse`. |
+| Subdirectories | Copied into the container environment (config files, seed data for sidecars). Any name except `__pycache__` and `.git`. |
+
+```toml title="evals/environment/mcp_servers.toml"
+[[mcp_servers]]
+name = "my-api"
+url = "http://localhost:8080"
+
+[[mcp_servers]]
+name = "my-tool"
+command = "python /workspace/tools/server.py"
+transport = "stdio"
+```
+
+## Validate before you run
+
+Check the whole contract — dataset fields, case IDs, `config.yml`, Dockerfile
+rules, MCP declarations — without launching anything:
+
+```bash title="Validate the evals/ contract"
+skillevaluator tier3 validate ./my-skill
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--json` | Emit JSON output. |
+| `--strict` | Treat warnings as failures. |
+| `--harbor-contract` | Validate the Harbor task and reward contract for BYOT/BYOG setups — see [Custom Graders & Tasks](custom-graders.mdx). |
+
+Run it in CI or before a long evaluation: it catches an empty dataset, missing
+required fields, duplicate case IDs, and invalid config in seconds.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Run a live evaluation" icon="rocket" href="tier3-live-evaluation.mdx">
+    Point `tier3 evaluate` at your skill and measure Skill Lift with the
+    dataset you just authored.
+  </Card>
+  <Card title="Custom graders and tasks" icon="flask" href="custom-graders.mdx">
+    When assertions aren't enough, bring your own grader or a complete Harbor
+    task.
+  </Card>
+</CardGroup>

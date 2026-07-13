@@ -4,6 +4,8 @@ The quickest install is the one-liner from the
 [README quickstart](../README.md#quickstart) — everything on this page is for
 tailoring it: smaller installs, plain pip, and Docker.
 
+This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) for the

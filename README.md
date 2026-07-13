@@ -39,6 +39,8 @@ automatically provisions Python 3.13; if uv is not installed yet, follow its
 uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
+This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
+
 The `all` bundle includes the Tier 1 Python scanners, Tier 2, Tier 3 with
 Harbor, LLM clients, and telemetry. System-level tools remain explicit:
 Gitleaks is required for a complete Tier 1 security result, Docker is required

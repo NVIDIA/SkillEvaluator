@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 instances:
-  - url: https://nvidia-skillevaluator.docs.buildwithfern.com/skillevaluator
+  - url: nvidia-skillevaluator.docs.buildwithfern.com/skillevaluator
     custom-domain: docs.nvidia.com/skillevaluator
     multi-source: true
 

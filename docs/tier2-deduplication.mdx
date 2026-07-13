@@ -12,8 +12,8 @@ analysis also needs a chat LLM. See
 [fully local recipe](configuration.mdx#fully-local-setup) when skill content
 must not leave your machine.
 
-Both checks read local files only. No external vector database or catalog
-service is required.
+Both checks read local files only.
+No external vector database or catalog service is required.
 
 ## Which check do you need
 
@@ -226,9 +226,9 @@ intentional batches rather than scanning an unbounded directory tree.
 ### What leaves your machine
 
 - A default inter-skill scan sends skill names and descriptions to the
-  configured embeddings provider. `--full-body` sends each discovered
-  `SKILL.md` in full, including frontmatter, in embedding chunks; supporting
-  files are not sent.
+  configured embeddings provider. With `--full-body`, the scan
+  sends each discovered `SKILL.md` in full, including frontmatter, in embedding
+  chunks; supporting files are not sent.
 - Intra-skill analysis sends retained content chunks to the configured
   embeddings provider. Only candidate clusters found by the embedding stage are
   sent to the configured chat LLM for classification.

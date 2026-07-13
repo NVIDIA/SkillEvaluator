@@ -93,6 +93,14 @@ skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
   --agent-model codex=gpt-5.4-mini
 ```
 
+The primary `evaluate` alias works with every supported agent harness:
+
+```bash title="Choose an agent harness"
+skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
+skillevaluator evaluate ./my-skill --agents codex --env-mode docker
+skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker
+```
+
 Use `--agent-model AGENT=MODEL` whenever the evaluator provider's default model
 is not valid for that agent — for example, `codex` needs an OpenAI-compatible
 Responses model. When the run completes, results land in a timestamped
@@ -164,9 +172,10 @@ Credentials](configuration.mdx) lists every blocked name.
 
 One deliberate exception collapses the two roles: with the `nv_build` provider
 in `--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
-evaluator and all three agents — `opencode` talks to NVIDIA Build directly,
-while `codex` and (experimentally) `claude-code` go through Skill Evaluator's
-loopback compatibility bridges. Bridged agents default to
+evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
+Codex and experimental Claude Code use a Docker or local compatibility bridge.
+SkillEvaluator never changes models silently: explicit overrides are preserved.
+Without an override, bridged agents default to
 `nvidia/nemotron-3-super-120b-a12b`; direct OpenCode defaults to
 `nvidia/nemotron-3-nano-30b-a3b` (rendered
 `nvidia/nvidia/nemotron-3-nano-30b-a3b`). On cloud env-modes the bridges are

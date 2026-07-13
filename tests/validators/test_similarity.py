@@ -30,7 +30,7 @@ class TestSimilarityValidatorProperties:
 
         Eagerly substituting SIMILARITY_DEFAULT_MODEL here overrides
         SKILL_EVAL_EMBEDDING_MODEL inside EmbeddingClient and breaks every
-        non-NVIDIA embedding endpoint (docs/CONFIGURATION.md contract).
+        non-NVIDIA embedding endpoint (docs/configuration.mdx contract).
         """
         assert SimilarityValidator()._model is None
         assert SimilarityValidator(model="custom-model")._model == "custom-model"

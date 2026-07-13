@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+instances:
+  - url: nvidia-skillevaluator.docs.buildwithfern.com/skillevaluator
+    custom-domain: docs.nvidia.com/skillevaluator
+    multi-source: true
+
+title: Skill Evaluator Documentation
+
+global-theme: nvidia
+
+navbar-links:
+  - type: github
+    value: https://github.com/NVIDIA/SkillEvaluator
+
+logo:
+  right-text: Skill Evaluator
+
+navigation:
+  - page: Overview
+    path: ../docs/index.mdx
+    slug: /
+  - section: Documentation
+    skip-slug: true
+    contents:
+      - page: Installation
+        path: ../docs/installation.mdx
+        slug: installation
+      - page: Configuration
+        path: ../docs/configuration.mdx
+        slug: configuration
+      - page: "Tier 1: Static and Security Validation"
+        path: ../docs/tier1-validation.mdx
+        slug: tier1-validation
+      - page: "Tier 2: Semantic Deduplication"
+        path: ../docs/tier2-deduplication.mdx
+        slug: tier2-deduplication
+      - page: "Tier 3: Live Agent Evaluation"
+        path: ../docs/tier3-live-evaluation.mdx
+        slug: tier3-live-evaluation
+      - page: Developer Guide
+        path: ../docs/developer-guide.mdx
+        slug: developer-guide

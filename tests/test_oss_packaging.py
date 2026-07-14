@@ -437,9 +437,9 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert "--agent-model codex=nvidia/nemotron-3-super-120b-a12b" in public_docs
     assert "--agent-model claude-code=nvidia/nemotron-3-super-120b-a12b" in public_docs
     assert "--agent-model opencode=nvidia/meta/llama-3.1-8b-instruct" in public_docs
-    assert "skillevaluator evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
-    assert "skillevaluator evaluate ./my-skill --agents codex --env-mode docker\n" in tier3
-    assert "skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker\n" in tier3
+    assert "skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
+    assert "skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker\n" in tier3
+    assert "skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker\n" in tier3
     assert "never changes models silently" in public_docs
     assert "direct OpenCode" in public_docs
     assert "Docker or local compatibility bridge" in public_docs

@@ -14,6 +14,7 @@ Turn Skill Evaluator into a merge gate for your skill repository. The recommende
 | `0` | Success — every gating check passed | Merge |
 | `1` | Validation failed — one or more gating checks failed | Fix the skill; read the report |
 | `2` | Configuration error — bad flags or an unreadable target | Fix the pipeline, not the skill |
+| `3` | Runtime error — an unexpected internal failure | Re-run; the skill was never judged. File an issue if it persists |
 
 Tier 1 checks gate the exit code — and so do Tier 2 deduplication findings when dedup runs (the recommended gate below disables it with `--no-dedup`). Tier 3 live-evaluation results are always advisory inside `validate`: they appear in the reports but never flip a passing run to `1`. That means you can layer Tier 3 on later without destabilizing the gate.
 

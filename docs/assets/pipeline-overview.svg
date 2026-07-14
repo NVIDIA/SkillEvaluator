@@ -48,7 +48,7 @@
     <text x="597" y="134" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">Sandboxed A/B runs</text>
     <text x="597" y="150" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.65">with skill vs. without</text>
     <line x1="526" y1="166" x2="668" y2="166" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>
-    <text x="597" y="184" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="currentColor" fill-opacity="0.7">evaluate · compare</text>
+    <text x="597" y="184" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="currentColor" fill-opacity="0.7">tier3 evaluate · compare</text>
   </g>
 
   <!-- Output: reports and verdict -->

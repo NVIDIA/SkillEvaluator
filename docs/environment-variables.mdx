@@ -87,6 +87,7 @@ These variables control where results land and how Harbor local mode is confined
 | `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
 | `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
 | `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
+| `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. |
 | `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory; oversized artifacts are skipped and recorded in the artifact manifest. |
 
 ## Telemetry

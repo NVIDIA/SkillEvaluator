@@ -93,12 +93,12 @@ skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
   --agent-model codex=gpt-5.4-mini
 ```
 
-The primary `evaluate` alias works with every supported agent harness:
+Every supported agent harness works the same way:
 
 ```bash title="Choose an agent harness"
-skillevaluator evaluate ./my-skill --agents opencode --env-mode docker
-skillevaluator evaluate ./my-skill --agents codex --env-mode docker
-skillevaluator evaluate ./my-skill --agents claude-code --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker
 ```
 
 Use `--agent-model AGENT=MODEL` whenever the evaluator provider's default model
@@ -187,7 +187,7 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 Docker is the default and needs only a running daemon. The same `--env-mode`
 flag also selects **local mode**, which runs the agent CLI directly on the
-host under an OS-sandbox policy, and 14 provider-managed Harbor cloud backends
+host under an OS-sandbox policy, and 14 additional Harbor-native backends
 (such as `daytona`, `e2b`, and `modal`), each requiring the matching Harbor
 environment extra. The complete environment matrix, Docker resource tuning, local-mode
 safety controls, and workspace modes live in

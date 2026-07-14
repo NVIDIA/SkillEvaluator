@@ -15,7 +15,12 @@ navbar-links:
     value: https://github.com/NVIDIA/SkillEvaluator
 
 logo:
+  light: ../docs/assets/skillevaluator-logo.svg
+  dark: ../docs/assets/skillevaluator-logo.svg
+  height: 28
   right-text: Skill Evaluator
+
+favicon: ../docs/assets/skillevaluator-logo.svg
 
 navigation:
   - page: Overview

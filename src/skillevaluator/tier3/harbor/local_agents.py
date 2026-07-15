@@ -453,10 +453,10 @@ class _NvidiaBuildBridgeAgent:
             # instead, then let the bridge consume and unlink it before
             # accepting requests.
             with tempfile.TemporaryDirectory(prefix="skillevaluator-nvidia-build-") as temp_dir:
-                host_key_file = Path(temp_dir) / key_file.name
+                host_key_file = Path(temp_dir) / "nvidia-api-key"
                 host_key_file.write_text(api_key, encoding="utf-8")
                 host_key_file.chmod(0o600)
-                host_client_token_file = Path(temp_dir) / client_token_file.name
+                host_client_token_file = Path(temp_dir) / "nvidia-client-token"
                 host_client_token_file.write_text(client_token, encoding="utf-8")
                 host_client_token_file.chmod(0o600)
                 await environment.upload_file(host_key_file, key_file.as_posix())

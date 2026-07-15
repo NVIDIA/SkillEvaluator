@@ -681,13 +681,13 @@ def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentin
     agent._nvidia_build_bridge_started = False
     agent._nvidia_build_bridge_key_file = None
     commands: list[str] = []
-    uploads: list[tuple[str, str]] = []
+    uploads: list[tuple[str, str, str]] = []
     host_key_file = tmp_path / "nvidia-build-host-key"
     host_key_file.write_text("real-nvidia-secret", encoding="utf-8")
 
     class Environment:
         async def upload_file(self, source: object, destination: object) -> None:
-            uploads.append((str(destination), Path(source).read_text(encoding="utf-8")))
+            uploads.append((Path(source).name, str(destination), Path(source).read_text(encoding="utf-8")))
 
     async def root_exec(
         _self: Codex,
@@ -706,8 +706,11 @@ def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentin
     asyncio.run(agent._start_bridge(Environment()))
     asyncio.run(agent._cleanup_bridge(Environment()))
 
-    key_upload = next(content for destination, content in uploads if destination.startswith("/tmp/"))
+    key_source_name, _, key_upload = next(upload for upload in uploads if upload[1].endswith(".key"))
+    token_source_name = next(source_name for source_name, destination, _ in uploads if destination.endswith(".token"))
     assert key_upload == "real-nvidia-secret"
+    assert key_source_name == "nvidia-api-key"
+    assert token_source_name == "nvidia-client-token"
     assert host_key_file.exists()
     assert all("real-nvidia-secret" not in command for command in commands)
     assert all("skillevaluator-file-backed-nvidia-key" not in command for command in commands)

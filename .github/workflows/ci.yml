@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -31,7 +33,27 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
       - if: matrix.python-version == '3.12'
         run: uv run ruff check .
-      - run: uv run pytest -q
+      - name: Run tests with coverage
+        if: matrix.python-version == '3.12'
+        run: >-
+          uv run pytest -q
+          --cov=skillevaluator
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+      - name: Run tests
+        if: matrix.python-version != '3.12'
+        run: uv run pytest -q
+      - name: Analyze with SonarQube
+        # Repository secrets are unavailable to forks; keep their test run green
+        # without exposing the Sonar token.
+        if: >-
+          matrix.python-version == '3.12' &&
+          (github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   package:
     name: Package

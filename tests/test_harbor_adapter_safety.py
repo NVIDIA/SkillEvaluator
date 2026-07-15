@@ -14,6 +14,7 @@ import pytest
 
 from skillevaluator.tier3.harbor.adapter import (
     _copy_custom_grader,
+    _rebase_custom_dockerfile_content,
     _stage_repo_context,
     generate_harbor_tasks,
     stage_native_harbor_tasks,
@@ -208,6 +209,69 @@ def test_generated_tasks_accept_distinct_portable_ids(tmp_path: Path) -> None:
     task_paths = generate_harbor_tasks(skill, output_dir)
 
     assert [path.name for path in task_paths] == ["case-001", "Case_002"]
+
+
+def test_generated_task_rebases_custom_dockerfile_content(tmp_path: Path) -> None:
+    skill = _write_generated_skill(tmp_path, ["case-001"])
+    custom_environment = skill / "evals" / "environment"
+    custom_environment.mkdir()
+    (custom_environment / "Dockerfile").write_text(
+        "FROM python:3.11-slim\nRUN echo generated-custom-layer\n",
+        encoding="utf-8",
+    )
+
+    task = generate_harbor_tasks(
+        skill,
+        tmp_path / "tasks",
+        base_image="registry.example/eval-base:verified",
+    )[0]
+
+    dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    assert dockerfile.startswith(
+        "FROM registry.example/eval-base:verified\n# SkillEvaluator: original base was FROM python:3.11-slim\n"
+    )
+    assert "RUN echo generated-custom-layer\n" in dockerfile
+
+
+def test_native_task_rebases_custom_dockerfile_content(tmp_path: Path) -> None:
+    skill = _write_native_skill(tmp_path)
+    native_task = skill / "evals" / "harbor" / "case-001"
+    environment = native_task / "environment"
+    environment.mkdir()
+    (environment / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\nRUN echo native-custom-layer\n",
+        encoding="utf-8",
+    )
+    tests_dir = native_task / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    task = stage_native_harbor_tasks(
+        skill,
+        tmp_path / "native-tasks",
+        grading_mode="custom_only",
+        base_image="registry.example/eval-base:verified",
+    )[0]
+
+    dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    assert dockerfile.startswith(
+        "FROM registry.example/eval-base:verified\n# SkillEvaluator: original base was FROM ubuntu:24.04\n"
+    )
+    assert "RUN echo native-custom-layer\n" in dockerfile
+
+
+def test_rebase_custom_dockerfile_content_without_from_is_unchanged() -> None:
+    content = "# comment only\nRUN echo unchanged\n"
+
+    assert (
+        _rebase_custom_dockerfile_content(
+            content,
+            "registry.example/eval-base:verified",
+            agent_config_lines=[],
+            include_input=False,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("candidate", _GRADER_CANDIDATES, ids=str)

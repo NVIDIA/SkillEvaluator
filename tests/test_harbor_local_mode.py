@@ -13,6 +13,7 @@ import os
 import shlex
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -681,13 +682,21 @@ def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentin
     agent._nvidia_build_bridge_started = False
     agent._nvidia_build_bridge_key_file = None
     commands: list[str] = []
-    uploads: list[tuple[str, str]] = []
+    uploads: list[tuple[str, str, str, int]] = []
     host_key_file = tmp_path / "nvidia-build-host-key"
     host_key_file.write_text("real-nvidia-secret", encoding="utf-8")
 
     class Environment:
         async def upload_file(self, source: object, destination: object) -> None:
-            uploads.append((str(destination), Path(source).read_text(encoding="utf-8")))
+            source_path = Path(source)
+            uploads.append(
+                (
+                    source_path.name,
+                    str(destination),
+                    source_path.read_text(encoding="utf-8"),
+                    stat.S_IMODE(source_path.stat().st_mode),
+                )
+            )
 
     async def root_exec(
         _self: Codex,
@@ -706,8 +715,14 @@ def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentin
     asyncio.run(agent._start_bridge(Environment()))
     asyncio.run(agent._cleanup_bridge(Environment()))
 
-    key_upload = next(content for destination, content in uploads if destination.startswith("/tmp/"))
+    key_source_name, _, key_upload, key_mode = next(upload for upload in uploads if upload[1].endswith(".key"))
+    token_source_name, _, _, token_mode = next(upload for upload in uploads if upload[1].endswith(".token"))
     assert key_upload == "real-nvidia-secret"
+    assert key_source_name.startswith("nvidia-api-key-")
+    assert token_source_name.startswith("nvidia-client-token-")
+    if os.name != "nt":
+        assert key_mode == 0o600
+        assert token_mode == 0o600
     assert host_key_file.exists()
     assert all("real-nvidia-secret" not in command for command in commands)
     assert all("skillevaluator-file-backed-nvidia-key" not in command for command in commands)

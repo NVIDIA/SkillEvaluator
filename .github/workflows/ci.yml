@@ -93,6 +93,8 @@ jobs:
         env:
           RUNNER_TOOL_CACHE: ${{ runner.temp }}/toolcache
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
+        with:
+          skipSignatureVerification: true
 
   package:
     name: Package

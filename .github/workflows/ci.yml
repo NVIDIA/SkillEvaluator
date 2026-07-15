@@ -43,29 +43,52 @@ jobs:
       - name: Run tests
         if: matrix.python-version != '3.12'
         run: uv run pytest -q
+
+  sonarqube:
+    name: SonarQube (NVIDIA network)
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'ci/christopherk/sonarqube-analysis'
+    runs-on: [self-hosted, macOS, ARM64, sonar-internal]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
+      - run: uv sync --all-extras --locked --python 3.12
+      - name: Run tests with coverage
+        run: >-
+          uv run pytest -q
+          --cov=skillevaluator
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
       - name: Normalize SonarQube credentials
-        # Repository secrets are unavailable to forks; keep their test run green
-        # without exposing the Sonar token.
-        if: >-
-          matrix.python-version == '3.12' &&
-          (github.event_name == 'push' ||
-          github.event.pull_request.head.repo.full_name == github.repository)
         env:
           RAW_SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           RAW_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          {
-            printf 'SONAR_HOST_URL='
-            printf '%s' "$RAW_SONAR_HOST_URL" | tr -d '\r\n'
-            printf '\nSONAR_TOKEN='
-            printf '%s' "$RAW_SONAR_TOKEN" | tr -d '\r\n'
-            printf '\n'
-          } >> "$GITHUB_ENV"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          host_url = os.environ["RAW_SONAR_HOST_URL"].strip()
+          token = os.environ["RAW_SONAR_TOKEN"].strip()
+          if urlparse(host_url).scheme != "https" or not urlparse(host_url).hostname:
+              raise SystemExit("SONAR_HOST_URL must be a valid HTTPS URL")
+          if not token:
+              raise SystemExit("SONAR_TOKEN is empty")
+
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"SONAR_HOST_URL={host_url}\n")
+              env_file.write(f"SONAR_TOKEN={token}\n")
+          PY
       - name: Analyze with SonarQube
-        if: >-
-          matrix.python-version == '3.12' &&
-          (github.event_name == 'push' ||
-          github.event.pull_request.head.repo.full_name == github.repository)
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
 
   package:

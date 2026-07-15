@@ -74,5 +74,8 @@ def _safe_endpoint_origin(base_url: str | None) -> str:
 
 def _safe_terminal_text(value: str) -> str:
     return "".join(
-        character if unicodedata.category(character) not in {"Cc", "Cf", "Cs"} else "�" for character in value
+        character
+        if unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+        else "\N{REPLACEMENT CHARACTER}"
+        for character in value
     )

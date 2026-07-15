@@ -19,8 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -40,66 +38,9 @@ jobs:
           --cov=skillevaluator
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
-      - name: Upload coverage for SonarQube
-        if: matrix.python-version == '3.12'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: sonarqube-coverage
-          path: coverage.xml
-          if-no-files-found: error
       - name: Run tests
         if: matrix.python-version != '3.12'
         run: uv run pytest -q
-
-  sonarqube:
-    name: SonarQube (NVIDIA network)
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.head_ref == 'ci/christopherk/sonarqube-analysis'
-    needs: test
-    runs-on: [self-hosted, macOS, ARM64, sonar-internal]
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-      - name: Verify internal runner toolchain
-        env:
-          RUNNER_TOOL_CACHE: ${{ runner.temp }}/toolcache
-        run: |
-          python3.12 --version
-          mkdir -p "$RUNNER_TOOL_CACHE"
-      - name: Download coverage report
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: sonarqube-coverage
-          path: .
-      - name: Normalize SonarQube credentials
-        env:
-          RAW_SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          RAW_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: |
-          python3.12 - <<'PY'
-          import os
-          from pathlib import Path
-          from urllib.parse import urlparse
-
-          host_url = os.environ["RAW_SONAR_HOST_URL"].strip()
-          token = os.environ["RAW_SONAR_TOKEN"].strip()
-          if urlparse(host_url).scheme != "https" or not urlparse(host_url).hostname:
-              raise SystemExit("SONAR_HOST_URL must be a valid HTTPS URL")
-          if not token:
-              raise SystemExit("SONAR_TOKEN is empty")
-
-          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
-              env_file.write(f"SONAR_HOST_URL={host_url}\n")
-              env_file.write(f"SONAR_TOKEN={token}\n")
-          PY
-      - name: Analyze with SonarQube
-        env:
-          RUNNER_TOOL_CACHE: ${{ runner.temp }}/toolcache
-        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
-        with:
-          skipSignatureVerification: true
 
   package:
     name: Package

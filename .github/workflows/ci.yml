@@ -31,7 +31,16 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
       - if: matrix.python-version == '3.12'
         run: uv run ruff check .
-      - run: uv run pytest -q
+      - name: Run tests with coverage
+        if: matrix.python-version == '3.12'
+        run: >-
+          uv run pytest -q
+          --cov=skillevaluator
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+      - name: Run tests
+        if: matrix.python-version != '3.12'
+        run: uv run pytest -q
 
   package:
     name: Package

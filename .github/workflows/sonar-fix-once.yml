@@ -1,0 +1,93 @@
+name: One-time SonarQube fix analysis
+
+on:
+  push:
+    branches:
+      - fix/christopherk/sonar-path-validation
+
+permissions:
+  contents: read
+
+env:
+  FIX_SHA: da4dda65bbc306e2248c2e447c99159ff1adf7c6
+
+jobs:
+  coverage:
+    name: Generate fix coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.FIX_SHA }}
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
+      - run: uv sync --all-extras --locked --python 3.12
+      - name: Run tests with coverage
+        run: >-
+          uv run pytest -q
+          --cov=skillevaluator
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+      - name: Upload coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sonarqube-fix-coverage
+          path: coverage.xml
+          if-no-files-found: error
+
+  sonarqube:
+    name: Analyze Sonar path fix
+    needs: coverage
+    runs-on: [self-hosted, macOS, ARM64, sonar-fix-once]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.FIX_SHA }}
+          fetch-depth: 0
+      - name: Prepare internal runner
+        env:
+          RUNNER_TOOL_CACHE: ${{ runner.temp }}/toolcache
+        run: |
+          python3.12 --version
+          mkdir -p "$RUNNER_TOOL_CACHE"
+      - name: Download coverage
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sonarqube-fix-coverage
+          path: .
+      - name: Normalize SonarQube credentials
+        env:
+          RAW_SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          RAW_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          python3.12 - <<'PY'
+          import os
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          host_url = os.environ["RAW_SONAR_HOST_URL"].strip()
+          token = os.environ["RAW_SONAR_TOKEN"].strip()
+          parsed = urlparse(host_url)
+          if parsed.scheme != "https" or not parsed.hostname:
+              raise SystemExit("SONAR_HOST_URL must be a valid HTTPS URL")
+          if not token:
+              raise SystemExit("SONAR_TOKEN is empty")
+
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"SONAR_HOST_URL={host_url}\n")
+              env_file.write(f"SONAR_TOKEN={token}\n")
+          PY
+      - name: Analyze fix branch with SonarQube
+        env:
+          RUNNER_TOOL_CACHE: ${{ runner.temp }}/toolcache
+        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
+        with:
+          args: >-
+            -Dsonar.branch.name=fix/christopherk/sonar-path-validation
+            -Dsonar.scm.revision=${{ env.FIX_SHA }}
+          skipSignatureVerification: true

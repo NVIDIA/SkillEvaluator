@@ -790,6 +790,9 @@ def start_in_process_bridge(
     while True:
         try:
             _check_bridge_health(origin, readiness_token)
+            remaining_startup_time = max(0.0, deadline - time.monotonic())
+            if not server.wait_for_workers(remaining_startup_time):
+                raise RuntimeError("NVIDIA Build bridge readiness request did not drain")
             return handle
         except RuntimeError:
             if not thread.is_alive() or time.monotonic() >= deadline:

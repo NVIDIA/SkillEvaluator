@@ -378,6 +378,46 @@ def test_local_nvidia_build_bridge_cleanup_preserves_cancellation(
     assert close_finished.is_set()
 
 
+def test_start_in_process_bridge_waits_for_readiness_worker_to_finish(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor import nvidia_build_bridge
+
+    release_started = threading.Event()
+    release_allowed = threading.Event()
+    release_lock = threading.Lock()
+    original_release_request = nvidia_build_bridge._BridgeHTTPServer.release_request
+    first_release = True
+
+    def delayed_first_release(server: object, request: object) -> None:
+        nonlocal first_release
+        with release_lock:
+            delay_release = first_release
+            first_release = False
+        if delay_release:
+            release_started.set()
+            release_timer = threading.Timer(1.0, release_allowed.set)
+            release_timer.daemon = True
+            release_timer.start()
+            assert release_allowed.wait(timeout=2)
+        original_release_request(server, request)
+
+    monkeypatch.setattr(nvidia_build_bridge._BridgeHTTPServer, "release_request", delayed_first_release)
+
+    running = nvidia_build_bridge.start_in_process_bridge(
+        api_key="test-readiness-worker-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        log_path=tmp_path / "nvidia-build-bridge.log",
+        request_transport=lambda _endpoint, _body: b"{}",
+    )
+    try:
+        assert release_started.wait(timeout=1)
+        assert running._server.active_workers == 0
+    finally:
+        release_allowed.set()
+        running.close()
+
+
 def test_local_nvidia_build_bridge_repeated_cancellation_releases_slow_header_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

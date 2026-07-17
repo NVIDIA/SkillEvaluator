@@ -47,6 +47,10 @@ Gitleaks is required for a complete Tier 1 security result, Docker is required
 for Tier 3 Docker mode, and live evaluation needs the selected agent CLI and
 credentials.
 
+Linux installs use scanner versions compatible with glibc 2.28, including
+RHEL 8; see the [installation guide](docs/installation.mdx#linux-security-scanner-compatibility)
+for the platform-specific dependency details.
+
 Run the first offline check directly against your own skill — **no API key,
 Docker, Gitleaks, or repository clone required**:
 

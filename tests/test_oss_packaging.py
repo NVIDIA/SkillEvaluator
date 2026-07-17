@@ -14,7 +14,9 @@ import zipfile
 from pathlib import Path
 
 from click.testing import CliRunner
+from packaging.markers import default_environment
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from skillevaluator.cli import cli
@@ -160,6 +162,25 @@ def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
     assert "nltk" not in lock_names
 
 
+def test_security_scanner_versions_support_rhel8_without_downgrading_other_platforms() -> None:
+    security = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["security"]]
+
+    def active_specifiers(name: str, sys_platform: str) -> set[frozenset[str]]:
+        environment = default_environment()
+        environment["sys_platform"] = sys_platform
+        return {
+            frozenset(str(specifier) for specifier in requirement.specifier)
+            for requirement in security
+            if canonicalize_name(requirement.name) == canonicalize_name(name)
+            and (requirement.marker is None or requirement.marker.evaluate(environment))
+        }
+
+    assert active_specifiers("semgrep", "linux") == {frozenset({">=1.157.0", "<1.158.0"})}
+    assert active_specifiers("pip_audit", "linux") == {frozenset({">=2.9.0", "<2.10.0"})}
+    assert active_specifiers("semgrep", "darwin") == {frozenset({">=1.162.0"})}
+    assert active_specifiers("pip-audit", "darwin") == {frozenset({">=2.10.0"})}
+
+
 def test_third_party_notices_do_not_list_removed_safety_dependency() -> None:
     notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 
@@ -172,8 +193,10 @@ def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -
     versions = {package["name"]: Version(package["version"]) for package in lock["package"]}
 
     assert "prerelease" not in project.get("tool", {}).get("uv", {})
-    for package in ("numpy", "pydantic", "wrapt"):
-        assert versions[package].is_prerelease is False
+    prerelease_guarded = {"cyclonedx-python-lib", "numpy", "pydantic", "wrapt"}
+    for package in lock["package"]:
+        if package["name"] in prerelease_guarded:
+            assert Version(package["version"]).is_prerelease is False
     assert versions["cryptography"] >= Version("48.0.1")
     assert versions["msgpack"] >= Version("1.2.1")
     assert versions["pydantic-settings"] >= Version("2.14.2")
@@ -452,3 +475,15 @@ def test_security_extra_enforces_patched_langchain_core() -> None:
 
     assert "langchain-core>=1.4.9" in project["project"]["optional-dependencies"]["security"]
     assert versions["langchain-core"] >= Version("1.4.9")
+
+
+def test_ci_installs_the_security_wheel_on_rhel8() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    rhel8_job = workflow.split("  rhel8-security-install:\n", 1)[1].split("\n  package:\n", 1)[0]
+
+    assert "container: rockylinux:8.10" in rhel8_job
+    assert 'getconf GNU_LIBC_VERSION)" = "glibc 2.28"' in rhel8_job
+    assert "uv build --wheel --python 3.12 --no-sources" in rhel8_job
+    assert '"${wheel}[security]"' in rhel8_job
+    assert 'version("semgrep") == "1.157.0"' in rhel8_job
+    assert 'version("pip-audit") == "2.9.0"' in rhel8_job

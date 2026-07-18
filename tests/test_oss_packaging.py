@@ -481,7 +481,7 @@ def test_ci_installs_the_security_wheel_on_rhel8() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     rhel8_job = workflow.split("  rhel8-security-install:\n", 1)[1].split("\n  package:\n", 1)[0]
 
-    assert "container: rockylinux:8.10" in rhel8_job
+    assert "container: rockylinux/rockylinux:8.10" in rhel8_job
     assert 'getconf GNU_LIBC_VERSION)" = "glibc 2.28"' in rhel8_job
     assert "uv build --wheel --python 3.12 --no-sources" in rhel8_job
     assert '"${wheel}[security]"' in rhel8_job

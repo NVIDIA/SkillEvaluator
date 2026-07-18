@@ -45,7 +45,7 @@ jobs:
   rhel8-security-install:
     name: RHEL 8 security install
     runs-on: ubuntu-latest
-    container: rockylinux:8.10
+    container: rockylinux/rockylinux:8.10
     steps:
       - name: Install container prerequisites
         run: dnf install --assumeyes findutils git gzip tar

@@ -42,6 +42,39 @@ jobs:
         if: matrix.python-version != '3.12'
         run: uv run pytest -q
 
+  rhel8-security-install:
+    name: RHEL 8 security install
+    runs-on: ubuntu-latest
+    container: rockylinux/rockylinux:8.10
+    steps:
+      - name: Install container prerequisites
+        run: dnf install --assumeyes findutils git gzip tar
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
+      - name: Verify the RHEL 8 glibc baseline
+        run: test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+      - name: Build the wheel
+        run: uv build --wheel --python 3.12 --no-sources
+      - name: Install the wheel with the security extra
+        shell: bash
+        run: |
+          wheel="$(find "$PWD/dist" -maxdepth 1 -type f -name 'skillevaluator-*.whl' -print -quit)"
+          test -n "$wheel"
+          uv venv --python 3.12 .rhel8-security-venv
+          uv pip install --python .rhel8-security-venv/bin/python "${wheel}[security]"
+      - name: Smoke-test the Linux scanner pair
+        run: |
+          .rhel8-security-venv/bin/python - <<'PY'
+          from importlib.metadata import version
+
+          assert version("semgrep") == "1.157.0"
+          assert version("pip-audit") == "2.9.0"
+          PY
+          .rhel8-security-venv/bin/semgrep --version
+          .rhel8-security-venv/bin/pip-audit --version
+
   package:
     name: Package
     runs-on: ubuntu-latest

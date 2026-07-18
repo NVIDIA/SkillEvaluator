@@ -48,6 +48,9 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Fixed
 
+- Security and full-feature installs now work on RHEL 8 and other glibc 2.28
+  Linux systems by selecting a compatible Semgrep and pip-audit pair, while
+  macOS and Windows retain the newer scanner release lines.
 - Tier 2 content collection now prunes configured evaluation and version
   artifact directories before enforcing the discovered-path limit, so excluded
   generated results cannot cause false path-count failures.

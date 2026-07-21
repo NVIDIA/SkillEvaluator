@@ -1692,6 +1692,110 @@ def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _collect_report_only_condition(
+    *,
+    skill_name: str,
+    agent: str,
+    variant: str,
+    directory_name: str,
+    output_dir: Path,
+    jobs_dir: Path,
+    n_attempts: int,
+    pass_threshold: float,
+    stop_on_pass: bool,
+    expected_cases: int | None,
+    expected_case_ids: list[str] | None,
+    expected_trials: int | None,
+    env_mode: str | None,
+    agent_model: str | None,
+    agent_model_source: str | None,
+) -> dict[str, Any]:
+    """Collect one advisory comparison arm without affecting run validity."""
+    job_name = f"{skill_name}-{agent}-{variant}"
+    job_dir = _find_job_dir(jobs_dir, job_name)
+    rewards: list[dict[str, Any]] = []
+    runtime_failures: list[dict[str, str]] = []
+    trial_failures: list[dict[str, str]] = []
+    job_failure = ""
+    if job_dir is not None:
+        job_ok, job_failure = validate_harbor_job_result(job_dir / "result.json", expected_trials=expected_trials)
+        runtime_failures = _extract_agent_runtime_failures(job_dir)
+        trial_failures = _extract_trial_failures(job_dir)
+        if job_ok or _can_preserve_partial_rewards(job_dir, trial_failures):
+            rewards = _extract_rewards(job_dir)
+        rewards, invalid_score_failures = _partition_scoreable_rewards(rewards)
+        trial_failures.extend(invalid_score_failures)
+    else:
+        job_failure = f"Harbor job directory was not created: {job_name}"
+
+    scores, metric_set, metrics = average_metrics(rewards)
+    custom_scores = average_custom_metrics(rewards)
+    pass_summary = _pass_summary(
+        rewards,
+        n_attempts=n_attempts,
+        pass_threshold=pass_threshold,
+        stop_on_pass=stop_on_pass,
+        expected_cases=expected_cases,
+        expected_case_ids=expected_case_ids,
+    )
+    execution = _condition_execution_summary(
+        rewards,
+        expected_case_ids=expected_case_ids,
+        expected_cases=expected_cases,
+        n_attempts=n_attempts,
+        job_failure=job_failure,
+        runtime_failures=runtime_failures,
+        stop_on_pass=stop_on_pass,
+        pass_threshold=pass_threshold,
+    )
+    condition_dir = output_dir / agent / directory_name
+    if job_dir is not None:
+        _save_trials(
+            rewards,
+            condition_dir / "trials",
+            job_dir,
+            skill_name=skill_name,
+            agent=agent,
+            variant=variant,
+            env_mode=env_mode,
+            agent_model=agent_model,
+            agent_model_source=agent_model_source,
+        )
+    condition_dir.mkdir(parents=True, exist_ok=True)
+    (condition_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "agent": agent,
+                "model": agent_model,
+                "model_source": agent_model_source,
+                "scores": scores,
+                "custom_scores": custom_scores,
+                "metric_set": metric_set,
+                "metrics": list(metrics),
+                "dimensions": dimension_scores(scores),
+                "num_trials": len(rewards),
+                "pass_at_k": pass_summary,
+                **execution,
+                "job_failure": job_failure,
+                "trial_failures": trial_failures,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "scores": scores,
+        "custom_scores": custom_scores,
+        "dimensions": dimension_scores(scores),
+        "pass_at_k": pass_summary,
+        "execution": execution,
+        "runtime_failures": runtime_failures,
+        "trial_failures": trial_failures,
+        "job_failure": job_failure,
+        "num_trials": len(rewards),
+    }
+
+
 def collect_harbor_results(
     skill_name: str,
     agents: list[str],
@@ -1699,6 +1803,7 @@ def collect_harbor_results(
     jobs_dir: Path,
     *,
     skip_baseline: bool = False,
+    sum_of_parts_arm: bool = False,
     n_attempts: int = 1,
     pass_threshold: float = 0.50,
     stop_on_pass: bool = False,
@@ -2029,6 +2134,49 @@ def collect_harbor_results(
                 encoding="utf-8",
             )
 
+        sum_of_parts = {
+            "scores": {},
+            "custom_scores": {},
+            "dimensions": {},
+            "pass_at_k": {},
+            "execution": {"execution_status": "skipped", "execution_errors": []},
+            "runtime_failures": [],
+            "trial_failures": [],
+            "job_failure": "",
+            "num_trials": 0,
+        }
+        if sum_of_parts_arm:
+            sum_of_parts = _collect_report_only_condition(
+                skill_name=skill_name,
+                agent=agent,
+                variant="sumofparts",
+                directory_name="sum-of-parts",
+                output_dir=output_dir,
+                jobs_dir=jobs_dir,
+                n_attempts=n_attempts,
+                pass_threshold=pass_threshold,
+                stop_on_pass=stop_on_pass,
+                expected_cases=expected_cases,
+                expected_case_ids=expected_case_ids,
+                expected_trials=expected_trials,
+                env_mode=env_mode,
+                agent_model=agent_model,
+                agent_model_source=agent_model_source,
+            )
+        integration_lift: dict[str, Any] = {}
+        if with_scores and sum_of_parts["scores"]:
+            integration_lift = _compute_lift(with_scores, sum_of_parts["scores"])
+            (agent_dir / "integration_lift.json").write_text(json.dumps(integration_lift, indent=2), encoding="utf-8")
+        integration_completeness = {
+            "with_plugin": with_execution,
+            "sum_of_parts": sum_of_parts["execution"],
+            "complete": bool(
+                sum_of_parts_arm
+                and with_execution.get("execution_status") == "succeeded"
+                and sum_of_parts["execution"].get("execution_status") == "succeeded"
+            ),
+        }
+
         lift: dict[str, Any] = {}
         if with_scores and without_scores:
             lift = _compute_lift(with_scores, without_scores)
@@ -2094,37 +2242,48 @@ def collect_harbor_results(
             },
             "with_skill": with_scores,
             "without_skill": without_scores,
+            "sum_of_parts": sum_of_parts["scores"],
             "custom_with_skill": with_custom_scores,
             "custom_without_skill": without_custom_scores,
+            "custom_sum_of_parts": sum_of_parts["custom_scores"],
             "dimensions_with_skill": dimension_scores(with_scores),
             "dimensions_without_skill": dimension_scores(without_scores),
+            "dimensions_sum_of_parts": sum_of_parts["dimensions"],
             "lift": lift,
+            "integration_lift": integration_lift,
+            "integration_completeness": integration_completeness,
             "custom_lift": custom_lift,
             "pass_at_k": {
                 "with_skill": with_pass,
                 "without_skill": without_pass,
+                "sum_of_parts": sum_of_parts["pass_at_k"],
                 "lift": pass_lift,
             },
             "security_attribution": security_attribution,
             "agent_runtime_failures": {
                 "with_skill": with_runtime_failures,
                 "without_skill": without_runtime_failures,
+                "sum_of_parts": sum_of_parts["runtime_failures"],
             },
             "trial_failures": {
                 "with_skill": with_trial_failures,
                 "without_skill": without_trial_failures,
+                "sum_of_parts": sum_of_parts["trial_failures"],
             },
             "job_failures": {
                 "with_skill": with_job_failure,
                 "without_skill": without_job_failure,
+                "sum_of_parts": sum_of_parts["job_failure"],
             },
             "conditions": {
                 "with_skill": with_execution,
                 "without_skill": without_execution,
+                "sum_of_parts": sum_of_parts["execution"],
             },
             **agent_execution,
             "num_trials_with": len(with_rewards),
             "num_trials_without": len(without_rewards) if not skip_baseline else 0,
+            "num_trials_sum_of_parts": sum_of_parts["num_trials"],
             "output_dir": str(agent_dir.resolve()),
         }
 

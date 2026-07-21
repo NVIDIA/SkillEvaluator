@@ -53,6 +53,20 @@ _SCHEMA_VERSION = "2.0"
 _TIER3_FEEDBACK_SCHEMA_VERSION = "1.0"
 _TIER3_FEEDBACK_FIELDS = ("conclusions", "recommendations", "suggestions", "suggestions_v2")
 
+_INTEGRATION_SCHEMA_VERSION = "1.0"
+INTEGRATION_VERDICT_REAL = "real_integration"
+INTEGRATION_VERDICT_COSMETIC = "cosmetic_bundling"
+INTEGRATION_VERDICT_NEGATIVE = "negative_integration"
+INTEGRATION_VERDICT_INCONCLUSIVE = "inconclusive"
+_INTEGRATION_REAL_THRESHOLD = 0.05
+_INTEGRATION_NEGATIVE_THRESHOLD = -0.05
+_INTEGRATION_INTERPRETATION = {
+    INTEGRATION_VERDICT_REAL: "The coordinated plugin measurably outperforms its member components alone.",
+    INTEGRATION_VERDICT_COSMETIC: "The plugin performs about the same as its member components alone.",
+    INTEGRATION_VERDICT_NEGATIVE: "The plugin underperforms its member components alone; inspect coordination overhead.",
+    INTEGRATION_VERDICT_INCONCLUSIVE: "The sum-of-parts comparison did not produce complete comparable evidence.",
+}
+
 # Canonical reports are self-contained HTML/JSON artifacts, so untrusted custom
 # grader cardinality must not multiply metric-by-trial detail without bound. The
 # full Harbor artifacts remain available under ``provenance.run_dir``.
@@ -266,8 +280,10 @@ def agent_eval_result_from_run(
     skill_path: Path,
     *,
     results_dir: Path | None = None,
+    dataset_source: Path | None = None,
     env_mode: str | None = None,
     engine_result: dict[str, Any] | None = None,
+    plugin_provenance: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> ValidationResult | None:
     """Build an advisory ``AGENT_EVAL`` result from the latest on-disk Harbor run.
@@ -284,8 +300,10 @@ def agent_eval_result_from_run(
     return agent_eval_result_from_directory(
         skill_path,
         run_dir,
+        dataset_source=dataset_source,
         env_mode=env_mode,
         engine_result=engine_result,
+        plugin_provenance=plugin_provenance,
         use_llm_judge=use_llm_judge,
     )
 
@@ -294,8 +312,10 @@ def agent_eval_result_from_directory(
     skill_path: Path,
     run_dir: Path,
     *,
+    dataset_source: Path | None = None,
     env_mode: str | None = None,
     engine_result: dict[str, Any] | None = None,
+    plugin_provenance: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> ValidationResult | None:
     """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run."""
@@ -311,7 +331,7 @@ def agent_eval_result_from_directory(
     if not agents:
         return None
 
-    dataset = load_dataset(skill_path) or load_staged_harbor_dataset(run_dir)
+    dataset = load_dataset(dataset_source or skill_path) or load_staged_harbor_dataset(run_dir)
     payload = build_agent_eval_payload(
         skill_path.name,
         agents,
@@ -324,9 +344,25 @@ def agent_eval_result_from_directory(
         suggestions_v2=_load_suggestions_v2(run_dir, agents),
         run_dir=run_dir,
         comparison=_read_comparison(run_dir),
+        plugin_provenance=plugin_provenance,
         use_llm_judge=use_llm_judge,
     )
     return _validation_result_from_payload(payload)
+
+
+def _incomplete_skip_reason(provenance: dict[str, Any]) -> str:
+    """Return a stable explanation for a partial plugin evaluation."""
+    counts = (
+        ("unresolved skill ref(s)", len(provenance.get("unresolved_skill_refs") or [])),
+        ("unresolved rule ref(s)", len(provenance.get("unresolved_rule_refs") or [])),
+        ("unresolved provider MCP server(s)", len(provenance.get("provider_only_mcp_servers") or [])),
+        (
+            "MCP server(s) declaring config the runtime cannot apply",
+            len(provenance.get("mcp_unsupported_config") or []),
+        ),
+    )
+    detail = ", ".join(f"{count} {label}" for label, count in counts if count) or "required declared components"
+    return f"INCOMPLETE: {detail} could not be resolved/evaluated at Tier 3"
 
 
 def _validation_result_from_payload(payload: dict[str, Any] | None) -> ValidationResult | None:
@@ -340,12 +376,18 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
     )
     result.metadata["agent_eval"] = payload
     best = payload.get("best_agent") or "n/a"
+    plugin_provenance = payload.get("plugin_provenance") or {}
+    partial = bool(isinstance(plugin_provenance, dict) and plugin_provenance.get("partial"))
     if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
         result.add_success(
             "agent_eval",
             f"Tier 3 evaluation complete: verdict {str(payload.get('verdict', 'neutral')).upper()}; best agent {best}",
         )
         result.passed = True
+        if partial:
+            result.passed = False
+            result.metadata["execution_status"] = "skipped"
+            result.metadata["skip_reason"] = _incomplete_skip_reason(plugin_provenance)
     else:
         errors = payload.get("execution_errors") or ["Tier 3 evaluation did not produce a complete scored run"]
         for error in errors:
@@ -410,6 +452,7 @@ def build_agent_eval_payload(
     suggestions_v2: list[dict[str, Any]] | None = None,
     run_dir: Path | None = None,
     comparison: dict[str, Any] | None = None,
+    plugin_provenance: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
@@ -513,6 +556,11 @@ def build_agent_eval_payload(
             agent_payloads, best_dimensions, pass_threshold=_pass_threshold_from_policy(policy)
         )
         deterministic_suggestions = _suggestions_for_dimensions(best_dimensions)
+    if plugin_provenance and plugin_provenance.get("partial"):
+        deterministic_conclusions = [
+            _plugin_incompleteness_conclusion(plugin_provenance),
+            *deterministic_conclusions,
+        ]
     recommendations = _attach_harbor_evidence_to_recommendations(
         [
             {
@@ -572,6 +620,12 @@ def build_agent_eval_payload(
     }
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
+    if plugin_provenance:
+        payload["plugin_provenance"] = plugin_provenance
+        summary["plugin_provenance"] = plugin_provenance
+    integration = _build_integration_report(best, run_config)
+    if integration is not None:
+        payload["integration"] = integration
 
     _layer_llm_insights(
         payload,
@@ -948,6 +1002,20 @@ def _build_agent(
         )
     overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
 
+    sum_of_parts_scores = info.get("sum_of_parts") or {}
+    sum_of_parts_dimensions = _build_dimensions(
+        sum_of_parts_scores,
+        {},
+        info.get("dimensions_sum_of_parts") or {},
+        {},
+    )
+    sum_of_parts_overall = _mean([dimension["with_skill"] for dimension in sum_of_parts_dimensions])
+    integration_lift = (
+        round(overall_ws - sum_of_parts_overall, 4)
+        if overall_ws is not None and sum_of_parts_overall is not None
+        else None
+    )
+
     trials = _normalize_trials(info.get("rewards") or [], metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)
     _attach_baseline_pairs(trials, baseline_trials, metrics)
@@ -972,6 +1040,9 @@ def _build_agent(
         "with_skill": overall_ws,
         "baseline": overall_bl,
         "lift": overall_lift,
+        "sum_of_parts": sum_of_parts_overall,
+        "integration_lift": integration_lift,
+        "integration_completeness": info.get("integration_completeness") or {},
         "num_trials": int(info.get("num_trials", 0) or 0),
         "num_trials_baseline": len(baseline_trials),
         "trials": trials,
@@ -2018,6 +2089,32 @@ def _build_conclusions(
     return conclusions
 
 
+def _plugin_incompleteness_conclusion(plugin_provenance: dict[str, Any]) -> dict[str, str]:
+    """Build the leading deterministic conclusion for a partial plugin run."""
+    unresolved = []
+    for label, key in (
+        ("skill ref(s)", "unresolved_skill_refs"),
+        ("rule ref(s)", "unresolved_rule_refs"),
+        ("provider MCP server(s)", "provider_only_mcp_servers"),
+        ("MCP server config(s)", "mcp_unsupported_config"),
+    ):
+        count = len(plugin_provenance.get(key) or [])
+        if count:
+            unresolved.append(f"{count} {label}")
+    unresolved_text = ", ".join(unresolved) or "required components"
+    resolved_skills = len(plugin_provenance.get("evaluated_member_skills") or [])
+    resolved_rules = len(plugin_provenance.get("staged_rules") or [])
+    return {
+        "severity": "fail",
+        "title": "Evaluation INCOMPLETE - unresolved dependencies",
+        "message": (
+            f"This plugin run is INCOMPLETE: {unresolved_text} could not be fully evaluated at Tier 3. "
+            f"The score reflects only the resolved components ({resolved_skills} skill(s), "
+            f"{resolved_rules} rule(s)) and must not be read as a full pass."
+        ),
+    }
+
+
 def _suggestions_for_dimensions(dimensions: list[dict[str, Any]]) -> list[str]:
     """Default suggestions: target the weakest dimensions (Skill Evaluator parity)."""
     pending: list[tuple[float, str]] = []
@@ -2095,6 +2192,66 @@ def _verdict_from_lift(lift: float | None) -> str:
     if numeric <= _VERDICT_FAIL_THRESHOLD:
         return VERDICT_FAIL
     return VERDICT_NEUTRAL
+
+
+def _integration_verdict(lift: float | None, *, complete: bool) -> str:
+    numeric = _finite_float(lift)
+    if not complete or numeric is None:
+        return INTEGRATION_VERDICT_INCONCLUSIVE
+    if numeric >= _INTEGRATION_REAL_THRESHOLD:
+        return INTEGRATION_VERDICT_REAL
+    if numeric <= _INTEGRATION_NEGATIVE_THRESHOLD:
+        return INTEGRATION_VERDICT_NEGATIVE
+    return INTEGRATION_VERDICT_COSMETIC
+
+
+def _build_integration_report(
+    best: dict[str, Any],
+    run_config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Build the plugin-only, report-only compositional-lift result."""
+    if not isinstance(run_config, dict):
+        return None
+    target = run_config.get("eval_target")
+    if not isinstance(target, dict) or target.get("kind") != "plugin":
+        return None
+    workspace = run_config.get("skill_workspace")
+    if not isinstance(workspace, dict):
+        return None
+    raw_components = workspace.get("staged_skills") or workspace.get("include") or []
+    components = [Path(str(component)).name for component in raw_components if str(component).strip()]
+    if not components:
+        return None
+
+    if workspace.get("sum_of_parts_arm"):
+        sum_of_parts = _finite_float(best.get("sum_of_parts"))
+        completeness = best.get("integration_completeness")
+        complete = bool(isinstance(completeness, dict) and completeness.get("complete"))
+    elif workspace.get("baseline_includes_workspace_skills"):
+        sum_of_parts = _finite_float(best.get("baseline"))
+        completeness = None
+        complete = sum_of_parts is not None and _finite_float(best.get("with_skill")) is not None
+    else:
+        return None
+
+    with_plugin = _finite_float(best.get("with_skill"))
+    lift = round(with_plugin - sum_of_parts, 4) if with_plugin is not None and sum_of_parts is not None else None
+    verdict = _integration_verdict(lift, complete=complete)
+    return {
+        "schema_version": _INTEGRATION_SCHEMA_VERSION,
+        "advisory": True,
+        "report_only": True,
+        "basis": "compositional-lift-ablation",
+        "baseline": "sum-of-parts",
+        "components": list(dict.fromkeys(components)),
+        "with_plugin": round(with_plugin, 4) if with_plugin is not None else None,
+        "sum_of_parts": round(sum_of_parts, 4) if sum_of_parts is not None else None,
+        "integration_lift": lift,
+        "verdict": verdict,
+        "complete": complete,
+        "completeness": completeness if isinstance(completeness, dict) else None,
+        "interpretation": _INTEGRATION_INTERPRETATION[verdict],
+    }
 
 
 def _pick_best_agent(agents: dict[str, dict[str, Any]]) -> str:

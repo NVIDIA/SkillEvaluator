@@ -34,6 +34,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.mcp_static import validate_contained_mcp_servers
 
 logger = get_logger(__name__)
 
@@ -259,13 +260,21 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
-        result.add_success(
-            check_name="plugin_manifest",
-            message=f"Contained plugin manifest '{name}' is valid (name present; full schema deferred)",
-        )
+        mcp_findings = validate_contained_mcp_servers(data.get("mcpServers"), str(manifest_path))
+        for finding in mcp_findings:
+            result.add_finding(finding)
+        if not mcp_findings:
+            result.add_success(
+                check_name="plugin_manifest",
+                message=f"Contained plugin manifest '{name}' is valid (name present; full schema deferred)",
+            )
         plugin = result.metadata.setdefault("plugin", {})
         plugin["name"] = name
-        dependencies = {key: len(value) for key, value in data.items() if isinstance(value, list)}
+        dependencies = {
+            key: len(value) for key, value in data.items() if isinstance(value, (list, dict)) and key != "mcpServers"
+        }
+        if isinstance(data.get("mcpServers"), dict):
+            dependencies["mcpServers"] = len(data["mcpServers"])
         if dependencies:
             plugin["declared_dependencies"] = dependencies
 

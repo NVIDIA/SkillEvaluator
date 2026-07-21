@@ -7,6 +7,9 @@ All notable changes to Skill Evaluator are documented in this file.
 ### Added
 
 - Initial public release candidate.
+- Added public plugin evaluation across all tiers: static schema and MCP checks,
+  advisory offline dependency/context deduplication, and Harbor-backed live
+  evaluation with effectiveness and optional sum-of-parts Integration arms.
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.

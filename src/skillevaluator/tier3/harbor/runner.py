@@ -1319,6 +1319,7 @@ def _run_agent_pair(
     env_mode: str,
     with_skill: Path,
     baseline: Path | None,
+    sum_of_parts: Path | None = None,
     jobs_dir: Path,
     run_env: dict[str, str],
     n_attempts: int,
@@ -1336,31 +1337,33 @@ def _run_agent_pair(
     jobs = [("with", with_skill)]
     if baseline is not None:
         jobs.append(("without", baseline))
+    if sum_of_parts is not None:
+        jobs.append(("sumofparts", sum_of_parts))
     if stop_on_pass:
         # A later attempt is launched only after the previous one scored, so
         # stop-on-pass runs each condition sequentially, one attempt at a time.
         sequential_errors: list[str] = []
         for variant, dataset in jobs:
-            sequential_errors.extend(
-                _run_stop_on_pass_variant(
-                    skill_name=skill_name,
-                    agent=agent,
-                    variant=variant,
-                    dataset=dataset,
-                    task_names=list(task_names or []),
-                    env_mode=env_mode,
-                    model=model,
-                    jobs_dir=jobs_dir,
-                    run_env=run_env,
-                    n_attempts=n_attempts,
-                    pass_threshold=pass_threshold,
-                    timeout_multiplier=timeout_multiplier,
-                    override_cpus=override_cpus,
-                    override_memory_mb=override_memory_mb,
-                    override_storage_mb=override_storage_mb,
-                    agent_import_path=agent_import_path,
-                )
+            variant_errors = _run_stop_on_pass_variant(
+                skill_name=skill_name,
+                agent=agent,
+                variant=variant,
+                dataset=dataset,
+                task_names=list(task_names or []),
+                env_mode=env_mode,
+                model=model,
+                jobs_dir=jobs_dir,
+                run_env=run_env,
+                n_attempts=n_attempts,
+                pass_threshold=pass_threshold,
+                timeout_multiplier=timeout_multiplier,
+                override_cpus=override_cpus,
+                override_memory_mb=override_memory_mb,
+                override_storage_mb=override_storage_mb,
+                agent_import_path=agent_import_path,
             )
+            if variant != "sumofparts":
+                sequential_errors.extend(variant_errors)
         return sequential_errors
     # The advertised concurrency is one per-agent trial budget. Split it
     # across concurrently running conditions instead of multiplying it by two.
@@ -1395,7 +1398,7 @@ def _run_agent_pair(
         }
         for future in as_completed(futures):
             ok, detail = future.result()
-            if not ok:
+            if not ok and futures[future] != "sumofparts":
                 errors.append(f"{agent} {futures[future]}-skill Harbor run failed: {detail}")
     return errors
 
@@ -1537,6 +1540,9 @@ def _run_harbor_eval_impl(
     custom_dockerfile_mode: str | None = None,
     skill_workspace_mode: str | None = None,
     include_skills: list[str | Path] | None = None,
+    workspace_skills_baseline: bool = True,
+    sum_of_parts_arm: bool = False,
+    eval_target_kind: str = "skill",
     copy_repo: bool = False,
     grading_mode: str | None = None,
     reference_skills_dir: Path | None = None,
@@ -1703,6 +1709,7 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
+    run_sum_of_parts = bool(sum_of_parts_arm and not skip_baseline and workspace_skills)
 
     evals_exists = find_evals_file(skill_path) is not None
     native_exists = (skill_path / "evals" / "harbor").exists()
@@ -1769,7 +1776,7 @@ def _run_harbor_eval_impl(
                     detail="base image build failed; falling back to per-task Dockerfiles",
                 )
             )
-    agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
+    agent_task_dirs: dict[str, tuple[Path, Path | None, Path | None]] = {}
     expected_task_names: list[str] | None = None
     reporter.emit(
         ProgressEvent(
@@ -1783,6 +1790,7 @@ def _run_harbor_eval_impl(
         for agent in agents:
             with_dir = tasks_dir / agent / "with"
             without_dir = None if skip_baseline else tasks_dir / agent / "without"
+            sumofparts_dir = tasks_dir / agent / "sumofparts" if run_sum_of_parts else None
             task_paths = emitter(
                 skill_path,
                 with_dir,
@@ -1805,7 +1813,7 @@ def _run_harbor_eval_impl(
                 expected_task_names = task_names
             elif task_names != expected_task_names:
                 raise ValueError(f"Generated task cases differ for agent {agent}")
-            agent_task_dirs[agent] = (with_dir, without_dir)
+            agent_task_dirs[agent] = (with_dir, without_dir, sumofparts_dir)
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="running"))
@@ -1815,6 +1823,25 @@ def _run_harbor_eval_impl(
                 emitter(
                     skill_path,
                     without_dir,
+                    with_skill=False,
+                    reference_skills_dir=reference_skills_dir,
+                    workspace_skill_paths=workspace_skills if workspace_skills_baseline else [],
+                    workspace_mode=workspace_mode,
+                    grading_mode=grading_mode,
+                    base_image=base_image,
+                    custom_dockerfile_mode=dockerfile_mode,
+                    copy_repo=copy_repo,
+                    runtime_env=dict(runtime_plans[agent].staged_env),
+                    verifier_env=staged_verifier_env,
+                    pre_agent_setup=harbor_config.get("pre_agent_setup", []),
+                    task_resources=resource_config,
+                    agent_workdir=harbor_config.get("agent_workdir"),
+                )
+            sumofparts_dir = agent_task_dirs[agent][2]
+            if sumofparts_dir is not None:
+                emitter(
+                    skill_path,
+                    sumofparts_dir,
                     with_skill=False,
                     reference_skills_dir=reference_skills_dir,
                     workspace_skill_paths=workspace_skills,
@@ -1839,7 +1866,7 @@ def _run_harbor_eval_impl(
 
     task_names = expected_task_names or []
     expected_trials = len(task_names) * n_attempts
-    variants = 1 if skip_baseline else 2
+    variants = (1 if skip_baseline else 2) + (1 if run_sum_of_parts else 0)
     matrix_trials = expected_trials * len(agents) * variants
     preflight_trials = len(agents) if agent_runtime_preflight else 0
     task_timeout_seconds = _task_timeout_plan(
@@ -1940,6 +1967,7 @@ def _run_harbor_eval_impl(
             env_mode=env_mode,
             with_skill=agent_task_dirs[agent][0],
             baseline=agent_task_dirs[agent][1],
+            sum_of_parts=agent_task_dirs[agent][2],
             jobs_dir=jobs_dir,
             run_env=dict(runtime_plans[agent].subprocess_env),
             n_attempts=n_attempts,
@@ -2016,6 +2044,7 @@ def _run_harbor_eval_impl(
             output_dir=run_dir,
             jobs_dir=jobs_dir,
             skip_baseline=skip_baseline,
+            sum_of_parts_arm=run_sum_of_parts,
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
@@ -2035,6 +2064,7 @@ def _run_harbor_eval_impl(
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
     run_config = {
         "config_file": str(config_path.relative_to(skill_path)) if config_path else "none",
+        "eval_target": {"kind": eval_target_kind or "skill"},
         "harbor": {
             "environment": {"value": env_mode, "source": env_mode_source},
             "n_attempts": n_attempts,
@@ -2047,6 +2077,13 @@ def _run_harbor_eval_impl(
         "provider": {"name": provider.provider, "model": provider.model},
         "task_source": task_source,
         "grading": {"mode": grading_mode},
+        "skill_workspace": {
+            "mode": workspace_mode,
+            "include": [str(path) for path in workspace_skills],
+            "staged_skills": [path.name for path in workspace_skills],
+            "baseline_includes_workspace_skills": workspace_skills_baseline,
+            "sum_of_parts_arm": run_sum_of_parts,
+        },
         "agents": model_resolution,
     }
     results.update(

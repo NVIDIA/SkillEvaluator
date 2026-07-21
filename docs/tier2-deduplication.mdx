@@ -30,6 +30,7 @@ configure an embeddings provider separately. See
 - [Commands](#commands)
 - [Inter-Skill Similarity (`similarity-check`)](#inter-skill-similarity-similarity-check)
 - [Intra-Skill Context Deduplication (`context-optimization-check`)](#intra-skill-context-deduplication-context-optimization-check)
+- [Plugin Deduplication](#plugin-deduplication)
 - [Provider Data and Privacy](#provider-data-and-privacy)
 - [Defaults](#defaults)
 - [Reports and Exit Behavior](#reports-and-exit-behavior)
@@ -59,6 +60,24 @@ skillevaluator validate ./my-skill --no-dedup
 `validate` skips its Tier 2 pass with a warning when the optional Tier 2
 dependencies or an embeddings provider are unavailable. Use `--no-dedup` to
 disable that pass explicitly.
+
+## Plugin Deduplication
+
+`validate` also accepts bundle-reference and contained plugins:
+
+```bash
+skillevaluator validate ./my-plugin --type plugin
+```
+
+Plugin Tier 2 is advisory and public/offline by design. It always checks for
+duplicate skill and rule references in `agent_plugin.yaml`. When an embeddings
+provider is available, it also runs context deduplication independently over
+each safely discovered skill under `skills/`. Missing optional embedding access
+skips only that contextual check; the offline reference check still runs.
+
+The public implementation does not connect to a remote vector database, fetch
+remote component catalogs, or compare a plugin against a private plugin index. It preserves the
+external repository's local-catalog-only Tier 2 contract.
 
 ## Inter-Skill Similarity (`similarity-check`)
 

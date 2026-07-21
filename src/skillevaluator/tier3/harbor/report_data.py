@@ -372,22 +372,26 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
         agent_diagnostics: list[dict[str, Any]] = []
         condition_execution: dict[str, dict[str, Any]] = {}
 
-        for variant in ("with-skill", "without-skill"):
+        variants = {
+            "with-skill": "with_skill",
+            "without-skill": "without_skill",
+            "sum-of-parts": "sum_of_parts",
+        }
+        for variant, key in variants.items():
             summary = agent_dir / variant / "summary.json"
             if summary.exists():
                 data = _load_bounded_json(summary, agent_diagnostics, artifact="summary")
                 if isinstance(data, dict):
-                    key = "with_skill" if variant == "with-skill" else "without_skill"
                     agent_info[key] = data.get("scores", data)
-                    metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
+                    metric_key = f"metrics_{key}"
                     agent_info[metric_key] = data.get("metrics", [])
-                    custom_key = "custom_with_skill" if variant == "with-skill" else "custom_without_skill"
+                    custom_key = f"custom_{key}"
                     if "custom_scores" in data:
                         agent_info[custom_key] = data.get("custom_scores", {})
-                    dimension_key = "dimensions_with_skill" if variant == "with-skill" else "dimensions_without_skill"
+                    dimension_key = f"dimensions_{key}"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})
-                    pass_key = "pass_with_skill" if variant == "with-skill" else "pass_without_skill"
+                    pass_key = f"pass_{key}"
                     if "pass_at_k" in data:
                         agent_info[pass_key] = data["pass_at_k"]
                     status = data.get("execution_status")
@@ -395,7 +399,11 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
                         status = "unknown"
                     errors = data.get("execution_errors")
                     condition_errors = [str(error) for error in errors] if isinstance(errors, list) else []
-                    label = "With skill" if variant == "with-skill" else "Without skill"
+                    label = {
+                        "with-skill": "With skill",
+                        "without-skill": "Without skill",
+                        "sum-of-parts": "Sum of parts",
+                    }[variant]
                     job_failure = data.get("job_failure")
                     if job_failure:
                         condition_errors.append(f"{label} aggregate job: {job_failure}")
@@ -434,7 +442,11 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
             if custom_lift is not _INVALID_JSON:
                 agent_info["custom_lift"] = custom_lift
 
-        for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
+        for variant_key, variant_dir_name in (
+            ("rewards", "with-skill"),
+            ("rewards_baseline", "without-skill"),
+            ("rewards_sum_of_parts", "sum-of-parts"),
+        ):
             trial_list: list[dict[str, Any]] = []
             trials_dir = agent_dir / variant_dir_name / "trials"
             if trials_dir.exists():
@@ -494,7 +506,9 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
         if "with_skill" not in agent_info:
             continue
 
-        active_conditions = list(condition_execution.values())
+        active_conditions = [
+            condition_execution[key] for key in ("with_skill", "without_skill") if key in condition_execution
+        ]
         execution_errors = [
             error for condition in active_conditions for error in condition.get("execution_errors", []) if error
         ]
@@ -534,6 +548,13 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
                 "dimensions_without_skill",
                 "pass_without_skill",
                 "rewards_baseline",
+            ),
+            "sum_of_parts": (
+                "sum_of_parts",
+                "custom_sum_of_parts",
+                "dimensions_sum_of_parts",
+                "pass_sum_of_parts",
+                "rewards_sum_of_parts",
             ),
         }
         for condition, fields in condition_quality_fields.items():

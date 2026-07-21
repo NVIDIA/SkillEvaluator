@@ -25,6 +25,7 @@ Default dimension rows remain visible for a stable terminal layout but show
 - [Quick Start](#quick-start)
 - [How a Run Works](#how-a-run-works)
 - [Two Ways to Run Tier 3](#two-ways-to-run-tier-3)
+- [Plugin Evaluation](#plugin-evaluation)
 - [Prerequisites and Credentials](#prerequisites-and-credentials)
 - [Commands](#commands)
 - [Choosing an Environment](#choosing-an-environment)
@@ -99,6 +100,48 @@ Tier 3 remains advisory when attached to `validate`: it is included in the
 combined reports but does not change the validation exit code. Focused live
 evaluation still requires the provider and agent credentials needed by the
 selected setup.
+
+## Plugin Evaluation
+
+Run all three tiers for a plugin with the same validation entry point:
+
+```bash
+skillevaluator validate ./my-plugin --type plugin --tier3
+```
+
+For focused Tier 3 iteration, use the plugin-specific command and optionally
+provide a combined dataset or local member skills:
+
+```bash
+skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both
+skillevaluator tier3 evaluate-plugin ./my-plugin \
+  --evals-source ./evals/evals.json --include-skills ../skills/local-member
+```
+
+Tier 3 builds a temporary skill-shaped wrapper and reuses the Harbor evaluation
+engine. It evaluates locally available components only:
+
+- bundled skills under `skills/` and same-repository `github` or `git` refs;
+- contained rule files; and
+- contained command or secure URL MCP servers, staged only in the plugin arm.
+
+Remote components are never fetched. Unresolved refs and provider-only MCP
+servers are recorded in plugin provenance. A partial run is reported as
+`INCOMPLETE`, never as a full pass; a plugin with nothing locally evaluable is
+reported as an honest advisory skip.
+
+Plugin baselines are controlled with `--lift-mode`:
+
+| Mode | Comparison |
+| --- | --- |
+| `effectiveness` | Coordinated plugin versus no plugin; default |
+| `integration` | Coordinated plugin versus its member skills staged individually |
+| `both` | Effectiveness plus a third, report-only sum-of-parts arm |
+
+The Integration result is advisory and never changes the main Tier 3 score,
+verdict, or validation exit code. MCP declarations are statically checked before
+staging; inline credentials, shell command forms, insecure URLs, floating
+versions, and disabled TLS verification are rejected.
 
 ## Prerequisites and Credentials
 

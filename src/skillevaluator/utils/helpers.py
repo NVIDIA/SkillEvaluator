@@ -51,14 +51,23 @@ def find_skills_in_directory(root_path: Path) -> list[Path]:
 
 
 def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
-    """Find live skills under a plugin's ``skills/`` directory."""
+    """Find live, contained skills under a plugin's ``skills/`` directory."""
     skills_root = plugin_root / "skills"
     if not skills_root.is_dir():
         return []
+    plugin_root_resolved = plugin_root.resolve()
+
+    def _within_plugin(skill_dir: Path) -> bool:
+        try:
+            return skill_dir.resolve().is_relative_to(plugin_root_resolved)
+        except OSError:
+            return False
+
     return [
         skill_dir
         for skill_dir in find_skills_in_directory(skills_root)
         if not any(part in SCAN_EXCLUDED_DIRS for part in skill_dir.relative_to(skills_root).parts)
+        and _within_plugin(skill_dir)
     ]
 
 

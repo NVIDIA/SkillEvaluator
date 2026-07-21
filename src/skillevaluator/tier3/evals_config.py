@@ -9,7 +9,9 @@ dataset says what to evaluate; this config says how SkillEvaluator should run Ha
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ import yaml
 from skillevaluator.tier3.harbor import canonical_agent_name
 
 CONFIG_FILENAMES = ("config.yml", "config.yaml")
+MAX_EVALS_CONFIG_BYTES = 4 * 1024 * 1024
 HARBOR_CUSTOM_DOCKERFILE_MODES = {"preserve", "rebase"}
 HARBOR_BASE_IMAGE_MODES = {"reuse", "rebuild", "disabled"}
 SKILL_WORKSPACE_MODES = {"isolated", "group"}
@@ -58,7 +61,7 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class EvalsConfigError(ValueError):
-    """Raised when ``evals/config.yml`` is present but invalid."""
+    """Raised when ``evals/config.yml`` is present but cannot be trusted."""
 
 
 def find_evals_config(skill_path: Path) -> Path | None:
@@ -83,11 +86,20 @@ def load_evals_config(skill_path: Path) -> tuple[dict[str, Any], Path | None]:
         return {}, None
 
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as e:
-        raise EvalsConfigError(f"{config_path}: invalid YAML: {e}") from e
-    except OSError as e:
-        raise EvalsConfigError(f"{config_path}: cannot read config: {e}") from e
+        config_stat = config_path.lstat()
+    except OSError as error:
+        raise EvalsConfigError(f"{config_path}: cannot inspect config: {error}") from error
+    if not stat.S_ISREG(config_stat.st_mode) or config_stat.st_nlink != 1:
+        raise EvalsConfigError(f"{config_path}: config must be a regular non-hardlinked file")
+    if config_stat.st_size > MAX_EVALS_CONFIG_BYTES:
+        raise EvalsConfigError(f"{config_path}: config exceeds {MAX_EVALS_CONFIG_BYTES} bytes")
+
+    try:
+        raw = yaml.safe_load(_read_config_text(config_path, config_stat))
+    except yaml.YAMLError as error:
+        raise EvalsConfigError(f"{config_path}: invalid YAML: {error}") from error
+    except (OSError, UnicodeError) as error:
+        raise EvalsConfigError(f"{config_path}: cannot read config: {error}") from error
 
     if raw is None:
         raise EvalsConfigError(f"{config_path}: config must not be empty")
@@ -97,8 +109,48 @@ def load_evals_config(skill_path: Path) -> tuple[dict[str, Any], Path | None]:
     return _validate_config(raw, config_path), config_path
 
 
-def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
-    unknown_top = set(raw) - _TOP_LEVEL_KEYS
+def _read_config_text(config_path: Path, expected_stat: os.stat_result) -> str:
+    """Read a bounded config from the same regular file that was inspected."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(config_path, flags)
+    try:
+        opened_stat = os.fstat(fd)
+        if (opened_stat.st_dev, opened_stat.st_ino) != (expected_stat.st_dev, expected_stat.st_ino):
+            raise EvalsConfigError(f"{config_path}: config changed while it was opened")
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
+            raise EvalsConfigError(f"{config_path}: config must be a regular non-hardlinked file")
+        if opened_stat.st_size > MAX_EVALS_CONFIG_BYTES:
+            raise EvalsConfigError(f"{config_path}: config exceeds {MAX_EVALS_CONFIG_BYTES} bytes")
+
+        chunks: list[bytes] = []
+        remaining = opened_stat.st_size
+        while remaining:
+            chunk = os.read(fd, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise EvalsConfigError(f"{config_path}: config changed while it was read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise EvalsConfigError(f"{config_path}: config changed while it was read")
+        return b"".join(chunks).decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def _unknown_keys(
+    mapping: dict[Any, Any],
+    allowed: set[str],
+    config_path: Path,
+    field: str,
+) -> set[str]:
+    """Return unknown string keys or fail closed on non-string YAML keys."""
+    if any(not isinstance(key, str) for key in mapping):
+        raise EvalsConfigError(f"{config_path}: {field} keys must be strings")
+    return set(mapping) - allowed
+
+
+def _validate_config(raw: dict[Any, Any], config_path: Path) -> dict[str, Any]:
+    unknown_top = _unknown_keys(raw, _TOP_LEVEL_KEYS, config_path, "top-level config")
     if unknown_top:
         raise EvalsConfigError(f"{config_path}: unknown top-level key(s): {', '.join(sorted(unknown_top))}")
 
@@ -112,7 +164,7 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
         if not isinstance(harbor_raw, dict):
             raise EvalsConfigError(f"{config_path}: harbor must be a mapping")
 
-        unknown_harbor = set(harbor_raw) - _HARBOR_KEYS
+        unknown_harbor = _unknown_keys(harbor_raw, _HARBOR_KEYS, config_path, "harbor")
         if unknown_harbor:
             raise EvalsConfigError(f"{config_path}: unknown harbor key(s): {', '.join(sorted(unknown_harbor))}")
 
@@ -276,7 +328,7 @@ def _agents(value: Any, config_path: Path) -> dict[str, dict[str, str]]:
                 f"refer to the same agent ({canonical_name}); use only {canonical_name}"
             )
 
-        unknown_agent = set(agent_cfg) - _AGENT_KEYS
+        unknown_agent = _unknown_keys(agent_cfg, _AGENT_KEYS, config_path, f"harbor.agents.{agent_name}")
         if unknown_agent:
             raise EvalsConfigError(
                 f"{config_path}: unknown key(s) under harbor.agents.{agent_name}: {', '.join(sorted(unknown_agent))}"
@@ -304,7 +356,7 @@ def _resources(value: Any, config_path: Path) -> dict[str, int]:
     if not isinstance(value, dict):
         raise EvalsConfigError(f"{config_path}: harbor.resources must be a mapping")
 
-    unknown = set(value) - _RESOURCE_KEYS
+    unknown = _unknown_keys(value, _RESOURCE_KEYS, config_path, "harbor.resources")
     if unknown:
         raise EvalsConfigError(f"{config_path}: unknown key(s) under harbor.resources: {', '.join(sorted(unknown))}")
 
@@ -375,7 +427,7 @@ def _skill_workspace(value: Any, config_path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise EvalsConfigError(f"{config_path}: skill_workspace must be a mapping")
 
-    unknown = set(value) - _SKILL_WORKSPACE_KEYS
+    unknown = _unknown_keys(value, _SKILL_WORKSPACE_KEYS, config_path, "skill_workspace")
     if unknown:
         raise EvalsConfigError(f"{config_path}: unknown skill_workspace key(s): {', '.join(sorted(unknown))}")
 
@@ -391,7 +443,7 @@ def _grading(value: Any, config_path: Path) -> dict[str, str]:
     if not isinstance(value, dict):
         raise EvalsConfigError(f"{config_path}: grading must be a mapping")
 
-    unknown = set(value) - _GRADING_KEYS
+    unknown = _unknown_keys(value, _GRADING_KEYS, config_path, "grading")
     if unknown:
         raise EvalsConfigError(f"{config_path}: unknown grading key(s): {', '.join(sorted(unknown))}")
 

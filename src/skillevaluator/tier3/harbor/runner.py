@@ -958,6 +958,160 @@ def _resolve_agent_runtime_plan(
     return plans
 
 
+def _resolve_provider_contract_exclusions(
+    *,
+    provider: ProviderConfig,
+    agents: list[str],
+    model_resolution: Mapping[str, Mapping[str, str]],
+    configured_runtime_env: Mapping[str, str],
+    env_mode: str,
+    agent_validity_policy: str,
+    min_valid_agents: int | None,
+    required_agents: tuple[str, ...],
+) -> tuple[dict[str, AgentRuntimePlan], dict[str, str], list[str]]:
+    """Resolve per-agent provider plans under the requested coverage policy."""
+    plans: dict[str, AgentRuntimePlan] = {}
+    errors_by_agent: dict[str, str] = {}
+    models = {agent: str(model_resolution[agent]["model"]) for agent in agents}
+    sources = {agent: str(model_resolution[agent]["source"]) for agent in agents}
+    for agent in agents:
+        try:
+            plans.update(
+                _resolve_agent_runtime_plan(
+                    provider=provider,
+                    agents=[agent],
+                    models=models,
+                    configured_runtime_env=configured_runtime_env,
+                    env_mode=env_mode,
+                    model_sources=sources,
+                )
+            )
+        except ValueError as exc:
+            errors_by_agent[agent] = str(exc)
+
+    if not errors_by_agent:
+        return plans, {}, []
+
+    errors = list(dict.fromkeys(errors_by_agent.values()))
+    if agent_validity_policy != "any-valid":
+        return {}, {}, errors
+
+    minimum = min_valid_agents or 1
+    if len(plans) < minimum or any(agent in errors_by_agent for agent in required_agents):
+        return {}, {}, errors
+
+    exclusions = {agent: errors_by_agent[agent] for agent in agents if agent in errors_by_agent}
+    return plans, exclusions, []
+
+
+def _provider_contract_excluded_agent_result(
+    *,
+    agent: str,
+    metadata: Mapping[str, str],
+    reason: str,
+    skip_baseline: bool,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Build the collector-shaped record for a preflight-excluded agent."""
+    condition = {
+        "execution_status": "skipped",
+        "execution_errors": [],
+        "expected_attempts": 0,
+        "scored_attempts": 0,
+    }
+    runtime_failure = {"reason": reason, "source": "provider_contract"}
+    return {
+        "agent": agent,
+        "model": str(metadata.get("model") or ""),
+        "model_source": str(metadata.get("source") or ""),
+        "model_resolution": {
+            "model": str(metadata.get("model") or ""),
+            "source": str(metadata.get("source") or ""),
+        },
+        "with_skill": {},
+        "without_skill": {},
+        "custom_with_skill": {},
+        "custom_without_skill": {},
+        "dimensions_with_skill": {},
+        "dimensions_without_skill": {},
+        "lift": {},
+        "custom_lift": {},
+        "pass_at_k": {"with_skill": {}, "without_skill": {}, "lift": {}},
+        "agent_runtime_failures": {
+            "with_skill": [runtime_failure],
+            "without_skill": [] if skip_baseline else [runtime_failure],
+        },
+        "trial_failures": {"with_skill": [], "without_skill": []},
+        "job_failures": {"with_skill": reason, "without_skill": "" if skip_baseline else reason},
+        "conditions": {
+            "with_skill": dict(condition),
+            "without_skill": dict(condition),
+        },
+        "execution_status": "skipped",
+        "execution_errors": [],
+        "expected_attempts": 0,
+        "scored_attempts": 0,
+        "num_trials_with": 0,
+        "num_trials_without": 0,
+        "output_dir": str(output_dir.resolve()),
+    }
+
+
+def _remove_staged_dataset_controls(
+    agent_task_dirs: Mapping[str, tuple[Path, Path | None]],
+) -> None:
+    """Remove unbound dataset-level files from every staged agent root."""
+
+    seen: set[Path] = set()
+    for with_skill_root, baseline_root in agent_task_dirs.values():
+        for task_root in (with_skill_root, baseline_root):
+            if task_root is None or task_root in seen:
+                continue
+            seen.add(task_root)
+            for control_name in ("dataset.toml", "metric.py"):
+                control = task_root / control_name
+                if control.is_symlink():
+                    raise ValueError(f"unsafe staged control file: {control}")
+                if control.exists():
+                    control.unlink()
+
+
+def _verify_agent_task_roots(
+    *,
+    run_dir: Path,
+    plan: Mapping[str, Any],
+    agent_task_dirs: Mapping[str, tuple[Path, Path | None]],
+    skip_baseline: bool,
+) -> None:
+    """Require every active agent to run the exact task bytes bound by the plan."""
+
+    from skillevaluator.tier3.harbor.coverage import (
+        verify_staged_arm_task_roots,
+        verify_staged_task_root_against_plan,
+    )
+
+    verify_staged_arm_task_roots(run_dir, plan)
+    for agent, (with_skill_root, baseline_root) in agent_task_dirs.items():
+        try:
+            verify_staged_task_root_against_plan(
+                run_dir,
+                with_skill_root,
+                plan,
+                arm="with_skill",
+            )
+            if not skip_baseline:
+                if baseline_root is None:
+                    raise ValueError("baseline task root is missing")
+                verify_staged_task_root_against_plan(
+                    run_dir,
+                    baseline_root,
+                    plan,
+                    arm="baseline",
+                )
+        except ValueError as error:
+            raise ValueError(f"staged task integrity check failed for agent {agent}: {error}") from error
+
+
 def _is_skill_dir(path: Path) -> bool:
     return path.is_dir() and (path / "SKILL.md").is_file()
 
@@ -1549,6 +1703,16 @@ def _run_harbor_eval_impl(
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
+    agent_validity_policy: str = "all-selected",
+    min_valid_agents: int | None = None,
+    required_agents: tuple[str, ...] = (),
+    contract_requests: tuple[str, ...] = (),
+    tier3_evidence_mode: bool = False,
+    tier3_result_file: Path | None = None,
+    tier3_occurrence_id: str | None = None,
+    expected_content_digest: str | None = None,
+    validated_sha: str | None = None,
+    gate_policy_digest: str | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
@@ -1621,6 +1785,54 @@ def _run_harbor_eval_impl(
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
+    if agent_validity_policy not in {"all-selected", "any-valid"}:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid agent validity policy"))
+        return {"error": ["agent_validity_policy must be all-selected or any-valid"]}
+    if min_valid_agents is not None and (
+        isinstance(min_valid_agents, bool) or not isinstance(min_valid_agents, int) or min_valid_agents < 1
+    ):
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid minimum agent count"))
+        return {"error": ["min_valid_agents must be >= 1"]}
+    if len(required_agents) != len(set(required_agents)):
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="duplicate required agents"))
+        return {"error": ["required_agents cannot contain duplicates"]}
+    unknown_required_agents = sorted(set(required_agents) - set(agents))
+    if unknown_required_agents:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unknown required agents"))
+        return {"error": ["required_agents must be selected agents: " + ", ".join(unknown_required_agents)]}
+    if min_valid_agents is not None and min_valid_agents > len(agents):
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="minimum exceeds selected agents"))
+        return {"error": ["min_valid_agents cannot exceed the number of selected agents"]}
+    try:
+        from skillevaluator.tier3.harbor.native_contract import (
+            SUPPORTED_CONTRACT_REQUESTS,
+            validate_contract_requests,
+            validate_evidence_bindings,
+        )
+
+        validate_contract_requests(contract_requests)
+        if tier3_evidence_mode and set(contract_requests) != SUPPORTED_CONTRACT_REQUESTS:
+            raise ValueError("tier3_evidence_mode requires the agent-coverage/1 and tier3-result/3 request pair")
+        bindings = (
+            tier3_result_file,
+            tier3_occurrence_id,
+            expected_content_digest,
+            validated_sha,
+            gate_policy_digest,
+        )
+        if not tier3_evidence_mode and any(value is not None for value in bindings):
+            raise ValueError("Tier 3 evidence bindings require tier3_evidence_mode")
+        if tier3_result_file is not None and (tier3_result_file.is_absolute() or ".." in tier3_result_file.parts):
+            raise ValueError("tier3_result_file must be a relative path confined to the run directory")
+        validate_evidence_bindings(
+            occurrence_id=tier3_occurrence_id,
+            expected_content_digest=expected_content_digest,
+            validated_sha=validated_sha,
+            gate_policy_digest=gate_policy_digest,
+        )
+    except (TypeError, ValueError) as exc:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
+        return {"error": [str(exc)]}
 
     reporter.emit(ProgressEvent(stage="configuration", state="ready", detail="evaluation config validated"))
     reporter.emit(ProgressEvent(stage="model-resolution", state="running"))
@@ -1659,29 +1871,26 @@ def _run_harbor_eval_impl(
         )
     )
 
-    reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
-    if prereq_errors:
-        reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
-        return {"error": prereq_errors}
-    reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
-
+    requested_agents = tuple(agents)
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail="; ".join(runtime_errors)))
         return {"error": runtime_errors}
-    try:
-        runtime_plans = _resolve_agent_runtime_plan(
-            provider=provider,
-            agents=agents,
-            models={agent: details["model"] for agent, details in model_resolution.items()},
-            configured_runtime_env=configured_runtime_env,
-            env_mode=env_mode,
-            model_sources={agent: details["source"] for agent, details in model_resolution.items()},
-        )
-    except ValueError as exc:
-        reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
+    runtime_plans, provider_agent_exclusions, provider_agent_errors = _resolve_provider_contract_exclusions(
+        provider=provider,
+        agents=agents,
+        model_resolution=model_resolution,
+        configured_runtime_env=configured_runtime_env,
+        env_mode=env_mode,
+        agent_validity_policy=agent_validity_policy,
+        min_valid_agents=min_valid_agents,
+        required_agents=required_agents,
+    )
+    if provider_agent_errors:
+        detail = "; ".join(provider_agent_errors)
+        reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=detail))
+        return {"error": provider_agent_errors}
+    agents = list(runtime_plans)
     nvidia_build_agent_import_paths = {
         agent: import_path
         for agent in agents
@@ -1691,6 +1900,14 @@ def _run_harbor_eval_impl(
         set().union(*(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values()))
     )
     reporter.emit(ProgressEvent(stage="credential-validation", state="complete", detail="credentials validated"))
+
+    reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
+    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
+    if prereq_errors:
+        reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
+        return {"error": prereq_errors}
+    reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
+
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env}
 
@@ -1718,6 +1935,19 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
         return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
 
+    coverage_mode = bool(
+        contract_requests
+        or tier3_evidence_mode
+        or tier3_result_file is not None
+        or agent_validity_policy != "all-selected"
+        or min_valid_agents is not None
+        or required_agents
+        or tier3_occurrence_id is not None
+        or expected_content_digest is not None
+        or validated_sha is not None
+        or gate_policy_digest is not None
+    )
+    sealed_plan = None
     root = output_dir or (skill_path / "evals" / "results")
     run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     run_dir = root / run_id
@@ -1781,8 +2011,12 @@ def _run_harbor_eval_impl(
     )
     try:
         for agent in agents:
-            with_dir = tasks_dir / agent / "with"
-            without_dir = None if skip_baseline else tasks_dir / agent / "without"
+            if coverage_mode and agent == agents[0]:
+                with_dir = run_dir / "staged" / "with_skill"
+                without_dir = None if skip_baseline else run_dir / "staged" / "baseline"
+            else:
+                with_dir = tasks_dir / agent / "with"
+                without_dir = None if skip_baseline else tasks_dir / agent / "without"
             task_paths = emitter(
                 skill_path,
                 with_dir,
@@ -1838,6 +2072,56 @@ def _run_harbor_eval_impl(
         return {"error": [str(exc)], "run_dir": str(run_dir)}
 
     task_names = expected_task_names or []
+    if coverage_mode:
+        try:
+            from skillevaluator.tier3.harbor.native_contract import seal_plan
+
+            _remove_staged_dataset_controls(agent_task_dirs)
+            canonical_agent = agents[0]
+            with_skill_root = agent_task_dirs[canonical_agent][0]
+            baseline_root = agent_task_dirs[canonical_agent][1] or with_skill_root
+            sealed_plan = seal_plan(
+                run_dir=run_dir,
+                run_id=run_id,
+                skill_path=skill_path,
+                task_source=task_source,
+                evals_file=find_evals_file(skill_path),
+                native_harbor_dir=skill_path / "evals" / "harbor",
+                evals_config=config,
+                grading_mode=grading_mode,
+                agent_entries=[
+                    {
+                        "result_agent": agent,
+                        "agent": agent,
+                        "occurrence": 1,
+                        "model": model_resolution[agent]["model"],
+                        "model_source": model_resolution[agent]["source"],
+                    }
+                    for agent in requested_agents
+                ],
+                task_paths=[with_skill_root / task_name for task_name in task_names],
+                with_skill_root=with_skill_root,
+                baseline_root=baseline_root,
+                skip_baseline=skip_baseline,
+                n_attempts=n_attempts,
+                stop_on_pass=bool(stop_on_pass),
+                pass_threshold=float(pass_threshold),
+                agent_validity_policy=agent_validity_policy,
+                min_valid_agents=min_valid_agents,
+                required_agents=required_agents,
+                contract_requests=contract_requests,
+            )
+            _verify_agent_task_roots(
+                run_dir=run_dir,
+                plan=sealed_plan.plan,
+                agent_task_dirs=agent_task_dirs,
+                skip_baseline=skip_baseline,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            detail = f"Tier 3 evidence plan could not be sealed: {exc}"
+            reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=detail))
+            return {"error": [detail], "run_dir": str(run_dir)}
+
     expected_trials = len(task_names) * n_attempts
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
@@ -2033,6 +2317,19 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
+    if provider_agent_exclusions:
+        agents_data = results.setdefault("agents", {})
+        for agent, reason in provider_agent_exclusions.items():
+            excluded_dir = run_dir / agent
+            excluded_dir.mkdir(parents=True, exist_ok=True)
+            agents_data[agent] = _provider_contract_excluded_agent_result(
+                agent=agent,
+                metadata=model_resolution[agent],
+                reason=reason,
+                skip_baseline=skip_baseline,
+                output_dir=excluded_dir,
+            )
+        results["provider_contract_exclusions"] = dict(provider_agent_exclusions)
     run_config = {
         "config_file": str(config_path.relative_to(skill_path)) if config_path else "none",
         "harbor": {
@@ -2044,7 +2341,11 @@ def _run_harbor_eval_impl(
             "base_image_mode": base_image_mode,
             "jobs_retained": keep_harbor_jobs,
         },
-        "provider": {"name": provider.provider, "model": provider.model},
+        "provider": {
+            "name": provider.provider,
+            "model": provider.model,
+            "agent_exclusions": dict(provider_agent_exclusions),
+        },
         "task_source": task_source,
         "grading": {"mode": grading_mode},
         "agents": model_resolution,
@@ -2066,11 +2367,6 @@ def _run_harbor_eval_impl(
             },
         }
     )
-    _finalize_harbor_artifacts(
-        run_dir_value=run_dir,
-        keep_requested=keep_harbor_jobs,
-        result=results,
-    )
     if errors:
         execution_errors = list(
             dict.fromkeys([*(str(error) for error in results.get("execution_errors", [])), *errors])
@@ -2078,6 +2374,48 @@ def _run_harbor_eval_impl(
         results["execution_status"] = "failed"
         results["execution_errors"] = execution_errors
         results["error"] = execution_errors
+    if coverage_mode and sealed_plan is None:
+        results.setdefault("error", []).append("Tier 3 evidence plan was not retained")
+    elif sealed_plan is not None:
+        try:
+            from skillevaluator.tier3.harbor.native_contract import finalize_contract
+
+            _verify_agent_task_roots(
+                run_dir=run_dir,
+                plan=sealed_plan.plan,
+                agent_task_dirs=agent_task_dirs,
+                skip_baseline=skip_baseline,
+            )
+            results = finalize_contract(
+                run_dir=run_dir,
+                sealed=sealed_plan,
+                results=results,
+                skill_name=skill_path.name,
+                environment=env_mode,
+                duration_seconds=max(0.0, time.monotonic() - started_at),
+                result_file=tier3_result_file,
+                occurrence_id=tier3_occurrence_id,
+                expected_content_digest=expected_content_digest,
+                validated_sha=validated_sha,
+                gate_policy_digest=gate_policy_digest,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            results.setdefault("error", []).append(f"Tier 3 evidence production failed: {exc}")
+            results["execution_status"] = "failed"
+
+    if tier3_evidence_mode and isinstance(results.get("tier3_result"), dict):
+        # Evidence jobs gate on production and integrity. Preserve semantic
+        # evaluation errors separately from the transport-level job status.
+        if results.get("error"):
+            results["semantic_errors"] = list(results["error"])
+            results.pop("error", None)
+        results["evidence_job_status"] = "succeeded"
+
+    _finalize_harbor_artifacts(
+        run_dir_value=run_dir,
+        keep_requested=keep_harbor_jobs,
+        result=results,
+    )
     reporter.emit(ProgressEvent(stage="report", state="running"))
     try:
         (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
@@ -2130,7 +2468,7 @@ def _run_harbor_eval_impl(
         record_agent_eval_summary(
             runner="harbor",
             skill_name=skill_path.name,
-            agents=agents,
+            agents=list(requested_agents),
             env_mode=env_mode,
             results=results,
             agent_models=model_resolution,

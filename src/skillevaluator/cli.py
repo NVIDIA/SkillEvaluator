@@ -1653,6 +1653,43 @@ def dedup_scan(
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
 @click.option(
+    "--agent-validity-policy",
+    type=click.Choice(["all-selected", "any-valid"]),
+    default="all-selected",
+    show_default=True,
+    help="Whether every selected agent must be valid or optional invalid agents may be excluded.",
+)
+@click.option(
+    "--min-valid-agents",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Minimum valid agents required by an any-valid run.",
+)
+@click.option(
+    "--required-agent",
+    "required_agents",
+    multiple=True,
+    help="Selected agent that must remain valid; repeat for multiple agents.",
+)
+@click.option(
+    "--contract-request",
+    "contract_requests",
+    type=click.Choice(["agent-coverage/1", "tier3-result/3"]),
+    multiple=True,
+    help="Request the paired CI evidence compatibility contracts.",
+)
+@click.option("--tier3-evidence-mode", is_flag=True, help="Emit integrity-bound CI evidence artifacts.")
+@click.option(
+    "--tier3-result-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Run-relative path for the schema-v3 result artifact.",
+)
+@click.option("--tier3-occurrence-id", default=None, help="Optional CI occurrence binding.")
+@click.option("--expected-content-digest", default=None, help="Optional expected sha256 content binding.")
+@click.option("--validated-sha", default=None, help="Optional validated 40-character Git commit binding.")
+@click.option("--gate-policy-digest", default=None, help="Optional sha256 gate-policy binding.")
+@click.option(
     "--progress",
     type=click.Choice(["auto", "rich", "plain", "off"]),
     default="auto",
@@ -1684,6 +1721,16 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    agent_validity_policy: str,
+    min_valid_agents: int | None,
+    required_agents: tuple[str, ...],
+    contract_requests: tuple[str, ...],
+    tier3_evidence_mode: bool,
+    tier3_result_file: Path | None,
+    tier3_occurrence_id: str | None,
+    expected_content_digest: str | None,
+    validated_sha: str | None,
+    gate_policy_digest: str | None,
     progress: str,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
@@ -1718,6 +1765,16 @@ def evaluate(
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
+        agent_validity_policy=agent_validity_policy,
+        min_valid_agents=min_valid_agents,
+        required_agents=required_agents,
+        contract_requests=contract_requests,
+        tier3_evidence_mode=tier3_evidence_mode,
+        tier3_result_file=tier3_result_file,
+        tier3_occurrence_id=tier3_occurrence_id,
+        expected_content_digest=expected_content_digest,
+        validated_sha=validated_sha,
+        gate_policy_digest=gate_policy_digest,
     )
     try:
         if env_mode == "local":

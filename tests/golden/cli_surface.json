@@ -540,6 +540,97 @@
         },
         {
           "choices": [
+            "all-selected",
+            "any-valid"
+          ],
+          "default": "all-selected",
+          "name": "agent_validity_policy",
+          "opts": [
+            "--agent-validity-policy"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "min_valid_agents",
+          "opts": [
+            "--min-valid-agents"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "multiple": true,
+          "name": "required_agents",
+          "opts": [
+            "--required-agent"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "choices": [
+            "agent-coverage/1",
+            "tier3-result/3"
+          ],
+          "multiple": true,
+          "name": "contract_requests",
+          "opts": [
+            "--contract-request"
+          ],
+          "param_type": "option"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "tier3_evidence_mode",
+          "opts": [
+            "--tier3-evidence-mode"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "name": "tier3_result_file",
+          "opts": [
+            "--tier3-result-file"
+          ],
+          "param_type": "option",
+          "type": "path"
+        },
+        {
+          "name": "tier3_occurrence_id",
+          "opts": [
+            "--tier3-occurrence-id"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "expected_content_digest",
+          "opts": [
+            "--expected-content-digest"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "validated_sha",
+          "opts": [
+            "--validated-sha"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "gate_policy_digest",
+          "opts": [
+            "--gate-policy-digest"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "choices": [
             "auto",
             "rich",
             "plain",
@@ -2391,6 +2482,97 @@
               ],
               "param_type": "option",
               "type": "integer"
+            },
+            {
+              "choices": [
+                "all-selected",
+                "any-valid"
+              ],
+              "default": "all-selected",
+              "name": "agent_validity_policy",
+              "opts": [
+                "--agent-validity-policy"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "min_valid_agents",
+              "opts": [
+                "--min-valid-agents"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "multiple": true,
+              "name": "required_agents",
+              "opts": [
+                "--required-agent"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "agent-coverage/1",
+                "tier3-result/3"
+              ],
+              "multiple": true,
+              "name": "contract_requests",
+              "opts": [
+                "--contract-request"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "tier3_evidence_mode",
+              "opts": [
+                "--tier3-evidence-mode"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "tier3_result_file",
+              "opts": [
+                "--tier3-result-file"
+              ],
+              "param_type": "option",
+              "type": "path"
+            },
+            {
+              "name": "tier3_occurrence_id",
+              "opts": [
+                "--tier3-occurrence-id"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "expected_content_digest",
+              "opts": [
+                "--expected-content-digest"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "validated_sha",
+              "opts": [
+                "--validated-sha"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "gate_policy_digest",
+              "opts": [
+                "--gate-policy-digest"
+              ],
+              "param_type": "option",
+              "type": "text"
             },
             {
               "choices": [

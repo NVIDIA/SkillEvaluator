@@ -613,6 +613,7 @@ def test_compact_footer_is_last_and_omits_result_json(tmp_path: Path) -> None:
     )
 
     assert "Result JSON:" not in output
+    assert "report.html ·" in output
     artifacts = output[output.rindex("Artifacts") :]
     normalized_artifacts = "".join(line.strip(" │") for line in artifacts.splitlines())
     assert str(tmp_path) in normalized_artifacts

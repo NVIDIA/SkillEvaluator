@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.evaluation.tier3_report import (
+    _apply_tier3_result_v3,
     _evaluator_cards,
     _metric_evidence,
     _raw_trial_rewards,
     _ReportBudget,
+    _tier3_result_v3,
     agent_eval_result_from_directory,
     build_agent_eval_payload,
     render_agent_eval_html_report,
@@ -25,6 +27,56 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+
+def test_v3_invalid_contract_nulls_legacy_score_mirrors() -> None:
+    payload = {
+        "agents": {
+            "codex": {
+                "with_skill": 0.9,
+                "baseline": 0.4,
+                "lift": 0.5,
+                "evaluators": {"accuracy": {"with_skill": 0.9}},
+                "dimensions": [{"id": "correctness", "score": 0.9}],
+            }
+        },
+        "summary": {"overall_score": 0.9},
+        "overall_score": 0.9,
+        "overall_lift": 0.5,
+        "composite_lift": 0.5,
+    }
+    contract = {
+        "schema_version": "3.0",
+        "coverage": {
+            "status": "invalid",
+            "requested_agents": ["codex"],
+            "eligible_agents": [],
+            "excluded_agents": ["codex"],
+        },
+        "quality": {"status": "not_evaluated"},
+        "summary": {"best_agent": None, "agents_run": []},
+        "overall_score": None,
+        "overall_lift": None,
+        "composite_lift": None,
+    }
+
+    result = _apply_tier3_result_v3(payload, contract)
+
+    assert result["overall_score"] is None
+    assert result["quality_status"] == "not_evaluated"
+    assert result["agents"]["codex"]["with_skill"] is None
+    assert result["agents"]["codex"]["evaluators"] == {}
+
+
+@pytest.mark.parametrize("schema_version", ["3.", "3.xyz", "30.0", "v3.0"])
+def test_v3_loader_rejects_malformed_schema_versions(tmp_path: Path, schema_version: str) -> None:
+    assert _tier3_result_v3(tmp_path, {"tier3_result": {"schema_version": schema_version}}) is None
+
+
+def test_v3_loader_accepts_numeric_minor_schema_version(tmp_path: Path) -> None:
+    candidate = {"schema_version": "3.1"}
+
+    assert _tier3_result_v3(tmp_path, {"tier3_result": candidate}) is candidate
 
 
 def _write_summary(

@@ -50,6 +50,11 @@ class EvaluationService:
         if not result:
             return "Tier 3 evaluation returned an empty result"
 
+        # Evidence mode gates on production/integrity. A schema-valid semantic
+        # result may intentionally report invalid coverage or quality.
+        if result.get("evidence_job_status") == "succeeded" and isinstance(result.get("tier3_result"), Mapping):
+            return None
+
         raw_errors = result.get("error") or result.get("execution_errors")
         if isinstance(raw_errors, str) and raw_errors.strip():
             return raw_errors.strip()

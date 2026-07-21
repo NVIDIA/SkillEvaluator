@@ -220,6 +220,9 @@ skillevaluator tier3 evaluate <SKILL_PATH> [OPTIONS]
 | `--results-dir` | `evals/results` or `SKILLEVALUATOR_RESULTS_DIR` | Write results below an explicit external root |
 | `--harbor-keep-jobs` | false | Retain Harbor job directories for inspection |
 | `--agent-runtime-preflight` | true | Run one real agent smoke task before the full A/B matrix |
+| `--agent-validity-policy` | `all-selected` | Require every selected agent, or allow optional provider-incompatible agents to be excluded with `any-valid` |
+| `--min-valid-agents` | policy default | Minimum valid agents for `any-valid` |
+| `--required-agent` | none | Repeatable selected agent that must remain valid |
 | `--progress` | `auto` | Rich TTY progress, stable plain lines, or `off` |
 | `--timeout-multiplier` | `1.0` | Scale Harbor setup, run, and verifier timeouts |
 | `--override-cpus`, `--override-memory-mb`, `--override-storage-mb` | engine default | Per-environment resource overrides |
@@ -228,6 +231,25 @@ The `claude` alias is also accepted in `--agent-model` and under
 `harbor.agents` in `evals/config.yml`. It is canonicalized before execution;
 persisted result keys, paths, progress, and reports always use `claude-code`.
 Do not configure both names for the same run.
+
+`all-selected` preserves the strict historical behavior: one incompatible
+provider/model route stops the run. `any-valid` may exclude only optional
+agents that fail provider-contract preflight, and only when the remaining
+agents satisfy `--min-valid-agents` and every `--required-agent`. Excluded
+agents are retained as typed diagnostics; they are never staged, executed, or
+represented by numeric scores.
+
+CI systems that require integrity-bound artifacts can additionally request the
+paired `agent-coverage/1` and `tier3-result/3` contracts with
+`--tier3-evidence-mode`. Optional occurrence, content, commit, and gate-policy
+bindings are validated before provider resolution. The output is a nullable
+schema-v3 result plus a coverage manifest and execution ledger under the run
+directory.
+
+Evidence mode also rehashes every active agent's staged task tree before
+execution and again before publishing evidence. All active agents must use the
+same bound task bytes. If agent-specific credential injection changes those
+bytes, the run fails closed; use separate evidence runs for those agent routes.
 
 For OpenCode, the resolved runtime model includes its adapter namespace
 (`nvidia/`, `openai/`, or `anthropic/`). Provider defaults are raw catalog IDs
@@ -546,11 +568,12 @@ alongside Skill Lift, not a replacement for the five dimensions. In
 `custom_only`, pass@k uses the custom overall reward and the standard dimension
 rows remain unscored.
 
-The canonical Tier 3 payload embedded by both standalone `evaluate` and
-`validate --agent-eval` reports uses schema version 2.0. A completed
-standard-grading payload includes the summary, five dimensions, per-agent
-results, trials, pass@k, attempt policy, and dataset; advisory or skipped
-payloads may leave some of those sections empty.
+Default runs retain the canonical schema-2 report payload. Runs that request a
+coverage policy or evidence contract additionally produce an authoritative
+nullable schema-v3 result. The report embeds that v3 object and keeps schema-2
+fields only as display mirrors. Ineligible agents and invalid coverage always
+show `null`/`NO SCORE`; a failed or skipped occurrence can never appear as a
+synthetic zero.
 
 Keep raw Harbor artifacts for debugging and open them with the bundled viewer:
 

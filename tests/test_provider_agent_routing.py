@@ -8,7 +8,12 @@ from __future__ import annotations
 import pytest
 
 from skillevaluator.provider_config import ProviderConfig
-from skillevaluator.tier3.harbor.runner import _model_for_agent, _validate_agent_provider_credentials
+from skillevaluator.tier3.harbor.runner import (
+    _model_for_agent,
+    _provider_contract_excluded_agent_result,
+    _resolve_provider_contract_exclusions,
+    _validate_agent_provider_credentials,
+)
 
 
 def _provider(name: str, model: str) -> ProviderConfig:
@@ -207,6 +212,7 @@ def test_openai_provider_rejects_an_anthropic_opencode_override() -> None:
         agent_models={"codex": "gpt-5.4-mini", "opencode": "anthropic/claude-sonnet-4-5"},
     )
     assert errors and "must match the evaluator provider" in errors[0]
+    assert "OPENAI_API_KEY" not in errors[0]
     assert "ANTHROPIC_API_KEY" not in errors[0]
 
 
@@ -297,4 +303,76 @@ def test_anthropic_provider_rejects_an_openai_opencode_override() -> None:
         agent_models={"claude-code": "claude-sonnet-4-5", "opencode": "openai/gpt-5.4-mini"},
     )
     assert errors and "must match the evaluator provider" in errors[0]
-    assert "OPENAI_API_KEY" not in errors[0]
+
+
+def _mixed_provider_resolution() -> dict[str, dict[str, str]]:
+    return {
+        "codex": {"model": "gpt-5.4-mini", "source": "public provider default"},
+        "claude-code": {"model": "claude-sonnet-4-5", "source": "CLI"},
+    }
+
+
+def test_any_valid_excludes_only_optional_provider_incompatibility(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    plans, exclusions, errors = _resolve_provider_contract_exclusions(
+        provider=_provider("openai", "gpt-5.4-mini"),
+        agents=["codex", "claude-code"],
+        model_resolution=_mixed_provider_resolution(),
+        configured_runtime_env={},
+        env_mode="docker",
+        agent_validity_policy="any-valid",
+        min_valid_agents=1,
+        required_agents=("codex",),
+    )
+
+    assert list(plans) == ["codex"]
+    assert list(exclusions) == ["claude-code"]
+    assert "ANTHROPIC_API_KEY" in exclusions["claude-code"]
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("policy", "minimum", "required"),
+    [
+        ("all-selected", None, ()),
+        ("any-valid", 2, ()),
+        ("any-valid", 1, ("claude-code",)),
+    ],
+)
+def test_provider_incompatibility_remains_fatal_when_policy_requires_it(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+    minimum: int | None,
+    required: tuple[str, ...],
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    plans, exclusions, errors = _resolve_provider_contract_exclusions(
+        provider=_provider("openai", "gpt-5.4-mini"),
+        agents=["codex", "claude-code"],
+        model_resolution=_mixed_provider_resolution(),
+        configured_runtime_env={},
+        env_mode="docker",
+        agent_validity_policy=policy,
+        min_valid_agents=minimum,
+        required_agents=required,
+    )
+
+    assert plans == {}
+    assert exclusions == {}
+    assert errors and "ANTHROPIC_API_KEY" in errors[0]
+
+
+def test_provider_exclusion_record_preserves_agent_identity(tmp_path) -> None:
+    record = _provider_contract_excluded_agent_result(
+        agent="claude-code",
+        metadata=_mixed_provider_resolution()["claude-code"],
+        reason="provider contract unavailable",
+        skip_baseline=True,
+        output_dir=tmp_path,
+    )
+
+    assert record["agent"] == "claude-code"
+    assert record["execution_status"] == "skipped"
+    assert record["agent_runtime_failures"]["with_skill"][0]["source"] == "provider_contract"

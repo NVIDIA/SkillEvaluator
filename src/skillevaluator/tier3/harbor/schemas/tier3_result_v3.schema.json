@@ -1,0 +1,1135 @@
+{
+  "$defs": {
+    "AgentCoverageEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "base_agent": {
+          "title": "Base Agent",
+          "type": "string"
+        },
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArmCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence_file_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence File Digest"
+        },
+        "evidence_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Ref"
+        },
+        "failure_stage": {
+          "anyOf": [
+            {
+              "enum": [
+                "policy_validation",
+                "dataset_validation",
+                "task_generation",
+                "preflight",
+                "agent_readiness",
+                "agent_adapter_bootstrap",
+                "agent_process_bootstrap",
+                "agent_authentication",
+                "transport_before_semantic_event",
+                "execution",
+                "verifier",
+                "manifest_validation",
+                "security"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Stage"
+        },
+        "model_source": {
+          "title": "Model Source",
+          "type": "string"
+        },
+        "occurrence": {
+          "minimum": 1,
+          "title": "Occurrence",
+          "type": "integer"
+        },
+        "reason_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "invalid_policy",
+                "policy_validation_failed",
+                "missing_dataset",
+                "invalid_dataset",
+                "dataset_validation_failed",
+                "task_generation_failed",
+                "staged_task_collision",
+                "preflight_failed",
+                "shared_environment_failure",
+                "execution_failed",
+                "shared_configuration_invalid",
+                "evidence_integrity_failure",
+                "evidence_production_failure",
+                "unsatisfied_required_agent",
+                "post_skill_unscored_failure",
+                "grader_contract_failure",
+                "verifier_contract_failure",
+                "corrupt_manifest",
+                "contradictory_manifest",
+                "evaluation_integrity_failure",
+                "adapter_unavailable",
+                "model_unavailable",
+                "agent_authentication_unavailable",
+                "gateway_configuration_invalid",
+                "agent_runtime_unavailable",
+                "model_not_available",
+                "adapter_initialization_failed",
+                "adapter_model_protocol_negotiation_failed",
+                "process_spawn_failed",
+                "process_start_timeout",
+                "agent_authentication_failed",
+                "transport_connection_failed",
+                "transport_timeout",
+                "model_rate_limited"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason Code"
+        },
+        "requested_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested Model"
+        },
+        "resolved_model": {
+          "title": "Resolved Model",
+          "type": "string"
+        },
+        "score_eligible": {
+          "title": "Score Eligible",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/AgentValidityStatus"
+        },
+        "viewer_url": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "pattern": "^https?://",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewer Url"
+        },
+        "with_skill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArmCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "base_agent",
+        "occurrence",
+        "resolved_model",
+        "model_source",
+        "status",
+        "score_eligible"
+      ],
+      "title": "AgentCoverageEntry",
+      "type": "object"
+    },
+    "AgentValidityStatus": {
+      "enum": [
+        "valid",
+        "invalid_infrastructure",
+        "invalid_configuration",
+        "invalid_coverage",
+        "not_evaluated_run_blocked"
+      ],
+      "title": "AgentValidityStatus",
+      "type": "string"
+    },
+    "ArmCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "exceptions": {
+          "minimum": 0,
+          "title": "Exceptions",
+          "type": "integer"
+        },
+        "expected_attempts": {
+          "minimum": 0,
+          "title": "Expected Attempts",
+          "type": "integer"
+        },
+        "expected_cases": {
+          "minimum": 0,
+          "title": "Expected Cases",
+          "type": "integer"
+        },
+        "failed_attempts": {
+          "minimum": 0,
+          "title": "Failed Attempts",
+          "type": "integer"
+        },
+        "not_run_attempts": {
+          "minimum": 0,
+          "title": "Not Run Attempts",
+          "type": "integer"
+        },
+        "scored_attempts": {
+          "minimum": 0,
+          "title": "Scored Attempts",
+          "type": "integer"
+        },
+        "scored_cases": {
+          "minimum": 0,
+          "title": "Scored Cases",
+          "type": "integer"
+        },
+        "skipped_attempts": {
+          "minimum": 0,
+          "title": "Skipped Attempts",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_cases",
+        "scored_cases",
+        "exceptions",
+        "expected_attempts",
+        "scored_attempts",
+        "failed_attempts",
+        "skipped_attempts",
+        "not_run_attempts"
+      ],
+      "title": "ArmCoverage",
+      "type": "object"
+    },
+    "ContractCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "provided": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Provided",
+          "type": "array"
+        },
+        "requested": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requested",
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested",
+        "provided"
+      ],
+      "title": "ContractCapabilities",
+      "type": "object"
+    },
+    "CoverageBlocker": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_file_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence File Digest"
+        },
+        "evidence_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Ref"
+        },
+        "reason_code": {
+          "enum": [
+            "invalid_policy",
+            "policy_validation_failed",
+            "missing_dataset",
+            "invalid_dataset",
+            "dataset_validation_failed",
+            "task_generation_failed",
+            "staged_task_collision",
+            "preflight_failed",
+            "shared_environment_failure",
+            "execution_failed",
+            "shared_configuration_invalid",
+            "evidence_integrity_failure",
+            "evidence_production_failure",
+            "unsatisfied_required_agent",
+            "post_skill_unscored_failure",
+            "grader_contract_failure",
+            "verifier_contract_failure",
+            "corrupt_manifest",
+            "contradictory_manifest",
+            "evaluation_integrity_failure",
+            "adapter_unavailable",
+            "model_unavailable",
+            "agent_authentication_unavailable",
+            "gateway_configuration_invalid",
+            "agent_runtime_unavailable",
+            "model_not_available",
+            "adapter_initialization_failed",
+            "adapter_model_protocol_negotiation_failed",
+            "process_spawn_failed",
+            "process_start_timeout",
+            "agent_authentication_failed",
+            "transport_connection_failed",
+            "transport_timeout",
+            "model_rate_limited"
+          ],
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "scope": {
+          "const": "run",
+          "title": "Scope",
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "policy_validation",
+            "dataset_validation",
+            "task_generation",
+            "preflight",
+            "agent_readiness",
+            "agent_adapter_bootstrap",
+            "agent_process_bootstrap",
+            "agent_authentication",
+            "transport_before_semantic_event",
+            "execution",
+            "verifier",
+            "manifest_validation",
+            "security"
+          ],
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "stage",
+        "reason_code"
+      ],
+      "title": "CoverageBlocker",
+      "type": "object"
+    },
+    "CoveragePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "min_valid_agents": {
+          "minimum": 1,
+          "title": "Min Valid Agents",
+          "type": "integer"
+        },
+        "mode": {
+          "enum": [
+            "all_selected",
+            "any_valid"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "required_agents": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Agents",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode",
+        "min_valid_agents"
+      ],
+      "title": "CoveragePolicy",
+      "type": "object"
+    },
+    "CoverageStatus": {
+      "enum": [
+        "valid_full",
+        "valid_degraded",
+        "invalid"
+      ],
+      "title": "CoverageStatus",
+      "type": "string"
+    },
+    "CoverageWarning": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "title": "Agent",
+          "type": "string"
+        },
+        "code": {
+          "const": "optional_agent_excluded",
+          "title": "Code",
+          "type": "string"
+        },
+        "evidence_file_digest": {
+          "title": "Evidence File Digest",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "failure_stage": {
+          "enum": [
+            "policy_validation",
+            "dataset_validation",
+            "task_generation",
+            "preflight",
+            "agent_readiness",
+            "agent_adapter_bootstrap",
+            "agent_process_bootstrap",
+            "agent_authentication",
+            "transport_before_semantic_event",
+            "execution",
+            "verifier",
+            "manifest_validation",
+            "security"
+          ],
+          "title": "Failure Stage",
+          "type": "string"
+        },
+        "reason_code": {
+          "enum": [
+            "invalid_policy",
+            "policy_validation_failed",
+            "missing_dataset",
+            "invalid_dataset",
+            "dataset_validation_failed",
+            "task_generation_failed",
+            "staged_task_collision",
+            "preflight_failed",
+            "shared_environment_failure",
+            "execution_failed",
+            "shared_configuration_invalid",
+            "evidence_integrity_failure",
+            "evidence_production_failure",
+            "unsatisfied_required_agent",
+            "post_skill_unscored_failure",
+            "grader_contract_failure",
+            "verifier_contract_failure",
+            "corrupt_manifest",
+            "contradictory_manifest",
+            "evaluation_integrity_failure",
+            "adapter_unavailable",
+            "model_unavailable",
+            "agent_authentication_unavailable",
+            "gateway_configuration_invalid",
+            "agent_runtime_unavailable",
+            "model_not_available",
+            "adapter_initialization_failed",
+            "adapter_model_protocol_negotiation_failed",
+            "process_spawn_failed",
+            "process_start_timeout",
+            "agent_authentication_failed",
+            "transport_connection_failed",
+            "transport_timeout",
+            "model_rate_limited"
+          ],
+          "title": "Reason Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "agent",
+        "reason_code",
+        "failure_stage",
+        "evidence_ref",
+        "evidence_file_digest"
+      ],
+      "title": "CoverageWarning",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "QualityStatus": {
+      "enum": [
+        "pass",
+        "neutral",
+        "fail",
+        "not_evaluated"
+      ],
+      "title": "QualityStatus",
+      "type": "string"
+    },
+    "Tier3AgentQuality": {
+      "additionalProperties": false,
+      "properties": {
+        "lift": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Lift"
+        },
+        "overall_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Overall Score"
+        },
+        "status": {
+          "$ref": "#/$defs/QualityStatus"
+        }
+      },
+      "required": [
+        "status",
+        "overall_score",
+        "lift"
+      ],
+      "title": "Tier3AgentQuality",
+      "type": "object"
+    },
+    "Tier3AgentResult": {
+      "additionalProperties": false,
+      "properties": {
+        "base_agent": {
+          "title": "Base Agent",
+          "type": "string"
+        },
+        "baseline": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Baseline"
+        },
+        "baseline_pass_rate": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Pass Rate"
+        },
+        "lift": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": -1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Lift"
+        },
+        "model_source": {
+          "title": "Model Source",
+          "type": "string"
+        },
+        "occurrence": {
+          "minimum": 1,
+          "title": "Occurrence",
+          "type": "integer"
+        },
+        "quality_status": {
+          "$ref": "#/$defs/QualityStatus"
+        },
+        "requested_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Requested Model"
+        },
+        "resolved_model": {
+          "title": "Resolved Model",
+          "type": "string"
+        },
+        "viewer_url": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "pattern": "^https?://",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewer Url"
+        },
+        "with_skill": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "With Skill"
+        },
+        "with_skill_pass_rate": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "With Skill Pass Rate"
+        }
+      },
+      "required": [
+        "base_agent",
+        "occurrence",
+        "requested_model",
+        "resolved_model",
+        "model_source",
+        "with_skill",
+        "baseline",
+        "lift",
+        "quality_status"
+      ],
+      "title": "Tier3AgentResult",
+      "type": "object"
+    },
+    "Tier3Coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AgentCoverageEntry"
+          },
+          "title": "Agents",
+          "type": "object"
+        },
+        "authorized_tightening": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoveragePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/CoverageBlocker"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "effective_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoveragePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "effective_policy_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effective Policy Digest"
+        },
+        "eligible_agents": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Eligible Agents",
+          "type": "array"
+        },
+        "excluded_agents": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Excluded Agents",
+          "type": "array"
+        },
+        "policy_provenance": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy Provenance"
+        },
+        "requested_agents": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requested Agents",
+          "type": "array"
+        },
+        "requested_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoveragePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "requested_policy_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested Policy Digest"
+        },
+        "status": {
+          "$ref": "#/$defs/CoverageStatus"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/CoverageWarning"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "requested_agents",
+        "eligible_agents",
+        "excluded_agents",
+        "agents"
+      ],
+      "title": "Tier3Coverage",
+      "type": "object"
+    },
+    "Tier3EvidenceBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_file_digest": {
+          "title": "Manifest File Digest",
+          "type": "string"
+        },
+        "manifest_ref": {
+          "title": "Manifest Ref",
+          "type": "string"
+        },
+        "root_ref": {
+          "title": "Root Ref",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "root_ref",
+        "manifest_ref",
+        "manifest_file_digest"
+      ],
+      "title": "Tier3EvidenceBundle",
+      "type": "object"
+    },
+    "Tier3Quality": {
+      "additionalProperties": false,
+      "properties": {
+        "per_agent": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Tier3AgentQuality"
+          },
+          "title": "Per Agent",
+          "type": "object"
+        },
+        "policy": {
+          "$ref": "#/$defs/Tier3QualityPolicy"
+        },
+        "status": {
+          "$ref": "#/$defs/QualityStatus"
+        }
+      },
+      "required": [
+        "status",
+        "policy",
+        "per_agent"
+      ],
+      "title": "Tier3Quality",
+      "type": "object"
+    },
+    "Tier3QualityPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation": {
+          "const": "any_pass_else_any_neutral_else_fail",
+          "title": "Aggregation",
+          "type": "string"
+        },
+        "lift_fail_threshold": {
+          "title": "Lift Fail Threshold",
+          "type": "number"
+        },
+        "lift_pass_threshold": {
+          "title": "Lift Pass Threshold",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "lift_pass_threshold",
+        "lift_fail_threshold",
+        "aggregation"
+      ],
+      "title": "Tier3QualityPolicy",
+      "type": "object"
+    },
+    "Tier3SummaryV3": {
+      "additionalProperties": false,
+      "properties": {
+        "agents_run": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Agents Run",
+          "type": "array"
+        },
+        "best_agent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Best Agent"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "overall_lift": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": -1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Overall Lift"
+        },
+        "overall_score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Overall Score"
+        },
+        "runtime_seconds": {
+          "minimum": 0,
+          "title": "Runtime Seconds",
+          "type": "number"
+        },
+        "schema_version": {
+          "pattern": "^3\\.[0-9]+$",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "skill_name": {
+          "title": "Skill Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "skill_name",
+        "agents_run",
+        "best_agent",
+        "overall_score",
+        "overall_lift",
+        "runtime_seconds",
+        "environment"
+      ],
+      "title": "Tier3SummaryV3",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "agents": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Tier3AgentResult"
+      },
+      "title": "Agents",
+      "type": "object"
+    },
+    "capabilities": {
+      "$ref": "#/$defs/ContractCapabilities"
+    },
+    "composite_lift": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": -1,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Composite Lift"
+    },
+    "coverage": {
+      "$ref": "#/$defs/Tier3Coverage"
+    },
+    "evidence_bundle": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Tier3EvidenceBundle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "expected_content_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Content Digest"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Extensions",
+      "type": "object"
+    },
+    "gate_policy_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Gate Policy Digest"
+    },
+    "occurrence_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Occurrence Id"
+    },
+    "overall_lift": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": -1,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Overall Lift"
+    },
+    "overall_score": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Overall Score"
+    },
+    "quality": {
+      "$ref": "#/$defs/Tier3Quality"
+    },
+    "schema_version": {
+      "pattern": "^3\\.[0-9]+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_manifest_file_digest": {
+      "title": "Source Manifest File Digest",
+      "type": "string"
+    },
+    "summary": {
+      "$ref": "#/$defs/Tier3SummaryV3"
+    },
+    "validated_sha": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Validated Sha"
+    }
+  },
+  "required": [
+    "schema_version",
+    "capabilities",
+    "source_manifest_file_digest",
+    "coverage",
+    "quality",
+    "summary",
+    "agents",
+    "overall_score",
+    "overall_lift",
+    "composite_lift"
+  ],
+  "title": "Tier3ResultV3",
+  "type": "object"
+}

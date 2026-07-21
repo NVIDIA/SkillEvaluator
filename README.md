@@ -211,6 +211,12 @@ is the measured difference between the with-skill and without-skill runs, while
 pass@k shows multi-attempt reliability separately from the dimension scores.
 In `custom_only` mode, the user-owned grader defines the score instead.
 
+Multi-agent runs remain strict by default. Use
+`--agent-validity-policy any-valid` with `--min-valid-agents` and optional
+repeatable `--required-agent` values when an optional agent with an
+incompatible public provider route may be excluded. Exclusions remain visible
+as diagnostics and never contribute numeric scores.
+
 | Dimension | Question |
 | --- | --- |
 | **Security** | Is it safe to use? |

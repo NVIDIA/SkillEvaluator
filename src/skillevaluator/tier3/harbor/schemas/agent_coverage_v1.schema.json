@@ -1,0 +1,669 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:skillevaluator:schema:agent_coverage_v1.schema.json",
+  "title": "SkillEvaluator agent coverage contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "phase",
+    "capabilities",
+    "requested_policy_digest",
+    "effective_policy_digest",
+    "task_plan_digest",
+    "task_plan_ref",
+    "execution_ledger_digest",
+    "execution_ledger_ref",
+    "dataset_digest",
+    "dataset_digest_algorithm",
+    "status",
+    "requested_policy",
+    "authorized_tightening",
+    "effective_policy",
+    "policy_provenance",
+    "requested_agents",
+    "eligible_agents",
+    "excluded_agents",
+    "agents",
+    "warnings",
+    "blockers"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "phase": {
+      "enum": [
+        "policy_validation",
+        "dataset_validation",
+        "task_generation",
+        "preflight",
+        "execution",
+        "completed"
+      ]
+    },
+    "capabilities": {
+      "$ref": "#/$defs/capabilities"
+    },
+    "requested_policy_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "effective_policy_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "task_plan_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "task_plan_ref": {
+      "$ref": "#/$defs/nullable_ref"
+    },
+    "execution_ledger_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "execution_ledger_ref": {
+      "$ref": "#/$defs/nullable_ref"
+    },
+    "dataset_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "dataset_digest_algorithm": {
+      "type": ["string", "null"],
+      "enum": ["skill-eval-dataset-c14n/1", null]
+    },
+    "status": {
+      "enum": ["valid_full", "valid_degraded", "invalid"]
+    },
+    "requested_policy": {
+      "$ref": "#/$defs/nullable_policy"
+    },
+    "authorized_tightening": {
+      "$ref": "#/$defs/nullable_policy"
+    },
+    "effective_policy": {
+      "$ref": "#/$defs/nullable_policy"
+    },
+    "policy_provenance": {
+      "type": ["string", "null"],
+      "enum": ["trusted_caller", "trusted_caller_plus_authorized_tightening", null]
+    },
+    "requested_agents": {
+      "$ref": "#/$defs/occurrence_keys"
+    },
+    "eligible_agents": {
+      "$ref": "#/$defs/occurrence_keys"
+    },
+    "excluded_agents": {
+      "$ref": "#/$defs/occurrence_keys"
+    },
+    "agents": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/identity"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/agent"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/warning"
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/failure"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*$": true
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {"phase": {"const": "policy_validation"}}
+      },
+      "then": {
+        "allOf": [
+          {"$ref": "#/$defs/policy_absent"},
+          {"$ref": "#/$defs/dataset_absent"},
+          {"$ref": "#/$defs/plan_absent"},
+          {"$ref": "#/$defs/ledger_absent"},
+          {"$ref": "#/$defs/early_terminal"}
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {"phase": {"const": "dataset_validation"}}
+      },
+      "then": {
+        "allOf": [
+          {"$ref": "#/$defs/policy_present"},
+          {"$ref": "#/$defs/dataset_absent"},
+          {"$ref": "#/$defs/plan_absent"},
+          {"$ref": "#/$defs/ledger_absent"},
+          {"$ref": "#/$defs/early_terminal"}
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {"phase": {"const": "task_generation"}}
+      },
+      "then": {
+        "allOf": [
+          {"$ref": "#/$defs/policy_present"},
+          {"$ref": "#/$defs/dataset_present"},
+          {"$ref": "#/$defs/plan_absent"},
+          {"$ref": "#/$defs/ledger_absent"},
+          {"$ref": "#/$defs/early_terminal"}
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {"phase": {"const": "preflight"}}
+      },
+      "then": {
+        "allOf": [
+          {"$ref": "#/$defs/policy_present"},
+          {"$ref": "#/$defs/dataset_present"},
+          {"$ref": "#/$defs/plan_present"},
+          {"$ref": "#/$defs/ledger_absent"},
+          {"$ref": "#/$defs/early_terminal"}
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {"phase": {"const": "execution"}}
+      },
+      "then": {
+        "allOf": [
+          {"$ref": "#/$defs/policy_present"},
+          {"$ref": "#/$defs/dataset_present"},
+          {"$ref": "#/$defs/plan_present"},
+          {"$ref": "#/$defs/ledger_present"},
+          {"$ref": "#/$defs/early_terminal"}
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {"phase": {"const": "completed"}}
+      },
+      "then": {
+        "allOf": [
+          {"$ref": "#/$defs/policy_present"},
+          {"$ref": "#/$defs/dataset_present"},
+          {"$ref": "#/$defs/plan_present"},
+          {"$ref": "#/$defs/ledger_present"},
+          {"$ref": "#/$defs/completed_terminal"}
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["requested_policy"],
+        "properties": {
+          "requested_policy": {
+            "type": "object",
+            "required": ["mode"],
+            "properties": {"mode": {"const": "any_valid"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "requested": {
+                "minItems": 1,
+                "contains": {"const": "agent-coverage/1"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nullable_digest": {
+      "anyOf": [
+        {"$ref": "#/$defs/digest"},
+        {"type": "null"}
+      ]
+    },
+    "relative_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?![\\s\\S]*[\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029])(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^/\\\\\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029]+(?:/[^/\\\\\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029]+)*$"
+    },
+    "nullable_ref": {
+      "anyOf": [
+        {"$ref": "#/$defs/relative_ref"},
+        {"type": "null"}
+      ]
+    },
+    "occurrence_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/identity"
+      },
+      "uniqueItems": true
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "provided"],
+      "properties": {
+        "requested": {
+          "type": "array",
+          "items": {"const": "agent-coverage/1"},
+          "uniqueItems": true
+        },
+        "provided": {
+          "type": "array",
+          "items": {"const": "agent-coverage/1"},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "min_valid_agents", "required_agents"],
+      "properties": {
+        "mode": {
+          "enum": ["all_selected", "any_valid"]
+        },
+        "min_valid_agents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "required_agents": {
+          "$ref": "#/$defs/occurrence_keys"
+        }
+      }
+    },
+    "nullable_policy": {
+      "anyOf": [
+        {"$ref": "#/$defs/policy"},
+        {"type": "null"}
+      ]
+    },
+    "arm_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_cases",
+        "scored_cases",
+        "exceptions",
+        "expected_attempts",
+        "scored_attempts",
+        "failed_attempts",
+        "skipped_attempts",
+        "not_run_attempts"
+      ],
+      "properties": {
+        "expected_cases": {"type": "integer", "minimum": 0},
+        "scored_cases": {"type": "integer", "minimum": 0},
+        "exceptions": {"type": "integer", "minimum": 0},
+        "expected_attempts": {"type": "integer", "minimum": 0},
+        "scored_attempts": {"type": "integer", "minimum": 0},
+        "failed_attempts": {"type": "integer", "minimum": 0},
+        "skipped_attempts": {"type": "integer", "minimum": 0},
+        "not_run_attempts": {"type": "integer", "minimum": 0}
+      }
+    },
+    "nullable_arm_summary": {
+      "anyOf": [
+        {"$ref": "#/$defs/arm_summary"},
+        {"type": "null"}
+      ]
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/evidence_pair"},
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": ["invalid_infrastructure", "invalid_configuration", "invalid_coverage"]
+              }
+            }
+          },
+          "then": {
+            "required": ["reason_code", "failure_stage", "failure_origin"],
+            "allOf": [
+              {"$ref": "#/$defs/agent_entry_failure_taxonomy"},
+              {"$ref": "#/$defs/agent_entry_origin_constraints"}
+            ]
+          }
+        }
+      ],
+      "required": [
+        "base_agent",
+        "occurrence",
+        "requested_model",
+        "resolved_model",
+        "model_source",
+        "status",
+        "score_eligible",
+        "with_skill",
+        "baseline"
+      ],
+      "properties": {
+        "base_agent": {"$ref": "#/$defs/identity"},
+        "occurrence": {"type": "integer", "minimum": 1},
+        "requested_model": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
+        "resolved_model": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "model_source": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "status": {
+          "enum": [
+            "valid",
+            "invalid_infrastructure",
+            "invalid_configuration",
+            "invalid_coverage",
+            "not_evaluated_run_blocked"
+          ]
+        },
+        "score_eligible": {"type": "boolean"},
+        "reason_code": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+        "failure_stage": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+        "failure_origin": {"type": ["string", "null"], "enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", null]},
+        "evidence_ref": {"$ref": "#/$defs/nullable_ref"},
+        "evidence_file_digest": {"$ref": "#/$defs/nullable_digest"},
+        "viewer_url": {"type": ["string", "null"], "minLength": 1, "maxLength": 4096},
+        "with_skill": {"$ref": "#/$defs/nullable_arm_summary"},
+        "baseline": {"$ref": "#/$defs/nullable_arm_summary"}
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/evidence_pair"},
+        {
+          "if": {
+            "anyOf": [{"required": ["reason_code"]}, {"required": ["failure_stage"]}, {"required": ["failure_origin"]}]
+          },
+          "then": {
+            "required": ["agent", "reason_code", "failure_stage", "failure_origin"],
+            "allOf": [
+              {"$ref": "#/$defs/agent_entry_failure_taxonomy"},
+              {"$ref": "#/$defs/agent_entry_origin_constraints"}
+            ]
+          }
+        }
+      ],
+      "required": ["code"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1, "maxLength": 128},
+        "agent": {"$ref": "#/$defs/identity"},
+        "reason_code": {"type": "string", "minLength": 1, "maxLength": 128},
+        "failure_stage": {"type": "string", "minLength": 1, "maxLength": 128},
+        "failure_origin": {"enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker"]},
+        "evidence_ref": {"$ref": "#/$defs/relative_ref"},
+        "evidence_file_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/evidence_pair"},
+        {
+          "oneOf": [
+            {
+              "properties": {"scope": {"const": "agent"}},
+              "required": ["agent"],
+              "allOf": [
+                {"$ref": "#/$defs/agent_failure_taxonomy"},
+                {"$ref": "#/$defs/agent_origin_constraints"}
+              ]
+            },
+            {
+              "properties": {"scope": {"const": "run"}, "agent": {"type": "null"}, "origin": {"const": "run_scope"}},
+              "allOf": [{"$ref": "#/$defs/run_failure_taxonomy"}]
+            }
+          ]
+        }
+      ],
+      "required": ["scope", "stage", "reason_code", "origin"],
+      "properties": {
+        "scope": {"enum": ["run", "agent"]},
+        "stage": {"type": "string", "minLength": 1, "maxLength": 128},
+        "reason_code": {"type": "string", "minLength": 1, "maxLength": 128},
+        "origin": {"enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "run_scope"]},
+        "agent": {
+          "anyOf": [
+            {"$ref": "#/$defs/identity"},
+            {"type": "null"}
+          ]
+        },
+        "evidence_ref": {"$ref": "#/$defs/nullable_ref"},
+        "evidence_file_digest": {"$ref": "#/$defs/nullable_digest"}
+      }
+    },
+    "evidence_pair": {
+      "oneOf": [
+        {
+          "not": {
+            "anyOf": [
+              {"required": ["evidence_ref"]},
+              {"required": ["evidence_file_digest"]}
+            ]
+          }
+        },
+        {
+          "required": ["evidence_ref", "evidence_file_digest"],
+          "properties": {
+            "evidence_ref": {"$ref": "#/$defs/relative_ref"},
+            "evidence_file_digest": {"$ref": "#/$defs/digest"}
+          }
+        },
+        {
+          "required": ["evidence_ref", "evidence_file_digest"],
+          "properties": {
+            "evidence_ref": {"type": "null"},
+            "evidence_file_digest": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "agent_entry_failure_taxonomy": {
+      "oneOf": [
+        {"properties": {"failure_stage": {"const": "agent_readiness"}, "reason_code": {"enum": ["adapter_unavailable", "model_unavailable", "agent_authentication_unavailable", "gateway_configuration_invalid"]}}},
+        {"properties": {"failure_stage": {"const": "preflight"}, "reason_code": {"enum": ["agent_runtime_unavailable", "model_not_available", "gateway_configuration_invalid"]}}},
+        {"properties": {"failure_stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
+        {"properties": {"failure_stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
+        {"properties": {"failure_stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
+        {"properties": {"failure_stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+      ]
+    },
+    "agent_entry_origin_constraints": {
+      "oneOf": [
+        {"properties": {"failure_origin": {"const": "trusted_preflight"}, "failure_stage": {"enum": ["agent_readiness", "preflight"]}}},
+        {"properties": {"failure_origin": {"const": "harbor_pre_instruction_phase"}, "failure_stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"const": "adapter_initialization_failed"}}},
+        {
+          "properties": {"failure_origin": {"const": "trusted_adapter_marker"}},
+          "oneOf": [
+            {"properties": {"failure_stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
+            {"properties": {"failure_stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
+            {"properties": {"failure_stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
+            {"properties": {"failure_stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+          ]
+        }
+      ]
+    },
+    "agent_origin_constraints": {
+      "oneOf": [
+        {"properties": {"origin": {"const": "trusted_preflight"}, "stage": {"enum": ["agent_readiness", "preflight"]}}},
+        {"properties": {"origin": {"const": "harbor_pre_instruction_phase"}, "stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"const": "adapter_initialization_failed"}}},
+        {
+          "properties": {"origin": {"const": "trusted_adapter_marker"}},
+          "oneOf": [
+            {"properties": {"stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
+            {"properties": {"stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
+            {"properties": {"stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
+            {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+          ]
+        }
+      ]
+    },
+    "agent_failure_taxonomy": {
+      "oneOf": [
+        {"properties": {"stage": {"const": "agent_readiness"}, "reason_code": {"enum": ["adapter_unavailable", "model_unavailable", "agent_authentication_unavailable", "gateway_configuration_invalid"]}}},
+        {"properties": {"stage": {"const": "preflight"}, "reason_code": {"enum": ["agent_runtime_unavailable", "model_not_available", "gateway_configuration_invalid"]}}},
+        {"properties": {"stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
+        {"properties": {"stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
+        {"properties": {"stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
+        {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+      ]
+    },
+    "run_failure_taxonomy": {
+      "oneOf": [
+        {"properties": {"stage": {"const": "policy_validation"}, "reason_code": {"enum": ["invalid_policy", "policy_validation_failed"]}}},
+        {"properties": {"stage": {"const": "dataset_validation"}, "reason_code": {"enum": ["missing_dataset", "invalid_dataset", "dataset_validation_failed"]}}},
+        {"properties": {"stage": {"const": "task_generation"}, "reason_code": {"enum": ["task_generation_failed", "staged_task_collision"]}}},
+        {"properties": {"stage": {"const": "preflight"}, "reason_code": {"enum": ["preflight_failed", "shared_environment_failure"]}}},
+        {"properties": {"stage": {"const": "execution"}, "reason_code": {"enum": ["execution_failed", "shared_configuration_invalid", "evidence_integrity_failure", "evidence_production_failure", "unsatisfied_required_agent", "post_skill_unscored_failure"]}}},
+        {"properties": {"stage": {"const": "verifier"}, "reason_code": {"enum": ["grader_contract_failure", "verifier_contract_failure"]}}},
+        {"properties": {"stage": {"const": "manifest_validation"}, "reason_code": {"enum": ["corrupt_manifest", "contradictory_manifest"]}}},
+        {"properties": {"stage": {"const": "security"}, "reason_code": {"const": "evaluation_integrity_failure"}}}
+      ]
+    },
+    "policy_absent": {
+      "properties": {
+        "requested_policy_digest": {"type": "null"},
+        "effective_policy_digest": {"type": "null"},
+        "requested_policy": {"type": "null"},
+        "authorized_tightening": {"type": "null"},
+        "effective_policy": {"type": "null"},
+        "policy_provenance": {"type": "null"}
+      }
+    },
+    "policy_present": {
+      "properties": {
+        "requested_policy_digest": {"$ref": "#/$defs/digest"},
+        "effective_policy_digest": {"$ref": "#/$defs/digest"},
+        "requested_policy": {"$ref": "#/$defs/policy"},
+        "effective_policy": {"$ref": "#/$defs/policy"},
+        "policy_provenance": {
+          "enum": ["trusted_caller", "trusted_caller_plus_authorized_tightening"]
+        }
+      }
+    },
+    "dataset_absent": {
+      "properties": {
+        "dataset_digest": {"type": "null"},
+        "dataset_digest_algorithm": {"type": "null"}
+      }
+    },
+    "dataset_present": {
+      "properties": {
+        "dataset_digest": {"$ref": "#/$defs/digest"},
+        "dataset_digest_algorithm": {"const": "skill-eval-dataset-c14n/1"}
+      }
+    },
+    "plan_absent": {
+      "properties": {
+        "task_plan_digest": {"type": "null"},
+        "task_plan_ref": {"type": "null"}
+      }
+    },
+    "plan_present": {
+      "properties": {
+        "task_plan_digest": {"$ref": "#/$defs/digest"},
+        "task_plan_ref": {"$ref": "#/$defs/relative_ref"}
+      }
+    },
+    "ledger_absent": {
+      "properties": {
+        "execution_ledger_digest": {"type": "null"},
+        "execution_ledger_ref": {"type": "null"}
+      }
+    },
+    "ledger_present": {
+      "properties": {
+        "execution_ledger_digest": {"$ref": "#/$defs/digest"},
+        "execution_ledger_ref": {"$ref": "#/$defs/relative_ref"}
+      }
+    },
+    "early_terminal": {
+      "properties": {
+        "status": {"const": "invalid"},
+        "eligible_agents": {"maxItems": 0},
+        "blockers": {
+          "minItems": 1,
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/failure"},
+              {"required": ["scope"], "properties": {"scope": {"const": "run"}}}
+            ]
+          }
+        },
+        "agents": {
+          "additionalProperties": {
+            "allOf": [
+              {"$ref": "#/$defs/agent"},
+              {
+                "properties": {
+                  "status": {"const": "not_evaluated_run_blocked"},
+                  "score_eligible": {"const": false},
+                  "with_skill": {"type": "null"},
+                  "baseline": {"type": "null"}
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "completed_terminal": {
+      "properties": {
+        "agents": {
+          "additionalProperties": {
+            "allOf": [
+              {"$ref": "#/$defs/agent"},
+              {"properties": {"with_skill": {"$ref": "#/$defs/arm_summary"}}}
+            ]
+          }
+        }
+      }
+    }
+  }
+}

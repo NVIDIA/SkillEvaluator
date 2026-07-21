@@ -46,6 +46,16 @@ class EvaluationOptions:
     override_cpus: int | None = None
     override_memory_mb: int | None = None
     override_storage_mb: int | None = None
+    agent_validity_policy: str = "all-selected"
+    min_valid_agents: int | None = None
+    required_agents: tuple[str, ...] = ()
+    contract_requests: tuple[str, ...] = ()
+    tier3_evidence_mode: bool = False
+    tier3_result_file: Path | None = None
+    tier3_occurrence_id: str | None = None
+    expected_content_digest: str | None = None
+    validated_sha: str | None = None
+    gate_policy_digest: str | None = None
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""

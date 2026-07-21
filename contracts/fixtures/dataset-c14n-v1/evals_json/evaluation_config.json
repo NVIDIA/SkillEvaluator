@@ -1,0 +1,7 @@
+{
+  "grading_mode": "default_plus_custom",
+  "judge": {
+    "temperature": 0,
+    "rubric_version": "v2"
+  }
+}

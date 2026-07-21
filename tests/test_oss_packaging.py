@@ -46,6 +46,15 @@ PACKAGED_NVIDIA_BUILD_RUNTIME_FILES = {
     "skillevaluator/tier3/harbor/nvidia_build_bridge.py",
     "skillevaluator/tier3/harbor/secure_docker_environment.py",
 }
+PACKAGED_TIER3_SCHEMA_FILES = {
+    "skillevaluator/tier3/harbor/schemas/agent_coverage_v1.schema.json",
+    "skillevaluator/tier3/harbor/schemas/execution_ledger_v1.schema.json",
+    "skillevaluator/tier3/harbor/schemas/expected_attempt_plan_v1.schema.json",
+    "skillevaluator/tier3/harbor/schemas/failure_evidence_v1.schema.json",
+    "skillevaluator/tier3/harbor/schemas/harbor_results_v1.schema.json",
+    "skillevaluator/tier3/harbor/schemas/harbor_schedule_v1.schema.json",
+    "skillevaluator/tier3/harbor/schemas/tier3_result_v3.schema.json",
+}
 SOURCE_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".nox",
@@ -257,12 +266,17 @@ def test_public_distributions_include_nvidia_build_runtime_bridges(tmp_path: Pat
         wheel_members = set(archive.namelist())
     missing_from_wheel = PACKAGED_NVIDIA_BUILD_RUNTIME_FILES - wheel_members
     assert not missing_from_wheel, f"wheel is missing runtime bridge files: {sorted(missing_from_wheel)}"
+    missing_schemas_from_wheel = PACKAGED_TIER3_SCHEMA_FILES - wheel_members
+    assert not missing_schemas_from_wheel, f"wheel is missing Tier 3 schemas: {sorted(missing_schemas_from_wheel)}"
 
     with tarfile.open(sdists[0], "r:gz") as archive:
         sdist_members = {member.name.partition("/")[2] for member in archive.getmembers()}
     expected_sdist_members = {f"src/{path}" for path in PACKAGED_NVIDIA_BUILD_RUNTIME_FILES}
     missing_from_sdist = expected_sdist_members - sdist_members
     assert not missing_from_sdist, f"sdist is missing runtime bridge files: {sorted(missing_from_sdist)}"
+    expected_sdist_schemas = {f"src/{path}" for path in PACKAGED_TIER3_SCHEMA_FILES}
+    missing_schemas_from_sdist = expected_sdist_schemas - sdist_members
+    assert not missing_schemas_from_sdist, f"sdist is missing Tier 3 schemas: {sorted(missing_schemas_from_sdist)}"
 
 
 def test_removed_benchmark_authoring_surface_stays_absent() -> None:

@@ -1,0 +1,13 @@
+[
+  {
+    "id": "case-1",
+    "question": "Read the supplied input.",
+    "expected": ["alpha", "beta"],
+    "files": ["files/input.txt"]
+  },
+  {
+    "id": "case-2",
+    "question": "Run the domain grader.",
+    "expected": ["pass"]
+  }
+]

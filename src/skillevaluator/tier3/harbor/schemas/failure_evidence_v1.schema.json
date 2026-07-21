@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:skillevaluator:schema:failure_evidence_v1.schema.json",
+  "title": "SkillEvaluator sanitized failure evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scope",
+    "stage",
+    "reason_code",
+    "origin",
+    "skill_logic_started"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "scope": {
+      "enum": ["run", "agent"]
+    },
+    "stage": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "origin": {
+      "enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "run_scope"]
+    },
+    "agent": {
+      "$ref": "#/$defs/identity"
+    },
+    "skill_logic_started": {
+      "type": "boolean"
+    },
+    "process_exit_code": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "process_signal": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "http_status": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "exception_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+    }
+  },
+  "allOf": [
+    {
+      "not": {
+        "required": ["process_exit_code", "process_signal"]
+      }
+    },
+    {
+      "if": {
+        "required": ["http_status"],
+        "properties": {
+          "scope": {"const": "agent"},
+          "http_status": {"const": 400}
+        }
+      },
+      "then": {
+        "properties": {
+          "stage": {"const": "agent_adapter_bootstrap"},
+          "reason_code": {"const": "adapter_model_protocol_negotiation_failed"},
+          "origin": {"const": "trusted_adapter_marker"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"origin": {"const": "run_scope"}}},
+      "then": {"properties": {"scope": {"const": "run"}}}
+    },
+    {
+      "if": {"properties": {"origin": {"const": "trusted_preflight"}}},
+      "then": {
+        "properties": {"scope": {"const": "agent"}},
+        "oneOf": [
+          {"properties": {"stage": {"const": "agent_readiness"}}},
+          {"properties": {"stage": {"const": "preflight"}}}
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"origin": {"const": "harbor_pre_instruction_phase"}}},
+      "then": {
+        "properties": {
+          "scope": {"const": "agent"},
+          "stage": {"const": "agent_adapter_bootstrap"},
+          "reason_code": {"const": "adapter_initialization_failed"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"origin": {"const": "trusted_adapter_marker"}}},
+      "then": {
+        "properties": {"scope": {"const": "agent"}},
+        "oneOf": [
+          {"properties": {"stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
+          {"properties": {"stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
+          {"properties": {"stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
+          {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+        ]
+      }
+    }
+  ],
+  "oneOf": [
+    {
+      "required": ["agent"],
+      "properties": {
+        "scope": {"const": "agent"},
+        "skill_logic_started": {"const": false}
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "stage": {"const": "agent_readiness"},
+                "reason_code": {
+                  "enum": [
+                    "adapter_unavailable",
+                    "model_unavailable",
+                    "agent_authentication_unavailable",
+                    "gateway_configuration_invalid"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "preflight"},
+                "reason_code": {
+                  "enum": [
+                    "agent_runtime_unavailable",
+                    "model_not_available",
+                    "gateway_configuration_invalid"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "agent_adapter_bootstrap"},
+                "reason_code": {
+                  "enum": [
+                    "adapter_initialization_failed",
+                    "adapter_model_protocol_negotiation_failed"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "agent_process_bootstrap"},
+                "reason_code": {
+                  "enum": ["process_spawn_failed", "process_start_timeout"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "agent_authentication"},
+                "reason_code": {"const": "agent_authentication_failed"}
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "transport_before_semantic_event"},
+                "reason_code": {
+                  "enum": [
+                    "transport_connection_failed",
+                    "transport_timeout",
+                    "model_rate_limited"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "properties": {
+        "scope": {"const": "run"}
+      },
+      "not": {
+        "required": ["agent"]
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "stage": {"const": "policy_validation"},
+                "reason_code": {"enum": ["invalid_policy", "policy_validation_failed"]}
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "dataset_validation"},
+                "reason_code": {
+                  "enum": ["missing_dataset", "invalid_dataset", "dataset_validation_failed"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "task_generation"},
+                "reason_code": {
+                  "enum": ["task_generation_failed", "staged_task_collision"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "preflight"},
+                "reason_code": {
+                  "enum": ["preflight_failed", "shared_environment_failure"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "execution"},
+                "reason_code": {
+                  "enum": [
+                    "execution_failed",
+                    "shared_configuration_invalid",
+                    "evidence_integrity_failure",
+                    "evidence_production_failure",
+                    "unsatisfied_required_agent",
+                    "post_skill_unscored_failure"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "verifier"},
+                "reason_code": {
+                  "enum": ["grader_contract_failure", "verifier_contract_failure"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "manifest_validation"},
+                "reason_code": {"enum": ["corrupt_manifest", "contradictory_manifest"]}
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "security"},
+                "reason_code": {"const": "evaluation_integrity_failure"}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    }
+  }
+}

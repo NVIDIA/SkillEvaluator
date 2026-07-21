@@ -61,6 +61,7 @@ tier2 = [
 tier3 = [
     "skillevaluator[llm]",
     "harbor==0.13.2",
+    "jsonschema>=4.23",
 ]
 # OpenTelemetry export (optional; telemetry degrades gracefully when absent).
 telemetry = [
@@ -122,6 +123,7 @@ include = ["skillevaluator*"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2"]
 "skillevaluator.tier3.harbor" = [
+    "schemas/*.json",
     "templates/*.py",
     "templates/*.sh",
 ]
@@ -199,6 +201,10 @@ ignore = [
 # pytest test directories are implicit namespace packages by design (no
 # __init__.py anywhere under tests/).
 "tests/**" = ["INP001"]
+"contracts/**" = ["INP001"]
+"tests/tier3/test_agent_coverage.py" = ["INP001", "C416", "RUF043"]
+"tests/tier3/test_failure_evidence.py" = ["INP001", "FLY002"]
+"tests/tier3/test_harbor_result_plugin.py" = ["INP001", "C416", "RUF043"]
 # Test helper / fixture scripts run standalone and print to stdout by design.
 "tests/golden/generate_cli_surface.py" = ["T201"]
 "tests/fixtures/skills/**" = ["T201"]

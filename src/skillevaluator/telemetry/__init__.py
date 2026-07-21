@@ -74,6 +74,14 @@ _REDACTIONS = (
     (re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])(gh[opusr])_[A-Za-z0-9]{36,}"), r"\1_<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])"), "AKIA<redacted>"),
+    (
+        re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}"),
+        "<redacted-jwt>",
+    ),
+    (re.compile(r"(?<![A-Za-z0-9_-])(xox[baprs])-[0-9]{8,}-[A-Za-z0-9-]{8,}"), r"\1-<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}"), "glpat-<redacted>"),
 )
 _HIGH_CARDINALITY_METRIC_KEYS = {
     "skillevaluator.run.id",

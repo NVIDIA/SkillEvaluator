@@ -70,7 +70,26 @@ def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
     result = CliRunner().invoke(
-        cli, ["evaluate", str(FIXTURE), "-a", "codex", "--env-mode", "docker", "--skip-baseline"]
+        cli,
+        [
+            "evaluate",
+            str(FIXTURE),
+            "-a",
+            "codex",
+            "--env-mode",
+            "docker",
+            "--skip-baseline",
+            "--agent-validity-policy",
+            "any-valid",
+            "--min-valid-agents",
+            "1",
+            "--required-agent",
+            "codex",
+            "--contract-request",
+            "agent-coverage/1",
+            "--contract-request",
+            "tier3-result/3",
+        ],
     )
     assert result.exit_code == 0, result.output
     opts = captured["options"]
@@ -78,6 +97,39 @@ def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> No
     assert opts.agents == "codex"
     assert opts.env_mode == "docker"
     assert opts.skip_baseline is True
+    assert opts.agent_validity_policy == "any-valid"
+    assert opts.min_valid_agents == 1
+    assert opts.required_agents == ("codex",)
+    assert set(opts.contract_requests) == {"agent-coverage/1", "tier3-result/3"}
+
+
+def test_cli_evidence_mode_requires_complete_compatibility_pair() -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "evaluate",
+            str(FIXTURE),
+            "--tier3-evidence-mode",
+            "--contract-request",
+            "agent-coverage/1",
+            "--progress",
+            "off",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "requires both" in result.output
+
+
+def test_evidence_job_success_allows_invalid_semantic_coverage() -> None:
+    result = {
+        "execution_status": "failed",
+        "execution_errors": ["coverage invalid"],
+        "evidence_job_status": "succeeded",
+        "tier3_result": {"schema_version": "3.0"},
+    }
+
+    assert EvaluationService.failure_reason(result) is None
 
 
 def _autopilot_skill(tmp_path: Path) -> Path:

@@ -7,6 +7,9 @@ All notable changes to Skill Evaluator are documented in this file.
 ### Added
 
 - Initial public release candidate.
+- Added occurrence-aware Tier 3 coverage and nullable schema-v3 evidence
+  artifacts, including an `any-valid` provider-preflight policy that can
+  exclude only optional incompatible agents while preserving strict defaults.
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.
@@ -16,6 +19,9 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Security
 
+- Bound Tier 3 evidence to an immutable expected-attempt plan, execution
+  ledger, coverage manifest, closed failure taxonomy, and optional CI digests;
+  invalid or excluded results cannot surface score-looking zeroes.
 - Isolated NVIDIA Build bridge credentials from vendor CLI processes using a
   transient, root-managed, container-only key handoff with cleanup on failure.
 - Removed NVIDIA Build secrets from Harbor and Docker exec arguments using a

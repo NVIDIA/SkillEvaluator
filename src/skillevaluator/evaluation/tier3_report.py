@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -52,6 +53,7 @@ _DIMENSION_IDS = list(DIMENSION_MAPPING.keys())
 _SCHEMA_VERSION = "2.0"
 _TIER3_FEEDBACK_SCHEMA_VERSION = "1.0"
 _TIER3_FEEDBACK_FIELDS = ("conclusions", "recommendations", "suggestions", "suggestions_v2")
+_TIER3_RESULT_V3_VERSION_RE = re.compile(r"^3\.\d+$")
 
 # Canonical reports are self-contained HTML/JSON artifacts, so untrusted custom
 # grader cardinality must not multiply metric-by-trial detail without bound. The
@@ -326,7 +328,100 @@ def agent_eval_result_from_directory(
         comparison=_read_comparison(run_dir),
         use_llm_judge=use_llm_judge,
     )
+    contract = _tier3_result_v3(run_dir, engine_result)
+    if payload is not None and contract is not None:
+        payload = _apply_tier3_result_v3(payload, contract)
     return _validation_result_from_payload(payload)
+
+
+def _tier3_result_v3(run_dir: Path, engine_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Load only a numeric-minor schema-v3 result associated with this run."""
+    candidate = engine_result.get("tier3_result") if isinstance(engine_result, dict) else None
+    if isinstance(candidate, dict) and _TIER3_RESULT_V3_VERSION_RE.fullmatch(str(candidate.get("schema_version", ""))):
+        return candidate
+
+    path = run_dir / "tier3-result.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return (
+        value
+        if isinstance(value, dict) and _TIER3_RESULT_V3_VERSION_RE.fullmatch(str(value.get("schema_version", "")))
+        else None
+    )
+
+
+def _apply_tier3_result_v3(payload: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    """Attach the v3 authority while retaining schema-v2 display mirrors."""
+    coverage = contract.get("coverage") if isinstance(contract.get("coverage"), dict) else {}
+    quality = contract.get("quality") if isinstance(contract.get("quality"), dict) else {}
+    eligible = set(coverage.get("eligible_agents") or [])
+    valid = coverage.get("status") in {"valid_full", "valid_degraded"}
+    quality_status = str(quality.get("status") or "not_evaluated")
+
+    agents = payload.get("agents") if isinstance(payload.get("agents"), dict) else {}
+    for name, agent in agents.items():
+        if name in eligible and valid:
+            agent["score_eligible"] = True
+            continue
+        agent["score_eligible"] = False
+        for score_field in ("with_skill", "baseline", "lift", "overall_score"):
+            if score_field in agent:
+                agent[score_field] = None
+        agent["evaluators"] = {}
+        agent["evaluator_cards"] = []
+        agent["dimensions"] = []
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    authoritative_summary = contract.get("summary") if isinstance(contract.get("summary"), dict) else {}
+    verdict = {
+        "pass": VERDICT_PASS,
+        "fail": VERDICT_FAIL,
+        "neutral": VERDICT_NEUTRAL,
+        "not_evaluated": VERDICT_NEUTRAL,
+    }.get(quality_status, VERDICT_NEUTRAL)
+    execution_status = "succeeded" if valid else "failed"
+    execution_errors = (
+        [f"Tier 3 coverage is {coverage.get('status', 'invalid')}; numerical quality was not evaluated"]
+        if not valid
+        else []
+    )
+    summary.update(
+        {
+            "overall_score": contract.get("overall_score"),
+            "overall_lift": contract.get("overall_lift"),
+            "best_agent": authoritative_summary.get("best_agent") or "",
+            "agents_run": list(authoritative_summary.get("agents_run") or []),
+            "verdict": verdict,
+            "quality_status": quality_status,
+            "execution_status": execution_status,
+            "execution_errors": execution_errors,
+        }
+    )
+    payload.update(
+        {
+            "contract_schema_version": contract.get("schema_version"),
+            "tier3_result": contract,
+            "coverage": coverage,
+            "quality": quality,
+            "bindings": {
+                key: contract.get(key)
+                for key in ("occurrence_id", "expected_content_digest", "validated_sha", "gate_policy_digest")
+            },
+            "extensions": contract.get("extensions") or {},
+            "overall_score": contract.get("overall_score"),
+            "overall_lift": contract.get("overall_lift"),
+            "composite_lift": contract.get("composite_lift"),
+            "best_agent": authoritative_summary.get("best_agent") or "",
+            "agents_run": list(authoritative_summary.get("agents_run") or []),
+            "verdict": verdict,
+            "quality_status": quality_status,
+            "execution_status": execution_status,
+            "execution_errors": execution_errors,
+        }
+    )
+    return payload
 
 
 def _validation_result_from_payload(payload: dict[str, Any] | None) -> ValidationResult | None:

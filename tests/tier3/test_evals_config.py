@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+from pathlib import Path
+
 import pytest
 
+from skillevaluator.tier3 import evals_config as evals_config_module
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
-from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+from skillevaluator.tier3.evals_config import MAX_EVALS_CONFIG_BYTES, EvalsConfigError, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_skillevaluators as validate_skill_evals
 
 
@@ -85,6 +89,102 @@ harbor:
     )
 
     with pytest.raises(EvalsConfigError, match="unknown harbor key"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_symlink(tmp_path):
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    source = tmp_path / "config-source.yml"
+    source.write_text("schema_version: 1\n", encoding="utf-8")
+    (evals / "config.yml").symlink_to(source)
+
+    with pytest.raises(EvalsConfigError, match="regular non-hardlinked file"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_file_replaced_by_symlink_during_open(tmp_path, monkeypatch):
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    config_path = evals / "config.yml"
+    config_path.write_text("schema_version: 1\n", encoding="utf-8")
+    outside = tmp_path / "outside.yml"
+    outside.write_text("schema_version: 1\nharbor:\n  n_attempts: 99\n", encoding="utf-8")
+
+    real_open = os.open
+    replaced = False
+
+    def replace_then_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if Path(path) == config_path and not replaced:
+            replaced = True
+            config_path.unlink()
+            try:
+                config_path.symlink_to(outside)
+            except OSError as error:
+                pytest.skip(f"symlinks are unavailable: {error}")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(evals_config_module.os, "open", replace_then_open)
+
+    with pytest.raises(EvalsConfigError, match=r"cannot read config|changed while it was opened"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_hardlink(tmp_path):
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    source = tmp_path / "config-source.yml"
+    source.write_text("schema_version: 1\n", encoding="utf-8")
+    try:
+        os.link(source, evals / "config.yml")
+    except OSError as error:
+        pytest.skip(f"hardlinks are unavailable: {error}")
+
+    with pytest.raises(EvalsConfigError, match="regular non-hardlinked file"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_oversized_file(tmp_path):
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    config = evals / "config.yml"
+    with config.open("wb") as stream:
+        stream.truncate(MAX_EVALS_CONFIG_BYTES + 1)
+
+    with pytest.raises(EvalsConfigError, match="config exceeds"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_invalid_utf8(tmp_path):
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "config.yml").write_bytes(b"schema_version: 1\ninvalid: \xff\n")
+
+    with pytest.raises(EvalsConfigError, match="cannot read config"):
+        load_evals_config(skill)
+
+
+@pytest.mark.parametrize(
+    "document, field",
+    [
+        ("schema_version: 1\n1: invalid\n", "top-level config"),
+        ("schema_version: 1\nharbor:\n  1: invalid\n", "harbor"),
+        ("schema_version: 1\nharbor:\n  resources:\n    1: invalid\n", "harbor.resources"),
+    ],
+)
+def test_load_evals_config_rejects_non_string_mapping_keys(tmp_path, document, field):
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "config.yml").write_text(document, encoding="utf-8")
+
+    with pytest.raises(EvalsConfigError, match=rf"{field} keys must be strings"):
         load_evals_config(skill)
 
 

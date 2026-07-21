@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:skillevaluator:schema:expected_attempt_plan_v1.schema.json",
+  "title": "SkillEvaluator Expected Attempt Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "dataset_snapshot_kind",
+    "dataset_digest_algorithm", "dataset_digest", "agents", "cases", "arm_task_sets",
+    "baseline_required", "n_attempts", "stop_on_pass", "pass_threshold",
+    "grading_mode", "reward_contract", "attempts"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "dataset_snapshot_kind": {"enum": ["evals_json", "native_harbor"]},
+    "dataset_digest_algorithm": {"const": "skill-eval-dataset-c14n/1"},
+    "dataset_digest": {"$ref": "#/$defs/digest"},
+    "agents": {
+      "type": "array", "minItems": 1, "maxItems": 128,
+      "items": {"$ref": "#/$defs/agent"}
+    },
+    "cases": {
+      "type": "array", "minItems": 1, "maxItems": 100000,
+      "items": {"$ref": "#/$defs/case"}
+    },
+    "arm_task_sets": {
+      "type": "array", "minItems": 1, "maxItems": 2,
+      "items": {"$ref": "#/$defs/arm_task_set"}
+    },
+    "baseline_required": {"type": "boolean"},
+    "n_attempts": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "stop_on_pass": {"type": "boolean"},
+    "pass_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+    "grading_mode": {"enum": ["default", "default_plus_custom", "custom_only"]},
+    "reward_contract": {"$ref": "#/$defs/reward_contract"},
+    "attempts": {
+      "type": "array", "minItems": 1, "maxItems": 1000000,
+      "items": {"$ref": "#/$defs/attempt"}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "identity": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "bounded_text": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "metric_name": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$",
+      "not": {"enum": [
+        "security", "skill_execution", "skill_efficiency", "accuracy",
+        "goal_accuracy", "behavior_check", "details", "entry_id", "error",
+        "has_skill", "metric_set", "metric_set_version", "metrics", "overall",
+        "reward", "trajectory_detail", "trajectory_source"
+      ]}
+    },
+    "custom_metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "range"],
+      "properties": {
+        "name": {"$ref": "#/$defs/metric_name"},
+        "range": {"const": "unit_interval"}
+      }
+    },
+    "default_metric_list": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "prefixItems": [
+        {"const": "security"}, {"const": "skill_execution"},
+        {"const": "skill_efficiency"}, {"const": "accuracy"},
+        {"const": "goal_accuracy"}, {"const": "behavior_check"}
+      ],
+      "items": false
+    },
+    "reward_contract": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema_version", "grading_mode", "metric_set", "default_metrics",
+        "custom_metrics", "custom_grader_schema_digest", "combination_rule"
+      ],
+      "properties": {
+        "schema_version": {"const": "1.0"},
+        "grading_mode": {"enum": ["default", "default_plus_custom", "custom_only"]},
+        "metric_set": {"enum": ["skill-evaluator-default-v2", "custom-only"]},
+        "default_metrics": {"type": "array"},
+        "custom_metrics": {"type": "array", "maxItems": 255, "uniqueItems": true, "items": {"$ref": "#/$defs/custom_metric"}},
+        "custom_grader_schema_digest": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]},
+        "combination_rule": {"enum": ["default_mean", "default_mean_with_advisory_custom", "custom_overall"]}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "grading_mode": {"const": "default"},
+            "metric_set": {"const": "skill-evaluator-default-v2"},
+            "default_metrics": {"$ref": "#/$defs/default_metric_list"},
+            "custom_metrics": {"maxItems": 0},
+            "custom_grader_schema_digest": {"type": "null"},
+            "combination_rule": {"const": "default_mean"}
+          }
+        },
+        {
+          "properties": {
+            "grading_mode": {"const": "default_plus_custom"},
+            "metric_set": {"const": "skill-evaluator-default-v2"},
+            "default_metrics": {"$ref": "#/$defs/default_metric_list"},
+            "custom_metrics": {"minItems": 1, "maxItems": 249},
+            "custom_grader_schema_digest": {"$ref": "#/$defs/digest"},
+            "combination_rule": {"const": "default_mean_with_advisory_custom"}
+          }
+        },
+        {
+          "properties": {
+            "grading_mode": {"const": "custom_only"},
+            "metric_set": {"const": "custom-only"},
+            "default_metrics": {"maxItems": 0},
+            "combination_rule": {"const": "custom_overall"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"custom_metrics": {"minItems": 1}}},
+              "then": {"properties": {"custom_grader_schema_digest": {"$ref": "#/$defs/digest"}}},
+              "else": {"properties": {"custom_grader_schema_digest": {"type": "null"}}}
+            }
+          ]
+        }
+      ]
+    },
+    "agent": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "result_key", "base_agent", "occurrence", "requested_model",
+        "resolved_model", "model_source"
+      ],
+      "properties": {
+        "result_key": {"$ref": "#/$defs/identity"},
+        "base_agent": {"$ref": "#/$defs/identity"},
+        "occurrence": {"type": "integer", "minimum": 1},
+        "requested_model": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/bounded_text"}]
+        },
+        "resolved_model": {"$ref": "#/$defs/bounded_text"},
+        "model_source": {"$ref": "#/$defs/bounded_text"}
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "harbor_task_name", "reward_strategy"],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "harbor_task_name": {"$ref": "#/$defs/identity"},
+        "reward_strategy": {
+          "enum": ["single_step", "multi_step_mean", "multi_step_final"]
+        }
+      }
+    },
+    "arm_task": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "harbor_task_name", "reward_strategy", "staged_task_digest"],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "harbor_task_name": {"$ref": "#/$defs/identity"},
+        "reward_strategy": {"enum": ["single_step", "multi_step_mean", "multi_step_final"]},
+        "staged_task_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "arm_task_set": {
+      "type": "object", "additionalProperties": false,
+      "required": ["arm", "root_ref", "digest_algorithm", "skill_payload_digest", "task_set_digest", "tasks"],
+      "properties": {
+        "arm": {"enum": ["with_skill", "baseline"]},
+        "root_ref": {"enum": ["staged/with_skill", "staged/baseline"]},
+        "digest_algorithm": {"const": "skill-evaluator-staged-harbor-task-tree-c14n/1"},
+        "skill_payload_digest": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]},
+        "task_set_digest": {"$ref": "#/$defs/digest"},
+        "tasks": {"type": "array", "minItems": 1, "maxItems": 100000, "items": {"$ref": "#/$defs/arm_task"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"arm": {"const": "with_skill"}}},
+          "then": {
+            "properties": {
+              "root_ref": {"const": "staged/with_skill"},
+              "skill_payload_digest": {"$ref": "#/$defs/digest"}
+            }
+          },
+          "else": {
+            "properties": {
+              "root_ref": {"const": "staged/baseline"},
+              "skill_payload_digest": {"type": "null"}
+            }
+          }
+        }
+      ]
+    },
+    "attempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agent", "arm", "case_id", "ordinal"],
+      "properties": {
+        "agent": {"$ref": "#/$defs/identity"},
+        "arm": {"enum": ["with_skill", "baseline"]},
+        "case_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    }
+  }
+}

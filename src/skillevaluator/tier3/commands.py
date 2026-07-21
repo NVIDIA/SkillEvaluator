@@ -615,12 +615,23 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    agent_validity_policy: str = "all-selected",
+    min_valid_agents: int | None = None,
+    required_agents: tuple[str, ...] = (),
+    contract_requests: tuple[str, ...] = (),
+    tier3_evidence_mode: bool = False,
+    tier3_result_file: Path | None = None,
+    tier3_occurrence_id: str | None = None,
+    expected_content_digest: str | None = None,
+    validated_sha: str | None = None,
+    gate_policy_digest: str | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
 
     agent_list = parse_agents(agents)
+    required_agents = tuple(canonical_agent_name(agent) for agent in required_agents)
     reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
     engine_started = False
     try:
@@ -642,6 +653,48 @@ def evaluate(
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
             raise ValueError(f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}")
+
+        from skillevaluator.tier3.harbor.native_contract import (
+            SUPPORTED_CONTRACT_REQUESTS,
+            validate_contract_requests,
+            validate_evidence_bindings,
+        )
+
+        validate_contract_requests(contract_requests)
+        if agent_validity_policy not in {"all-selected", "any-valid"}:
+            raise ValueError("--agent-validity-policy must be all-selected or any-valid")
+        if len(required_agents) != len(set(required_agents)):
+            raise ValueError("--required-agent cannot contain duplicates")
+        unknown_required_agents = sorted(set(required_agents) - set(agent_list))
+        if unknown_required_agents:
+            raise ValueError(
+                "--required-agent names must also be selected by -a/--agents: " + ", ".join(unknown_required_agents)
+            )
+        if min_valid_agents is not None and min_valid_agents > len(agent_list):
+            raise ValueError("--min-valid-agents cannot exceed the number of selected agents")
+        if tier3_evidence_mode and set(contract_requests) != SUPPORTED_CONTRACT_REQUESTS:
+            raise ValueError(
+                "--tier3-evidence-mode requires --contract-request agent-coverage/1 "
+                "and --contract-request tier3-result/3"
+            )
+        evidence_bindings = {
+            "--tier3-result-file": tier3_result_file,
+            "--tier3-occurrence-id": tier3_occurrence_id,
+            "--expected-content-digest": expected_content_digest,
+            "--validated-sha": validated_sha,
+            "--gate-policy-digest": gate_policy_digest,
+        }
+        if not tier3_evidence_mode and any(value is not None for value in evidence_bindings.values()):
+            supplied = ", ".join(name for name, value in evidence_bindings.items() if value is not None)
+            raise ValueError(f"{supplied} require --tier3-evidence-mode")
+        if tier3_result_file is not None and (tier3_result_file.is_absolute() or ".." in tier3_result_file.parts):
+            raise ValueError("--tier3-result-file must be a relative path confined to the run directory")
+        validate_evidence_bindings(
+            occurrence_id=tier3_occurrence_id,
+            expected_content_digest=expected_content_digest,
+            validated_sha=validated_sha,
+            gate_policy_digest=gate_policy_digest,
+        )
 
         try:
             resolve_llm_provider()
@@ -682,6 +735,16 @@ def evaluate(
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
+            agent_validity_policy=agent_validity_policy,
+            min_valid_agents=min_valid_agents,
+            required_agents=required_agents,
+            contract_requests=contract_requests,
+            tier3_evidence_mode=tier3_evidence_mode,
+            tier3_result_file=tier3_result_file,
+            tier3_occurrence_id=tier3_occurrence_id,
+            expected_content_digest=expected_content_digest,
+            validated_sha=validated_sha,
+            gate_policy_digest=gate_policy_digest,
             progress_reporter=reporter,
         )
     except Exception as exc:

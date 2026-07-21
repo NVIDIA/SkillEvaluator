@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:skillevaluator:schema:harbor_results_v1.schema.json",
+  "title": "SkillEvaluator Harbor Results Sidecar v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "plan_digest", "schedule_file_digest", "job_id",
+    "job_name", "agent", "arm", "resolved_model", "harbor_model", "reward_contract_digest", "task_set_digest", "trials"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "plan_digest": {"$ref": "#/$defs/digest"},
+    "schedule_file_digest": {"$ref": "#/$defs/digest"},
+    "job_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "job_name": {"type": "string", "minLength": 1, "maxLength": 256},
+    "agent": {"$ref": "#/$defs/identity"},
+    "arm": {"enum": ["with_skill", "baseline"]},
+    "resolved_model": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "harbor_model": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "reward_contract_digest": {"$ref": "#/$defs/digest"},
+    "task_set_digest": {"$ref": "#/$defs/digest"},
+    "trials": {
+      "type": "array", "maxItems": 1000000,
+      "items": {"$ref": "#/$defs/trial"}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "identity": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "relative_ref": {
+      "type": "string", "minLength": 1, "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))(?!.*//)(?!.*\\\\)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$"
+    },
+    "rewards": {
+      "type": "object", "maxProperties": 256,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"},
+      "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}
+    },
+    "exception_type": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string", "minLength": 1, "maxLength": 128,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+        }
+      ]
+    },
+    "step": {
+      "type": "object", "additionalProperties": false,
+      "required": ["step_name", "verifier_result_present", "rewards", "exception_type"],
+      "properties": {
+        "step_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "verifier_result_present": {"type": "boolean"},
+        "rewards": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/rewards"}]},
+        "exception_type": {"$ref": "#/$defs/exception_type"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"verifier_result_present": {"const": false}}},
+          "then": {"properties": {"rewards": {"type": "null"}}}
+        }
+      ]
+    },
+    "trial": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "trial_name", "agent", "arm", "case_id", "ordinal", "reward_strategy", "staged_task_digest",
+        "state", "verifier_result_present", "rewards", "steps", "exception_type",
+        "skill_logic_started", "agent_failure",
+        "trial_ref", "trial_file_digest"
+      ],
+      "properties": {
+        "trial_name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "agent": {"$ref": "#/$defs/identity"},
+        "arm": {"enum": ["with_skill", "baseline"]},
+        "case_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "reward_strategy": {"enum": ["single_step", "multi_step_mean", "multi_step_final"]},
+        "staged_task_digest": {"$ref": "#/$defs/digest"},
+        "state": {"enum": ["completed", "failed"]},
+        "verifier_result_present": {"type": "boolean"},
+        "rewards": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/rewards"}]},
+        "steps": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/step"}},
+        "exception_type": {"$ref": "#/$defs/exception_type"},
+        "skill_logic_started": {"type": "boolean"},
+        "agent_failure": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stage", "reason_code", "origin"],
+              "properties": {
+                "stage": {"type": "string"},
+                "reason_code": {"type": "string"},
+                "origin": {"enum": ["harbor_pre_instruction_phase", "trusted_adapter_marker"]}
+              },
+              "oneOf": [
+                {"properties": {"stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
+                {"properties": {"stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
+                {"properties": {"stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
+                {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+              ],
+              "allOf": [
+                {
+                  "if": {"properties": {"origin": {"const": "harbor_pre_instruction_phase"}}},
+                  "then": {
+                    "properties": {
+                      "stage": {"const": "agent_adapter_bootstrap"},
+                      "reason_code": {"const": "adapter_initialization_failed"}
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "trial_ref": {"$ref": "#/$defs/relative_ref"},
+        "trial_file_digest": {"$ref": "#/$defs/digest"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"verifier_result_present": {"const": false}}},
+          "then": {"properties": {"rewards": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"reward_strategy": {"const": "single_step"}}},
+          "then": {"properties": {"steps": {"maxItems": 0}}}
+        },
+        {
+          "if": {"properties": {"state": {"const": "completed"}}},
+          "then": {
+            "properties": {
+              "rewards": {"allOf": [{"$ref": "#/$defs/rewards"}, {"minProperties": 1}]},
+              "skill_logic_started": {"const": true},
+              "agent_failure": {"type": "null"},
+              "exception_type": {"type": "null"},
+              "steps": {
+                "items": {
+                  "allOf": [
+                    {"$ref": "#/$defs/step"},
+                    {"properties": {"exception_type": {"type": "null"}}}
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"state": {"const": "failed"}}},
+          "then": {
+            "properties": {
+              "rewards": {
+                "oneOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/rewards"}, {"maxProperties": 0}]}]
+              },
+              "steps": {
+                "items": {
+                  "allOf": [
+                    {"$ref": "#/$defs/step"},
+                    {"properties": {"rewards": {"type": "null"}}}
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"agent_failure": {"type": "object"}}},
+          "then": {
+            "properties": {
+              "skill_logic_started": {"const": false},
+              "state": {"const": "failed"}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

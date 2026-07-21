@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.telemetry import record_agent_trial, redact_sensitive_data, redact_sensitive_text
+from skillevaluator.tier3.harbor.failure_evidence import first_trial_agent_failure
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
@@ -81,6 +82,7 @@ _AGENT_RUNTIME_EXCEPTION_TYPES = {
     "NotFoundError",
     "ProviderException",
 }
+
 _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES = {
     "AgentTimeoutError",
 }
@@ -369,25 +371,21 @@ def _agent_log_runtime_failure_reason(
 
 
 def _agent_runtime_failure_reason(trial_dir: Path) -> str:
-    """Return why a trial cannot produce a valid score."""
-    exception_type, exception_reason = _trial_exception_details(trial_dir)
-    agent_reason = _agent_log_runtime_failure_reason(
-        trial_dir,
-        include_text_logs=bool(exception_reason),
-    )
-    if agent_reason:
-        return agent_reason
+    """Return a structured transcript failure or typed Harbor agent exception."""
+    evidence = first_trial_agent_failure(trial_dir)
+    if evidence is not None:
+        # Preserve the concise public diagnostic shape when the structured
+        # event contains a known provider/runtime marker.
+        return (_text_contains_agent_runtime_failure(evidence.message) or evidence.message).strip('"')
 
+    exception_type, exception_reason = _trial_exception_details(trial_dir)
     if exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES:
         return exception_reason
 
     # Do not classify verifier/healthcheck/task exceptions as agent runtime failures.
-    if (
-        exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES
-        and exception_reason
-        and _text_contains_agent_runtime_failure(exception_reason)
-    ):
-        return exception_reason
+    if exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES and exception_reason:
+        exception_message = exception_reason.removeprefix(f"{exception_type}:").lstrip()
+        return _text_contains_agent_runtime_failure(exception_message)
 
     return ""
 

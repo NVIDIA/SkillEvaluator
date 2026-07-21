@@ -1424,6 +1424,14 @@
               "type": "text"
             },
             {
+              "name": "previous_version",
+              "opts": [
+                "--previous-version"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "fail_fast",
@@ -2671,6 +2679,14 @@
           "opts": [
             "--checks",
             "--tier1-checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "previous_version",
+          "opts": [
+            "--previous-version"
           ],
           "param_type": "option",
           "type": "text"

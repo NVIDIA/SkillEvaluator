@@ -819,9 +819,18 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
-    "Choices: schema, security, pii, license, code-integrity, unicode, quality, lint; "
-    "opt-in (not run by default): version, dependency. "
+    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
+    "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--previous-version",
+    default=None,
+    metavar="VERSION",
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Previous released version for strictly increasing SemVer validation. "
+    "Can also be supplied via SKILLEVALUATOR_PREVIOUS_VERSION.",
 )
 @click.option(
     "--fail-fast",
@@ -1049,6 +1058,7 @@ def validate(
     full: bool,
     verbose: bool,
     checks: str | None,
+    previous_version: str | None,
     fail_fast: bool,
     continue_on_failure: bool,
     llm: bool,
@@ -1196,6 +1206,7 @@ def validate(
         use_llm=llm,
         llm_verify=llm_verify,
         min_score=min_score,
+        previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
         fail_fast=fail_fast,

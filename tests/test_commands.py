@@ -15,6 +15,44 @@ from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_age
 FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "simple"
 
 
+def test_version_check_is_in_the_default_tier1_lineup() -> None:
+    from skillevaluator.tier1.commands import DEFAULT_CHECKS, OPTIONAL_CHECKS, enabled_check_lineup
+
+    assert "version" in DEFAULT_CHECKS
+    assert "version" not in OPTIONAL_CHECKS
+    assert enabled_check_lineup(None) == list(DEFAULT_CHECKS)
+    assert enabled_check_lineup("security,version") == ["version", "security"]
+
+
+def test_validate_passes_explicit_previous_version(monkeypatch) -> None:
+    from skillevaluator import cli as cli_module
+
+    captured: list[str | None] = []
+
+    def _run_validation(_target: Path, **kwargs):
+        captured.append(kwargs["previous_version"])
+        return []
+
+    monkeypatch.setattr(cli_module, "run_validation", _run_validation)
+    monkeypatch.setattr(cli_module, "emit_reports", lambda *_args, **_kwargs: True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(FIXTURE),
+            "--no-dedup",
+            "--checks",
+            "version",
+            "--previous-version",
+            "1.2.0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == ["1.2.0"]
+
+
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
     assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
 

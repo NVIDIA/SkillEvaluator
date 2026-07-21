@@ -516,7 +516,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         """A completed scanner process without parseable output is not a clean scan."""
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
-            success=True,
+            success=False,
             stdout="not valid json",
             stderr="",
             exit_code=0,
@@ -611,6 +611,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             stdout=json.dumps(_skillspector_json_report([deterministic_issue])),
             stderr="",
             exit_code=1,
+            error_message="skillspector exited with code 1",
         )
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.side_effect = [deterministic, llm_failure]
@@ -829,7 +830,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         """SkillSpector exit 1 is a findings report, not an execution failure."""
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
-            success=True,
+            success=False,
             stdout=json.dumps(
                 {
                     "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "Review"},
@@ -847,6 +848,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             stderr="",
             exit_code=1,
+            error_message="skillspector exited with code 1",
         )
 
         result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
@@ -854,6 +856,23 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not result.passed
         assert any(finding.check_name == "Instruction override (PI-1)" for finding in result.findings)
         assert not any("unexpected exit code" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_completed_scan_preserves_suppression_metadata(self, mock_tools, sample_skill_dir: Path):
+        mock_tools.skillspector.is_available = True
+        payload = _skillspector_json_report()
+        payload["suppressed_count"] = 2
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.metadata["skillspector_suppressed_count"] == 2
+        assert any("suppressed 2" in message for message in result.messages)
 
     @pytest.mark.parametrize(
         ("payload", "expected_error"),

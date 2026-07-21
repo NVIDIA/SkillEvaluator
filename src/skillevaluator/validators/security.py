@@ -498,16 +498,12 @@ class SecurityValidator(ValidatorBase):
         child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
         tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
 
-        if not tool_result.success or tool_result.error_message:
-            result.add_error(tool_result.error_message or f"{stage_name} failed to execute")
-            result.mark_scan_incomplete(stage_name)
-            return result
-
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
-            result.add_error(
+            detail = tool_result.error_message or (
                 f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
                 "scanner diagnostics were redacted"
             )
+            result.add_error(detail)
             result.mark_scan_incomplete(stage_name)
             return result
 
@@ -671,6 +667,7 @@ class SecurityValidator(ValidatorBase):
         risk = data.get("risk_assessment") or {}
         score = risk.get("score", 0)
         severity = risk.get("severity", "UNKNOWN")
+        suppressed_count = int(data.get("suppressed_count") or 0)
 
         result.metadata.update(
             {
@@ -682,8 +679,12 @@ class SecurityValidator(ValidatorBase):
                 "skillspector_scanned_at": skill_info.get("scanned_at"),
                 "skillspector_components_count": len(components),
                 "skillspector_has_executable_scripts": sp_metadata.get("has_executable_scripts", False),
+                "skillspector_suppressed_count": suppressed_count,
             }
         )
+
+        if suppressed_count:
+            result.add_message(f"skillspector suppressed {suppressed_count} audited finding(s)")
 
         if sp_metadata.get("llm_requested") and not sp_metadata.get("llm_available"):
             result.add_warning(

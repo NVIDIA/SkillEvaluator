@@ -28,8 +28,8 @@ def _extract_version(frontmatter: dict[str, Any]) -> str:
     the optional-version proposal, ``quality_score.py`` recommended a top-level
     ``version`` without enforcing strict semver, so existing skills may carry
     values like ``"1.0"`` or ``1`` that would now produce HIGH findings. Scoping
-    extraction to ``metadata.version`` keeps the new check opt-in via the
-    canonical field and avoids breaking those skills.
+    extraction to ``metadata.version`` keeps the label itself optional and
+    avoids breaking those skills when the validator runs by default.
     """
     metadata = frontmatter.get("metadata")
     if isinstance(metadata, dict):

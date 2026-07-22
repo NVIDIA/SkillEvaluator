@@ -152,17 +152,43 @@ def _options(command: click.Command, ctx: click.Context) -> RenderableType | Non
 def _commands(command: click.Command, ctx: click.Context) -> RenderableType | None:
     if not isinstance(command, click.Group):
         return None
-    rows: list[tuple[str, str]] = []
+    rows: dict[str, tuple[str, str]] = {}
     for name in command.list_commands(ctx):
         sub = command.get_command(ctx, name)
         if sub is None or getattr(sub, "hidden", False):
             continue
         # Large limit so rich (not Click) handles wrapping in the help column,
         # avoiding the truncating "..." Click otherwise inserts.
-        rows.append((name, sub.get_short_help_str(limit=120)))
+        rows[name] = (name, sub.get_short_help_str(limit=120))
     if not rows:
         return None
-    return Group(Text("Commands:", style="help.heading"), _definition_table(rows, key_style="help.command"))
+
+    help_groups = getattr(command, "help_command_groups", ())
+    if not help_groups:
+        return Group(
+            Text("Commands:", style="help.heading"),
+            _definition_table(list(rows.values()), key_style="help.command"),
+        )
+
+    blocks: list[RenderableType] = []
+    grouped: set[str] = set()
+    for heading, names in help_groups:
+        section = [rows[name] for name in names if name in rows]
+        if not section:
+            continue
+        if blocks:
+            blocks.append(Text(""))
+        blocks.append(Text(f"{heading}:", style="help.heading"))
+        blocks.append(_definition_table(section, key_style="help.command"))
+        grouped.update(name for name in names if name in rows)
+
+    remaining = [row for name, row in rows.items() if name not in grouped]
+    if remaining:
+        if blocks:
+            blocks.append(Text(""))
+        blocks.append(Text("Other commands:", style="help.heading"))
+        blocks.append(_definition_table(remaining, key_style="help.command"))
+    return Group(*blocks)
 
 
 def _epilog_line(line: str) -> Text:
@@ -244,6 +270,15 @@ class RichGroup(click.Group):
 
     command_class = RichCommand
     group_class = type  # sub-groups created via @group.group() reuse RichGroup
+
+    def __init__(
+        self,
+        *args: object,
+        help_command_groups: tuple[tuple[str, tuple[str, ...]], ...] = (),
+        **kwargs: object,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.help_command_groups = help_command_groups
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         formatter.write(render_help(self, ctx, width=formatter.width))

@@ -146,7 +146,29 @@ Examples:
 """
 
 
-@click.group(cls=RichGroup, context_settings=CONTEXT_SETTINGS)
+_TOP_LEVEL_COMMAND_HELP_GROUPS = (
+    ("Core workflows", ("validate", "health-check", "doctor", "models")),
+    (
+        "Tier 1 · Static and security",
+        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
+    ),
+    (
+        "Tier 2 · Deduplication",
+        ("similarity-check", "context-optimization-check", "dedup-scan"),
+    ),
+    (
+        "Tier 3 · Live evaluation",
+        ("create-eval-dataset", "init-custom-grader", "init-harbor-task", "compare", "view", "harbor-view"),
+    ),
+    ("Expert aliases", ("tier1", "tier2", "tier3")),
+)
+
+
+@click.group(
+    cls=RichGroup,
+    context_settings=CONTEXT_SETTINGS,
+    help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
+)
 @click.version_option(version=__version__, prog_name="skillevaluator")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging.")
 def cli(verbose: bool) -> None:

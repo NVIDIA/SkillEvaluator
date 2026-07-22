@@ -41,6 +41,8 @@ def test_v3_invalid_contract_nulls_legacy_score_mirrors() -> None:
             }
         },
         "summary": {"overall_score": 0.9},
+        "evaluators": {"accuracy": {"with_skill": 0.9, "baseline": 0.4, "lift": 0.5}},
+        "insights": {"correctness": {"score": 0.9, "explanation": "partial"}},
         "overall_score": 0.9,
         "overall_lift": 0.5,
         "composite_lift": 0.5,
@@ -58,6 +60,30 @@ def test_v3_invalid_contract_nulls_legacy_score_mirrors() -> None:
         "overall_score": None,
         "overall_lift": None,
         "composite_lift": None,
+        "extensions": {
+            "org.skillevaluator/agent-diagnostics/1": {
+                "authoritative": False,
+                "agents": {
+                    "codex": {
+                        "authoritative": False,
+                        "execution_status": "failed",
+                        "failure_stage": "agent_execution",
+                        "reason_code": "agent_execution_timeout",
+                        "evidence_ref": "diagnostics/codex.json",
+                        "evidence_file_digest": "sha256:" + "a" * 64,
+                        "failures": [
+                            {
+                                "trial": "case-1_attempt001",
+                                "exception_type": "AgentTimeoutError",
+                                "reason_code": "agent_execution_timeout",
+                                "reason": "Agent execution timed out",
+                            }
+                        ],
+                        "trajectory_status": "retained_locally",
+                    }
+                },
+            }
+        },
     }
 
     result = _apply_tier3_result_v3(payload, contract)
@@ -66,6 +92,15 @@ def test_v3_invalid_contract_nulls_legacy_score_mirrors() -> None:
     assert result["quality_status"] == "not_evaluated"
     assert result["agents"]["codex"]["with_skill"] is None
     assert result["agents"]["codex"]["evaluators"] == {}
+    assert result["evaluators"] == {}
+    assert result["insights"] == {}
+    assert result["agent_diagnostics"]["codex"]["reason_code"] == "agent_execution_timeout"
+
+    html = _render_agent_payload(result)
+    assert "Excluded/failed agents (diagnostic only)" in html
+    assert "Agent execution timed out" in html
+    assert "retained with local Harbor artifacts" in html
+    assert ">N/A<" in html
 
 
 @pytest.mark.parametrize("schema_version", ["3.", "3.xyz", "30.0", "v3.0"])

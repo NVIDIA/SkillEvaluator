@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
@@ -351,7 +352,14 @@ def _failure_dict(failure: FailureRecord) -> dict[str, Any]:
     return value
 
 
-def _write_failure(run_dir: Path, failure: FailureRecord, *, index: int) -> FailureRecord:
+def _write_failure(
+    run_dir: Path,
+    failure: FailureRecord,
+    *,
+    index: int,
+    exception_type: str | None = None,
+    process_exit_code: int | None = None,
+) -> FailureRecord:
     identity = failure.agent or "run"
     ref = f"diagnostics/contract/{index:03d}-{identity}-{failure.reason_code}.json"
     ensure_artifact_parent(run_dir / ref, trusted_root=run_dir)
@@ -359,8 +367,11 @@ def _write_failure(run_dir: Path, failure: FailureRecord, *, index: int) -> Fail
         run_dir,
         ref,
         failure,
-        skill_logic_started=failure.reason_code == "post_skill_unscored_failure",
-        exception_type="Tier3ExecutionFailure",
+        skill_logic_started=(
+            failure.origin == "trusted_execution_result" or failure.reason_code == "post_skill_unscored_failure"
+        ),
+        process_exit_code=process_exit_code,
+        exception_type=exception_type or "Tier3ExecutionFailure",
     )
     return FailureRecord(
         failure.scope,
@@ -371,6 +382,86 @@ def _write_failure(run_dir: Path, failure: FailureRecord, *, index: int) -> Fail
         evidence_ref=ref,
         evidence_file_digest=digest,
     )
+
+
+def _trusted_execution_failure(data: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return one trusted post-start failure when all failed trials are agent-scoped."""
+
+    execution = data.get("agent_execution_failures")
+    trials = data.get("trial_failures")
+    if not isinstance(execution, Mapping) or not isinstance(trials, Mapping):
+        return None
+    execution_rows = [
+        row for arm in ("with_skill", "without_skill") for row in (execution.get(arm) or []) if isinstance(row, Mapping)
+    ]
+    if not execution_rows:
+        return None
+    trusted_trials = {str(row.get("trial") or "") for row in execution_rows}
+    recorded_trials = {
+        str(row.get("trial") or "")
+        for arm in ("with_skill", "without_skill")
+        for row in (trials.get(arm) or [])
+        if isinstance(row, Mapping)
+    }
+    if not recorded_trials or not recorded_trials.issubset(trusted_trials):
+        return None
+    counts = Counter(
+        (str(row.get("exception_type") or ""), str(row.get("reason_code") or "")) for row in execution_rows
+    )
+    representative = max(
+        counts,
+        key=lambda item: (
+            counts[item],
+            item[1] == "agent_process_exit",
+            item,
+        ),
+    )
+    row = next(
+        row
+        for row in execution_rows
+        if (str(row.get("exception_type") or ""), str(row.get("reason_code") or "")) == representative
+    )
+    exception_type = str(row.get("exception_type") or "")
+    reason_code = str(row.get("reason_code") or "")
+    if not exception_type or reason_code not in {"agent_execution_timeout", "agent_process_exit"}:
+        return None
+    result: dict[str, Any] = {"exception_type": exception_type, "reason_code": reason_code}
+    exit_code = row.get("process_exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and 0 <= exit_code <= 255:
+        result["process_exit_code"] = exit_code
+    return result
+
+
+def _agent_diagnostic(
+    data: Mapping[str, Any],
+    *,
+    failure: FailureRecord,
+    artifacts_retained: bool,
+) -> dict[str, Any]:
+    """Build bounded, non-authoritative diagnostics for one excluded occurrence."""
+
+    execution = data.get("agent_execution_failures")
+    execution_map = execution if isinstance(execution, Mapping) else {}
+    failures = [
+        {
+            key: value
+            for key, value in row.items()
+            if key in {"trial", "exception_type", "reason_code", "reason", "process_exit_code"}
+        }
+        for arm in ("with_skill", "without_skill")
+        for row in (execution_map.get(arm) or [])
+        if isinstance(row, Mapping)
+    ][:20]
+    return {
+        "authoritative": False,
+        "execution_status": str(data.get("execution_status") or "failed"),
+        "failure_stage": failure.stage,
+        "reason_code": failure.reason_code,
+        "evidence_ref": failure.evidence_ref,
+        "evidence_file_digest": failure.evidence_file_digest,
+        "failures": failures,
+        "trajectory_status": "retained_locally" if artifacts_retained else "not_available",
+    }
 
 
 def _agent_score(data: Mapping[str, Any], field: str) -> float | None:
@@ -561,6 +652,21 @@ def finalize_contract(
                 agent=occurrence.result_key,
             )
             failures[occurrence.result_key] = _write_failure(run_dir, failure, index=len(failures))
+        elif execution_failure := _trusted_execution_failure(data):
+            failure = FailureRecord(
+                "agent",
+                "agent_execution",
+                execution_failure["reason_code"],
+                origin="trusted_execution_result",
+                agent=occurrence.result_key,
+            )
+            failures[occurrence.result_key] = _write_failure(
+                run_dir,
+                failure,
+                index=len(failures),
+                exception_type=execution_failure["exception_type"],
+                process_exit_code=execution_failure.get("process_exit_code"),
+            )
         else:
             blockers.append(
                 _write_failure(
@@ -577,6 +683,7 @@ def finalize_contract(
     ledger_digest = _write_ledger(run_dir=run_dir, sealed=sealed, agents_data=agents_data, eligible=eligible_set)
     expected_cases = len(sealed.plan["cases"])
     agent_entries: dict[str, dict[str, Any]] = {}
+    diagnostic_agents: dict[str, dict[str, Any]] = {}
     warnings: list[dict[str, Any]] = []
     for occurrence in sealed.occurrences:
         data = agents_data.get(occurrence.result_key, {})
@@ -627,6 +734,11 @@ def finalize_contract(
                     "evidence_ref": failure.evidence_ref,
                     "evidence_file_digest": failure.evidence_file_digest,
                 }
+            )
+            diagnostic_agents[occurrence.result_key] = _agent_diagnostic(
+                data if isinstance(data, Mapping) else {},
+                failure=failure,
+                artifacts_retained=bool(results.get("harbor_jobs_retained")),
             )
             if decision.status == "valid_degraded":
                 warnings.append(
@@ -680,15 +792,17 @@ def finalize_contract(
     }
     manifest_digest = write_manifest(run_dir, manifest)
 
+    valid = decision.status != "invalid"
     quality_agents: dict[str, dict[str, Any]] = {}
     result_agents: dict[str, dict[str, Any]] = {}
-    for occurrence in sealed.occurrences:
+    for occurrence in sealed.occurrences if valid else ():
+        if occurrence.result_key not in eligible_set:
+            continue
         data = agents_data.get(occurrence.result_key, {})
-        is_eligible = occurrence.result_key in eligible_set and decision.status != "invalid"
-        with_score = _agent_score(data, "with_skill") if is_eligible else None
-        baseline = _agent_score(data, "without_skill") if is_eligible and sealed.plan["baseline_required"] else None
+        with_score = _agent_score(data, "with_skill")
+        baseline = _agent_score(data, "without_skill") if sealed.plan["baseline_required"] else None
         lift = round(with_score - baseline, 4) if with_score is not None and baseline is not None else None
-        status = _quality_for(lift, evaluated=is_eligible)
+        status = _quality_for(lift, evaluated=True)
         quality_agents[occurrence.result_key] = {"status": status, "overall_score": with_score, "lift": lift}
         pass_at_k = data.get("pass_at_k", {}) if isinstance(data, dict) else {}
         result_agents[occurrence.result_key] = {
@@ -701,11 +815,10 @@ def finalize_contract(
             "baseline": baseline,
             "lift": lift,
             "quality_status": status,
-            "with_skill_pass_rate": pass_at_k.get("with_skill", {}).get("rate") if is_eligible else None,
-            "baseline_pass_rate": pass_at_k.get("without_skill", {}).get("rate") if is_eligible else None,
+            "with_skill_pass_rate": pass_at_k.get("with_skill", {}).get("rate"),
+            "baseline_pass_rate": pass_at_k.get("without_skill", {}).get("rate"),
         }
 
-    valid = decision.status != "invalid"
     quality_status = _quality_status(quality_agents, valid=valid)
     eligible_quality = {key: value for key, value in quality_agents.items() if key in eligible_set}
     best_agent = max(
@@ -766,7 +879,7 @@ def finalize_contract(
         "summary": {
             "schema_version": RESULT_SCHEMA_VERSION,
             "skill_name": skill_name,
-            "agents_run": list(decision.eligible_agents),
+            "agents_run": list(decision.eligible_agents) if valid else [],
             "best_agent": best_agent,
             "overall_score": overall,
             "overall_lift": lift,
@@ -792,7 +905,11 @@ def finalize_contract(
                 "run_id": sealed.plan["run_id"],
                 "task_plan_digest": sealed.digest,
                 "execution_ledger_digest": ledger_digest,
-            }
+            },
+            "org.skillevaluator/agent-diagnostics/1": {
+                "authoritative": False,
+                "agents": diagnostic_agents,
+            },
         },
     }
     _validate_result(tier3_result)
@@ -811,7 +928,16 @@ def finalize_contract(
     results["coverage_status"] = decision.status
     results["eligible_agents"] = list(decision.eligible_agents)
     results["excluded_agents"] = list(decision.excluded_agents)
-    if decision.status == "invalid":
+    if decision.status == "valid_degraded":
+        if errors := results.get("error"):
+            results["degraded_execution_errors"] = list(errors) if isinstance(errors, list) else [str(errors)]
+            results.pop("error", None)
+        results["execution_status"] = "succeeded"
+        results["execution_errors"] = []
+    elif valid and not results.get("error"):
+        results["execution_status"] = "succeeded"
+        results["execution_errors"] = []
+    else:
         results["overall_score"] = None
         results["overall_lift"] = None
     return results

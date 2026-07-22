@@ -30,6 +30,10 @@ AGENT_FAILURE_REASONS: dict[str, tuple[str, ...]] = {
         "transport_timeout",
         "model_rate_limited",
     ),
+    "agent_execution": (
+        "agent_execution_timeout",
+        "agent_process_exit",
+    ),
 }
 
 RUN_FAILURE_REASONS: dict[str, tuple[str, ...]] = {
@@ -70,6 +74,14 @@ LAUNCHED_AGENT_FAILURE_TAXONOMY = frozenset(
     for reason in reasons
 )
 
+# Typed Harbor exceptions that are safe to classify as occurrence-scoped
+# execution failures after the agent has started. These are process/runtime
+# outcomes, not grader, dataset, or shared-evidence failures.
+TRUSTED_AGENT_EXECUTION_EXCEPTIONS: dict[str, str] = {
+    "AgentTimeoutError": "agent_execution_timeout",
+    "NonZeroAgentExitCodeError": "agent_process_exit",
+}
+
 
 def taxonomy_schema(scope: Literal["agent", "run"], *, stage_field: str = "stage") -> dict[str, object]:
     """Generate the closed JSON-Schema branch embedded in packaged contracts."""
@@ -99,5 +111,6 @@ __all__ = [
     "LAUNCHED_AGENT_FAILURE_TAXONOMY",
     "RUN_FAILURE_REASONS",
     "RUN_FAILURE_TAXONOMY",
+    "TRUSTED_AGENT_EXECUTION_EXCEPTIONS",
     "taxonomy_schema",
 ]

@@ -54,6 +54,9 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 `any-valid` runs now degrade safely when an optional agent has a typed,
+  isolated post-launch timeout or process exit, while shared and untyped
+  failures remain blocking and excluded agents remain diagnostic-only.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
   Linux systems by selecting a compatible Semgrep and pip-audit pair, while
   macOS and Windows retain the newer scanner release lines.

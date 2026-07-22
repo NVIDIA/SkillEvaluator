@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.tier3.harbor import collector
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
 
@@ -120,12 +123,75 @@ def test_agent_timeout_invalidates_reward_and_is_reported_as_trial_failure(tmp_p
     assert opencode["num_trials_with"] == 0
     assert opencode["with_skill"] == {}
     assert opencode["lift"] == {}
-    assert opencode["agent_runtime_failures"]["with_skill"] == [
-        {"trial": "case-001__attempt", "reason": "AgentTimeoutError: Agent timed out after 600 seconds"}
-    ]
+    assert opencode["agent_runtime_failures"]["with_skill"] == []
     assert opencode["trial_failures"]["with_skill"] == [
         {"trial": "case-001__attempt", "reason": "AgentTimeoutError: Agent timed out after 600 seconds"}
     ]
+    assert opencode["agent_execution_failures"]["with_skill"] == [
+        {
+            "trial": "case-001__attempt",
+            "exception_type": "AgentTimeoutError",
+            "reason_code": "agent_execution_timeout",
+            "reason": "AgentTimeoutError: Agent timed out after 600 seconds",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("exception_type", "message", "reason_code", "exit_code"),
+    [
+        ("NonZeroAgentExitCodeError", "Command failed (exit 137)", "agent_process_exit", 137),
+        ("AgentTimeoutError", "Agent execution timed out after 1200.0 seconds", "agent_execution_timeout", None),
+    ],
+)
+def test_top_level_process_failure_is_structured_agent_execution_evidence(
+    tmp_path: Path,
+    exception_type: str,
+    message: str,
+    reason_code: str,
+    exit_code: int | None,
+) -> None:
+    job = tmp_path / "job"
+    trial = job / "case-a_attempt001"
+    trial.mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps({"exception_info": {"exception_type": exception_type, "exception_message": message}}),
+        encoding="utf-8",
+    )
+
+    failures = collector._extract_agent_execution_failures(job)
+
+    assert failures[0]["exception_type"] == exception_type
+    assert failures[0]["reason_code"] == reason_code
+    assert failures[0].get("process_exit_code") == exit_code
+
+
+def test_top_level_agent_failure_with_step_exception_is_not_trusted_execution_evidence(tmp_path: Path) -> None:
+    job = tmp_path / "job"
+    trial = job / "case-a_attempt001"
+    trial.mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "exception_info": {
+                    "exception_type": "AgentTimeoutError",
+                    "exception_message": "agent timed out",
+                },
+                "step_results": [
+                    {
+                        "step_name": "verifier",
+                        "exception_info": {
+                            "exception_type": "VerifierContractError",
+                            "exception_message": "shared grader failed",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert collector._extract_agent_execution_failures(job) == []
 
 
 def test_errored_job_stats_suppress_rewards_without_trial_exception(tmp_path: Path) -> None:

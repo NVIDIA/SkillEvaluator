@@ -213,8 +213,9 @@ In `custom_only` mode, the user-owned grader defines the score instead.
 
 Multi-agent runs remain strict by default. Use
 `--agent-validity-policy any-valid` with `--min-valid-agents` and optional
-repeatable `--required-agent` values when an optional agent with an
-incompatible public provider route may be excluded. Exclusions remain visible
+repeatable `--required-agent` values when an optional agent has an incompatible
+public provider route or an isolated, typed post-launch timeout/process exit.
+Shared or untyped failures still invalidate the run. Exclusions remain visible
 as diagnostics and never contribute numeric scores.
 
 | Dimension | Question |

@@ -2137,6 +2137,7 @@ def test_failure_taxonomy_runtime_schema_full_cartesian_parity() -> None:
         reasons = {reason for _stage, reason in allowed}
         for stage in stages:
             for reason in reasons:
+                execution_failure = scope == "agent" and stage == "agent_execution"
                 payload = {
                     "schema_version": "1.0",
                     "scope": scope,
@@ -2148,6 +2149,8 @@ def test_failure_taxonomy_runtime_schema_full_cartesian_parity() -> None:
                         else (
                             "trusted_preflight"
                             if stage in {"agent_readiness", "preflight"}
+                            else "trusted_execution_result"
+                            if execution_failure
                             else (
                                 "harbor_pre_instruction_phase"
                                 if (stage, reason) == ("agent_adapter_bootstrap", "adapter_initialization_failed")
@@ -2155,10 +2158,14 @@ def test_failure_taxonomy_runtime_schema_full_cartesian_parity() -> None:
                             )
                         )
                     ),
-                    "skill_logic_started": False,
+                    "skill_logic_started": execution_failure,
                 }
                 if scope == "agent":
                     payload["agent"] = "codex"
+                if execution_failure:
+                    payload["exception_type"] = (
+                        "AgentTimeoutError" if reason == "agent_execution_timeout" else "NonZeroAgentExitCodeError"
+                    )
                 runtime_ok = True
                 try:
                     validate_failure_evidence(payload)
@@ -2197,6 +2204,7 @@ def test_failure_origin_runtime_schema_full_cartesian_parity() -> None:
         "trusted_preflight",
         "harbor_pre_instruction_phase",
         "trusted_adapter_marker",
+        "trusted_execution_result",
         "run_scope",
     )
     for scope, taxonomy in (

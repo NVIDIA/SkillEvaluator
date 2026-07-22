@@ -403,7 +403,7 @@
         "score_eligible": {"type": "boolean"},
         "reason_code": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
         "failure_stage": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
-        "failure_origin": {"type": ["string", "null"], "enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", null]},
+        "failure_origin": {"type": ["string", "null"], "enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "trusted_execution_result", null]},
         "evidence_ref": {"$ref": "#/$defs/nullable_ref"},
         "evidence_file_digest": {"$ref": "#/$defs/nullable_digest"},
         "viewer_url": {"type": ["string", "null"], "minLength": 1, "maxLength": 4096},
@@ -435,7 +435,7 @@
         "agent": {"$ref": "#/$defs/identity"},
         "reason_code": {"type": "string", "minLength": 1, "maxLength": 128},
         "failure_stage": {"type": "string", "minLength": 1, "maxLength": 128},
-        "failure_origin": {"enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker"]},
+        "failure_origin": {"enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "trusted_execution_result"]},
         "evidence_ref": {"$ref": "#/$defs/relative_ref"},
         "evidence_file_digest": {"$ref": "#/$defs/digest"}
       }
@@ -467,7 +467,7 @@
         "scope": {"enum": ["run", "agent"]},
         "stage": {"type": "string", "minLength": 1, "maxLength": 128},
         "reason_code": {"type": "string", "minLength": 1, "maxLength": 128},
-        "origin": {"enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "run_scope"]},
+        "origin": {"enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "trusted_execution_result", "run_scope"]},
         "agent": {
           "anyOf": [
             {"$ref": "#/$defs/identity"},
@@ -511,7 +511,8 @@
         {"properties": {"failure_stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
         {"properties": {"failure_stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
         {"properties": {"failure_stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
-        {"properties": {"failure_stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+        {"properties": {"failure_stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}},
+        {"properties": {"failure_stage": {"const": "agent_execution"}, "reason_code": {"enum": ["agent_execution_timeout", "agent_process_exit"]}}}
       ]
     },
     "agent_entry_origin_constraints": {
@@ -526,7 +527,8 @@
             {"properties": {"failure_stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
             {"properties": {"failure_stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
           ]
-        }
+        },
+        {"properties": {"failure_origin": {"const": "trusted_execution_result"}, "failure_stage": {"const": "agent_execution"}, "reason_code": {"enum": ["agent_execution_timeout", "agent_process_exit"]}}}
       ]
     },
     "agent_origin_constraints": {
@@ -541,7 +543,8 @@
             {"properties": {"stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
             {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
           ]
-        }
+        },
+        {"properties": {"origin": {"const": "trusted_execution_result"}, "stage": {"const": "agent_execution"}, "reason_code": {"enum": ["agent_execution_timeout", "agent_process_exit"]}}}
       ]
     },
     "agent_failure_taxonomy": {
@@ -551,7 +554,8 @@
         {"properties": {"stage": {"const": "agent_adapter_bootstrap"}, "reason_code": {"enum": ["adapter_initialization_failed", "adapter_model_protocol_negotiation_failed"]}}},
         {"properties": {"stage": {"const": "agent_process_bootstrap"}, "reason_code": {"enum": ["process_spawn_failed", "process_start_timeout"]}}},
         {"properties": {"stage": {"const": "agent_authentication"}, "reason_code": {"const": "agent_authentication_failed"}}},
-        {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
+        {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}},
+        {"properties": {"stage": {"const": "agent_execution"}, "reason_code": {"enum": ["agent_execution_timeout", "agent_process_exit"]}}}
       ]
     },
     "run_failure_taxonomy": {

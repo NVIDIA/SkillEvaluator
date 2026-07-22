@@ -356,6 +356,18 @@ def _apply_tier3_result_v3(payload: dict[str, Any], contract: dict[str, Any]) ->
     """Attach the v3 authority while retaining schema-v2 display mirrors."""
     coverage = contract.get("coverage") if isinstance(contract.get("coverage"), dict) else {}
     quality = contract.get("quality") if isinstance(contract.get("quality"), dict) else {}
+    extensions = contract.get("extensions") if isinstance(contract.get("extensions"), dict) else {}
+    diagnostic_extension = extensions.get("org.skillevaluator/agent-diagnostics/1")
+    raw_agent_diagnostics = (
+        diagnostic_extension.get("agents")
+        if isinstance(diagnostic_extension, dict) and isinstance(diagnostic_extension.get("agents"), dict)
+        else {}
+    )
+    agent_diagnostics = {
+        name: dict(diagnostic)
+        for name, diagnostic in raw_agent_diagnostics.items()
+        if isinstance(name, str) and isinstance(diagnostic, dict)
+    }
     eligible = set(coverage.get("eligible_agents") or [])
     valid = coverage.get("status") in {"valid_full", "valid_degraded"}
     quality_status = str(quality.get("status") or "not_evaluated")
@@ -372,6 +384,12 @@ def _apply_tier3_result_v3(payload: dict[str, Any], contract: dict[str, Any]) ->
         agent["evaluators"] = {}
         agent["evaluator_cards"] = []
         agent["dimensions"] = []
+
+    if not valid:
+        payload["evaluators"] = {}
+        payload["evaluator_cards"] = []
+        payload["dimensions"] = []
+        payload["insights"] = {}
 
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     authoritative_summary = contract.get("summary") if isinstance(contract.get("summary"), dict) else {}
@@ -410,6 +428,7 @@ def _apply_tier3_result_v3(payload: dict[str, Any], contract: dict[str, Any]) ->
                 for key in ("occurrence_id", "expected_content_digest", "validated_sha", "gate_policy_digest")
             },
             "extensions": contract.get("extensions") or {},
+            "agent_diagnostics": agent_diagnostics,
             "overall_score": contract.get("overall_score"),
             "overall_lift": contract.get("overall_lift"),
             "composite_lift": contract.get("composite_lift"),

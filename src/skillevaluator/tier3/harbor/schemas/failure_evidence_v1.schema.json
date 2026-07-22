@@ -26,7 +26,7 @@
       "type": "string"
     },
     "origin": {
-      "enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "run_scope"]
+      "enum": ["trusted_preflight", "harbor_pre_instruction_phase", "trusted_adapter_marker", "trusted_execution_result", "run_scope"]
     },
     "agent": {
       "$ref": "#/$defs/identity"
@@ -113,14 +113,28 @@
           {"properties": {"stage": {"const": "transport_before_semantic_event"}, "reason_code": {"enum": ["transport_connection_failed", "transport_timeout", "model_rate_limited"]}}}
         ]
       }
+    },
+    {
+      "if": {"properties": {"origin": {"const": "trusted_execution_result"}}},
+      "then": {
+        "required": ["exception_type"],
+        "properties": {
+          "scope": {"const": "agent"},
+          "stage": {"const": "agent_execution"},
+          "skill_logic_started": {"const": true}
+        },
+        "oneOf": [
+          {"properties": {"exception_type": {"const": "AgentTimeoutError"}, "reason_code": {"const": "agent_execution_timeout"}}},
+          {"properties": {"exception_type": {"const": "NonZeroAgentExitCodeError"}, "reason_code": {"const": "agent_process_exit"}}}
+        ]
+      }
     }
   ],
   "oneOf": [
     {
       "required": ["agent"],
       "properties": {
-        "scope": {"const": "agent"},
-        "skill_logic_started": {"const": false}
+        "scope": {"const": "agent"}
       },
       "allOf": [
         {
@@ -184,6 +198,14 @@
                     "transport_timeout",
                     "model_rate_limited"
                   ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "stage": {"const": "agent_execution"},
+                "reason_code": {
+                  "enum": ["agent_execution_timeout", "agent_process_exit"]
                 }
               }
             }

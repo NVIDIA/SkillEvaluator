@@ -327,6 +327,29 @@ class CLIReporter(ReporterBase):
                 )
         console.print()
 
+        diagnostics = agent_eval.get("agent_diagnostics")
+        if isinstance(diagnostics, dict) and diagnostics:
+            console.print("[bold yellow]Excluded/failed agents (diagnostic only)[/bold yellow]")
+            for agent_name, diagnostic in diagnostics.items():
+                if not isinstance(diagnostic, dict):
+                    continue
+                stage = str(diagnostic.get("failure_stage") or "unknown")
+                reason = str(diagnostic.get("reason_code") or "agent_failure")
+                console.print(f"  [yellow]• {agent_name}:[/yellow] {stage} / {reason}")
+                failures = diagnostic.get("failures")
+                if isinstance(failures, list):
+                    for failure in failures[:5]:
+                        if not isinstance(failure, dict):
+                            continue
+                        trial = str(failure.get("trial") or "unknown trial")
+                        detail = str(failure.get("reason") or failure.get("exception_type") or reason)
+                        console.print(f"      [dim]{trial}: {detail}[/dim]", soft_wrap=True)
+                if diagnostic.get("trajectory_status") == "retained_locally":
+                    console.print("      [dim]Trajectory: retained with local Harbor artifacts[/dim]")
+                elif diagnostic.get("trajectory_status") == "not_available":
+                    console.print("      [dim]Trajectory: not produced or not available[/dim]")
+            console.print()
+
         evaluators = agent_eval.get("evaluators", {})
         if evaluators:
             table = Table(

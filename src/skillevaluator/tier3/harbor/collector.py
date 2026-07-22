@@ -18,6 +18,7 @@ from typing import Any
 
 from skillevaluator.telemetry import record_agent_trial, redact_sensitive_data, redact_sensitive_text
 from skillevaluator.tier3.harbor.failure_evidence import first_trial_agent_failure
+from skillevaluator.tier3.harbor.failure_taxonomy import TRUSTED_AGENT_EXECUTION_EXCEPTIONS
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
@@ -82,10 +83,7 @@ _AGENT_RUNTIME_EXCEPTION_TYPES = {
     "NotFoundError",
     "ProviderException",
 }
-
-_UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES = {
-    "AgentTimeoutError",
-}
+_PROCESS_EXIT_CODE_RE = re.compile(r"\bexit(?:ed)?(?:\s+code)?\s+([0-9]{1,3})\b", re.IGNORECASE)
 
 
 def _agent_runtime_failure_pattern_start(value: str) -> int | None:
@@ -329,6 +327,32 @@ def _trial_exception_details(trial_dir: Path) -> tuple[str, str]:
     return exception_type, (exception_type or exception_message)[:600]
 
 
+def _top_level_trial_exception_details(trial_dir: Path) -> tuple[str, str]:
+    """Return only the trial-level exception, excluding verifier/task-step errors."""
+
+    result = _read_json(trial_dir / "result.json")
+    exception_info = result.get("exception_info") if isinstance(result, dict) else None
+    if not isinstance(exception_info, dict):
+        return "", ""
+    exception_type = str(exception_info.get("exception_type") or "").strip()
+    exception_message = str(exception_info.get("exception_message") or "").strip()
+    if exception_type and exception_message:
+        return exception_type, f"{exception_type}: {exception_message}"[:600]
+    if exception_type or exception_message:
+        return exception_type, (exception_type or exception_message)[:600]
+    return "", ""
+
+
+def _has_step_exception(trial_dir: Path) -> bool:
+    """Return whether task/verifier step evidence also failed in this trial."""
+
+    result = _read_json(trial_dir / "result.json")
+    step_results = result.get("step_results") if isinstance(result, dict) else None
+    return isinstance(step_results, list) and any(
+        isinstance(step, dict) and isinstance(step.get("exception_info"), dict) for step in step_results
+    )
+
+
 def _agent_log_runtime_failure_reason(
     trial_dir: Path,
     *,
@@ -379,9 +403,6 @@ def _agent_runtime_failure_reason(trial_dir: Path) -> str:
         return (_text_contains_agent_runtime_failure(evidence.message) or evidence.message).strip('"')
 
     exception_type, exception_reason = _trial_exception_details(trial_dir)
-    if exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES:
-        return exception_reason
-
     # Do not classify verifier/healthcheck/task exceptions as agent runtime failures.
     if exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES and exception_reason:
         exception_message = exception_reason.removeprefix(f"{exception_type}:").lstrip()
@@ -416,6 +437,33 @@ def _extract_trial_failures(job_dir: Path) -> list[dict[str, str]]:
         reason = _trial_failure_reason(trial_dir)
         if reason:
             failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
+    return failures
+
+
+def _extract_agent_execution_failures(job_dir: Path) -> list[dict[str, Any]]:
+    """Return typed, redacted post-start process failures for one Harbor arm."""
+
+    failures: list[dict[str, Any]] = []
+    for trial_dir in sorted(path for path in job_dir.iterdir() if path.is_dir()):
+        if _has_step_exception(trial_dir):
+            # Mixed task/verifier and top-level process evidence is shared; it
+            # must not be downgraded to an optional-agent exclusion.
+            continue
+        exception_type, reason = _top_level_trial_exception_details(trial_dir)
+        reason_code = TRUSTED_AGENT_EXECUTION_EXCEPTIONS.get(exception_type)
+        if reason_code is None:
+            continue
+        failure: dict[str, Any] = {
+            "trial": trial_dir.name,
+            "exception_type": exception_type,
+            "reason_code": reason_code,
+            "reason": redact_sensitive_text(reason),
+        }
+        if exception_type == "NonZeroAgentExitCodeError":
+            match = _PROCESS_EXIT_CODE_RE.search(reason)
+            if match is not None and 0 <= (exit_code := int(match.group(1))) <= 255:
+                failure["process_exit_code"] = exit_code
+        failures.append(failure)
     return failures
 
 
@@ -1744,6 +1792,7 @@ def collect_harbor_results(
         with_custom_scores: dict[str, float] = {}
         with_pass: dict[str, Any] = {}
         with_runtime_failures: list[dict[str, str]] = []
+        with_execution_failures: list[dict[str, Any]] = []
         with_trial_failures: list[dict[str, str]] = []
         with_job_failure = ""
         with_execution: dict[str, Any] = {}
@@ -1754,6 +1803,7 @@ def collect_harbor_results(
                 expected_trials=expected_trials,
             )
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
+            with_execution_failures = _extract_agent_execution_failures(with_job_dir)
             with_trial_failures = _extract_trial_failures(with_job_dir)
             preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
             with_rewards = _extract_rewards(with_job_dir) if with_job_ok or preserve_partial else []
@@ -1886,6 +1936,7 @@ def collect_harbor_results(
         without_custom_scores: dict[str, float] = {}
         without_pass: dict[str, Any] = {}
         without_runtime_failures: list[dict[str, str]] = []
+        without_execution_failures: list[dict[str, Any]] = []
         without_trial_failures: list[dict[str, str]] = []
         without_job_failure = ""
         without_execution: dict[str, Any] = {}
@@ -1900,6 +1951,7 @@ def collect_harbor_results(
                     expected_trials=expected_trials,
                 )
                 without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
+                without_execution_failures = _extract_agent_execution_failures(without_job_dir)
                 without_trial_failures = _extract_trial_failures(without_job_dir)
                 preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
                 without_rewards = _extract_rewards(without_job_dir) if without_job_ok or preserve_partial else []
@@ -2107,6 +2159,10 @@ def collect_harbor_results(
             "agent_runtime_failures": {
                 "with_skill": with_runtime_failures,
                 "without_skill": without_runtime_failures,
+            },
+            "agent_execution_failures": {
+                "with_skill": with_execution_failures,
+                "without_skill": without_execution_failures,
             },
             "trial_failures": {
                 "with_skill": with_trial_failures,

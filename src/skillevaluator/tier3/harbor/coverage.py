@@ -36,6 +36,9 @@ from skillevaluator.tier3.harbor.failure_taxonomy import (
 from skillevaluator.tier3.harbor.failure_taxonomy import (
     RUN_FAILURE_TAXONOMY as _RUN_FAILURE_TAXONOMY,
 )
+from skillevaluator.tier3.harbor.failure_taxonomy import (
+    TRUSTED_AGENT_EXECUTION_EXCEPTIONS as _TRUSTED_AGENT_EXECUTION_EXCEPTIONS,
+)
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -85,6 +88,7 @@ FailureOrigin = Literal[
     "trusted_preflight",
     "harbor_pre_instruction_phase",
     "trusted_adapter_marker",
+    "trusted_execution_result",
     "run_scope",
 ]
 
@@ -329,6 +333,7 @@ class FailureRecord:
             "trusted_preflight",
             "harbor_pre_instruction_phase",
             "trusted_adapter_marker",
+            "trusted_execution_result",
             "run_scope",
         }:
             raise ContractError("failure origin is unsupported")
@@ -344,6 +349,8 @@ class FailureRecord:
                 raise ContractError("Harbor pre-instruction origin is restricted to adapter setup")
             if origin == "trusted_adapter_marker" and pair not in _LAUNCHED_AGENT_FAILURE_TAXONOMY:
                 raise ContractError("trusted adapter marker is outside the launched-agent taxonomy")
+            if origin == "trusted_execution_result" and self.stage != "agent_execution":
+                raise ContractError("trusted execution result is restricted to agent execution")
             if origin == "run_scope":
                 raise ContractError("agent-scoped failure cannot use run_scope origin")
         if self.scope == "run" and self.agent is not None:
@@ -1065,8 +1072,13 @@ def validate_failure_evidence(
         origin=obj["origin"],
         agent=obj.get("agent"),
     )
-    if failure.scope == "agent" and obj["skill_logic_started"]:
-        raise ContractError("agent-scoped failure evidence requires skill_logic_started=false")
+    if failure.scope == "agent":
+        started = obj["skill_logic_started"]
+        if failure.origin == "trusted_execution_result":
+            if not started:
+                raise ContractError("trusted execution failure evidence requires skill_logic_started=true")
+        elif started:
+            raise ContractError("pre-semantic agent failure evidence requires skill_logic_started=false")
     if expected is not None and (
         failure.scope,
         failure.stage,
@@ -1105,6 +1117,10 @@ def validate_failure_evidence(
         or not _SAFE_EXCEPTION_TYPE_RE.fullmatch(exception_type)
     ):
         raise ContractError("failure_evidence.exception_type is not a safe typed identifier")
+    if failure.origin == "trusted_execution_result":
+        expected_reason = _TRUSTED_AGENT_EXECUTION_EXCEPTIONS.get(str(exception_type or ""))
+        if expected_reason != failure.reason_code:
+            raise ContractError("trusted execution failure evidence requires a matching typed exception")
 
 
 def write_failure_evidence(

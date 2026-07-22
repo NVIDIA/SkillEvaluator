@@ -2310,6 +2310,35 @@
                 </div>
             </div>
             {% endif %}
+            {% if tier3.agent_diagnostics %}
+            <details class="t3-details" open>
+                <summary>Excluded/failed agents (diagnostic only)</summary>
+                <div class="t3-details-body">
+                    {% for agent_name, diagnostic in tier3.agent_diagnostics.items() %}
+                    <div class="t3-section">
+                        <h3>{{ agent_name }}</h3>
+                        <p>
+                            <strong>{{ diagnostic.failure_stage or 'unknown' }}</strong>
+                            / <code>{{ diagnostic.reason_code or 'agent_failure' }}</code>.
+                            This evidence is retained for debugging and is not included in authoritative scores.
+                        </p>
+                        {% if diagnostic.failures %}
+                        <ul>
+                            {% for failure in diagnostic.failures[:5] %}
+                            <li><code>{{ failure.trial or 'unknown trial' }}</code>: {{ failure.reason or failure.exception_type or diagnostic.reason_code }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                        {% if diagnostic.trajectory_status == 'retained_locally' %}
+                        <p><strong>Trajectory:</strong> retained with local Harbor artifacts.</p>
+                        {% elif diagnostic.trajectory_status == 'not_available' %}
+                        <p><strong>Trajectory:</strong> not produced or not available.</p>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </details>
+            {% endif %}
             <div class="dashboard">
                 <div class="dashboard-card {{ 'success' if tier3.verdict == 'pass' else ('danger' if tier3.verdict == 'fail' else '') }}">
                     <h3 class="dashboard-card-title">Verdict</h3>

@@ -233,11 +233,12 @@ persisted result keys, paths, progress, and reports always use `claude-code`.
 Do not configure both names for the same run.
 
 `all-selected` preserves the strict historical behavior: one incompatible
-provider/model route stops the run. `any-valid` may exclude only optional
-agents that fail provider-contract preflight, and only when the remaining
-agents satisfy `--min-valid-agents` and every `--required-agent`. Excluded
-agents are retained as typed diagnostics; they are never staged, executed, or
-represented by numeric scores.
+provider/model route stops the run. `any-valid` may exclude optional agents
+that fail provider-contract preflight or have an isolated, typed post-launch
+timeout/process exit, and only when the remaining agents satisfy
+`--min-valid-agents` and every `--required-agent`. Shared, verifier, and untyped
+failures remain run blockers. Excluded agents are retained as typed diagnostics
+and are never represented by numeric scores.
 
 CI systems that require integrity-bound artifacts can additionally request the
 paired `agent-coverage/1` and `tier3-result/3` contracts with

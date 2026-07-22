@@ -55,6 +55,7 @@
                 "agent_process_bootstrap",
                 "agent_authentication",
                 "transport_before_semantic_event",
+                "agent_execution",
                 "execution",
                 "verifier",
                 "manifest_validation",
@@ -115,7 +116,9 @@
                 "agent_authentication_failed",
                 "transport_connection_failed",
                 "transport_timeout",
-                "model_rate_limited"
+                "model_rate_limited",
+                "agent_execution_timeout",
+                "agent_process_exit"
               ],
               "type": "string"
             },
@@ -341,7 +344,9 @@
             "agent_authentication_failed",
             "transport_connection_failed",
             "transport_timeout",
-            "model_rate_limited"
+            "model_rate_limited",
+            "agent_execution_timeout",
+            "agent_process_exit"
           ],
           "title": "Reason Code",
           "type": "string"
@@ -362,6 +367,7 @@
             "agent_process_bootstrap",
             "agent_authentication",
             "transport_before_semantic_event",
+            "agent_execution",
             "execution",
             "verifier",
             "manifest_validation",
@@ -450,6 +456,7 @@
             "agent_process_bootstrap",
             "agent_authentication",
             "transport_before_semantic_event",
+            "agent_execution",
             "execution",
             "verifier",
             "manifest_validation",
@@ -493,7 +500,9 @@
             "agent_authentication_failed",
             "transport_connection_failed",
             "transport_timeout",
-            "model_rate_limited"
+            "model_rate_limited",
+            "agent_execution_timeout",
+            "agent_process_exit"
           ],
           "title": "Reason Code",
           "type": "string"

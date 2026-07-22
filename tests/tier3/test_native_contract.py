@@ -131,6 +131,32 @@ def _agent_result() -> dict:
     }
 
 
+def _post_start_failed_agent(*, exception_type: str, reason_code: str, reason: str) -> dict:
+    failed = _agent_result()
+    failed["execution_status"] = "failed"
+    failed["conditions"]["without_skill"] = {
+        "execution_status": "failed",
+        "execution_errors": ["baseline agent process failed"],
+        "expected_attempts": 1,
+        "scored_attempts": 0,
+    }
+    failed["pass_at_k"]["without_skill"]["cases"]["case-1"]["attempts"] = []
+    trial: dict[str, object] = {
+        "trial": "case-1_attempt001",
+        "exception_type": exception_type,
+        "reason_code": reason_code,
+        "reason": reason,
+    }
+    if exception_type == "NonZeroAgentExitCodeError":
+        trial["process_exit_code"] = 137
+    failed["trial_failures"] = {
+        "with_skill": [],
+        "without_skill": [{"trial": trial["trial"], "reason": reason}],
+    }
+    failed["agent_execution_failures"] = {"with_skill": [], "without_skill": [trial]}
+    return failed
+
+
 def test_any_valid_runner_excludes_optional_provider_before_staging_and_emits_v3(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -235,7 +261,7 @@ def test_any_valid_runner_excludes_optional_provider_before_staging_and_emits_v3
     assert result["coverage_status"] == "valid_degraded"
     assert result["eligible_agents"] == ["codex"]
     assert result["excluded_agents"] == ["claude-code"]
-    assert result["tier3_result"]["agents"]["claude-code"]["with_skill"] is None
+    assert "claude-code" not in result["tier3_result"]["agents"]
     assert result["evidence_job_status"] == "succeeded"
     run_dir = Path(result["run_dir"])
     for name in ("expected_attempt_plan.json", "execution_ledger.json", "agent_coverage.json", "tier3-result.json"):
@@ -467,7 +493,11 @@ def test_invalid_coverage_never_synthesizes_zero_score(tmp_path: Path) -> None:
     assert result["coverage_status"] == "invalid"
     assert result["quality"] == "not_evaluated"
     assert result["tier3_result"]["overall_score"] is None
-    assert result["tier3_result"]["agents"]["codex"]["with_skill"] is None
+    assert result["tier3_result"]["agents"] == {}
+    assert result["tier3_result"]["quality"]["per_agent"] == {}
+    assert result["tier3_result"]["summary"]["agents_run"] == []
+    assert result["tier3_result"]["summary"]["best_agent"] is None
+    assert result["agent_coverage"]["blockers"][0]["reason_code"] == "post_skill_unscored_failure"
 
 
 def test_optional_presemantic_agent_failure_is_valid_degraded(tmp_path: Path) -> None:
@@ -513,8 +543,168 @@ def test_optional_presemantic_agent_failure_is_valid_degraded(tmp_path: Path) ->
 
     assert result["coverage_status"] == "valid_degraded"
     assert result["eligible_agents"] == ["codex"]
-    assert result["tier3_result"]["agents"]["opencode"]["with_skill"] is None
+    assert set(result["tier3_result"]["agents"]) == {"codex"}
+    assert set(result["tier3_result"]["quality"]["per_agent"]) == {"codex"}
     assert result["agent_coverage"]["warnings"][0]["code"] == "optional_agent_excluded"
+
+
+@pytest.mark.parametrize(
+    ("exception_type", "reason_code", "reason"),
+    [
+        ("NonZeroAgentExitCodeError", "agent_process_exit", "Command failed (exit 137)"),
+        ("AgentTimeoutError", "agent_execution_timeout", "Agent execution timed out after 1200.0 seconds"),
+    ],
+)
+def test_optional_post_start_agent_failure_is_valid_degraded(
+    tmp_path: Path,
+    exception_type: str,
+    reason_code: str,
+    reason: str,
+) -> None:
+    run_dir, sealed = _sealed(
+        tmp_path,
+        policy="any-valid",
+        agent_entries=[
+            {
+                "result_agent": "codex",
+                "agent": "codex",
+                "occurrence": 1,
+                "model": "gpt-5",
+                "model_source": "default",
+            },
+            {
+                "result_agent": "claude-code",
+                "agent": "claude-code",
+                "occurrence": 1,
+                "model": "claude-opus",
+                "model_source": "default",
+            },
+        ],
+    )
+    failed = _post_start_failed_agent(exception_type=exception_type, reason_code=reason_code, reason=reason)
+
+    result = finalize_contract(
+        run_dir=run_dir,
+        sealed=sealed,
+        results={
+            "agents": {"codex": _agent_result(), "claude-code": failed},
+            "harbor_jobs_retained": True,
+            "error": ["claude-code failed"],
+        },
+        skill_name="demo",
+        environment="local",
+        duration_seconds=2.0,
+    )
+
+    assert result["coverage_status"] == "valid_degraded"
+    assert result["execution_status"] == "succeeded"
+    assert "error" not in result
+    assert result["degraded_execution_errors"] == ["claude-code failed"]
+    assert result["eligible_agents"] == ["codex"]
+    assert result["excluded_agents"] == ["claude-code"]
+    assert set(result["tier3_result"]["agents"]) == {"codex"}
+    excluded = result["agent_coverage"]["agents"]["claude-code"]
+    assert excluded["failure_stage"] == "agent_execution"
+    assert excluded["reason_code"] == reason_code
+    evidence = json.loads((run_dir / excluded["evidence_ref"]).read_text())
+    assert evidence["skill_logic_started"] is True
+    assert evidence["exception_type"] == exception_type
+    diagnostics = result["tier3_result"]["extensions"]["org.skillevaluator/agent-diagnostics/1"]
+    assert diagnostics["authoritative"] is False
+    assert diagnostics["agents"]["claude-code"]["failures"][0]["reason"] == reason
+    assert diagnostics["agents"]["claude-code"]["trajectory_status"] == "retained_locally"
+
+
+def test_mixed_execution_types_choose_deterministic_primary_evidence(tmp_path: Path) -> None:
+    run_dir, sealed = _sealed(
+        tmp_path,
+        policy="any-valid",
+        agent_entries=[
+            {"result_agent": "codex", "agent": "codex", "occurrence": 1, "model": "gpt-5", "model_source": "default"},
+            {
+                "result_agent": "claude-code",
+                "agent": "claude-code",
+                "occurrence": 1,
+                "model": "claude-opus",
+                "model_source": "default",
+            },
+        ],
+    )
+    failed = _post_start_failed_agent(
+        exception_type="AgentTimeoutError",
+        reason_code="agent_execution_timeout",
+        reason="Agent execution timed out",
+    )
+    failed["conditions"]["with_skill"] = {
+        "execution_status": "failed",
+        "execution_errors": ["agent exited"],
+        "expected_attempts": 1,
+        "scored_attempts": 0,
+    }
+    failed["pass_at_k"]["with_skill"]["cases"]["case-1"]["attempts"] = []
+    failed["trial_failures"]["with_skill"] = [{"trial": "case-2_attempt001", "reason": "Command failed"}]
+    failed["agent_execution_failures"]["with_skill"] = [
+        {
+            "trial": "case-2_attempt001",
+            "exception_type": "NonZeroAgentExitCodeError",
+            "reason_code": "agent_process_exit",
+            "reason": "Command failed (exit 137)",
+            "process_exit_code": 137,
+        }
+    ]
+
+    result = finalize_contract(
+        run_dir=run_dir,
+        sealed=sealed,
+        results={"agents": {"codex": _agent_result(), "claude-code": failed}},
+        skill_name="demo",
+        environment="local",
+        duration_seconds=2.0,
+    )
+
+    excluded = result["agent_coverage"]["agents"]["claude-code"]
+    assert result["coverage_status"] == "valid_degraded"
+    assert excluded["reason_code"] == "agent_process_exit"
+    evidence = json.loads((run_dir / excluded["evidence_ref"]).read_text())
+    assert evidence["exception_type"] == "NonZeroAgentExitCodeError"
+    assert evidence["process_exit_code"] == 137
+
+
+def test_mixed_post_start_and_untyped_failure_remains_invalid(tmp_path: Path) -> None:
+    run_dir, sealed = _sealed(
+        tmp_path,
+        policy="any-valid",
+        agent_entries=[
+            {"result_agent": "codex", "agent": "codex", "occurrence": 1, "model": "gpt-5", "model_source": "default"},
+            {
+                "result_agent": "claude-code",
+                "agent": "claude-code",
+                "occurrence": 1,
+                "model": "claude-opus",
+                "model_source": "default",
+            },
+        ],
+    )
+    failed = _post_start_failed_agent(
+        exception_type="AgentTimeoutError",
+        reason_code="agent_execution_timeout",
+        reason="Agent execution timed out",
+    )
+    failed["trial_failures"]["without_skill"].append({"trial": "case-2_attempt001", "reason": "VerifierContractError"})
+
+    result = finalize_contract(
+        run_dir=run_dir,
+        sealed=sealed,
+        results={"agents": {"codex": _agent_result(), "claude-code": failed}},
+        skill_name="demo",
+        environment="local",
+        duration_seconds=2.0,
+    )
+
+    assert result["coverage_status"] == "invalid"
+    assert result["tier3_result"]["agents"] == {}
+    assert result["tier3_result"]["quality"]["per_agent"] == {}
+    assert result["agent_coverage"]["blockers"][0]["reason_code"] == "post_skill_unscored_failure"
 
 
 def test_required_agent_failure_invalidates_any_valid_policy(tmp_path: Path) -> None:

@@ -14,7 +14,6 @@ import zipfile
 from pathlib import Path
 
 from click.testing import CliRunner
-from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
@@ -162,23 +161,18 @@ def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
     assert "nltk" not in lock_names
 
 
-def test_security_scanner_versions_support_rhel8_without_downgrading_other_platforms() -> None:
+def test_security_extra_does_not_bundle_external_scanners_or_an_old_pip_audit() -> None:
     security = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["security"]]
+    lock_names = {package["name"] for package in _lock()["package"]}
 
-    def active_specifiers(name: str, sys_platform: str) -> set[frozenset[str]]:
-        environment = default_environment()
-        environment["sys_platform"] = sys_platform
-        return {
-            frozenset(str(specifier) for specifier in requirement.specifier)
-            for requirement in security
-            if canonicalize_name(requirement.name) == canonicalize_name(name)
-            and (requirement.marker is None or requirement.marker.evaluate(environment))
-        }
-
-    assert active_specifiers("semgrep", "linux") == {frozenset({">=1.157.0", "<1.158.0"})}
-    assert active_specifiers("pip_audit", "linux") == {frozenset({">=2.9.0", "<2.10.0"})}
-    assert active_specifiers("semgrep", "darwin") == {frozenset({">=1.162.0"})}
-    assert active_specifiers("pip-audit", "darwin") == {frozenset({">=2.10.0"})}
+    for external_scanner in ("semgrep", "skillspector"):
+        assert not any(canonicalize_name(requirement.name) == external_scanner for requirement in security)
+        assert external_scanner not in lock_names
+    assert {
+        frozenset(str(specifier) for specifier in requirement.specifier)
+        for requirement in security
+        if canonicalize_name(requirement.name) == canonicalize_name("pip-audit")
+    } == {frozenset({">=2.10.0"})}
 
 
 def test_third_party_notices_do_not_list_removed_safety_dependency() -> None:
@@ -200,6 +194,22 @@ def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -
     assert versions["cryptography"] >= Version("48.0.1")
     assert versions["msgpack"] >= Version("1.2.1")
     assert versions["pydantic-settings"] >= Version("2.14.2")
+
+
+def test_release_lock_enforces_nspect_remediation_floors_on_all_platforms() -> None:
+    project = _project()
+    tier3 = project["project"]["optional-dependencies"]["tier3"]
+    all_lock_versions: dict[str, list[Version]] = {}
+    for package in _lock()["package"]:
+        all_lock_versions.setdefault(package["name"], []).append(Version(package["version"]))
+
+    assert "mcp>=1.28.1,<2" in tier3
+    assert "pyjwt[crypto]>=2.13.0" in tier3
+    for extra in ("llm", "telemetry"):
+        assert "protobuf>=7.35.1" in project["project"]["optional-dependencies"][extra]
+    assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
+    assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
+    assert all(version >= Version("7.35.1") for version in all_lock_versions["protobuf"])
 
 
 def test_public_docs_declare_support_and_security_sections() -> None:
@@ -302,30 +312,22 @@ def test_public_docker_image_uses_only_public_dependencies() -> None:
     assert '".[all]"' in dockerfile
 
 
-def test_public_slim_docker_image_can_install_pinned_public_skillspector() -> None:
+def test_public_slim_docker_image_uses_only_distribution_dependencies() -> None:
     project = _project()
     extras = project["project"]["optional-dependencies"]
-    skillspector_requirement = next(
-        requirement for requirement in extras["security"] if requirement.startswith("skillspector @ ")
-    )
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert re.fullmatch(
-        r"skillspector @ git\+https://github\.com/NVIDIA/SkillSpector\.git@[0-9a-f]{40}",
-        skillspector_requirement,
-    )
     assert "skillevaluator[tier2,tier3,telemetry,security]" in extras["all"]
     assert re.search(r"^FROM python:3\.12-slim$", dockerfile, flags=re.MULTILINE)
 
-    git_install = "apt-get install --yes --no-install-recommends git"
     public_install = 'python -m pip install --no-cache-dir ".[all]"'
     install_run = next(
         run
         for run in re.findall(r"^RUN\s+(.*?)(?=^[A-Z]+\s|\Z)", dockerfile, flags=re.MULTILINE | re.DOTALL)
         if public_install in run
     )
-    assert git_install in install_run
-    assert install_run.index(git_install) < install_run.index(public_install)
+    assert "apt-get" not in install_run
+    assert "git+" not in install_run
 
 
 def test_public_source_files_fall_back_without_git_metadata(tmp_path: Path, monkeypatch) -> None:
@@ -485,5 +487,6 @@ def test_ci_installs_the_security_wheel_on_rhel8() -> None:
     assert 'getconf GNU_LIBC_VERSION)" = "glibc 2.28"' in rhel8_job
     assert "uv build --wheel --python 3.12 --no-sources" in rhel8_job
     assert '"${wheel}[security]"' in rhel8_job
-    assert 'version("semgrep") == "1.157.0"' in rhel8_job
-    assert 'version("pip-audit") == "2.9.0"' in rhel8_job
+    assert 'Version(version("pip-audit")) >= Version("2.10.0")' in rhel8_job
+    assert ".rhel8-security-venv/bin/bandit --version" in rhel8_job
+    assert ".rhel8-security-venv/bin/semgrep --version" not in rhel8_job

@@ -1011,10 +1011,8 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert "NVIDIA_API_KEY" not in child_env
         assert "ANTHROPIC_API_KEY" not in child_env
 
-    def test_pinned_skillspector_accepts_public_nvidia_build_through_openai_contract(self, monkeypatch) -> None:
-        """Exercise the pinned dependency's real provider credential resolver without making a network call."""
-        from skillspector.providers.openai.provider import OpenAIProvider
-
+    def test_external_skillspector_receives_public_nvidia_build_openai_contract(self, monkeypatch) -> None:
+        """The external scanner receives the documented OpenAI-compatible contract."""
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
         monkeypatch.setenv("NVIDIA_API_KEY", "public-test-key")
         monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
@@ -1024,11 +1022,10 @@ Call us at 555-123-4567 or +1-555-987-6543
         child_env = _skillspector_child_env()
 
         assert child_env is not None
-        with patch.dict(os.environ, child_env, clear=True):
-            assert OpenAIProvider().resolve_credentials() == (
-                "public-test-key",
-                "https://integrate.api.nvidia.com/v1",
-            )
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
+        assert child_env["OPENAI_API_KEY"] == "public-test-key"
+        assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
+        assert "NVIDIA_API_KEY" not in child_env
 
     @pytest.mark.parametrize(
         ("provider", "credential", "model"),

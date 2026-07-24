@@ -161,13 +161,16 @@ def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
     assert "nltk" not in lock_names
 
 
-def test_security_extra_does_not_bundle_external_scanners_or_an_old_pip_audit() -> None:
+def test_security_extra_does_not_bundle_external_or_unused_scanner_dependencies() -> None:
     security = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["security"]]
     lock_names = {package["name"] for package in _lock()["package"]}
 
     for external_scanner in ("semgrep", "skillspector"):
         assert not any(canonicalize_name(requirement.name) == external_scanner for requirement in security)
         assert external_scanner not in lock_names
+    for unused_dependency in ("langchain-core", "langsmith"):
+        assert not any(canonicalize_name(requirement.name) == unused_dependency for requirement in security)
+        assert unused_dependency not in lock_names
     assert {
         frozenset(str(specifier) for specifier in requirement.specifier)
         for requirement in security
@@ -469,14 +472,6 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert "direct OpenCode" in public_docs
     assert "Docker or local compatibility bridge" in public_docs
     assert "experimental Claude Code" in public_docs
-
-
-def test_security_extra_enforces_patched_langchain_core() -> None:
-    project = _project()
-    versions = {package["name"]: Version(package["version"]) for package in _lock()["package"]}
-
-    assert "langchain-core>=1.4.9" in project["project"]["optional-dependencies"]["security"]
-    assert versions["langchain-core"] >= Version("1.4.9")
 
 
 def test_ci_installs_the_security_wheel_on_rhel8() -> None:

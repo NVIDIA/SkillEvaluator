@@ -707,10 +707,12 @@ class SchemaValidator(ValidatorBase):
         """Allowed skill-root subdirectories: built-in defaults plus per-repo extras.
 
         Recognised skill-root subdirectories (``DEFAULT_ALLOWED_SKILL_DIRS``):
+        - ``agents/`` — recommended agent-facing UI metadata.
         - ``references/``, ``scripts/``, ``assets/`` — Skill Evaluator canonical content dirs.
         - ``evals/`` — canonical location for Tier 3 evaluation datasets
           (``evals/evals.json``, optional ``evals/EVAL.md``, and Harbor outputs
           under ``evals/results/``).
+        - ``tests/`` — skill-local verification discovered by repository tooling.
         - ``tools/`` — agentskills.io canonical name for executable helpers
           (the skill_evaluator onboarding renames ``scripts/`` -> ``tools/``).
         - ``config/`` — data-driven runtime config (JSON/YAML the skill loads).

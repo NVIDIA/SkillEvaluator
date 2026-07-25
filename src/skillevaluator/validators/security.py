@@ -31,6 +31,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -630,12 +631,16 @@ class SecurityValidator(ValidatorBase):
         issues = data.get("issues", [])
         scanned_issues = []
         skipped_generated = 0
+        skipped_spdx_comments = 0
         has_critical_or_high = False
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
             if self._is_generated_artifact_issue(issue):
                 skipped_generated += 1
+                continue
+            if self._is_spdx_only_hidden_instruction(issue):
+                skipped_spdx_comments += 1
                 continue
             scanned_issues.append(issue)
             finding, is_error = self._convert_skillspector_issue(issue)
@@ -645,6 +650,8 @@ class SecurityValidator(ValidatorBase):
 
         if skipped_generated:
             result.add_message(f"skillspector ignored {skipped_generated} generated artifact issue(s)")
+        if skipped_spdx_comments:
+            result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
 
         self._summarize_skillspector_results(scanned_issues, has_critical_or_high, result)
 
@@ -656,6 +663,16 @@ class SecurityValidator(ValidatorBase):
         if path.name.lower() in SCAN_EXCLUDED_FILES:
             return True
         return any(part in SCAN_EXCLUDED_DIRS for part in path.parts)
+
+    @staticmethod
+    def _is_spdx_only_hidden_instruction(issue: dict) -> bool:
+        """Suppress only the exact public SPDX comment false positive."""
+        if issue.get("id") != "P2" or issue.get("pattern") != "Hidden Instructions":
+            return False
+        return is_spdx_only_html_comment(
+            str(issue.get("code_snippet") or ""),
+            allow_frontmatter_separator=True,
+        )
 
     @staticmethod
     def _store_skillspector_metadata(data: dict, result: ValidationResult) -> None:
@@ -974,11 +991,54 @@ class SecurityValidator(ValidatorBase):
         return root.lower() in protected_usernames
 
     _GPS_ZERO_PATTERN = re.compile(r"[-+]?0+\.0+[,\s]+[-+]?0+\.0+")
+    _VERSION_LABEL_PATTERN = re.compile(r"(?i)\b(?:[a-z_][\w-]*(?:version|tag)[\w-]*|(?:version|tag)[\w-]*)\b")
+    _PACKAGE_ARTIFACT_PATTERN = re.compile(
+        r"(?i)(?:wheel|archive|artifact|package|conda|filename|\.whl\b|\.conda\b|\.tar\.(?:gz|xz)\b)"
+    )
+    _PACKAGE_VERSION_CALL_PATTERN = re.compile(
+        r"(?i)\b[a-z_]\w*(?:wheel|archive|artifact|package|conda)[a-z_]*\([^)]*\Z"
+    )
+    _NETWORK_ADDRESS_PATTERN = re.compile(
+        r"(?i)(?:^|[^a-z0-9])(?:address|dns|host|hostname|ip|nameserver|resolver|server)(?=$|[^a-z0-9])"
+    )
+    _URL_AUTHORITY_PREFIX_PATTERN = re.compile(r"(?i)[a-z][a-z0-9+.-]*://[^/\s\"']*\Z")
 
     @staticmethod
     def _is_near_zero_gps(line: str) -> bool:
         """Check if a GPS match contains only near-zero coordinates (Null Island)."""
         return bool(SecurityValidator._GPS_ZERO_PATTERN.search(line))
+
+    @classmethod
+    def _is_version_literal(cls, match: re.Match, line: str) -> bool:
+        """Return whether an IPv4-shaped match is clearly a release version."""
+        components = tuple(int(component) for component in match.group().split("."))
+        if 0 not in components:
+            return False
+
+        prefix = line[: match.start()]
+        if cls._URL_AUTHORITY_PREFIX_PATTERN.search(prefix):
+            return False
+
+        context_start = max(0, match.start() - 80)
+        context_end = min(len(line), match.end() + 80)
+        context = line[context_start:context_end]
+        if cls._NETWORK_ADDRESS_PATTERN.search(context):
+            return False
+        if cls._VERSION_LABEL_PATTERN.search(context):
+            return True
+
+        quote_start = max(line.rfind('"', 0, match.start()), line.rfind("'", 0, match.start()))
+        if quote_start >= 0:
+            quote = line[quote_start]
+            quote_end = line.find(quote, match.end())
+            if quote_end >= 0:
+                quoted_value = line[quote_start + 1 : quote_end]
+                if cls._PACKAGE_ARTIFACT_PATTERN.search(quoted_value):
+                    return True
+                if quoted_value == match.group() and cls._PACKAGE_VERSION_CALL_PATTERN.search(prefix):
+                    return True
+
+        return False
 
     @staticmethod
     def _passes_luhn(digits: str) -> bool:
@@ -1096,9 +1156,14 @@ class SecurityValidator(ValidatorBase):
             if category == "emails" and (author_email := author_emails.get(line_num)):
                 scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
 
-            match = regex.search(scan_line)
-            if not match or any(exc in line for exc in exceptions):
+            matches = list(regex.finditer(scan_line))
+            if not matches or any(exc in line for exc in exceptions):
                 continue
+            if category == "ip_addresses":
+                matches = [match for match in matches if not self._is_version_literal(match, line)]
+                if not matches:
+                    continue
+            match = matches[0]
 
             # /home/<root>/ is PII only when <root> is the author/submitter
             # username; unrelated roots are skipped.

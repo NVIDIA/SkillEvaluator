@@ -189,6 +189,13 @@ Static scanning covers common patterns in four broad areas:
 - **Supply chain** — unpinned dependencies, external script fetching, and code
   obfuscation.
 
+The exact two-line SPDX HTML preamble used by this public repository is treated
+as license metadata rather than a hidden instruction. Any extra line,
+surrounding content, modified field, or embedded directive remains a security
+finding. PII scanning similarly distinguishes zero-bearing, explicitly
+versioned package artifacts from network addresses; URL, endpoint, host, server,
+and resolver contexts are never suppressed.
+
 ```bash
 skillevaluator security-scan ./my-skill
 skillevaluator security-scan ./my-skill --llm
@@ -476,7 +483,7 @@ credential configuration is documented in [CONFIGURATION.md](configuration.mdx).
 | Forbidden frontmatter | `alwaysApply`, `globs` |
 | Naming | Kebab-case; directory name matches frontmatter `name` |
 | Recommended maximum | 500 lines in `SKILL.md` |
-| Default supporting directories | `references/`, `scripts/`, `assets/`, `evals/`, `tools/`, `config/` |
+| Default supporting directories | `agents/`, `references/`, `scripts/`, `assets/`, `evals/`, `tests/`, `tools/`, `config/` |
 
 ## See Also
 

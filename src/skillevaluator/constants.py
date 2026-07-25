@@ -36,11 +36,13 @@ REQUIRED_BODY_SECTIONS: list[str] = []
 RECOMMENDED_BODY_SECTIONS = ["## Instructions", "## Examples"]
 
 # Skill-root subdirectories the schema validator recognises; anything else
-# triggers a LOW "unexpected in skill root" finding. ``tools/`` is the
-# agentskills.io name for executable helpers (the skill_evaluator onboarding renames
-# ``scripts/`` -> ``tools/``); ``config/`` holds data-driven runtime config the
-# skill loads.
-DEFAULT_ALLOWED_SKILL_DIRS = frozenset({"references", "scripts", "assets", "evals", "tools", "config"})
+# triggers a LOW "unexpected in skill root" finding. ``agents/`` contains
+# agent-facing metadata, ``tests/`` contains skill-local verification, and
+# ``tools/`` is the agentskills.io name for executable helpers. ``config/``
+# holds data-driven runtime configuration.
+DEFAULT_ALLOWED_SKILL_DIRS = frozenset(
+    {"agents", "references", "scripts", "assets", "evals", "tests", "tools", "config"}
+)
 
 # Env var that lets consumers EXTEND the allowed skill-root directory set per
 # repo (comma- or whitespace-separated) without editing bundled config — e.g.

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from skillevaluator.constants import CONTENT_DEDUP_MIN_CHUNK_CHARS
+from skillevaluator.spdx import is_spdx_only_html_comment
 
 if TYPE_CHECKING:
     from skillevaluator.deduplication.utils.skill_collector import CollectedFile
@@ -76,7 +77,9 @@ def chunk_markdown(
         if match:
             if current_lines:
                 text = "".join(current_lines).strip()
-                if len(text) >= min_chars:
+                if len(text) >= min_chars and not (
+                    current_heading == "(preamble)" and is_spdx_only_html_comment(text)
+                ):
                     sections.append(
                         ContentChunk(
                             source_file=collected.rel_path,
@@ -95,7 +98,9 @@ def chunk_markdown(
 
     if current_lines:
         text = "".join(current_lines).strip()
-        if len(text) >= min_chars:
+        if len(text) >= min_chars and not (
+            current_heading == "(preamble)" and is_spdx_only_html_comment(text)
+        ):
             sections.append(
                 ContentChunk(
                     source_file=collected.rel_path,

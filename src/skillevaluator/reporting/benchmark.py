@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import UTC, datetime
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator.constants import DIMENSION_HINTS, DIMENSION_MAPPING
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -41,6 +44,8 @@ _TIER2_VALIDATORS = {
     "context deduplication",
     "intra-skill deduplication",
 }
+
+_RETIRED_PRODUCT_NAME = re.compile(r"\b[a-z]*[\s_-]*skills[\s_-]*eval\b", flags=re.IGNORECASE)
 
 
 class BenchmarkReporter(ReporterBase):
@@ -88,7 +93,7 @@ class BenchmarkReporter(ReporterBase):
         self._render_tier_summary(lines, "Tier 2: Deduplication Summary", _tier2_results(results))
         self._render_publication_recommendation(lines, results, ae)
 
-        return "\n".join(lines).rstrip() + "\n"
+        return _publication_safe_text("\n".join(lines).rstrip() + "\n")
 
     def _render_evaluation_summary(
         self,
@@ -104,15 +109,11 @@ class BenchmarkReporter(ReporterBase):
             date = datetime.now(tz=UTC).date().isoformat()
             lines.append(f"- Evaluation date: {date}")
 
-        profile = _policy_profile(results)
-        if profile:
-            lines.append(f"- Skill Evaluator profile: `{profile}`")
-
         if ae:
             summary = ae.get("summary") or {}
             environment = summary.get("environment") or ae.get("environment")
             if environment:
-                lines.append(f"- Environment: `{environment}`")
+                lines.append(f"- Environment: `{_publication_safe_environment(environment)}`")
 
             dataset_count = _dataset_count(ae)
             if dataset_count is not None:
@@ -307,7 +308,7 @@ class BenchmarkReporter(ReporterBase):
         lines.append("Top findings:")
         lines.append("")
         for finding in _top_findings(findings, limit=self.max_findings_shown):
-            loc = f" (`{finding.location}`)" if finding.file_path else ""
+            loc = f" (`{_publication_safe_location(finding)}`)" if finding.file_path else ""
             lines.append(
                 f"- {finding.severity.value.upper()} {finding.category}/{finding.check_name}: {finding.message}{loc}"
             )
@@ -415,14 +416,6 @@ def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> s
         if isinstance(quality, dict) and quality.get("skill_name"):
             return str(quality["skill_name"])
     return "skill"
-
-
-def _policy_profile(results: list[ValidationResult]) -> str | None:
-    for result in results:
-        policy = result.metadata.get("policy") if isinstance(result.metadata, dict) else None
-        if isinstance(policy, dict) and policy.get("profile"):
-            return str(policy["profile"])
-    return None
 
 
 def _agents(ae: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -594,3 +587,28 @@ def _top_findings(findings: list[Finding], *, limit: int) -> list[Finding]:
 
 def _md_cell(value: object) -> str:
     return str(value).replace("|", "\\|")
+
+
+def _publication_safe_text(value: object) -> str:
+    """Remove retired internal product branding from publication output."""
+    return _RETIRED_PRODUCT_NAME.sub("Skill Evaluator", str(value))
+
+
+def _publication_safe_environment(value: object) -> str:
+    """Keep public environment names and generalize unknown imported labels."""
+    environment = str(value).strip()
+    return environment if environment.casefold() in HARBOR_ENV_MODES else "Isolated sandbox"
+
+
+def _publication_safe_location(finding: Finding) -> str:
+    """Render a finding location without publishing an absolute host path."""
+    file_path = str(finding.file_path)
+    posix_path = PurePosixPath(file_path)
+    windows_path = PureWindowsPath(file_path)
+    if posix_path.is_absolute():
+        file_path = posix_path.name
+    elif windows_path.is_absolute():
+        file_path = windows_path.name
+    if finding.line_number:
+        file_path += f":{finding.line_number}"
+    return file_path

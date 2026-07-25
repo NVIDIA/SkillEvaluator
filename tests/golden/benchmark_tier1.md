@@ -7,7 +7,6 @@ This benchmark summarizes 3-Tier Evaluation from Skill Evaluator results for the
 ## Evaluation Summary
 
 - Skill: `demo-skill`
-- Skill Evaluator profile: `internal`
 - Overall verdict: PASS
 - Tier 3 live agent evaluation: not available in this report
 
@@ -43,7 +42,7 @@ Tier 1 validation passed. Skill Evaluator ran 1 checks and found 0 total finding
 
 Notable observations:
 
-- Schema & Repository Governance: Valid author format: Dev One <dev@nvidia.com>
+- Schema & Repository Governance: Valid author format: Dev One <dev@example.com>
 
 ## Tier 2: Deduplication Summary
 

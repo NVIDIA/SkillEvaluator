@@ -23,7 +23,7 @@ from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
-from skillevaluator.reporting.base import ReporterBase
+from skillevaluator.reporting.base import ReporterBase, passes_required_gate
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -117,7 +117,7 @@ class CLIReporter(ReporterBase):
         console.print()
 
         # Print detailed results for failures
-        failed = [r for r in results if not r.passed and not self._is_advisory_agent_eval_skip(r)]
+        failed = [r for r in results if not passes_required_gate(r)]
         if failed:
             console.print(
                 Panel.fit(
@@ -129,7 +129,7 @@ class CLIReporter(ReporterBase):
             for result in failed:
                 self.render_result(result, console)
 
-        non_blocking = [result for result in results if result.passed and result.findings]
+        non_blocking = [result for result in results if passes_required_gate(result) and result.findings]
         if non_blocking:
             console.print(
                 Panel.fit(
@@ -143,7 +143,7 @@ class CLIReporter(ReporterBase):
 
         # Print overall status
         advisory_skips = [result for result in results if self._is_advisory_agent_eval_skip(result)]
-        required_passed = all(result.passed or self._is_advisory_agent_eval_skip(result) for result in results)
+        required_passed = all(passes_required_gate(result) for result in results)
         if any(result.is_incomplete for result in results):
             console.print("\n[bold yellow][INCOMPLETE] Validation evidence is incomplete[/bold yellow]\n")
         elif required_passed:

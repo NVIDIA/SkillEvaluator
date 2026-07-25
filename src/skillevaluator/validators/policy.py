@@ -21,6 +21,8 @@ overlay), or the ``SKILLEVALUATOR_PROFILE`` environment variable.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from collections.abc import Iterable
@@ -64,9 +66,22 @@ class ValidationPolicy:
     """
 
     profile: str = DEFAULT_PROFILE_NAME
+    audience: str = "external"
     author_email_regex: re.Pattern[str] | None = None
     severity_overrides: dict[str, Severity] = field(default_factory=dict)
     source: Path | None = None
+
+    @property
+    def digest(self) -> str:
+        """Return a stable digest for the effective, source-independent policy."""
+        payload = {
+            "profile": self.profile,
+            "audience": self.audience,
+            "author_email_regex": self.author_email_regex.pattern if self.author_email_regex else None,
+            "severity_overrides": {key: value.value for key, value in sorted(self.severity_overrides.items())},
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
     @property
     def author_shape_regex(self) -> re.Pattern[str]:
@@ -101,6 +116,8 @@ class ValidationPolicy:
         """Serialize for inclusion in reports (read-only summary)."""
         return {
             "profile": self.profile,
+            "audience": self.audience,
+            "digest": self.digest,
             "author_email_regex": (self.author_email_regex.pattern if self.author_email_regex else None),
             "severity_overrides": {k: v.value for k, v in self.severity_overrides.items()},
             "source": str(self.source) if self.source else None,
@@ -192,6 +209,7 @@ def _policy_from_data(
 
     return ValidationPolicy(
         profile=profile_name,
+        audience="external",
         author_email_regex=author_email_regex,
         severity_overrides=severity_overrides,
         source=source,
@@ -247,6 +265,7 @@ def load_policy_file(
 
     return ValidationPolicy(
         profile=custom.profile,
+        audience=base.audience,
         author_email_regex=(custom.author_email_regex if overlay_sets_email_regex else base.author_email_regex),
         severity_overrides=merged_overrides,
         source=path,

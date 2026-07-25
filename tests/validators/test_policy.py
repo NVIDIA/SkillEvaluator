@@ -56,3 +56,19 @@ def test_policy_validation_and_resolution() -> None:
     )
     with pytest.raises(FileNotFoundError):
         load_profile("missing-profile")
+
+
+def test_public_policy_serialization_has_stable_digest() -> None:
+    policy = default_policy()
+    data = policy.to_dict()
+
+    assert data["audience"] == "external"
+    assert data["digest"].startswith("sha256:")
+    assert policy.digest == default_policy().digest
+
+
+def test_policy_digest_excludes_source_path() -> None:
+    first = ValidationPolicy(profile="external", source=Path("/tmp/one.yaml"))
+    second = ValidationPolicy(profile="external", source=Path("/tmp/two.yaml"))
+
+    assert first.digest == second.digest

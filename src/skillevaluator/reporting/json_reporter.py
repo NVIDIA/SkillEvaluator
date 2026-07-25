@@ -104,6 +104,29 @@ class JSONReporter(ReporterBase):
             "results": [self._result_to_dict(r) for r in results],
         }
 
+        policy = next(
+            (
+                result.metadata.get("policy")
+                for result in results
+                if isinstance(result.metadata.get("policy"), dict)
+            ),
+            None,
+        )
+        if policy is not None:
+            data["policy"] = policy
+
+        gating_by_tier: dict[str, dict[str, Any]] = {}
+        for result in results:
+            gating = result.metadata.get("gating")
+            if not isinstance(gating, dict) or gating.get("tier") is None:
+                continue
+            tier = str(gating["tier"])
+            tier_entry = gating_by_tier.setdefault(tier, {"blocking": False, "validators": []})
+            tier_entry["blocking"] = bool(tier_entry["blocking"] or gating.get("blocking"))
+            tier_entry["validators"].append(result.validator_name)
+        if gating_by_tier:
+            data["gating"] = {"tiers": gating_by_tier}
+
         # Quality summary from any QUALITY validator results
         quality_results = [r.metadata["quality_scores"] for r in results if r.metadata.get("quality_scores")]
         if quality_results:
@@ -120,6 +143,16 @@ class JSONReporter(ReporterBase):
         tier3_results = [r.metadata["agent_eval"] for r in results if r.metadata.get("agent_eval")]
         if tier3_results:
             data["tier3"] = tier3_results[0]
+            applicability = next(
+                (
+                    result.metadata.get("tier3_applicability")
+                    for result in results
+                    if isinstance(result.metadata.get("tier3_applicability"), dict)
+                ),
+                None,
+            )
+            if applicability is not None:
+                data["tier3_applicability"] = applicability
 
         if self.include_timestamp:
             data["generated_at"] = datetime.now(tz=UTC).isoformat()
@@ -187,6 +220,10 @@ class JSONReporter(ReporterBase):
         rubric = result.metadata.get("rubric_eval")
         if rubric:
             data["rubric_eval"] = rubric
+
+        gating = result.metadata.get("gating")
+        if isinstance(gating, dict):
+            data["gating"] = gating
 
         return data
 

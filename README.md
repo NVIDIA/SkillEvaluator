@@ -111,7 +111,7 @@ skillevaluator rubric-eval ./my-skill           # LLM-as-judge scoring — the o
 | `security` | SkillSpector scanning for prompt injection, data exfiltration, and related risks |
 | `pii` | Credentials, tokens, personal data, and other sensitive information |
 | `license` | Frontmatter, license-file, and SPDX compliance |
-| `code-integrity` | Bandit, packaged Semgrep checks, Gitleaks, links, dependency declarations, and static test discovery |
+| `code-integrity` | Bandit, Semgrep with packaged policy, Gitleaks, links, dependency declarations, and static test discovery |
 | `unicode` | Invisible Unicode, bidirectional overrides, and ASCII smuggling |
 | `quality` | Deterministic quality scoring with a 0–100 score and A–F grade |
 | `lint` | Advisory script structure, nesting, constants, shebang, and input-validation checks |

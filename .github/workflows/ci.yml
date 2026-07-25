@@ -64,15 +64,16 @@ jobs:
           test -n "$wheel"
           uv venv --python 3.12 .rhel8-security-venv
           uv pip install --python .rhel8-security-venv/bin/python "${wheel}[security]"
-      - name: Smoke-test the Linux scanner pair
+      - name: Smoke-test the bundled Python scanners
         run: |
           .rhel8-security-venv/bin/python - <<'PY'
           from importlib.metadata import version
+          from packaging.version import Version
 
-          assert version("semgrep") == "1.157.0"
-          assert version("pip-audit") == "2.9.0"
+          assert Version(version("bandit")) >= Version("1.9.4")
+          assert Version(version("pip-audit")) >= Version("2.10.0")
           PY
-          .rhel8-security-venv/bin/semgrep --version
+          .rhel8-security-venv/bin/bandit --version
           .rhel8-security-venv/bin/pip-audit --version
 
   package:

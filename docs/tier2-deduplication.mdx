@@ -188,6 +188,24 @@ Catalogs stay local unless you explicitly share them. Because they contain
 embeddings and other data derived from skill content, review them before
 sharing like any other generated project artifact.
 
+## Plugin deduplication
+
+`validate` also accepts bundle-reference and contained plugins:
+
+```bash title="Run offline and contextual checks for a plugin"
+skillevaluator validate ./my-plugin --type plugin
+```
+
+Plugin Tier 2 is advisory and public/offline by design. It always checks for
+duplicate skill and rule references in `agent_plugin.yaml`. When an embeddings
+provider is available, it also runs context deduplication independently over
+each safely discovered skill under `skills/`. Missing optional embedding access
+skips only that contextual check; the offline reference check still runs.
+
+The public implementation does not connect to a remote vector database, fetch
+remote component catalogs, or compare a plugin against a private plugin index.
+It preserves the external repository's local-catalog-only Tier 2 contract.
+
 ## Inside validate
 
 `validate` runs the intra-skill deduplication pass by default as part of a full

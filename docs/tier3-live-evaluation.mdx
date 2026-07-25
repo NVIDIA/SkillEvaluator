@@ -239,6 +239,56 @@ enabled — via `--tier3`, `--autopilot`, `--full`, or the `--agent-eval` alias.
 deprecated. See the [CLI Reference](cli-reference.mdx) for the full group.
 </Note>
 
+## Plugin evaluation
+
+Run all three tiers for a plugin with the same validation entry point:
+
+```bash title="Validate a plugin through Tier 3"
+skillevaluator validate ./my-plugin --type plugin --tier3
+```
+
+For focused Tier 3 iteration, use the plugin-specific command and optionally
+provide a combined dataset or local member skills:
+
+```bash title="Evaluate plugin effectiveness and integration"
+skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both
+skillevaluator tier3 evaluate-plugin ./my-plugin \
+  --evals-source ./evals/evals.json --include-skills ../skills/local-member
+```
+
+Tier 3 builds a temporary skill-shaped wrapper and reuses the Harbor evaluation
+engine. It evaluates locally available components only:
+
+- bundled skills under `skills/` and same-repository `github` or `git` refs;
+- contained rule files; and
+- contained command or secure URL MCP servers, staged only in the plugin arm.
+
+Remote components are never fetched. Unresolved refs and provider-only MCP
+servers are recorded in plugin provenance. A partial run is reported as
+`INCOMPLETE`, never as a full pass; a plugin with nothing locally evaluable is
+reported as an honest advisory skip.
+
+Plugin baselines are controlled with `--lift-mode`:
+
+| Mode | Comparison |
+| --- | --- |
+| `effectiveness` | Coordinated plugin versus no plugin; default |
+| `integration` | Coordinated plugin versus its member skills staged individually |
+| `both` | Effectiveness plus a third, report-only sum-of-parts arm |
+
+Integration is only meaningful when the dataset contains composition evidence:
+at least one case with `cross_component: true` and two or more distinct
+`expected_skills`. Explicit `integration` fails as inconclusive when that
+evidence is absent. `both` preserves the valid effectiveness run and records
+that Integration was skipped. Integration modes require the baseline and cannot
+be combined with `--skip-baseline`. Native Harbor-only sources remain valid for
+effectiveness but do not establish composition evidence by themselves.
+
+The Integration result is advisory and never changes the main Tier 3 score,
+verdict, or validation exit code. MCP declarations are statically checked before
+staging; inline credentials, shell command forms, insecure URLs, floating
+versions, and disabled TLS verification are rejected.
+
 ## Plan for cost
 
 Tier 3 performs live model and agent calls, so it can incur provider charges

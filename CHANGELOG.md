@@ -9,7 +9,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Initial public release candidate.
 - Enabled optional semantic-version validation in the default Tier 1 pipeline,
   including a public `--previous-version` monotonic-bump bound.
-
+- Added public plugin evaluation across all tiers: static schema and MCP checks,
+  advisory offline dependency/context deduplication, and Harbor-backed live
+  evaluation with effectiveness and optional sum-of-parts Integration arms.
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.
@@ -86,6 +88,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Programmatic dataset generation now returns explicit created, preview, and
   unchanged outcomes, preserves actionable failures, and no longer mutates
   process-wide command-line arguments.
+- Plugin manifest discovery is now root-bounded across all tiers, and Integration
+  evaluation requires explicit cross-component dataset evidence instead of
+  reporting unsupported composition claims.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
   Linux systems by keeping Semgrep and SkillSpector in separate tool
   environments while retaining compatible bundled Python dependencies.

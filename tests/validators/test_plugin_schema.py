@@ -5,6 +5,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.constants import PLUGIN_MANIFEST_TYPE, PLUGIN_MODE
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 
@@ -30,6 +32,23 @@ def _write_manifest(dir_path: Path, body: str, name: str = "agent_plugin.yaml") 
 
 
 class TestPluginSchemaValidator:
+    def test_rejects_manifest_symlink_outside_plugin_root(self, tmp_path: Path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        external_manifest = outside / "external.yaml"
+        external_manifest.write_text(_VALID_MANIFEST, encoding="utf-8")
+        plugin = tmp_path / "plugin"
+        plugin.mkdir()
+        try:
+            (plugin / "agent_plugin.yaml").symlink_to(external_manifest)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+
+        result = PluginSchemaValidator().validate(plugin)
+
+        assert not result.passed
+        assert {finding.check_name for finding in result.findings} == {"manifest_outside_root"}
+
     def test_valid_manifest_passes_with_metadata(self, tmp_path: Path):
         _write_manifest(tmp_path, _VALID_MANIFEST)
         result = PluginSchemaValidator().validate(tmp_path)

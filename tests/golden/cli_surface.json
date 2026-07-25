@@ -554,6 +554,273 @@
         }
       ]
     },
+    "evaluate-plugin": {
+      "params": [
+        {
+          "name": "plugin_path",
+          "opts": [
+            "plugin_path"
+          ],
+          "param_type": "argument",
+          "required": true,
+          "type": "path"
+        },
+        {
+          "name": "evals_source",
+          "opts": [
+            "--evals-source"
+          ],
+          "param_type": "option",
+          "type": "path"
+        },
+        {
+          "default": "codex",
+          "name": "agents",
+          "opts": [
+            "--agents",
+            "-a"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "choices": [
+            "docker",
+            "daytona",
+            "e2b",
+            "modal",
+            "runloop",
+            "langsmith",
+            "gke",
+            "novita",
+            "apple-container",
+            "singularity",
+            "islo",
+            "tensorlake",
+            "cwsandbox",
+            "wandb",
+            "use-computer",
+            "local"
+          ],
+          "default": "docker",
+          "name": "env_mode",
+          "opts": [
+            "--env-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "skip_baseline",
+          "opts": [
+            "--skip-baseline"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "choices": [
+            "effectiveness",
+            "integration",
+            "both"
+          ],
+          "default": "effectiveness",
+          "name": "lift_mode",
+          "opts": [
+            "--lift-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "n_attempts",
+          "opts": [
+            "--n-attempts"
+          ],
+          "param_type": "option",
+          "type": "integer"
+        },
+        {
+          "name": "pass_threshold",
+          "opts": [
+            "--pass-threshold"
+          ],
+          "param_type": "option",
+          "type": "float"
+        },
+        {
+          "is_flag": true,
+          "name": "stop_on_pass",
+          "opts": [
+            "--stop-on-pass"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-stop-on-pass"
+          ],
+          "type": "boolean"
+        },
+        {
+          "name": "n_concurrent",
+          "opts": [
+            "--n-concurrent"
+          ],
+          "param_type": "option",
+          "type": "integer"
+        },
+        {
+          "name": "max_agents",
+          "opts": [
+            "--max-agents"
+          ],
+          "param_type": "option",
+          "type": "integer"
+        },
+        {
+          "name": "model",
+          "opts": [
+            "--model"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "multiple": true,
+          "name": "agent_model",
+          "opts": [
+            "--agent-model"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "choices": [
+            "preserve",
+            "rebase"
+          ],
+          "name": "custom_dockerfile_mode",
+          "opts": [
+            "--custom-dockerfile-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "include_skills",
+          "opts": [
+            "--include-skills"
+          ],
+          "param_type": "option",
+          "type": "path"
+        },
+        {
+          "name": "repo_root",
+          "opts": [
+            "--repo-root"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "copy_repo",
+          "opts": [
+            "--copy-repo"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "choices": [
+            "default",
+            "default_plus_custom",
+            "custom_only"
+          ],
+          "name": "grading_mode",
+          "opts": [
+            "--grading-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "results_dir",
+          "opts": [
+            "--results-dir"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "harbor_keep_jobs",
+          "opts": [
+            "--harbor-keep-jobs"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "agent_runtime_preflight",
+          "opts": [
+            "--agent-runtime-preflight"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
+          "name": "timeout_multiplier",
+          "opts": [
+            "--timeout-multiplier"
+          ],
+          "param_type": "option",
+          "type": "float"
+        },
+        {
+          "name": "override_cpus",
+          "opts": [
+            "--override-cpus"
+          ],
+          "param_type": "option",
+          "type": "integer"
+        },
+        {
+          "name": "override_memory_mb",
+          "opts": [
+            "--override-memory-mb"
+          ],
+          "param_type": "option",
+          "type": "integer"
+        },
+        {
+          "name": "override_storage_mb",
+          "opts": [
+            "--override-storage-mb"
+          ],
+          "param_type": "option",
+          "type": "integer"
+        },
+        {
+          "choices": [
+            "auto",
+            "rich",
+            "plain",
+            "off"
+          ],
+          "default": "auto",
+          "name": "progress",
+          "opts": [
+            "--progress"
+          ],
+          "param_type": "option"
+        }
+      ]
+    },
     "harbor-view": {
       "params": [
         {
@@ -1585,6 +1852,19 @@
               "param_type": "option"
             },
             {
+              "choices": [
+                "effectiveness",
+                "integration",
+                "both"
+              ],
+              "default": "effectiveness",
+              "name": "lift_mode",
+              "opts": [
+                "--lift-mode"
+              ],
+              "param_type": "option"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "skip_baseline",
@@ -2416,6 +2696,273 @@
             }
           ]
         },
+        "evaluate-plugin": {
+          "params": [
+            {
+              "name": "plugin_path",
+              "opts": [
+                "plugin_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "evals_source",
+              "opts": [
+                "--evals-source"
+              ],
+              "param_type": "option",
+              "type": "path"
+            },
+            {
+              "default": "codex",
+              "name": "agents",
+              "opts": [
+                "--agents",
+                "-a"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "docker",
+                "daytona",
+                "e2b",
+                "modal",
+                "runloop",
+                "langsmith",
+                "gke",
+                "novita",
+                "apple-container",
+                "singularity",
+                "islo",
+                "tensorlake",
+                "cwsandbox",
+                "wandb",
+                "use-computer",
+                "local"
+              ],
+              "default": "docker",
+              "name": "env_mode",
+              "opts": [
+                "--env-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "skip_baseline",
+              "opts": [
+                "--skip-baseline"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "choices": [
+                "effectiveness",
+                "integration",
+                "both"
+              ],
+              "default": "effectiveness",
+              "name": "lift_mode",
+              "opts": [
+                "--lift-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "n_attempts",
+              "opts": [
+                "--n-attempts"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "pass_threshold",
+              "opts": [
+                "--pass-threshold"
+              ],
+              "param_type": "option",
+              "type": "float"
+            },
+            {
+              "is_flag": true,
+              "name": "stop_on_pass",
+              "opts": [
+                "--stop-on-pass"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-stop-on-pass"
+              ],
+              "type": "boolean"
+            },
+            {
+              "name": "n_concurrent",
+              "opts": [
+                "--n-concurrent"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "max_agents",
+              "opts": [
+                "--max-agents"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "multiple": true,
+              "name": "agent_model",
+              "opts": [
+                "--agent-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "preserve",
+                "rebase"
+              ],
+              "name": "custom_dockerfile_mode",
+              "opts": [
+                "--custom-dockerfile-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "include_skills",
+              "opts": [
+                "--include-skills"
+              ],
+              "param_type": "option",
+              "type": "path"
+            },
+            {
+              "name": "repo_root",
+              "opts": [
+                "--repo-root"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "copy_repo",
+              "opts": [
+                "--copy-repo"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "choices": [
+                "default",
+                "default_plus_custom",
+                "custom_only"
+              ],
+              "name": "grading_mode",
+              "opts": [
+                "--grading-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "harbor_keep_jobs",
+              "opts": [
+                "--harbor-keep-jobs"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "is_flag": true,
+              "name": "agent_runtime_preflight",
+              "opts": [
+                "--agent-runtime-preflight"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-agent-runtime-preflight"
+              ],
+              "type": "boolean"
+            },
+            {
+              "name": "timeout_multiplier",
+              "opts": [
+                "--timeout-multiplier"
+              ],
+              "param_type": "option",
+              "type": "float"
+            },
+            {
+              "name": "override_cpus",
+              "opts": [
+                "--override-cpus"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "override_memory_mb",
+              "opts": [
+                "--override-memory-mb"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "override_storage_mb",
+              "opts": [
+                "--override-storage-mb"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "choices": [
+                "auto",
+                "rich",
+                "plain",
+                "off"
+              ],
+              "default": "auto",
+              "name": "progress",
+              "opts": [
+                "--progress"
+              ],
+              "param_type": "option"
+            }
+          ]
+        },
         "harbor-view": {
           "params": [
             {
@@ -2841,6 +3388,19 @@
           "name": "env_mode",
           "opts": [
             "--env-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "choices": [
+            "effectiveness",
+            "integration",
+            "both"
+          ],
+          "default": "effectiveness",
+          "name": "lift_mode",
+          "opts": [
+            "--lift-mode"
           ],
           "param_type": "option"
         },

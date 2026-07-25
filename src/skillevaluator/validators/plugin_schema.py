@@ -33,7 +33,9 @@ from skillevaluator.constants import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.mcp_static import validate_contained_mcp_servers
 
 logger = get_logger(__name__)
 
@@ -62,7 +64,20 @@ class PluginSchemaValidator(ValidatorBase):
         """Validate the plugin manifest located at (or under) ``path``."""
         result = ValidationResult()
 
-        located = self._locate_manifest(path)
+        try:
+            located = locate_plugin_manifest(path)
+        except PluginManifestPathError as exc:
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="manifest_outside_root",
+                    message=str(exc),
+                    file_path=str(path),
+                    suggestion="Replace the manifest symlink with a regular file contained by the plugin root.",
+                )
+            )
+            return result
         if located is None:
             result.add_finding(
                 Finding(
@@ -83,9 +98,10 @@ class PluginSchemaValidator(ValidatorBase):
             )
             return result
 
-        manifest_path, manifest_type = located
-        root = manifest_path.parent.parent if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE else manifest_path.parent
-        self._stamp_manifest_metadata(manifest_path, root, manifest_type, result)
+        manifest_path = located.path
+        manifest_type = located.manifest_type
+        root = located.root
+        self._stamp_manifest_metadata(located.manifest_filename, root, manifest_type, result)
 
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
             self._validate_contained_manifest(manifest_path, result)
@@ -102,35 +118,20 @@ class PluginSchemaValidator(ValidatorBase):
         self._validate_in_plugin_skills(root, result)
         return result
 
-    def _locate_manifest(self, path: Path) -> tuple[Path, str] | None:
-        """Return ``(manifest_path, manifest_type)`` with bundle precedence."""
-        if path.is_file():
-            if path.name in PLUGIN_MANIFEST_FILES:
-                return path, PLUGIN_MANIFEST_TYPE
-            if path.name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name == PLUGIN_CONTAINED_MANIFEST_DIR:
-                return path, PLUGIN_CONTAINED_MANIFEST_TYPE
-            return None
-        if path.is_dir():
-            for manifest_name in PLUGIN_MANIFEST_FILES:
-                candidate = path / manifest_name
-                if candidate.exists():
-                    return candidate, PLUGIN_MANIFEST_TYPE
-            contained = path / PLUGIN_CONTAINED_MANIFEST_DIR / PLUGIN_CONTAINED_MANIFEST_FILE
-            if contained.exists():
-                return contained, PLUGIN_CONTAINED_MANIFEST_TYPE
-        return None
-
     @staticmethod
-    def _stamp_manifest_metadata(manifest_path: Path, root: Path, manifest_type: str, result: ValidationResult) -> None:
+    def _stamp_manifest_metadata(
+        manifest_filename: str,
+        root: Path,
+        manifest_type: str,
+        result: ValidationResult,
+    ) -> None:
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
             mode = PLUGIN_CONTAINED_MODE
-            filename = f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}"
         else:
             mode = PLUGIN_MODE
-            filename = manifest_path.name
         result.metadata["manifest_type"] = manifest_type
         result.metadata["plugin_mode"] = mode
-        result.metadata["plugin"] = {"manifest_filename": filename, "root": str(root)}
+        result.metadata["plugin"] = {"manifest_filename": manifest_filename, "root": str(root)}
 
     def _load_yaml(self, manifest_path: Path, result: ValidationResult) -> dict | None:
         """Parse the manifest YAML; record a finding and return None on failure."""
@@ -259,13 +260,21 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
-        result.add_success(
-            check_name="plugin_manifest",
-            message=f"Contained plugin manifest '{name}' is valid (name present; full schema deferred)",
-        )
+        mcp_findings = validate_contained_mcp_servers(data.get("mcpServers"), str(manifest_path))
+        for finding in mcp_findings:
+            result.add_finding(finding)
+        if not mcp_findings:
+            result.add_success(
+                check_name="plugin_manifest",
+                message=f"Contained plugin manifest '{name}' is valid (name present; full schema deferred)",
+            )
         plugin = result.metadata.setdefault("plugin", {})
         plugin["name"] = name
-        dependencies = {key: len(value) for key, value in data.items() if isinstance(value, list)}
+        dependencies = {
+            key: len(value) for key, value in data.items() if isinstance(value, (list, dict)) and key != "mcpServers"
+        }
+        if isinstance(data.get("mcpServers"), dict):
+            dependencies["mcpServers"] = len(data["mcpServers"])
         if dependencies:
             plugin["declared_dependencies"] = dependencies
 

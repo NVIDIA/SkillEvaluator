@@ -10,4 +10,4 @@ records the exact resolved dependency set used for this release.
 | LLM | Anthropic (MIT), Boto3 (Apache-2.0), LiteLLM (MIT), OpenAI (Apache-2.0), Protobuf (BSD-3-Clause) |
 | Tier 3 | Harbor (Apache-2.0) |
 | Telemetry | OpenTelemetry API, SDK, and OTLP HTTP Exporter (Apache-2.0) |
-| Security | Bandit (Apache-2.0), LangChain Core (MIT), pip-audit (Apache-2.0), Semgrep (LGPL-2.1), SkillSpector (Apache-2.0) |
+| Security | Bandit (Apache-2.0), pip-audit (Apache-2.0) |

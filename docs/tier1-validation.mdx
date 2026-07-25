@@ -243,14 +243,17 @@ project environment or an explicit sandbox.
 The default external profile treats a missing, timed-out, crashed, or malformed
 Bandit, Semgrep, Gitleaks, or SkillSpector run as `INCOMPLETE`: terminal and
 saved reports are non-green and `validate` exits non-zero. Install
-`skillevaluator[security]` for the bundled Python scanners and install Gitleaks
-separately (`brew install gitleaks` or
+`skillevaluator[security]` for Bandit and pip-audit. Install Semgrep separately
+(`brew install semgrep` or `uv tool install semgrep`), install SkillSpector
+separately (`uv tool install git+https://github.com/NVIDIA/SkillSpector.git`),
+and install Gitleaks separately (`brew install gitleaks` or
 download a binary from the official
 [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases)).
 
 Semgrep uses a policy packaged with the installed distribution, with metrics
 and version checks disabled; Tier 1 never fetches a registry policy at runtime.
-Bundled scanners resolve next to the SkillEvaluator interpreter before PATH.
+Bundled Python scanners resolve next to the SkillEvaluator interpreter before
+PATH. External Semgrep and SkillSpector installations resolve from PATH.
 Intentional replacements require an auditable absolute executable path in
 `SKILLEVALUATOR_BANDIT_PATH`, `SKILLEVALUATOR_SEMGREP_PATH`, or
 `SKILLEVALUATOR_SKILLSPECTOR_PATH`; relative, missing, and non-executable
@@ -444,9 +447,14 @@ credential configuration is documented in [CONFIGURATION.md](configuration.mdx).
 - **Gitleaks is not installed** — install it with `brew install gitleaks` or
   download a binary from the official
   [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
-- **A Python scanner is missing** — install the security extra with
-  `skillevaluator[security]`. Required scanner failures remain `INCOMPLETE`
-  until the scanner is installed and returns valid evidence.
+- **Bandit or pip-audit is missing** — install the security extra with
+  `skillevaluator[security]`.
+- **SkillSpector is missing** — install it separately with
+  `uv tool install git+https://github.com/NVIDIA/SkillSpector.git`.
+- **Semgrep is missing** — install it separately with `brew install semgrep`
+  or `uv tool install semgrep`.
+  Required scanner failures remain `INCOMPLETE` until the scanner is installed
+  and returns valid evidence.
 - **An LLM-backed stage fails immediately** — configure a supported provider or
   omit `--llm`/`--llm-verify`. Use `--no-dedup` when a fully key-free Tier 1 run
   is required.

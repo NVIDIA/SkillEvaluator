@@ -4,6 +4,14 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "internal-runtime-dependency",
+      "line": 135,
+      "reason": "Negative dependency boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-runtime-dependency",
       "line": 136,
       "reason": "Negative dependency boundary assertion",
       "expires": "2027-07-08",
@@ -11,16 +19,8 @@
     },
     {
       "path": "tests/test_oss_packaging.py",
-      "rule": "internal-runtime-dependency",
-      "line": 137,
-      "reason": "Negative dependency boundary assertion",
-      "expires": "2027-07-08",
-      "review_owner": "oss-release-reviewers"
-    },
-    {
-      "path": "tests/test_oss_packaging.py",
       "rule": "internal-product-name",
-      "line": 138,
+      "line": 137,
       "reason": "Negative product boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"
@@ -28,7 +28,7 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "internal-nvidia-credential",
-      "line": 144,
+      "line": 143,
       "reason": "Negative credential boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"
@@ -36,7 +36,7 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "execution-service-integration",
-      "line": 145,
+      "line": 144,
       "reason": "Negative execution boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"
@@ -44,7 +44,7 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "internal-runtime-dependency",
-      "line": 147,
+      "line": 146,
       "reason": "Negative dependency boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"
@@ -52,7 +52,7 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "harbor-upload-integration",
-      "line": 418,
+      "line": 423,
       "reason": "Negative upload boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"
@@ -60,7 +60,7 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "internal-nvidia-credential",
-      "line": 459,
+      "line": 464,
       "reason": "Negative documentation boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"

@@ -33,7 +33,7 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
     if getattr(param, "required", False):
         data["required"] = True
     default = getattr(param, "default", None)
-    if default is not None:
+    if default is not None and default is not getattr(click.core, "UNSET", None):
         data["default"] = str(default)
     param_type = getattr(param, "type", None)
     if isinstance(param_type, click.Choice):

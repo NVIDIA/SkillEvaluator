@@ -16,9 +16,17 @@ import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.evaluation import EvaluationOptions, EvaluationService
+from skillevaluator.evaluation import DatasetOptions, EvaluationOptions, EvaluationService
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "simple"
+
+
+def test_service_preserves_dataset_generation_failure_diagnostic(tmp_path: Path) -> None:
+    invalid_skill = tmp_path / "not-a-skill"
+    invalid_skill.mkdir()
+
+    with pytest.raises(ValueError, match=rf"{invalid_skill} does not contain a SKILL\.md"):
+        EvaluationService().create_dataset(DatasetOptions(skill_path=invalid_skill, no_llm=True))
 
 
 def test_options_fields_match_engine_signature() -> None:

@@ -45,8 +45,10 @@ import json
 import os
 import re
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
@@ -852,7 +854,31 @@ def _refine_from_trajectory_template(
     return refined
 
 
-def main():
+@dataclass(frozen=True)
+class DatasetGenerationResult:
+    """Structured outcome shared by CLI and programmatic dataset generation."""
+
+    status: Literal["created", "preview", "unchanged"]
+    path: Path
+    dataset: dict[str, Any] | None = None
+    cases_count: int = 0
+
+
+class DatasetGenerationExit(SystemExit):
+    """CLI-compatible exit that preserves an actionable failure diagnostic."""
+
+    def __init__(self, diagnostic: str, code: int = 1) -> None:
+        super().__init__(code)
+        self.diagnostic = diagnostic
+
+
+def _abort(message: str) -> None:
+    """Print the established CLI error and retain it for in-process callers."""
+    print(f"Error: {message}")
+    raise DatasetGenerationExit(message)
+
+
+def main(argv: Sequence[str] | None = None) -> DatasetGenerationResult:
     parser = argparse.ArgumentParser(
         description="Generate eval dataset for a skill.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -908,19 +934,16 @@ Agent-refined mode (--refine):
         help="With --refine: external results root to search before the legacy skill directory",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     skill_path = args.path.resolve()
 
     if not (skill_path / "SKILL.md").exists():
-        print(f"Error: {skill_path} does not contain a SKILL.md")
-        sys.exit(1)
+        _abort(f"{skill_path} does not contain a SKILL.md")
 
     if args.from_results and not args.refine:
-        print("Error: --from-results requires --refine")
-        sys.exit(1)
+        _abort("--from-results requires --refine")
     if args.results_dir and not args.refine:
-        print("Error: --results-dir requires --refine")
-        sys.exit(1)
+        _abort("--results-dir requires --refine")
 
     evals_dir = skill_path / "evals"
     output_path = evals_dir / "evals.json"
@@ -929,7 +952,7 @@ Agent-refined mode (--refine):
     if output_path.exists() and not args.force and not args.refine:
         print(f"Dataset already exists: {output_path}")
         print("Use --force to overwrite.")
-        return
+        return DatasetGenerationResult(status="unchanged", path=output_path)
 
     # Parse skill
     skill = _parse_skill(skill_path, prompt_file=args.prompt)
@@ -988,15 +1011,22 @@ Agent-refined mode (--refine):
         else:
             print("  No trajectory available — using initial cases as-is.")
 
+    dataset = _to_agentskills_dataset(skill["name"], cases)
+
     if args.dry_run:
         print("\nDry run — not saved.")
-        print(json.dumps(_to_agentskills_dataset(skill["name"], cases), indent=2))
-        return
+        print(json.dumps(dataset, indent=2))
+        return DatasetGenerationResult(
+            status="preview",
+            path=output_path,
+            dataset=dataset,
+            cases_count=len(cases),
+        )
 
     # Save
     evals_dir.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
-        json.dump(_to_agentskills_dataset(skill["name"], cases), f, indent=2, ensure_ascii=False)
+        json.dump(dataset, f, indent=2, ensure_ascii=False)
 
     print(f"\nSaved: {output_path}")
     print(f"  {len(cases)} test case(s)")
@@ -1005,6 +1035,12 @@ Agent-refined mode (--refine):
     else:
         print(f"\nNext: skillevaluator evaluate {skill_path} --agents claude-code --env-mode docker")
         print(f"  Or refine with trajectory: skillevaluator create-eval-dataset {skill_path} --refine --force")
+    return DatasetGenerationResult(
+        status="created",
+        path=output_path,
+        dataset=dataset,
+        cases_count=len(cases),
+    )
 
 
 if __name__ == "__main__":

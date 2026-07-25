@@ -70,6 +70,9 @@ All notable changes to Skill Evaluator are documented in this file.
 - Accepted structurally complete SkillSpector finding reports on policy exit 1
   and hardened validation of the external scanner's untrusted JSON contract;
   SkillSpector remains separately installed and unpinned by this distribution.
+- Programmatic dataset generation now returns explicit created, preview, and
+  unchanged outcomes, preserves actionable failures, and no longer mutates
+  process-wide command-line arguments.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
   Linux systems by selecting a compatible Semgrep and pip-audit pair, while
   macOS and Windows retain the newer scanner release lines.

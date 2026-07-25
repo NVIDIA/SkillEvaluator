@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions
+    from skillevaluator.tier3.generate_dataset import DatasetGenerationResult
     from skillevaluator.tier3.harbor.progress import ProgressReporter
 
 
@@ -66,11 +67,11 @@ class EvaluationService:
             return f"Tier 3 evaluation execution status is {label}"
         return None
 
-    def create_dataset(self, options: DatasetOptions) -> None:
-        """Create a synthetic evaluation dataset for a skill."""
+    def create_dataset(self, options: DatasetOptions) -> DatasetGenerationResult:
+        """Create or preview a synthetic dataset and return its outcome."""
         from skillevaluator.tier3.commands import create_dataset as _create_dataset
 
-        _create_dataset(options.skill_path, **options.engine_kwargs())
+        return _create_dataset(options.skill_path, **options.engine_kwargs())
 
     def create_autopilot_dataset(self, skill_path: Path, *, use_llm: bool) -> Path:
         """Create one missing eval case for the CLI autopilot workflow."""

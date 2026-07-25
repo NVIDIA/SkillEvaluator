@@ -51,6 +51,9 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Fixed
 
+- Plugin manifest discovery is now root-bounded across all tiers, and Integration
+  evaluation requires explicit cross-component dataset evidence instead of
+  reporting unsupported composition claims.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
   Linux systems by selecting a compatible Semgrep and pip-audit pair, while
   macOS and Windows retain the newer scanner release lines.

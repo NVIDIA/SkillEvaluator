@@ -10,9 +10,10 @@ from typing import Any
 
 import yaml
 
-from skillevaluator.constants import PLUGIN_MANIFEST_FILES
+from skillevaluator.constants import PLUGIN_MANIFEST_TYPE
 from skillevaluator.deduplication.plugin.ref_utils import find_duplicate_refs
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.validators.base import ValidatorBase
 
 
@@ -29,12 +30,17 @@ class IntraPluginValidator(ValidatorBase):
 
     def validate(self, plugin_root: Path) -> ValidationResult:
         result = ValidationResult(validator_name=self.name, validator_description=self.description)
-        manifest_path = self._locate_manifest(plugin_root)
-        if manifest_path is None:
+        try:
+            located = locate_plugin_manifest(plugin_root)
+        except PluginManifestPathError:
+            return self._skip(
+                result,
+                "Plugin manifest resolves outside the plugin root; refusing to read it.",
+            )
+        if located is None or located.manifest_type != PLUGIN_MANIFEST_TYPE:
             result.add_success("plugin_dep_dedup", "No bundle-reference manifest; check not applicable")
             return result
-        if plugin_root.is_dir() and not self._is_within(manifest_path, plugin_root):
-            return self._skip(result, "Plugin manifest resolves outside the plugin root; refusing to read it.")
+        manifest_path = located.path
         data = self._load_manifest(manifest_path)
         if data is None:
             return self._skip(result, "Plugin manifest could not be parsed as a YAML mapping.")
@@ -63,19 +69,6 @@ class IntraPluginValidator(ValidatorBase):
             result.add_success("plugin_dep_dedup", "No duplicate skill/rule dependency references found")
         result.metadata["advisory_tier2"] = True
         return result
-
-    @staticmethod
-    def _locate_manifest(plugin_root: Path) -> Path | None:
-        if plugin_root.is_file():
-            return plugin_root if plugin_root.name in PLUGIN_MANIFEST_FILES else None
-        return next((plugin_root / name for name in PLUGIN_MANIFEST_FILES if (plugin_root / name).exists()), None)
-
-    @staticmethod
-    def _is_within(candidate: Path, root: Path) -> bool:
-        try:
-            return candidate.resolve().is_relative_to(root.resolve())
-        except OSError:
-            return False
 
     @staticmethod
     def _load_manifest(manifest_path: Path) -> dict[str, Any] | None:

@@ -99,6 +99,8 @@ class PluginEvalPackage:
     unresolved_skill_refs: tuple[str, ...] = ()
     unresolved_rule_refs: tuple[str, ...] = ()
     mcp_unsupported_config: tuple[str, ...] = ()
+    dataset_case_count: int = 0
+    cross_component_case_count: int = 0
     skipped: bool = False
     skip_reason: str | None = None
 
@@ -125,8 +127,20 @@ class PluginEvalPackage:
             "unresolved_rule_refs": unresolved_rule,
             "provider_only_mcp_servers": provider_only_mcp,
             "mcp_unsupported_config": mcp_unsupported_config,
+            "dataset_case_count": self.dataset_case_count,
+            "cross_component_case_count": self.cross_component_case_count,
+            "integration_evidence_ready": self.cross_component_case_count > 0,
             "partial": bool(unresolved_skill or unresolved_rule or provider_only_mcp or mcp_unsupported_config),
         }
+
+    def integration_evidence_error(self) -> str | None:
+        """Explain why an Integration arm would not test composition."""
+        if self.cross_component_case_count > 0:
+            return None
+        return (
+            "Integration evaluation requires at least one dataset case with "
+            "cross_component=true and two or more expected_skills"
+        )
 
 
 def _stage_agent_plugin_manifest(
@@ -309,6 +323,20 @@ def prepare_plugin_eval_package(
     else:
         _write_combined_member_evals(evals_dir, member_skills, plugin_name=plugin_name)
 
+    dataset_path = next((evals_dir / name for name in _EVAL_DATASET_NAMES if (evals_dir / name).exists()), None)
+    if dataset_path is None and not (evals_dir / "harbor").exists():
+        raise ValueError(f"Prepared plugin package has no evaluation dataset: {package_path}")
+    # Native Harbor sources can be valid for effectiveness without carrying the
+    # structured composition metadata required for an Integration claim.
+    dataset_cases = load_dataset_entries(dataset_path) if dataset_path is not None else []
+    cross_component_case_count = sum(
+        1
+        for case in dataset_cases
+        if case.get("cross_component") is True
+        and isinstance(case.get("expected_skills"), list)
+        and len({str(name).strip() for name in case["expected_skills"] if str(name).strip()}) >= 2
+    )
+
     _write_plugin_mcp_servers_toml(evals_dir, runnable_mcp)
     return PluginEvalPackage(
         plugin_name=plugin_name,
@@ -321,6 +349,8 @@ def prepare_plugin_eval_package(
         staged_rules=tuple(rule.name for rule in staged_rules),
         unresolved_skill_refs=unresolved_skill_refs,
         unresolved_rule_refs=unresolved_rule_refs,
+        dataset_case_count=len(dataset_cases),
+        cross_component_case_count=cross_component_case_count,
     )
 
 
@@ -353,21 +383,12 @@ def _is_contained_manifest(path: Path) -> bool:
 
 
 def _manifest_path(plugin_path: Path) -> Path:
-    candidate = plugin_path.expanduser().resolve()
-    if candidate.is_file():
-        if candidate.name in {"agent_plugin.yaml", "agent_plugin.yml"} or _is_contained_manifest(candidate):
-            return candidate
-        raise ValueError(f"Plugin manifest must be agent_plugin.yaml/.yml or .claude-plugin/plugin.json: {candidate}")
-    # Directory: the bundle-reference manifest wins (matches Tier 1 precedence),
-    # then the contained .claude-plugin/plugin.json form.
-    for name in ("agent_plugin.yaml", "agent_plugin.yml"):
-        manifest = candidate / name
-        if manifest.exists():
-            return manifest.resolve()
-    contained = candidate / PLUGIN_CONTAINED_MANIFEST_DIR / PLUGIN_CONTAINED_MANIFEST_FILE
-    if contained.exists():
-        return contained.resolve()
-    raise ValueError(f"No agent_plugin.yaml or .claude-plugin/plugin.json found under {candidate}")
+    from skillevaluator.plugin_manifest import locate_plugin_manifest
+
+    located = locate_plugin_manifest(plugin_path)
+    if located is None:
+        raise ValueError(f"No agent_plugin.yaml or .claude-plugin/plugin.json found under {plugin_path}")
+    return located.path
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:

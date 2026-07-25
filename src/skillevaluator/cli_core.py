@@ -146,3 +146,15 @@ def resolve_plugin_path(path: Path) -> Path:
         if _is_contained_plugin_manifest(path):
             return path.parent.parent
     return path
+
+
+def resolve_content_path(path: Path, content_type: str) -> Path:
+    """Normalize a direct manifest path for the selected content type."""
+    resolvers = {
+        CONTENT_TYPE_SKILL: resolve_skill_path,
+        CONTENT_TYPE_RULES: resolve_rules_path,
+        CONTENT_TYPE_WORKFLOWS: resolve_workflows_path,
+        CONTENT_TYPE_PLUGIN: resolve_plugin_path,
+    }
+    resolver = resolvers.get(content_type)
+    return resolver(path) if resolver else path

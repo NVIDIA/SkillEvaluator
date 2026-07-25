@@ -9,6 +9,7 @@ import copy
 import logging
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
@@ -51,6 +52,9 @@ from skillevaluator.utils.tier2_paths import (
     paths_refer_to_same_location,
     sanitize_tier2_results,
 )
+
+if TYPE_CHECKING:
+    from skillevaluator.tier3.plugin_eval import PluginEvalPackage
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -560,6 +564,34 @@ def _run_agent_eval_or_skip(
     return result
 
 
+def _plugin_lift_mode_for_evidence(
+    prepared: PluginEvalPackage,
+    requested_lift_mode: str,
+) -> tuple[str, str | None]:
+    """Resolve a plugin lift mode without discarding a valid effectiveness run."""
+    if requested_lift_mode not in {"integration", "both"}:
+        return requested_lift_mode, None
+    evidence_error = prepared.integration_evidence_error()
+    if evidence_error and requested_lift_mode == "both":
+        return "effectiveness", evidence_error
+    return requested_lift_mode, evidence_error
+
+
+def _plugin_lift_fallback_metadata(
+    requested_lift_mode: str,
+    effective_lift_mode: str,
+    integration_skip_reason: str | None,
+) -> dict[str, str]:
+    """Describe an Integration-to-effectiveness fallback."""
+    if integration_skip_reason is None:
+        return {}
+    return {
+        "requested_lift_mode": requested_lift_mode,
+        "effective_lift_mode": effective_lift_mode,
+        "integration_skip_reason": integration_skip_reason,
+    }
+
+
 def _run_plugin_agent_eval(
     plugin_target: Path,
     *,
@@ -596,6 +628,7 @@ def _run_plugin_agent_eval(
     def _skipped(message: str) -> ValidationResult:
         return advisory_skip_result(message, skill_name=plugin_dir.name)
 
+    fallback_metadata: dict[str, str] = {}
     try:
         with tempfile.TemporaryDirectory(prefix="skillevaluator-plugin-eval-") as temp_dir:
             prepared = prepare_plugin_eval_package(
@@ -607,6 +640,17 @@ def _run_plugin_agent_eval(
                 return _skipped(
                     f"Tier 3 plugin evaluation skipped: {prepared.skip_reason or 'nothing locally evaluable'}"
                 )
+            effective_lift_mode, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
+            if lift_mode in {"integration", "both"}:
+                if skip_baseline:
+                    return _skipped("Tier 3 plugin Integration requires a baseline; remove --skip-baseline.")
+                if integration_skip_reason and lift_mode == "integration":
+                    return _skipped(f"Tier 3 plugin Integration is inconclusive: {integration_skip_reason}.")
+            fallback_metadata = _plugin_lift_fallback_metadata(
+                lift_mode,
+                effective_lift_mode,
+                integration_skip_reason,
+            )
 
             options = EvaluationOptions(
                 skill_path=prepared.package_path,
@@ -623,8 +667,8 @@ def _run_plugin_agent_eval(
                 grading_mode=grading_mode,
                 skill_workspace_mode="group",
                 include_skills=prepared.include_skills,
-                workspace_skills_baseline=lift_mode == "integration",
-                sum_of_parts_arm=lift_mode == "both",
+                workspace_skills_baseline=effective_lift_mode == "integration",
+                sum_of_parts_arm=effective_lift_mode == "both",
                 eval_target_kind="plugin",
                 results_dir=results_dir,
                 resolved_results_root=resolve_results_root(plugin_dir, results_dir),
@@ -641,6 +685,7 @@ def _run_plugin_agent_eval(
                 return _skipped(f"Tier 3 plugin evaluation did not complete: {failure}")
 
             provenance = prepared.provenance()
+            provenance.update(fallback_metadata)
             if isinstance(engine_result, dict) and engine_result.get("run_dir"):
                 write_plugin_provenance(Path(str(engine_result["run_dir"])), provenance)
             result = agent_eval_result_from_run(
@@ -654,7 +699,10 @@ def _run_plugin_agent_eval(
     except Exception as exc:
         return _skipped(f"Tier 3 plugin evaluation skipped: {exc}")
 
-    return result or _skipped("Tier 3 plugin evaluation produced no parseable results.")
+    if result is None:
+        return _skipped("Tier 3 plugin evaluation produced no parseable results.")
+    result.metadata.update(fallback_metadata)
+    return result
 
 
 # Per-tier section headings printed by ``validate`` as each tier runs. They give
@@ -1248,7 +1296,7 @@ def validate(
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
 
-    from skillevaluator.cli_core import detect_content_type, resolve_plugin_path
+    from skillevaluator.cli_core import detect_content_type, resolve_content_path
     from skillevaluator.constants import (
         CONTENT_TYPE_PLUGIN,
         CONTENT_TYPE_RULES,
@@ -1269,7 +1317,7 @@ def validate(
         raise click.ClickException(str(exc)) from exc
 
     resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
-    resolved_target = resolve_plugin_path(target_path) if resolved_type == CONTENT_TYPE_PLUGIN else target_path
+    resolved_target = resolve_content_path(target_path, resolved_type)
 
     # --full is the one-shot (everything incl. autopilot); --autopilot implies
     # Tier 3; --tiers is the explicit selector. Explicit --no-tier2 still wins.
@@ -1938,7 +1986,11 @@ def evaluate(
     type=click.Choice(["effectiveness", "integration", "both"]),
     default="effectiveness",
     show_default=True,
-    help="Compare against no plugin, sum-of-parts, or both baselines.",
+    help=(
+        "Compare against no plugin, sum-of-parts, or both baselines. Integration "
+        "requires a cross-component dataset case; 'both' falls back to effectiveness "
+        "when composition evidence is unavailable."
+    ),
 )
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
@@ -2030,6 +2082,20 @@ def evaluate_plugin(
             if prepared.skipped or prepared.package_path is None:
                 console.print(f"[yellow]Skipping plugin evaluation:[/yellow] {prepared.skip_reason}")
                 return
+            effective_lift_mode, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
+            if lift_mode in {"integration", "both"}:
+                if skip_baseline:
+                    raise click.ClickException("Plugin Integration requires a baseline; remove --skip-baseline.")
+                if integration_skip_reason and lift_mode == "integration":
+                    raise click.ClickException(
+                        f"Plugin Integration is inconclusive: {integration_skip_reason}. "
+                        "Add a cross-component case or use --lift-mode effectiveness."
+                    )
+                if integration_skip_reason:
+                    console.print(
+                        f"[yellow]Integration skipped:[/yellow] {integration_skip_reason}. "
+                        "Running effectiveness only."
+                    )
 
             options = EvaluationOptions(
                 skill_path=prepared.package_path,
@@ -2046,8 +2112,8 @@ def evaluate_plugin(
                 custom_dockerfile_mode=custom_dockerfile_mode,
                 skill_workspace_mode="group",
                 include_skills=prepared.include_skills,
-                workspace_skills_baseline=lift_mode == "integration",
-                sum_of_parts_arm=lift_mode == "both",
+                workspace_skills_baseline=effective_lift_mode == "integration",
+                sum_of_parts_arm=effective_lift_mode == "both",
                 eval_target_kind="plugin",
                 copy_repo=copy_repo,
                 grading_mode=grading_mode,
@@ -2070,6 +2136,13 @@ def evaluate_plugin(
                 raise click.ClickException(f"Tier 3 plugin evaluation did not complete: {failure}")
 
             provenance = prepared.provenance()
+            provenance.update(
+                _plugin_lift_fallback_metadata(
+                    lift_mode,
+                    effective_lift_mode,
+                    integration_skip_reason,
+                )
+            )
             if isinstance(engine_result, dict) and engine_result.get("run_dir"):
                 write_plugin_provenance(Path(str(engine_result["run_dir"])), provenance)
             if provenance.get("partial"):

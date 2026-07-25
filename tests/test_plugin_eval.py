@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package
+from skillevaluator.cli import _plugin_lift_mode_for_evidence
+from skillevaluator.plugin_manifest import locate_plugin_manifest
+from skillevaluator.tier3.plugin_eval import PluginEvalPackage, prepare_plugin_eval_package
 
 
 def _skill(root: Path, name: str = "demo") -> Path:
@@ -43,6 +45,100 @@ def test_contained_plugin_stages_member_skill_and_combined_dataset(tmp_path: Pat
     entries = json.loads((package.package_path / "evals" / "evals.json").read_text(encoding="utf-8"))
     assert entries[0]["id"] == "demo-case-1"
     assert entries[0]["plugin_eval_source_skill"] == "demo"
+
+
+def test_plugin_integration_evidence_is_counted_from_dataset(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "public-plugin", "skills": "./skills"}), encoding="utf-8")
+    _skill(plugin, "alpha")
+    _skill(plugin, "beta")
+    evals = plugin / "evals"
+    evals.mkdir()
+    evals.joinpath("evals.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "composition",
+                    "prompt": "Use both skills.",
+                    "expected_skills": ["alpha", "beta"],
+                    "cross_component": True,
+                },
+                {
+                    "id": "single",
+                    "prompt": "Use alpha.",
+                    "expected_skills": ["alpha"],
+                    "cross_component": False,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+    assert package.dataset_case_count == 2
+    assert package.cross_component_case_count == 1
+    assert package.integration_evidence_error() is None
+    assert package.provenance()["integration_evidence_ready"] is True
+
+
+def test_both_lift_falls_back_without_composition_evidence() -> None:
+    package = PluginEvalPackage(
+        plugin_name="public-plugin",
+        package_path=Path("/unused"),
+        include_skills=(),
+        unresolved_mcp_servers=(),
+        runnable_mcp_servers=(),
+        rule_refs=(),
+        dataset_case_count=1,
+        cross_component_case_count=0,
+    )
+
+    effective, reason = _plugin_lift_mode_for_evidence(package, "both")
+
+    assert effective == "effectiveness"
+    assert reason is not None
+    assert "cross_component=true" in reason
+    assert _plugin_lift_mode_for_evidence(package, "integration") == ("integration", reason)
+
+
+def test_prepare_rejects_out_of_root_manifest_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"name": "outside"}', encoding="utf-8")
+    plugin = tmp_path / "plugin"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    try:
+        (manifest_dir / "plugin.json").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(ValueError, match="outside the plugin root"):
+        prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+
+def test_symlinked_standalone_plugin_directory_is_supported(tmp_path: Path) -> None:
+    real_plugin = tmp_path / "real-plugin"
+    manifest = real_plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "linked-plugin", "skills": "./skills"}), encoding="utf-8")
+    _skill(real_plugin)
+    linked_plugin = tmp_path / "linked-plugin"
+    try:
+        linked_plugin.symlink_to(real_plugin, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    located = locate_plugin_manifest(linked_plugin)
+    package = prepare_plugin_eval_package(linked_plugin, stage_root=tmp_path / "stage")
+
+    assert located is not None
+    assert located.root == linked_plugin
+    assert located.path == manifest.resolve()
+    assert not package.skipped
+    assert package.plugin_name == "linked-plugin"
 
 
 def test_remote_only_public_bundle_is_honestly_skipped(tmp_path: Path) -> None:

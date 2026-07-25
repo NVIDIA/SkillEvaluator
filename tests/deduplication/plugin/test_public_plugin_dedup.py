@@ -3,6 +3,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.deduplication.plugin.intra_plugin_validator import IntraPluginValidator
 from skillevaluator.deduplication.plugin.ref_utils import find_duplicate_refs, normalize_ref
 from skillevaluator.models.result import Severity
@@ -38,6 +40,26 @@ skills:
 def test_invalid_manifest_is_an_optional_skip(tmp_path: Path) -> None:
     (tmp_path / "agent_plugin.yaml").write_text("name: [unterminated", encoding="utf-8")
     result = IntraPluginValidator().validate(tmp_path)
+    assert result.passed
+    assert result.metadata["execution_status"] == "skipped"
+    assert result.metadata["optional"] is True
+
+
+def test_symlinked_manifest_outside_plugin_is_an_optional_skip(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(
+        "name: outside\nauthor: {email: dev@example.com}\nskills:\n  refs: [github::example/repo::skills::a]\n",
+        encoding="utf-8",
+    )
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    try:
+        (plugin / "agent_plugin.yaml").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    result = IntraPluginValidator().validate(plugin)
+
     assert result.passed
     assert result.metadata["execution_status"] == "skipped"
     assert result.metadata["optional"] is True

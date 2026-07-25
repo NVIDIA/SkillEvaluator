@@ -68,6 +68,34 @@ def test_tier_alias_help() -> None:
         assert result.exit_code == 0
 
 
+def test_validate_accepts_direct_skill_manifest(tmp_path: Path) -> None:
+    skill = tmp_path / "sample"
+    skill.mkdir()
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        "---\n"
+        "name: sample\n"
+        "description: Direct manifest validation fixture\n"
+        "metadata:\n"
+        "  author: Test Author <test@example.com>\n"
+        "---\n\n"
+        "# Sample\n\nFollow the request.\n",
+        encoding="utf-8",
+    )
+
+    direct = CliRunner().invoke(
+        cli,
+        ["validate", str(manifest), "--checks", "schema", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+    directory = CliRunner().invoke(
+        cli,
+        ["validate", str(skill), "--checks", "schema", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+
+    assert direct.exit_code == directory.exit_code == 0, direct.output
+    assert "No skills found" not in direct.output
+
+
 def test_similarity_help_exposes_catalog_workflow_and_hides_legacy_cache_names() -> None:
     result = CliRunner().invoke(cli, ["similarity-check", "--help"])
 

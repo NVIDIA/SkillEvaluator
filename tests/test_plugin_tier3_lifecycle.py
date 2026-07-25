@@ -5,17 +5,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 
+import pytest
 from click.testing import CliRunner
 
 from skillevaluator import cli as cli_module
 from skillevaluator.evaluation import EvaluationService
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.tier3.harbor import runner
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def test_plugin_dispatch_configures_clean_effectiveness_and_sum_of_parts_arms(
@@ -32,6 +29,7 @@ def test_plugin_dispatch_configures_clean_effectiveness_and_sum_of_parts_arms(
         skipped=False,
         package_path=package_path,
         include_skills=(member,),
+        integration_evidence_error=lambda: None,
         provenance=lambda: {"plugin_name": "plugin", "partial": False},
     )
     monkeypatch.setattr("skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package", lambda *_a, **_k: prepared)
@@ -116,6 +114,7 @@ def test_tier3_evaluate_plugin_command_uses_public_plugin_options(
         unresolved_skill_refs=(),
         unresolved_rule_refs=(),
         unresolved_mcp_servers=(),
+        integration_evidence_error=lambda: None,
         provenance=lambda: {"plugin_name": "plugin", "partial": False},
     )
     monkeypatch.setattr("skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package", lambda *_a, **_k: prepared)
@@ -138,3 +137,48 @@ def test_tier3_evaluate_plugin_command_uses_public_plugin_options(
     assert options.workspace_skills_baseline is False
     assert options.sum_of_parts_arm is True
     assert options.resolved_results_root == plugin / "evals" / "results"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "evidence_error", "expected"),
+    [
+        (["--lift-mode", "integration"], "composition evidence is missing", "Integration is inconclusive"),
+        (["--lift-mode", "both", "--skip-baseline"], None, "Integration requires a baseline"),
+    ],
+)
+def test_tier3_evaluate_plugin_rejects_invalid_integration_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: list[str],
+    evidence_error: str | None,
+    expected: str,
+) -> None:
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    package_path = tmp_path / "package"
+    package_path.mkdir()
+    prepared = SimpleNamespace(
+        skipped=False,
+        skip_reason=None,
+        package_path=package_path,
+        include_skills=(),
+        unresolved_skill_refs=(),
+        unresolved_rule_refs=(),
+        unresolved_mcp_servers=(),
+        integration_evidence_error=lambda: evidence_error,
+        provenance=lambda: {"plugin_name": "plugin", "partial": False},
+    )
+    monkeypatch.setattr("skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package", lambda *_a, **_k: prepared)
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda *_a, **_k: pytest.fail("evaluation must not start"),
+    )
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["tier3", "evaluate-plugin", str(plugin), *arguments, "--progress", "off"],
+    )
+
+    assert result.exit_code != 0
+    assert expected in result.output

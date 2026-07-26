@@ -275,14 +275,21 @@ def test_public_distributions_include_nvidia_build_runtime_bridges(tmp_path: Pat
 
     with zipfile.ZipFile(wheels[0]) as archive:
         wheel_members = set(archive.namelist())
+        metadata_member = next(member for member in wheel_members if member.endswith(".dist-info/METADATA"))
+        wheel_metadata = archive.read(metadata_member).decode("utf-8")
     missing_from_wheel = PACKAGED_NVIDIA_BUILD_RUNTIME_FILES - wheel_members
     assert not missing_from_wheel, f"wheel is missing runtime bridge files: {sorted(missing_from_wheel)}"
+    assert not any(member.startswith("skillevaluator/telemetry/") for member in wheel_members)
+    assert "Provides-Extra: telemetry" not in wheel_metadata
+    assert "Requires-Dist: protobuf" not in wheel_metadata
+    assert "Requires-Dist: opentelemetry-" not in wheel_metadata
 
     with tarfile.open(sdists[0], "r:gz") as archive:
         sdist_members = {member.name.partition("/")[2] for member in archive.getmembers()}
     expected_sdist_members = {f"src/{path}" for path in PACKAGED_NVIDIA_BUILD_RUNTIME_FILES}
     missing_from_sdist = expected_sdist_members - sdist_members
     assert not missing_from_sdist, f"sdist is missing runtime bridge files: {sorted(missing_from_sdist)}"
+    assert not any(member.startswith("src/skillevaluator/telemetry/") for member in sdist_members)
 
 
 def test_removed_benchmark_authoring_surface_stays_absent() -> None:

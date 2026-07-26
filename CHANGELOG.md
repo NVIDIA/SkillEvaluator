@@ -32,9 +32,14 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Changed
 
-- Removed the optional OpenTelemetry integration and its direct Protobuf
-  dependency from the public distribution. Skill Evaluator continues to strip
-  inherited tracing configuration from child processes.
+- Removed the optional OpenTelemetry integration, the
+  `skillevaluator[telemetry]` extra, and the `skillevaluator.telemetry` Python
+  module from the public distribution. Imports of that module now fail rather
+  than providing the former telemetry and safety helpers. Redaction and
+  child-process environment filtering remain available from
+  `skillevaluator.utils.redaction` and
+  `skillevaluator.utils.process_environment`; direct Protobuf and OpenTelemetry
+  dependencies are no longer installed.
 - Changed the public OpenAI default to `gpt-5.4-mini` and the NVIDIA Build
   default to `nvidia/nemotron-3-nano-30b-a3b`; OpenCode, Codex, and experimental
   Claude Code now resolve that Build default without redundant model flags.

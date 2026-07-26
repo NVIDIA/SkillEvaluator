@@ -30,10 +30,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from skillevaluator.telemetry import child_process_env
 from skillevaluator.tier3.case_ids import safe_child, validate_case_ids
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.utils.process_environment import child_process_env
 
 logger = logging.getLogger(__name__)
 

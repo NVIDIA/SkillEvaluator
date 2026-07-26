@@ -32,6 +32,9 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Changed
 
+- Removed the optional OpenTelemetry integration and its direct Protobuf
+  dependency from the public distribution. Skill Evaluator continues to strip
+  inherited tracing configuration from child processes.
 - Changed the public OpenAI default to `gpt-5.4-mini` and the NVIDIA Build
   default to `nvidia/nemotron-3-nano-30b-a3b`; OpenCode, Codex, and experimental
   Claude Code now resolve that Build default without redundant model flags.

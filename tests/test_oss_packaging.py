@@ -199,20 +199,27 @@ def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -
     assert versions["pydantic-settings"] >= Version("2.14.2")
 
 
-def test_release_lock_enforces_nspect_remediation_floors_on_all_platforms() -> None:
+def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemetry_stack() -> None:
     project = _project()
-    tier3 = project["project"]["optional-dependencies"]["tier3"]
+    extras = project["project"]["optional-dependencies"]
+    tier3 = extras["tier3"]
     all_lock_versions: dict[str, list[Version]] = {}
     for package in _lock()["package"]:
         all_lock_versions.setdefault(package["name"], []).append(Version(package["version"]))
 
     assert "mcp>=1.28.1,<2" in tier3
     assert "pyjwt[crypto]>=2.13.0" in tier3
-    for extra in ("llm", "telemetry"):
-        assert "protobuf>=7.35.1" in project["project"]["optional-dependencies"][extra]
+    assert "telemetry" not in extras
+    assert all(
+        "protobuf" not in requirement.lower() for requirements in extras.values() for requirement in requirements
+    )
+    assert all(
+        "opentelemetry" not in requirement.lower() for requirements in extras.values() for requirement in requirements
+    )
     assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
-    assert all(version >= Version("7.35.1") for version in all_lock_versions["protobuf"])
+    assert "protobuf" not in all_lock_versions
+    assert not any(name.startswith("opentelemetry") for name in all_lock_versions)
 
 
 def test_public_docs_declare_support_and_security_sections() -> None:
@@ -320,7 +327,7 @@ def test_public_slim_docker_image_uses_only_distribution_dependencies() -> None:
     extras = project["project"]["optional-dependencies"]
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "skillevaluator[tier2,tier3,telemetry,security]" in extras["all"]
+    assert "skillevaluator[tier2,tier3,security]" in extras["all"]
     assert re.search(r"^FROM python:3\.12-slim$", dockerfile, flags=re.MULTILINE)
 
     public_install = 'python -m pip install --no-cache-dir ".[all]"'

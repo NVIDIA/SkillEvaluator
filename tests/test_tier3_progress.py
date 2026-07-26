@@ -667,7 +667,6 @@ def _stub_runner(
     )
     monkeypatch.setattr(runner, "collect_harbor_results", collect or collect_results)
     monkeypatch.setattr(runner, "render_agent_eval_html_report", html_report or write_html)
-    monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
     return runner, skill
 
 
@@ -919,8 +918,6 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
         return report
 
     monkeypatch.setattr(runner, "render_agent_eval_html_report", _write_report)
-    monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
-
     result = runner.run_harbor_eval(
         skill,
         ["codex", "opencode"],

@@ -8,14 +8,22 @@ def _reward(metric_score=0.1):
     return {
         "entry_id": "evaluator-plugin-002",
         "goal_accuracy": metric_score,
-        "security": 1.0, "skill_execution": 1.0, "skill_efficiency": 1.0,
-        "accuracy": 1.0, "behavior_check": 1.0,
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "behavior_check": 1.0,
         "details": {
             "goal_accuracy": {
                 "reason": "job submitted but results file not produced",
                 "evidence_refs": [
-                    {"source": "trajectory.json", "json_pointer": "/steps/14",
-                     "kind": "tool_call", "label": "bash: nemo evaluator submit", "excerpt": "submit ..."},
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/14",
+                        "kind": "tool_call",
+                        "label": "bash: nemo evaluator submit",
+                        "excerpt": "submit ...",
+                    },
                 ],
                 "omitted": {"count": 3, "truncated": True, "reason": "older results dropped"},
             },
@@ -29,21 +37,33 @@ def _reward_multi_metric(metric_score=0.1):
         "entry_id": "evaluator-plugin-003",
         "goal_accuracy": metric_score,
         "security": 0.3,
-        "skill_execution": 1.0, "skill_efficiency": 1.0,
-        "accuracy": 1.0, "behavior_check": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "behavior_check": 1.0,
         "details": {
             "goal_accuracy": {
                 "reason": "results file not produced",
                 "evidence_refs": [
-                    {"source": "trajectory.json", "json_pointer": "/steps/14",
-                     "kind": "tool_call", "path": "steps[14].tool_use", "excerpt": "submit ..."},
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/14",
+                        "kind": "tool_call",
+                        "path": "steps[14].tool_use",
+                        "excerpt": "submit ...",
+                    },
                 ],
             },
             "security": {
                 "reason": "unsafe operation",
                 "evidence_refs": [
-                    {"source": "trajectory.json", "json_pointer": "/steps/5",
-                     "kind": "tool_call", "path": "steps[5].tool_use", "excerpt": "rm -rf /"},
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/5",
+                        "kind": "tool_call",
+                        "path": "steps[5].tool_use",
+                        "excerpt": "rm -rf /",
+                    },
                 ],
             },
         },
@@ -63,22 +83,28 @@ def test_generate_suggestions_prompt_includes_refs_and_uses_larger_budget(monkey
     def fake_hub(prompt, **_kw):
         captured["prompt"] = prompt
         captured["max_tokens"] = _kw.get("max_tokens")
-        return ('[{"suggestion": "Wait for the evaluator job and save results.", '
-                '"dimension": "goal_accuracy", "evidence_refs": ["trajectory.json#/steps/14"]}]', None)
+        return (
+            '[{"suggestion": "Wait for the evaluator job and save results.", '
+            '"dimension": "goal_accuracy", "evidence_refs": ["trajectory.json#/steps/14"]}]',
+            None,
+        )
 
     monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
     findings = report._extract_findings([_reward(0.1)])
     out = report._generate_suggestions("demo-skill", findings, [_reward(0.1)])
-    assert "/steps/14" in captured["prompt"]               # refs reached the prompt
+    assert "/steps/14" in captured["prompt"]  # refs reached the prompt
     assert captured["max_tokens"] and captured["max_tokens"] >= 1024  # raised from 512
-    assert out and isinstance(out[0], str)                 # back-compat: returns display strings
+    assert out and isinstance(out[0], str)  # back-compat: returns display strings
 
 
 def test_generate_suggestions_structured_returns_objects(monkeypatch):
     monkeypatch.setattr(
         "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
-        lambda _prompt, **_kw: ('[{"suggestion": "X", "dimension": "goal_accuracy", '
-                              '"evidence_refs": ["trajectory.json#/steps/14"]}]', None))
+        lambda _prompt, **_kw: (
+            '[{"suggestion": "X", "dimension": "goal_accuracy", "evidence_refs": ["trajectory.json#/steps/14"]}]',
+            None,
+        ),
+    )
     findings = report._extract_findings([_reward(0.1)])
     objs = report._generate_suggestions_structured("demo", findings, [_reward(0.1)])
     assert objs and objs[0]["dimension"] == "goal_accuracy" and "suggestion" in objs[0]
@@ -86,18 +112,30 @@ def test_generate_suggestions_structured_returns_objects(monkeypatch):
 
 def test_findings_artifact_includes_suggestions_v2(tmp_path):
     import json
+
     findings = report._extract_findings([_reward(0.1)])
     art = report._write_findings_artifact(
-        results_dir=tmp_path, skill_name="demo", agent="codex",
-        findings=findings, suggestions=["do X"], suggestion_mode="remediation",
-        suggestions_v2=[{"suggestion": "do X", "dimension": "goal_accuracy",
-                         "trial_id": "evaluator-plugin-002", "evidence_refs": []}],
+        results_dir=tmp_path,
+        skill_name="demo",
+        agent="codex",
+        findings=findings,
+        suggestions=["do X"],
+        suggestion_mode="remediation",
+        suggestions_v2=[
+            {
+                "suggestion": "do X",
+                "dimension": "goal_accuracy",
+                "trial_id": "evaluator-plugin-002",
+                "evidence_refs": [],
+            }
+        ],
     )
     payload = json.loads(art.read_text())
     assert "suggestions_v2" in payload and payload["suggestions_v2"][0]["dimension"] == "goal_accuracy"
 
 
 # --- New tests for dict-shaped evidence_refs in suggestions_v2 ---
+
 
 def test_suggestions_evidence_refs_resolved_to_full_dict(monkeypatch):
     """LLM returns string ref; function resolves it to the full dict from rewards."""
@@ -152,8 +190,7 @@ def test_suggestions_evidence_refs_lookup_uses_all_metrics(monkeypatch):
     monkeypatch.setattr(
         "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
         lambda _prompt, **_kw: (
-            '[{"suggestion": "Fix security", "dimension": "security",'
-            ' "evidence_refs": ["trajectory.json#/steps/5"]}]',
+            '[{"suggestion": "Fix security", "dimension": "security", "evidence_refs": ["trajectory.json#/steps/5"]}]',
             None,
         ),
     )
@@ -182,12 +219,10 @@ def test_suggestions_structured_evidence_refs_are_dicts_not_strings(monkeypatch)
     objs = report._generate_suggestions_structured("demo", findings, [reward])
     for obj in objs:
         for ref in obj.get("evidence_refs", []):
-            assert isinstance(ref, dict), (
-                f"evidence_ref must be a dict in suggestions_v2, got {type(ref)!r}: {ref!r}"
-            )
+            assert isinstance(ref, dict), f"evidence_ref must be a dict in suggestions_v2, got {type(ref)!r}: {ref!r}"
 
 
-def test_display_findings_report_writes_artifact_and_records_telemetry(tmp_path, monkeypatch):
+def test_display_findings_report_writes_artifact(tmp_path, monkeypatch):
     """Smoke the real findings report display path over a temporary run directory."""
     import json
 
@@ -195,8 +230,6 @@ def test_display_findings_report_writes_artifact_and_records_telemetry(tmp_path,
     trial_dir.mkdir(parents=True)
     reward = _reward(0.1)
     (trial_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
-    captured = []
-
     monkeypatch.setattr(
         report,
         "_generate_suggestions_structured",
@@ -208,8 +241,6 @@ def test_display_findings_report_writes_artifact_and_records_telemetry(tmp_path,
             }
         ],
     )
-    monkeypatch.setattr(report, "record_agent_eval_findings", lambda **kwargs: captured.append(kwargs))
-
     report.display_findings_report(
         {
             "env_mode": "local",
@@ -241,9 +272,3 @@ def test_display_findings_report_writes_artifact_and_records_telemetry(tmp_path,
     assert payload["suggestions"] == ["Tighten the workflow around result-file creation."]
     assert payload["suggestions_v2"][0]["dimension"] == "goal_accuracy"
     assert any(finding["metric"] == "goal_accuracy" for finding in payload["findings"])
-
-    assert captured
-    assert captured[0]["skill_name"] == "demo-skill"
-    assert captured[0]["agent"] == "codex"
-    assert captured[0]["env_mode"] == "local"
-    assert captured[0]["artifact_path"] == artifact

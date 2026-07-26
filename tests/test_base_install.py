@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prove the base install runs Tier 1 without Harbor, LLM, or telemetry extras.
+"""Prove the base install runs Tier 1 without Harbor or LLM extras.
 
 A subprocess installs an import blocker for every extras-only top-level module,
 then imports the CLI and runs static validation. This isolates from any heavy
@@ -24,8 +24,7 @@ import sys
 
 BLOCKED = {
     "anthropic", "boto3", "botocore", "harbor", "openai", "litellm",
-    "langgraph", "langgraph_checkpoint",
-    "opentelemetry",
+    "langgraph", "langgraph_checkpoint", "opentelemetry",
 }
 
 

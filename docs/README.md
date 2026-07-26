@@ -13,7 +13,7 @@ contributors making non-trivial edits.
 
 - `index.mdx` — landing page and three-tier overview
 - `installation.mdx` — extras, pip, Docker, requirements
-- `configuration.mdx` — credential map, providers, embeddings, telemetry
+- `configuration.mdx` — credential map, providers, and embeddings
 - `tier1-validation.mdx` — checks, flags, reports, CI recipe
 - `tier2-deduplication.mdx` — dedup commands and thresholds
 - `tier3-live-evaluation.mdx` — skill evaluation with live agents

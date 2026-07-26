@@ -556,7 +556,6 @@ def test_html_generation_failure_is_persisted_identically_to_returned_result(
     monkeypatch.setattr(runner, "generate_harbor_tasks", emit_tasks)
     monkeypatch.setattr(runner, "_run_agent_pair", lambda **_kwargs: [])
     monkeypatch.setattr(runner, "render_agent_eval_html_report", fail_html)
-    monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
     monkeypatch.setattr(Path, "symlink_to", deny_symlink)
 
     returned = runner.run_harbor_eval(

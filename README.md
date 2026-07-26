@@ -42,7 +42,7 @@ uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVID
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
 
 The `all` bundle includes the Tier 1 Python scanners, Tier 2, Tier 3 with
-Harbor, LLM clients, and telemetry. System-level tools remain explicit:
+Harbor, and LLM clients. System-level tools remain explicit:
 Gitleaks is required for a complete Tier 1 security result, Docker is required
 for Tier 3 Docker mode, and live evaluation needs the selected agent CLI and
 credentials.
@@ -152,10 +152,6 @@ servers work too: [configuration guide](docs/configuration.mdx).
 
 The external publication profile is the default. `--external` is shorthand
 for `--profile external`, and `--policy` can overlay a custom policy file.
-
-Telemetry is disabled by default. To opt in, install the `telemetry` extra
-(included in `all`), set `SKILLEVALUATOR_TELEMETRY_ENABLED=true`, and configure
-an OpenTelemetry endpoint; see the [configuration guide](docs/configuration.mdx#telemetry).
 
 ## Tier 2: Semantic Deduplication
 
@@ -315,7 +311,7 @@ uv sync --python 3.13 --all-extras
 - [Tier 1 guide](docs/tier1-validation.mdx) — checks, flags, reports, CI recipe
 - [Tier 2 guide](docs/tier2-deduplication.mdx) — dedup commands and thresholds
 - [Tier 3 guide](docs/tier3-live-evaluation.mdx) — skill evaluation with live agents, in depth
-- [Configuration](docs/configuration.mdx) — credential map, providers, embeddings, telemetry
+- [Configuration](docs/configuration.mdx) — credential map, providers, and embeddings
 - [Developer guide](docs/developer-guide.mdx) — contributor setup
 - Related: [SkillSpector](https://github.com/NVIDIA/SkillSpector) (skill
   security scanner used by the `security` extra),

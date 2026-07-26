@@ -45,19 +45,8 @@ import json
 import os
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any
-
-try:
-    from skillevaluator.telemetry import record_dataset_creation, trace_span
-except ModuleNotFoundError as exc:
-    if exc.name != "skillevaluator.telemetry":
-        raise
-    _SRC_ROOT = Path(__file__).resolve().parents[1]
-    if str(_SRC_ROOT) not in sys.path:
-        sys.path.insert(0, str(_SRC_ROOT))
-    from skillevaluator.telemetry import record_dataset_creation, trace_span
 
 _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
@@ -864,7 +853,6 @@ def _refine_from_trajectory_template(
 
 
 def main():
-    start_time = time.perf_counter()
     parser = argparse.ArgumentParser(
         description="Generate eval dataset for a skill.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -922,11 +910,6 @@ Agent-refined mode (--refine):
 
     args = parser.parse_args()
     skill_path = args.path.resolve()
-    telemetry_mode = "full" if args.full else "simple"
-    if args.no_llm:
-        telemetry_mode = f"{telemetry_mode}_template"
-    if args.refine:
-        telemetry_mode = f"{telemetry_mode}_refined"
 
     if not (skill_path / "SKILL.md").exists():
         print(f"Error: {skill_path} does not contain a SKILL.md")
@@ -960,75 +943,54 @@ Agent-refined mode (--refine):
         mode_parts.append("agent-refined")
     print(f"  Mode: {', '.join(mode_parts)}")
 
-    with trace_span(
-        "skillevaluator.dataset.generate",
-        {
-            "skillevaluator.command": "create_dataset",
-            "skillevaluator.layer": "dataset_creation",
-            "skillevaluator.skill.name": skill["name"],
-            "skillevaluator.dataset.mode": telemetry_mode,
-            "skillevaluator.dataset.no_llm": args.no_llm,
-            "skillevaluator.dataset.refined": args.refine,
-            "skillevaluator.dataset.dry_run": args.dry_run,
-        },
-    ):
-        # Step 1: Generate initial cases
-        if args.no_llm:
-            cases = _generate_full(skill) if args.full else _generate_simple(skill)
-        else:
-            cases = asyncio.run(_generate_with_llm(skill, full=args.full))
+    # Step 1: Generate initial cases
+    if args.no_llm:
+        cases = _generate_full(skill) if args.full else _generate_simple(skill)
+    else:
+        cases = asyncio.run(_generate_with_llm(skill, full=args.full))
 
-        print(f"\nGenerated {len(cases)} initial test case(s):")
-        for case in cases:
-            neg = " (negative)" if case.get("expected_skill") is None else ""
-            print(f"  [{case['id']}]{neg} {case['question'][:70]}")
+    print(f"\nGenerated {len(cases)} initial test case(s):")
+    for case in cases:
+        neg = " (negative)" if case.get("expected_skill") is None else ""
+        print(f"  [{case['id']}]{neg} {case['question'][:70]}")
 
-        # Step 2: Refine with agent trajectory (if --refine)
-        if args.refine:
-            print("\nRefining with agent trajectory...")
+    # Step 2: Refine with agent trajectory (if --refine)
+    if args.refine:
+        print("\nRefining with agent trajectory...")
 
-            trajectories = _discover_trajectories(
-                skill_path,
-                from_results=args.from_results,
-                results_dir=args.results_dir,
-            )
+        trajectories = _discover_trajectories(
+            skill_path,
+            from_results=args.from_results,
+            results_dir=args.results_dir,
+        )
 
-            if not trajectories:
-                print("  No existing trajectory found.")
-                if args.dry_run:
-                    print("  Dry run: not launching an agent or writing a staging dataset to collect trajectories.")
-                else:
-                    trajectories = _run_agent_collect_trajectories(
-                        skill_path,
-                        cases,
-                        results_dir=args.results_dir,
-                    )
-
-            if trajectories:
-                matched = sum(1 for c in cases if c["id"] in trajectories)
-                print(f"  Trajectory matched {matched}/{len(cases)} case(s)")
-
-                if args.no_llm:
-                    cases = _refine_from_trajectory_template(cases, trajectories, skill=skill)
-                    print("  Applied template-based refinement from trajectory")
-                else:
-                    cases = asyncio.run(_refine_with_llm(skill, cases, trajectories))
-                    print(f"  Refined {len(cases)} case(s) with LLM + trajectory")
+        if not trajectories:
+            print("  No existing trajectory found.")
+            if args.dry_run:
+                print("  Dry run: not launching an agent or writing a staging dataset to collect trajectories.")
             else:
-                print("  No trajectory available — using initial cases as-is.")
+                trajectories = _run_agent_collect_trajectories(
+                    skill_path,
+                    cases,
+                    results_dir=args.results_dir,
+                )
+
+        if trajectories:
+            matched = sum(1 for c in cases if c["id"] in trajectories)
+            print(f"  Trajectory matched {matched}/{len(cases)} case(s)")
+
+            if args.no_llm:
+                cases = _refine_from_trajectory_template(cases, trajectories, skill=skill)
+                print("  Applied template-based refinement from trajectory")
+            else:
+                cases = asyncio.run(_refine_with_llm(skill, cases, trajectories))
+                print(f"  Refined {len(cases)} case(s) with LLM + trajectory")
+        else:
+            print("  No trajectory available — using initial cases as-is.")
 
     if args.dry_run:
         print("\nDry run — not saved.")
         print(json.dumps(_to_agentskills_dataset(skill["name"], cases), indent=2))
-        record_dataset_creation(
-            skill_name=skill["name"],
-            cases_count=len(cases),
-            mode=telemetry_mode,
-            refined=args.refine,
-            no_llm=args.no_llm,
-            dry_run=True,
-            duration_ms=(time.perf_counter() - start_time) * 1000.0,
-        )
         return
 
     # Save
@@ -1038,15 +1000,6 @@ Agent-refined mode (--refine):
 
     print(f"\nSaved: {output_path}")
     print(f"  {len(cases)} test case(s)")
-    record_dataset_creation(
-        skill_name=skill["name"],
-        cases_count=len(cases),
-        mode=telemetry_mode,
-        refined=args.refine,
-        no_llm=args.no_llm,
-        dry_run=False,
-        duration_ms=(time.perf_counter() - start_time) * 1000.0,
-    )
     if args.refine:
         print(f"\nNext: skillevaluator evaluate {skill_path} --agents claude-code --env-mode docker")
     else:

@@ -15,7 +15,7 @@ import re
 # ("task-granularity" -> "sk-granularity") and mangling log text; the glued
 # form still catches a key jammed onto a word ("xsk-Ab1Cd2...") without
 # matching dictionary words, lowercase hex IDs/hashes, or short tokens.
-# Mirrors src/skillevaluator.telemetry and skillevaluator.tier3.eval_core.checks._SECRET_PATTERNS.
+# Mirrors skillevaluator.utils.redaction and skillevaluator.tier3.eval_core.checks._SECRET_PATTERNS.
 _GLUED_KEY_BODY = r"(?=[A-Za-z0-9]*[a-z])(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{20,}"
 LOG_SK_RE = re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}|sk-" + _GLUED_KEY_BODY)
 LOG_NVAPI_RE = re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}|nvapi-" + _GLUED_KEY_BODY)

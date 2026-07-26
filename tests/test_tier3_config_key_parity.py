@@ -79,8 +79,6 @@ def _run_engine(
     monkeypatch.setattr(runner, "_run_agent_pair", pair)
     monkeypatch.setattr(runner, "collect_harbor_results", collect)
     monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
-    monkeypatch.setattr(runner, "record_agent_eval_summary", lambda **_kwargs: None)
-
     agents = engine_kwargs.pop("agents", ["opencode"])
     result = runner.run_harbor_eval(
         skill,

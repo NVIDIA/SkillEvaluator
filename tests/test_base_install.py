@@ -24,7 +24,7 @@ import sys
 
 BLOCKED = {
     "anthropic", "boto3", "botocore", "harbor", "openai", "litellm",
-    "langgraph", "langgraph_checkpoint",
+    "langgraph", "langgraph_checkpoint", "opentelemetry",
 }
 
 

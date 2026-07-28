@@ -23,6 +23,10 @@ from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
+from skillevaluator.constants import (
+    DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
+    DIMENSION_VERDICT_PASS_THRESHOLD,
+)
 from skillevaluator.reporting.base import ReporterBase
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
@@ -397,7 +401,11 @@ class CLIReporter(ReporterBase):
                     sc = "green" if score.upper() == "PASS" else "red"
                     score_str = f"[{sc}]{score}[/{sc}]"
                 else:
-                    sc = "green" if score >= 0.7 else ("yellow" if score >= 0.4 else "red")
+                    sc = (
+                        "green"
+                        if score >= DIMENSION_VERDICT_PASS_THRESHOLD
+                        else ("yellow" if score >= DIMENSION_VERDICT_NEUTRAL_THRESHOLD else "red")
+                    )
                     score_str = f"[{sc}]{score:.2f}[/{sc}]"
                 table.add_row(dim.title(), score_str, explanation[:80])
 

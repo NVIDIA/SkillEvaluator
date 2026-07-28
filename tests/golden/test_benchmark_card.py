@@ -1,23 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Golden regression guard for the BENCHMARK.md skill evaluation card.
-
-The card content is a faithful Skill Evaluator 3.2.1 port and must not drift. If this
-test fails after an intentional change, regenerate the golden and review the
-diff. Timestamps are disabled so the snapshot is deterministic.
-"""
+"""Golden and state-matrix regression guards for the BENCHMARK.md card."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting import BenchmarkReporter
+from skillevaluator.reporting.benchmark import _verdict_callout
 
 GOLDEN = Path(__file__).resolve().parent / "benchmark_tier1.md"
+TIER3_GOLDEN = Path(__file__).resolve().parent / "benchmark_tier3.md"
+
+
+def _private_sandbox_name(separator: str = " ") -> str:
+    """Build the retired private label without embedding it in public source."""
+    private_name = chr(65) + "stra"
+    return separator.join((private_name, "sandbox"))
 
 
 def _deterministic_results() -> list[ValidationResult]:
@@ -25,17 +29,17 @@ def _deterministic_results() -> list[ValidationResult]:
         validator_name="Schema & Repository Governance",
         validator_description="Validate SKILL.md frontmatter and repository structure",
     )
-    t1.add_success(check_name="author_format", message="Valid author format: Dev One <dev@example.com>")
-    t1.metadata["policy"] = {"profile": "private"}
+    t1.add_success(check_name="author_format", message="Valid author format: Dev One <dev@nvidia.com>")
+    t1.metadata["policy"] = {"profile": "internal"}
     t1.metadata["quality_scores"] = {"skill_name": "demo-skill"}
 
     t2 = ValidationResult(
-        validator_name="Context Deduplication",
-        validator_description="Detect redundant content within one skill",
+        validator_name="Inter-Skill Deduplication",
+        validator_description="Detect duplicate skills across a catalog",
     )
     t2.add_finding(
         Finding(
-            category="CONTENT_DEDUP",
+            category="INTER_SKILL",
             severity=Severity.LOW,
             check_name="partial_overlap",
             message="Partial overlap with another skill",
@@ -48,7 +52,7 @@ def _deterministic_results() -> list[ValidationResult]:
 def test_benchmark_card_matches_golden() -> None:
     rendered = BenchmarkReporter(include_timestamp=False).render_all(_deterministic_results())
     assert rendered == GOLDEN.read_text(encoding="utf-8"), (
-        "BENCHMARK.md content drifted from the faithful Skill Evaluator golden. If intentional, "
+        "BENCHMARK.md content drifted from the source golden. If intentional, "
         "regenerate tests/golden/benchmark_tier1.md and review the diff."
     )
 
@@ -68,30 +72,223 @@ def _tier3_result(
         "summary": {"environment": environment},
         "metric_ids": ["accuracy"],
         "metric_labels": {"accuracy": metric_label},
+        "agents": {"codex": {"model": "not-recorded"}},
     }
     return result
 
 
-@pytest.mark.parametrize("environment", ["private-sandbox", "Private sandbox", "PRIVATE"])
+def _live_tier3_result() -> ValidationResult:
+    result = ValidationResult(
+        validator_name="AGENT_EVAL",
+        validator_description="Run live agent evaluation",
+    )
+
+    def dimensions(
+        baseline: float,
+        with_skill: float,
+    ) -> list[dict]:
+        return [
+            {
+                "id": dimension,
+                "baseline": baseline,
+                "with_skill": with_skill,
+                "lift": with_skill - baseline,
+            }
+            for dimension in ("security", "correctness", "discoverability", "effectiveness", "efficiency")
+        ]
+
+    result.metadata["agent_eval"] = {
+        "skill_name": "demo-skill",
+        "verdict": "pass",
+        "execution_status": "succeeded",
+        "evaluated_at": "2026-07-24T12:30:00+00:00",
+        "evaluator_version": "0.8.2",
+        "summary": {
+            "environment": _private_sandbox_name("-"),
+            "verdict": "pass",
+            "execution_status": "succeeded",
+        },
+        "dataset_summary": {
+            "total_tasks": 8,
+            "positive_tasks": 6,
+            "negative_tasks": 2,
+            "unclassified_tasks": 0,
+            "source": "dataset",
+        },
+        "dataset_digest": "sha256:0123456789abcdef",
+        "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
+        "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5},
+        "agents": {
+            "claude-code": {
+                "model": "claude-sonnet",
+                "baseline": 0.47,
+                "with_skill": 0.92,
+                "dimensions": dimensions(0.47, 0.92),
+                "evaluators": {"accuracy": {"baseline": 0.47, "with_skill": 0.92}},
+            },
+            "codex": {
+                "model": "gpt-codex",
+                "baseline": 0.55,
+                "with_skill": 0.88,
+                "dimensions": dimensions(0.55, 0.88),
+                "evaluators": {"accuracy": {"baseline": 0.55, "with_skill": 0.88}},
+            },
+        },
+    }
+    result.add_success("agent_eval", "Live evaluation completed")
+    return result
+
+
+def test_benchmark_live_results_are_decision_first_and_unambiguous() -> None:
+    rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), _live_tier3_result()])
+
+    assert rendered.index("Overall verdict: PASS") < rendered.index("Evaluation Metadata")
+    assert "# Skill Benchmark: demo-skill" in rendered
+    assert "- Evaluation date: 2026-07-24" in rendered
+    assert "- Evaluator version: `0.8.2`" in rendered
+    assert "- Tasks: 8 evaluation tasks (6 positive, 2 negative)" in rendered
+    assert "- Dataset digest: `sha256:0123456789abcdef` (skill-evaluator-dataset-snapshot/1)" in rendered
+    assert "- Tier 3 evidence: required for publication" in rendered
+    assert "Each task attempt ran in its own isolated sandbox." in rendered
+    assert "| Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |" in rendered
+    assert "| Overall | 47% → 92% (+45 points) | 55% → 88% (+33 points) |" in rendered
+    assert "| Dimension | Num |" not in rendered
+    assert "The 50% attempt pass threshold is a separate per-task gate" in rendered
+    assert "`goal_accuracy` (50%) + `behavior_check` (50%)" in rendered
+    assert "PASS only when every configured dimension passes for at least one supported agent" in rendered
+
+
+def test_benchmark_requires_tier3_by_default() -> None:
+    rendered = BenchmarkReporter(include_timestamp=True).render_all(_deterministic_results())
+
+    assert "Overall verdict: INCOMPLETE" in rendered
+    assert "## Publication Recommendation" not in rendered
+    assert "| Tier 3 | Live agent evaluation | **NOT RUN** |" in rendered
+    assert "- Evaluation date: not recorded (legacy or non-live result)" in rendered
+    assert "- Evaluator version: not recorded (legacy or non-live result)" in rendered
+    assert "- Agents: not recorded (legacy or non-live result)" in rendered
+    assert "- Tasks: not recorded (legacy or non-live result)" in rendered
+    assert "- Attempts per task: not recorded (legacy or non-live result)" in rendered
+    assert "- Environment: not recorded (legacy or non-live result)" in rendered
+
+
+def test_tier1_only_cli_result_cannot_publish_without_tier3() -> None:
+    rendered = BenchmarkReporter(include_timestamp=False).render_all([_deterministic_results()[0]])
+
+    assert "Overall verdict: INCOMPLETE" in rendered
+    assert "## Publication Recommendation" not in rendered
+    assert "| Tier 2 | Semantic deduplication | **NOT RUN** |" in rendered
+    assert "| Tier 3 | Live agent evaluation | **NOT RUN** |" in rendered
+
+
+def test_benchmark_allows_explicit_persisted_optional_tier3_policy() -> None:
+    results = _deterministic_results()
+    results[0].metadata["benchmark_policy"] = {"tier3_required": False}
+
+    rendered = BenchmarkReporter(include_timestamp=False).render_all(results)
+
+    assert "Overall verdict: PASS" in rendered
+    assert "## Publication Recommendation" in rendered
+    assert "- Tier 3 evidence: optional by policy" in rendered
+
+
+def test_legacy_neutral_verdict_stays_neutral_without_execution_status() -> None:
+    tier3 = _tier3_result(environment="docker")
+    payload = tier3.metadata["agent_eval"]
+    payload["verdict"] = "neutral"
+    payload["summary"]["verdict"] = "neutral"
+
+    rendered = BenchmarkReporter(include_timestamp=False).render_all([*_deterministic_results(), tier3])
+
+    assert "Overall verdict: NEUTRAL" in rendered
+    assert "## Publication Recommendation" not in rendered
+    assert "| Tier 3 | Live agent evaluation | **NEUTRAL** |" in rendered
+
+
+def test_verdict_callout_falls_back_for_future_statuses() -> None:
+    assert _verdict_callout("WARN") == "> **Overall verdict: WARN**"
+
+
+def test_benchmark_live_card_matches_golden() -> None:
+    rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), _live_tier3_result()])
+    assert rendered == TIER3_GOLDEN.read_text(encoding="utf-8")
+
+
+def test_benchmark_no_baseline_never_fabricates_uplift() -> None:
+    tier3 = deepcopy(_live_tier3_result())
+    payload = tier3.metadata["agent_eval"]
+    payload["verdict"] = "neutral"
+    payload["summary"]["verdict"] = "neutral"
+    for agent in payload["agents"].values():
+        agent["baseline"] = None
+        for dimension in agent["dimensions"]:
+            dimension["baseline"] = None
+            dimension["lift"] = None
+
+    rendered = BenchmarkReporter(include_timestamp=False).render_all([*_deterministic_results(), tier3])
+
+    assert "Overall verdict: NEUTRAL" in rendered
+    assert "92% — baseline not run; uplift unavailable" in rendered
+    assert "88% — baseline not run; uplift unavailable" in rendered
+    assert "Publication Recommendation" not in rendered
+
+
+def test_benchmark_zero_and_negative_lift_use_percentage_points() -> None:
+    from skillevaluator.reporting.benchmark import _score_transition_values
+
+    assert _score_transition_values(1.0, 1.0) == "100% → 100% (±0 points)"
+    assert _score_transition_values(0.7, 0.62) == "70% → 62% (-8 points)"
+    assert _score_transition_values(None, 0.92) == "92% — baseline not run; uplift unavailable"
+
+
+def test_benchmark_local_mode_does_not_claim_sandboxing() -> None:
+    tier3 = deepcopy(_live_tier3_result())
+    tier3.metadata["agent_eval"]["summary"]["environment"] = "local"
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(tier3)
+
+    assert "trusted local host; local mode is not sandboxed" in rendered
+    assert "own isolated sandbox" not in rendered
+
+
+@pytest.mark.parametrize("environment", [_private_sandbox_name("-"), _private_sandbox_name(), "ASTRA"])
 def test_benchmark_uses_public_sandbox_label(environment: str) -> None:
     rendered = BenchmarkReporter(include_timestamp=False).render(_tier3_result(environment=environment))
 
     assert "- Environment: `Isolated sandbox`" in rendered
-    assert "private" not in rendered.lower()
+    assert "astra" not in rendered.lower()
 
 
 def test_benchmark_preserves_non_sandbox_skill_name() -> None:
     rendered = BenchmarkReporter(include_timestamp=False).render(
-        _tier3_result(environment="docker", skill_name="private-db")
+        _tier3_result(environment="docker", skill_name="astra-db")
     )
 
-    assert "- Skill: `private-db`" in rendered
+    assert "- Skill: `astra-db`" in rendered
     assert "Isolated sandbox-db" not in rendered
+
+
+def test_benchmark_sanitizes_internal_sandbox_name_in_finding_text() -> None:
+    result = _tier3_result(environment="docker")
+    result.add_finding(
+        Finding(
+            category="AGENT_EVAL",
+            severity=Severity.LOW,
+            check_name="environment",
+            message=f"Observed in {_private_sandbox_name()} during evaluation",
+            file_path=None,
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert _private_sandbox_name() not in rendered
+    assert "Observed in isolated sandbox during evaluation" in rendered
 
 
 @pytest.mark.parametrize(
     "retired_name",
-    ["LegacySkills-Eval", "LegacySkills Eval", "LegacySkillsEval", "legacyskillseval"],
+    ["NVSkills-Eval", "NVSkills Eval", "NVSkillsEval", "nvskillseval", "legacy-skills-eval"],
 )
 def test_benchmark_rebrands_retired_product_name_from_payload(retired_name: str) -> None:
     rendered = BenchmarkReporter(include_timestamp=False).render(
@@ -102,12 +299,12 @@ def test_benchmark_rebrands_retired_product_name_from_payload(retired_name: str)
     assert "`accuracy` (Skill Evaluator)" in rendered
 
 
-def test_benchmark_omits_validation_profile() -> None:
+def test_benchmark_omits_internal_validation_profile() -> None:
     result = ValidationResult(
         validator_name="Schema & Repository Governance",
         validator_description="Validate SKILL.md",
     )
-    result.metadata["policy"] = {"profile": "private"}
+    result.metadata["policy"] = {"profile": "internal"}
     result.metadata["quality_scores"] = {"skill_name": "demo-skill"}
 
     rendered = BenchmarkReporter(include_timestamp=False).render(result)

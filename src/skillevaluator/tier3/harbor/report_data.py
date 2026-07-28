@@ -9,6 +9,7 @@ on-disk Harbor result layout into data consumed by the shared report adapters.
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import logging
@@ -37,11 +38,101 @@ _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
 
 __all__ = (
+    "DATASET_SNAPSHOT_DIGEST_ALGORITHM",
+    "build_dataset_snapshot",
+    "deduplicate_dataset_entries",
     "load_agent_data",
     "load_dataset",
+    "load_dataset_snapshot",
     "load_staged_harbor_dataset",
     "metrics_for_agents",
+    "summarize_dataset_entries",
 )
+
+DATASET_SNAPSHOT_DIGEST_ALGORITHM = "skill-evaluator-dataset-snapshot/1"
+DATASET_SNAPSHOT_SCHEMA_VERSION = "1.0"
+
+
+def _canonical_dataset_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _dataset_entry_identity(entry: dict[str, Any]) -> str:
+    for key in ("id", "entry_id", "case_id", "task_id"):
+        value = entry.get(key)
+        if value is not None and str(value).strip():
+            return f"{key}:{str(value).strip()}"
+    return f"payload:{_canonical_dataset_json(entry)}"
+
+
+def deduplicate_dataset_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the first entry for each stable task identity, preserving order."""
+    deduplicated: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        identity = _dataset_entry_identity(entry)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduplicated.append(dict(entry))
+    return deduplicated
+
+
+def summarize_dataset_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize unique task identities and their activation intent."""
+    unique = deduplicate_dataset_entries(entries)
+    positive = sum(1 for case in unique if case.get("expected_skill") is not None)
+    negative = sum(1 for case in unique if "expected_skill" in case and case.get("expected_skill") is None)
+    return {
+        "total_tasks": len(unique),
+        "positive_tasks": positive,
+        "negative_tasks": negative,
+        "unclassified_tasks": len(unique) - positive - negative,
+        "source": "dataset" if unique else "unavailable",
+    }
+
+
+def build_dataset_snapshot(entries: list[dict[str, Any]], *, evaluator_version: str) -> dict[str, Any]:
+    """Build immutable, digest-backed dataset truth owned by one evaluation run."""
+    unique = deduplicate_dataset_entries(entries)
+    canonical = _canonical_dataset_json(unique).encode("utf-8")
+    return {
+        "schema_version": DATASET_SNAPSHOT_SCHEMA_VERSION,
+        "evaluator_version": evaluator_version,
+        "dataset": unique,
+        "dataset_summary": summarize_dataset_entries(unique),
+        "dataset_digest": f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+        "dataset_digest_algorithm": DATASET_SNAPSHOT_DIGEST_ALGORITHM,
+    }
+
+
+def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
+    """Load a validated run-owned dataset snapshot, if one was persisted."""
+    path = run_dir / "dataset_snapshot.json"
+    diagnostics: list[dict[str, Any]] = []
+    snapshot = _load_bounded_json(path, diagnostics, artifact="dataset_snapshot")
+    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != DATASET_SNAPSHOT_SCHEMA_VERSION:
+        return None
+    dataset = snapshot.get("dataset")
+    summary = snapshot.get("dataset_summary")
+    version = snapshot.get("evaluator_version")
+    if not isinstance(dataset, list) or not isinstance(summary, dict):
+        return None
+    if not isinstance(version, str) or not version.strip():
+        return None
+    expected = build_dataset_snapshot(
+        [entry for entry in dataset if isinstance(entry, dict)],
+        evaluator_version=version,
+    )
+    if dataset != expected["dataset"] or summary != expected["dataset_summary"]:
+        return None
+    if snapshot.get("dataset_digest_algorithm") != DATASET_SNAPSHOT_DIGEST_ALGORITHM:
+        return None
+    if snapshot.get("dataset_digest") != expected["dataset_digest"]:
+        return None
+    return snapshot
 
 
 class _JSONLimitError(ValueError):

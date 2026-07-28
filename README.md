@@ -214,10 +214,13 @@ In `custom_only` mode, the user-owned grader defines the score instead.
 | Dimension | Question |
 | --- | --- |
 | **Security** | Is it safe to use? |
-| **Correctness** | Does it do what it is supposed to? |
-| **Discoverability** | Is it loaded when it should be? |
-| **Effectiveness** | Is it better with the skill than without? |
-| **Efficiency** | Does it use tools and tokens efficiently? |
+| **Correctness** | Is the answer correct? |
+| **Discoverability** | Was the right skill loaded when needed? |
+| **Effectiveness** | Did the skill help complete the task and expected behavior? |
+| **Efficiency** | Did it avoid wasted skill or tool usage? |
+
+Effectiveness is the equal-weight mean of goal completion and expected behavior
+adherence. Token efficiency remains a separate report-only signal.
 
 Live evaluation normally has **two credential roles**: the evaluator provider
 generates tasks and performs standard grading, while the selected agent uses

@@ -18,6 +18,7 @@ from skillevaluator.evaluation import (
     compute_dimensions,
     compute_dimensions_deterministic,
 )
+from skillevaluator.tier3.harbor.metrics import DIMENSION_DEFINITIONS
 
 
 @pytest.fixture
@@ -51,8 +52,16 @@ class TestDimensionJudgeDeterministic:
 
     def test_verdict_thresholds(self, evaluators: dict) -> None:
         dims = {d["id"]: d for d in compute_dimensions_deterministic(evaluators)}
-        # efficiency = 0.7*0.6 + 0.3*0.5 = 0.57 -> below 0.7 pass threshold
-        assert dims["efficiency"]["verdict"] == "NEUTRAL"
+        # Efficiency maps directly to skill_efficiency (0.6), above the canonical 0.5 pass threshold.
+        assert dims["efficiency"]["verdict"] == "PASS"
+        assert dims["efficiency"]["score"] == pytest.approx(0.6)
+
+    def test_harbor_and_report_dimension_contracts_match(self) -> None:
+        expected = {
+            dimension: dict(zip(config["evaluators"], config["weights"], strict=True))
+            for dimension, config in DIMENSION_MAPPING.items()
+        }
+        assert expected == DIMENSION_DEFINITIONS
 
     def test_baseline_absent_yields_none_lift(self) -> None:
         evaluators = {"security": {"with_skill": 0.9}}

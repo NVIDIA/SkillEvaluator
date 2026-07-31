@@ -295,6 +295,22 @@ def test_benchmark_sanitizes_file_uris_markdown_and_private_dimension_values() -
 
 
 @pytest.mark.parametrize(
+    "dimension_num",
+    ["secret-cluster-4", "x-secret-cluster", "secret-cluster_count"],
+)
+def test_benchmark_redacts_embedded_private_environment_labels(dimension_num: str) -> None:
+    result = _tier3_result(environment="secret-cluster")
+    result.metadata["agent_eval"]["agents"] = {
+        "runner": {"dimensions": [{"id": "security", "num": dimension_num, "with_skill": 1.0}]}
+    }
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert "secret-cluster" not in rendered
+    assert "Isolated sandbox" in rendered
+
+
+@pytest.mark.parametrize(
     "file_uri",
     [
         "file:/Users/alice/private/SKILL.md",

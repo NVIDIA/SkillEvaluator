@@ -708,7 +708,7 @@ def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()
     text = _redact_absolute_paths(text)
     for label in sorted(private_labels, key=len, reverse=True):
         text = re.sub(
-            rf"(?<![\w-]){re.escape(label)}(?![\w-])",
+            re.escape(label),
             "Isolated sandbox",
             text,
             flags=re.IGNORECASE,

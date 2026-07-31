@@ -370,8 +370,12 @@ metadata:
 ```
 
 When `--previous-version` or `SKILLEVALUATOR_PREVIOUS_VERSION` is set, the
-current version must be numerically greater than the previous value. A missing
-version remains valid; the skill then relies on commit history.
+current version must be present and numerically greater than the previous
+value. Without a previous-version bound, the version remains optional and the
+skill can rely on commit history.
+
+`--previous-version` is valid only when checking one skill. Catalog validation
+must run each skill separately with its own previous version.
 
 ```bash
 SKILLEVALUATOR_PREVIOUS_VERSION=1.2.2 \

@@ -686,6 +686,12 @@ def _validate_catalog(
     (under ``<output_dir>/<skill>/``), and verdict; the catalog exits nonzero
     when any skill failed.
     """
+    if ctx.params.get("previous_version"):
+        raise click.ClickException(
+            "--previous-version applies to one skill and cannot be reused for a catalog; "
+            "validate each skill separately with its own previous version"
+        )
+
     skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
     failures: list[tuple[str, str]] = []
     for index, skill_dir in enumerate(skill_dirs, start=1):

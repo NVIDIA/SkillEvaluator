@@ -327,6 +327,34 @@ def test_validate_catalog_runs_each_skill_as_separate_job() -> None:
         assert any(Path("out/simple2").glob("*.html"))
 
 
+def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        for name in ("simple", "simple2"):
+            shutil.copytree(FIXTURE, catalog / name)
+        second = catalog / "simple2" / "SKILL.md"
+        second.write_text(second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"), encoding="utf-8")
+
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "version",
+                "--previous-version",
+                "1.2.0",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "cannot be reused for a catalog" in result.output
+        assert not Path("skillevaluator-results").exists()
+
+
 def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatch) -> None:
     # Regression: a failing DEFAULT (quiet) run must render the verdict panel
     # and exit via the machine-readable ClickException — not an AttributeError.

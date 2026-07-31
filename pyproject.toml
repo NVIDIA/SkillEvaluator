@@ -68,22 +68,7 @@ tier3 = [
 # Static security scanners (floors raised to the established release baseline).
 security = [
     "bandit>=1.9.4",
-    # CVE-2026-45134 / BDSA-2026-10450 fixed floor.
-    "langchain-core>=1.4.9",
-    # Semgrep 1.157 (the last release compatible with glibc 2.28) pins
-    # tomli<2.1, while pip-audit >=2.10 requires tomli>=2.2.1. Keep the two
-    # scanners on their compatible Linux pair; other platforms retain the
-    # established release baselines.
-    "pip-audit>=2.9.0,<2.10.0; sys_platform == 'linux'",
-    "pip-audit>=2.10.0; sys_platform != 'linux'",
-    "protobuf>=6.33.5",
-    # Semgrep >=1.158 Linux wheels require glibc >=2.34, while RHEL 8
-    # and compatible enterprise Linux distributions provide glibc 2.28.
-    "semgrep>=1.157.0,<1.158.0; sys_platform == 'linux'",
-    "semgrep>=1.162.0; sys_platform != 'linux'",
-    # Public 2.4.1 snapshot containing the reviewed scanner-contract and
-    # false-positive fixes; retain an immutable Git commit for reproducibility.
-    "skillspector @ git+https://github.com/NVIDIA/SkillSpector.git@cffb03bac912094ff9770ccbb9ec8c787a7ef961",
+    "pip-audit>=2.10.0",
 ]
 # Full public install convenience bundle.
 all = [

@@ -100,6 +100,22 @@ class VersionValidator(ValidatorBase):
             )
             return False
 
+        if not current:
+            result.add_finding(
+                Finding(
+                    category="VERSION",
+                    severity=Severity.HIGH,
+                    check_name="version_missing",
+                    message=(
+                        "metadata.version is missing even though a previous version "
+                        f"('{previous}') was supplied"
+                    ),
+                    file_path=str(manifest),
+                    suggestion="Keep metadata.version and bump major, minor, or patch",
+                )
+            )
+            return False
+
         current_tuple = _version_tuple(current)
         previous_tuple = _version_tuple(previous)
         if current_tuple is None or previous_tuple is None:
@@ -136,13 +152,7 @@ class VersionValidator(ValidatorBase):
         return True
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
-        """Validate one skill's optional ``metadata.version`` label.
-
-        Opting back out of semver labels is always allowed: a skill that
-        previously published ``metadata.version: 1.2.0`` and now removes the
-        label entirely is treated as ``version_optional`` and passes, even when
-        a previous version is supplied.
-        """
+        """Validate one skill's optional ``metadata.version`` label."""
         result = ValidationResult(
             validator_name=self.name,
             validator_description=self.description,
@@ -159,12 +169,11 @@ class VersionValidator(ValidatorBase):
 
         current = _extract_version(parsed.yaml_data)
         if not current:
+            if not self._validate_previous_version(current, manifest, result):
+                return result
             result.add_success(
                 check_name="version_optional",
-                message=(
-                    "No semantic version label present; resource will use commit-hash "
-                    "history (opting back out of an existing label is allowed)"
-                ),
+                message="No semantic version label present; resource will use commit-hash history",
                 previous_version=self.previous_version,
             )
             return result

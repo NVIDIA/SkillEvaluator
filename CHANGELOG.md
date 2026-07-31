@@ -61,6 +61,8 @@ All notable changes to Skill Evaluator are documented in this file.
 
 - Public benchmark cards now omit policy profiles, redact absolute host paths,
   and normalize imported internal or retired metadata before publication.
+- Previous-version validation now rejects catalog-wide scalar reuse and removal
+  of an already bounded `metadata.version` label.
 - Tier 1 and Tier 2 now ignore only the exact public SPDX metadata preamble,
   distinguish package versions from network addresses, recognize canonical
   `agents/` and `tests/` support directories, and keep Ruff on the validated

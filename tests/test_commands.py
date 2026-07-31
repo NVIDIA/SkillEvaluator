@@ -56,7 +56,7 @@ def test_validate_fixture_no_llm() -> None:
 
 def test_validate_prints_tier1_section_banner() -> None:
     # The Tier 1 section is announced as it runs so it is visibly reported in
-    # CI logs (Skill Evaluator parity), not only inside the final combined report.
+    # CI logs (SkillEvaluator parity), not only inside the final combined report.
     result = CliRunner().invoke(
         cli, ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--checks", "schema,quality,lint"]
     )

@@ -233,7 +233,7 @@ Example.
         validator = SchemaValidator()
         result = validator.validate(root)
 
-        assert any("Folder structure compliant with Skill Evaluator guidelines" in m for m in result.messages)
+        assert any("Folder structure compliant with SkillEvaluator guidelines" in m for m in result.messages)
 
     def test_folder_structure_compliance_with_team_skills(self, tmp_path):
         """Test folder structure compliance for folder with team-skills/ directory."""
@@ -268,7 +268,7 @@ Example.
         validator = SchemaValidator()
         result = validator.validate(root)
 
-        assert any("Folder structure compliant with Skill Evaluator guidelines" in m for m in result.messages)
+        assert any("Folder structure compliant with SkillEvaluator guidelines" in m for m in result.messages)
         assert any("team-skills" in m for m in result.messages)
 
 

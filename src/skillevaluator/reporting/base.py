@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Base reporter interface for Skill Evaluator.
+"""Base reporter interface for SkillEvaluator.
 
 This module defines the abstract base class that all reporters must implement.
 Reporters are responsible for rendering ValidationResult objects in their

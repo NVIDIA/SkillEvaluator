@@ -2,7 +2,7 @@
 name: api-caller
 description: Call any REST API dynamically. Make GET, POST, PUT, DELETE requests to any endpoint with custom headers and JSON body.
 metadata:
-  author: Skill Evaluator Maintainers <maintainers@example.com>
+  author: SkillEvaluator Maintainers <maintainers@example.com>
 ---
 
 # API Caller Skill

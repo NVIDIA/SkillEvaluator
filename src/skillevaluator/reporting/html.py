@@ -208,7 +208,7 @@ class HTMLReporter(ReporterBase):
         profile: str | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
-        self.title = title or "Skill Evaluator Validation Report"
+        self.title = title or "SkillEvaluator Validation Report"
         self.tabs = list(tabs) if tabs is not None else list(self.DEFAULT_TABS)
         self._tabs_explicit = tabs is not None
         self.target_path = target_path
@@ -812,7 +812,7 @@ class HTMLReporter(ReporterBase):
            workflow) without leaking the surrounding repo / worktree path.
         3. Falls back to the basename — best effort when no canonical
            ``skills/`` or ``team-skills/`` segment is present (e.g. validating
-           an ad-hoc directory outside the standard Skill Evaluator layout).
+           an ad-hoc directory outside the standard SkillEvaluator layout).
         4. Empty string when ``target`` is ``None`` / empty so callers can
            defensibly chain ``label or fallback``.
         """

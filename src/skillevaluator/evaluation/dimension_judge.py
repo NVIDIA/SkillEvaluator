@@ -5,7 +5,7 @@
 
 Takes the raw evaluator scores (security, skill_execution, skill_efficiency,
 accuracy, goal_accuracy, behavior_check) plus per-case findings and ATIF trace evidence
-from Skill Evaluator, and produces 5 stakeholder-facing dimensions (Security,
+from SkillEvaluator, and produces 5 stakeholder-facing dimensions (Security,
 Correctness, Discoverability, Effectiveness, Efficiency) with scores,
 verdicts, and natural-language explanations.
 

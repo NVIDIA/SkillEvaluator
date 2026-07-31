@@ -2,7 +2,7 @@
 
 ## Overview
 
-Define the code of conduct followed and enforced for Skill Evaluator.
+Define the code of conduct followed and enforced for SkillEvaluator.
 
 ### Intended audience
 

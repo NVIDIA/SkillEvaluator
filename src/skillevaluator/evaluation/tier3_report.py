@@ -3,16 +3,16 @@
 
 """Map native Harbor (Tier 3) results into the canonical ``agent_eval`` payload.
 
-Skill Evaluator folds Tier 3 into the *combined* ``validate`` report (HTML / JSON /
+SkillEvaluator folds Tier 3 into the *combined* ``validate`` report (HTML / JSON /
 BENCHMARK.md) by attaching a canonical ``metadata["agent_eval"]`` payload to a
 single ``AGENT_EVAL`` :class:`~skillevaluator.models.result.ValidationResult`. The
-shared reporters (ported faithfully from Skill Evaluator) consume that payload.
+shared reporters (ported faithfully from SkillEvaluator) consume that payload.
 
 SkillEvaluator runs Tier 3 through its own in-process Harbor engine, which writes
 per-agent results to disk rather than returning a canonical payload. This module
 reads those on-disk results and produces the same canonical ``agent_eval`` shape
 so ``validate --agent-eval`` emits one combined report containing all three tiers
--- restoring parity with Skill Evaluator.
+-- restoring parity with SkillEvaluator.
 """
 
 from __future__ import annotations
@@ -34,13 +34,13 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import ValidationResult
 
-# Verdict labels mirror Skill Evaluator's AGENT_EVAL_VERDICT_* values so the ported
+# Verdict labels mirror SkillEvaluator's AGENT_EVAL_VERDICT_* values so the ported
 # reporters classify the overall outcome identically.
 VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_NEUTRAL = "neutral"
 
-# Lift thresholds mirror Skill Evaluator TIER3_LIFT_PASS_THRESHOLD / _FAIL_THRESHOLD.
+# Lift thresholds mirror SkillEvaluator TIER3_LIFT_PASS_THRESHOLD / _FAIL_THRESHOLD.
 _VERDICT_PASS_THRESHOLD = 0.05
 _VERDICT_FAIL_THRESHOLD = -0.05
 
@@ -179,7 +179,7 @@ def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None)
     minimal payload — verdict ``neutral``, no agents/dimensions, and the skip
     reason surfaced via ``suggestions`` + ``provenance`` — guarantees an
     explicit ``--agent-eval`` request always produces a visible, self-explaining
-    Tier 3 section instead of silently disappearing. Mirrors Skill Evaluator, which
+    Tier 3 section instead of silently disappearing. Mirrors SkillEvaluator, which
     always emits an ``AGENT_EVAL`` result with a payload (e.g.
     ``_tier3_dataset_required_result`` / ``_invalid_skill_evaluator_result``) even when the
     dataset/runtime is unavailable.
@@ -418,7 +418,7 @@ def build_agent_eval_payload(
     :func:`skillevaluator.tier3.harbor.report_data.load_agent_data`.
     Returns ``None`` when no agent carries usable scores.
 
-    The payload mirrors Skill Evaluator's canonical Tier 3 shape so the ported reporters
+    The payload mirrors SkillEvaluator's canonical Tier 3 shape so the ported reporters
     render every Tier 3 sub-tab: per-trial data (``trials`` / per-agent
     ``trials`` + ``pass_at_k``) feeds the Trials tab, deterministic + LLM
     ``conclusions`` / ``recommendations`` / ``suggestions`` feed the Insights tab,
@@ -602,7 +602,7 @@ def _layer_llm_insights(
 ) -> None:
     """Append LLM-as-Judge conclusions/recommendations on top of the deterministic
     baselines. The judge never raises; when the LLM is unavailable the
-    deterministic content is preserved unchanged (Skill Evaluator parity).
+    deterministic content is preserved unchanged (SkillEvaluator parity).
     """
     if not use_llm_judge:
         return
@@ -640,7 +640,7 @@ def _build_provenance(
 ) -> dict[str, Any]:
     """Assemble the Diagnostics ``provenance`` block.
 
-    Mirrors Skill Evaluator's Harbor provenance: per-agent raw evaluator scores and lift
+    Mirrors SkillEvaluator's Harbor provenance: per-agent raw evaluator scores and lift
     feed the "Raw Evaluator Scores Per Agent" / "Raw Lift Per Agent" diagnostics
     panels, ``comparison`` feeds the "comparison.json" panel, and
     ``raw_trial_rewards`` preserves the underlying Harbor reward scores for deep
@@ -1098,10 +1098,10 @@ def _deterministic_reasoning(
     signals: list[str],
     with_scores: dict[str, Any],
 ) -> tuple[list[str], str]:
-    """Build deterministic reasoning bullets for a dimension (Skill Evaluator parity).
+    """Build deterministic reasoning bullets for a dimension (SkillEvaluator parity).
 
     Reuses the ported dimension-judge helper so the Reasoning column reads
-    identically to Skill Evaluator when no LLM explanation is available.
+    identically to SkillEvaluator when no LLM explanation is available.
     """
     from skillevaluator.evaluation.dimension_judge import _human_reasoning_bullets
 
@@ -1497,7 +1497,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
 
     Each reward (loaded by ``_load_agent_data``) carries the per-evaluator
     scores at the top level, an ``overall`` score, and an internal ``_traj``
-    annotation with step/token counters. The canonical shape mirrors Skill Evaluator's
+    annotation with step/token counters. The canonical shape mirrors SkillEvaluator's
     ``_normalize_harbor_trials`` so the ported Trials tab (per-evaluator
     drill-down, token/steps charts, warnings) renders identically.
     """
@@ -1540,7 +1540,7 @@ def _attach_baseline_pairs(
 
     Adds ``baseline_overall`` / ``baseline_scores`` / ``lift_scores`` to each
     matched trial so the "Lift per Eval Case" panel can render the per-metric
-    deltas (Skill Evaluator parity).
+    deltas (SkillEvaluator parity).
     """
     by_entry: dict[str, list[dict[str, Any]]] = {}
     for trial in baseline_trials:
@@ -1965,7 +1965,7 @@ def _build_conclusions(
     *,
     pass_threshold: float,
 ) -> list[dict[str, str]]:
-    """Generate stable Insights conclusions from canonical scores (Skill Evaluator parity)."""
+    """Generate stable Insights conclusions from canonical scores (SkillEvaluator parity)."""
     conclusions: list[dict[str, str]] = []
     if agents:
         best_name = _pick_best_agent(agents)
@@ -2019,7 +2019,7 @@ def _build_conclusions(
 
 
 def _suggestions_for_dimensions(dimensions: list[dict[str, Any]]) -> list[str]:
-    """Default suggestions: target the weakest dimensions (Skill Evaluator parity)."""
+    """Default suggestions: target the weakest dimensions (SkillEvaluator parity)."""
     pending: list[tuple[float, str]] = []
     for dim in dimensions:
         score = _finite_float(dim.get("with_skill", dim.get("score", 0.0)))

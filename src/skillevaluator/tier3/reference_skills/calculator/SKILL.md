@@ -3,7 +3,7 @@ name: calculator
 description: Evaluate mathematical expressions and unit conversions. Handles arithmetic, percentages, exponents, and common unit conversions (temperature, distance, weight). No external dependencies.
 compatibility: Python 3.10+, no external dependencies
 metadata:
-  author: Skill Evaluator Maintainers <maintainers@example.com>
+  author: SkillEvaluator Maintainers <maintainers@example.com>
 ---
 
 # Calculator

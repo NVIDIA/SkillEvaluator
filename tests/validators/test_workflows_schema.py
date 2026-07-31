@@ -3,7 +3,7 @@
 
 """Tests for Workflows schema validation.
 
-Based on Skill Evaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
+Based on SkillEvaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
 """
 
 from pathlib import Path
@@ -23,7 +23,7 @@ class TestWorkflowsSchemaValidator:
 
     @pytest.fixture
     def valid_workflow_dir(self, tmp_path: Path) -> Path:
-        """Create a valid workflow directory per Skill Evaluator spec."""
+        """Create a valid workflow directory per SkillEvaluator spec."""
         workflows_dir = tmp_path / "workflows"
         workflows_dir.mkdir()
         workflow_dir = workflows_dir / "fastapi-setup"
@@ -712,7 +712,7 @@ metadata:
         assert any("team-workflows" in msg.lower() for msg in result.messages)
 
     def test_validate_folder_not_skill_evaluator_compliant(self, tmp_path: Path):
-        """Test validation warns for non-Skill Evaluator compliant folder."""
+        """Test validation warns for non-SkillEvaluator compliant folder."""
         validator = WorkflowsSchemaValidator()
 
         # Create a kebab-case named workflow directory

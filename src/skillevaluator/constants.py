@@ -3,7 +3,7 @@
 
 """Constants and configuration for SkillEvaluator.
 
-Based on Skill Evaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
+Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
 # =============================================================================
@@ -15,13 +15,13 @@ SKILL_MANIFEST_FILE = "SKILL.md"
 SKILL_FOLDER_PREFIX = "skills/"
 TEAM_SKILL_FOLDER_PREFIX = "team-skills/"
 
-# Required fields per Skill Evaluator specification
+# Required fields per SkillEvaluator specification
 REQUIRED_SKILL_FIELDS = ["name", "description"]
 
 # Forbidden fields - these should NOT be present in skills
 FORBIDDEN_SKILL_FIELDS = ["alwaysApply", "always_apply", "globs"]
 
-# Reserved words that must NOT appear in skill names (agentskills.io + Skill Evaluator)
+# Reserved words that must NOT appear in skill names (agentskills.io + SkillEvaluator)
 RESERVED_SKILL_NAMES = {"anthropic", "claude"}
 
 # Required body sections (HIGH severity if missing).
@@ -94,7 +94,7 @@ OPTIONAL_WORKFLOWS_METADATA_FIELDS = [
 # SHARED CONSTANTS
 # =============================================================================
 
-# Field length constraints per Skill Evaluator specification
+# Field length constraints per SkillEvaluator specification
 NAME_MIN_LENGTH = 1
 NAME_MAX_LENGTH = 64
 TITLE_MIN_LENGTH = 1

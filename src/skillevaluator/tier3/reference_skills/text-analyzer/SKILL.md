@@ -3,7 +3,7 @@ name: text-analyzer
 description: Analyze text content and produce statistics including word count, line count, character count, most frequent words, and readability metrics. Works on any plain text input provided inline or from a file path.
 compatibility: Python 3.10+, no external dependencies
 metadata:
-  author: Skill Evaluator Maintainers <maintainers@example.com>
+  author: SkillEvaluator Maintainers <maintainers@example.com>
 ---
 
 # Text Analyzer

@@ -299,7 +299,7 @@ class TestQualityScoreValidator:
 
     def test_readme_supporting_file_is_allowed(self, quality_skill):
         # An unreferenced README.md is a permitted human-facing supporting file
-        # (Skill Evaluator HOW_TO_CONTRIBUTE_SKILLS.md). The quality_skill SKILL.md does
+        # (SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md). The quality_skill SKILL.md does
         # not link to it, so under progressive disclosure it costs no agent
         # context and must not be penalized.
         (quality_skill / "README.md").write_text("# Human-facing skill notes\n")

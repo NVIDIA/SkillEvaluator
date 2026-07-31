@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Skill Evaluator are documented in this file.
+All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
@@ -10,7 +10,7 @@ All notable changes to Skill Evaluator are documented in this file.
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.
-- Fern documentation site published to `docs.nvidia.com/skillevaluator`,
+- Fern documentation site configured for `docs.nvidia.com/skills/skillevaluator`,
   building the `docs/` guides (installation, configuration, and the three
   evaluation tiers) as MDX pages.
 - Expanded the documentation site to fifteen pages — quickstart, eval
@@ -39,6 +39,10 @@ All notable changes to Skill Evaluator are documented in this file.
 - Simplified the repository README into a documentation landing page, broadened
   the project description to agent artifacts starting with agent skills, and
   moved setup and usage guidance to `docs.nvidia.com/skills/skillevaluator`.
+- Added Tier 3 cost-planning guidance, including trial-volume multipliers,
+  cost-saving flags, and the cost and isolation tradeoffs of local mode.
+- Standardized the product name as `SkillEvaluator` across documentation,
+  repository metadata, CLI output, and generated report artifacts.
 - Removed the optional OpenTelemetry integration, the
   `skillevaluator[telemetry]` extra, and the `skillevaluator.telemetry` Python
   module from the public distribution. Imports of that module now fail rather
@@ -66,8 +70,8 @@ All notable changes to Skill Evaluator are documented in this file.
 - Public benchmark cards now omit policy profiles, redact absolute host paths,
   and normalize imported internal or retired metadata before publication.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
-  Linux systems by selecting a compatible Semgrep and pip-audit pair, while
-  macOS and Windows retain the newer scanner release lines.
+  Linux systems by keeping Semgrep and SkillSpector in separate tool
+  environments while retaining compatible bundled Python dependencies.
 - Tier 2 content collection now prunes configured evaluation and version
   artifact directories before enforcing the discovered-path limit, so excluded
   generated results cannot cause false path-count failures.

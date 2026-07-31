@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Command line interface for Skill Evaluator."""
+"""Command line interface for SkillEvaluator."""
 
 from __future__ import annotations
 
@@ -514,7 +514,7 @@ def _run_agent_eval_or_skip(
 
 
 # Per-tier section headings printed by ``validate`` as each tier runs. They give
-# the CLI/CI stream the same progressive, labeled structure Skill Evaluator emitted, so
+# the CLI/CI stream the same progressive, labeled structure SkillEvaluator emitted, so
 # Tier 1 (and Tier 2) are visibly reported as they execute instead of only
 # surfacing in the single combined report rendered at the very end.
 _TIER_BANNERS = {
@@ -757,7 +757,7 @@ def _finish_pipeline_view(
 
 
 def _print_tier_banner(title: str) -> None:
-    """Print a labeled per-tier section banner (parity with Skill Evaluator)."""
+    """Print a labeled per-tier section banner (parity with SkillEvaluator)."""
     click.echo(f"\n{title}")
     click.echo("-" * 50)
 
@@ -765,12 +765,12 @@ def _print_tier_banner(title: str) -> None:
 def _print_run_banner(target_path: Path, content_type: str, profile: str | None) -> None:
     """Print the pre-run header (target + detected type + active profile).
 
-    Restores parity with Skill Evaluator's ``_print_validation_banner``: before any
+    Restores parity with SkillEvaluator's ``_print_validation_banner``: before any
     tier runs, surface what is being validated, the resolved content type, and
     the active validation profile so CI logs and terminal sessions identify the
     run up front instead of opening straight on the Tier 1 section.
     """
-    console.print(f"\n[bold]Skill Evaluator {content_type.title()} Validation[/bold]")
+    console.print(f"\n[bold]SkillEvaluator {content_type.title()} Validation[/bold]")
     console.print(f"Target: {target_path}")
     console.print(f"Type: {content_type}")
     if profile:
@@ -1247,7 +1247,7 @@ def validate(
         CLIReporter(console=console).print_summary(tier_gate_results)
 
     # Tier 3 runs BEFORE report emission so its results are folded into the
-    # single combined HTML/JSON/BENCHMARK.md report (parity with Skill Evaluator), and
+    # single combined HTML/JSON/BENCHMARK.md report (parity with SkillEvaluator), and
     # runs regardless of Tier 1/Tier 2 outcome. It degrades to a non-blocking
     # advisory note when it cannot run.
     tier3_result: ValidationResult | None = None
@@ -1350,7 +1350,7 @@ def validate(
         announce_paths=not quiet,
     )
 
-    # BENCHMARK.md is generated compulsorily for skills (matches Skill Evaluator), even on
+    # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --
     # now including Tier 3 results when --agent-eval ran.
     if resolved_type == CONTENT_TYPE_SKILL:

@@ -16,7 +16,7 @@ def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
     """Return ``<prefix>-YYYYMMDDHHMMSS<suffix>`` for report artifacts.
 
     Used so each combined ``validate`` run writes a distinct, sortable report
-    file rather than overwriting the previous one (Skill Evaluator parity). ``suffix``
+    file rather than overwriting the previous one (SkillEvaluator parity). ``suffix``
     is the optional file extension (e.g. ``".html"``); omit it to get the bare
     timestamped basename.
     """
@@ -27,7 +27,7 @@ def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
 def find_skills_in_directory(root_path: Path) -> list[Path]:
     """Find all skill directories containing SKILL.md.
 
-    Uses case-insensitive manifest detection per Skill Evaluator spec.
+    Uses case-insensitive manifest detection per SkillEvaluator spec.
     Deduplicates results when both SKILL.md and skill.md exist.
 
     Args:

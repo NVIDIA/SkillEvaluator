@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: Bug report
-description: Report a reproducible problem in Skill Evaluator.
+description: Report a reproducible problem in SkillEvaluator.
 title: "[BUG]: "
 labels:
   - bug
@@ -27,7 +27,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Skill Evaluator version or commit
+      label: SkillEvaluator version or commit
     validations:
       required: true
   - type: textarea

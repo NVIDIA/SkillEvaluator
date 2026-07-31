@@ -1,8 +1,8 @@
 # Evaluation Report
 
-Evaluation of the `demo-skill` skill before publication through Skill Evaluator.
+Evaluation of the `demo-skill` skill before publication through SkillEvaluator.
 
-This benchmark summarizes 3-Tier Evaluation from Skill Evaluator results for the skill. The goal is to document whether the skill is safe, discoverable, effective, and useful for agents before it is published for broader workflow use.
+This benchmark summarizes 3-Tier Evaluation from SkillEvaluator results for the skill. The goal is to document whether the skill is safe, discoverable, effective, and useful for agents before it is published for broader workflow use.
 
 ## Evaluation Summary
 
@@ -38,7 +38,7 @@ Tier 3 dimension rollup was not available in this report.
 
 ## Tier 1: Static Validation Summary
 
-Tier 1 validation passed. Skill Evaluator ran 1 checks and found 0 total findings.
+Tier 1 validation passed. SkillEvaluator ran 1 checks and found 0 total findings.
 
 Notable observations:
 
@@ -46,7 +46,7 @@ Notable observations:
 
 ## Tier 2: Deduplication Summary
 
-Tier 2 validation passed with observations. Skill Evaluator ran 1 checks and found 1 total findings.
+Tier 2 validation passed with observations. SkillEvaluator ran 1 checks and found 1 total findings.
 
 Top findings:
 
@@ -54,4 +54,4 @@ Top findings:
 
 ## Publication Recommendation
 
-The skill is suitable to proceed toward Skill Evaluator publication based on this benchmark. Skill owners should keep this file with the skill and refresh it when the evaluation dataset, skill behavior, or target agents materially change.
+The skill is suitable to proceed toward SkillEvaluator publication based on this benchmark. Skill owners should keep this file with the skill and refresh it when the evaluation dataset, skill behavior, or target agents materially change.

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pytest configuration and fixtures for Skill Evaluator tests.
+"""Pytest configuration and fixtures for SkillEvaluator tests.
 
-Based on Skill Evaluator HOW_TO_CONTRIBUTE_SKILLS.md and HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
+Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md and HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
 from pathlib import Path
@@ -17,7 +17,7 @@ import pytest
 
 @pytest.fixture
 def sample_skill_dir(tmp_path: Path) -> Path:
-    """Create a sample valid skill directory per Skill Evaluator spec.
+    """Create a sample valid skill directory per SkillEvaluator spec.
 
     Structure: skills/sample-skill/SKILL.md
     Required fields: name, description
@@ -29,11 +29,11 @@ def sample_skill_dir(tmp_path: Path) -> Path:
     skill_dir = skills_dir / "sample-skill"
     skill_dir.mkdir()
 
-    # Create valid SKILL.md per Skill Evaluator spec
+    # Create valid SKILL.md per SkillEvaluator spec
     skill_md = skill_dir / "SKILL.md"
     skill_md.write_text("""---
 name: sample-skill
-description: A sample skill for testing Skill Evaluator validation. Use when demonstrating validation workflows.
+description: A sample skill for testing SkillEvaluator validation. Use when demonstrating validation workflows.
 metadata:
   author: Test User <testuser@example.com>
   tags:
@@ -95,7 +95,7 @@ def skill_with_forbidden_fields(tmp_path: Path) -> Path:
     skill_md = skill_dir / "SKILL.md"
     skill_md.write_text("""---
 name: forbidden-fields
-description: A skill that uses forbidden fields per Skill Evaluator spec
+description: A skill that uses forbidden fields per SkillEvaluator spec
 alwaysApply: true
 globs:
   - "*.py"
@@ -248,7 +248,7 @@ graph.invoke({"input": "test"}, config={"debug": True})
 
 @pytest.fixture
 def sample_rule_file(tmp_path: Path) -> Path:
-    """Create a sample valid .mdc rule file per Skill Evaluator spec.
+    """Create a sample valid .mdc rule file per SkillEvaluator spec.
 
     Structure: team-rules/<team-name>/<rule-name>.mdc
     Required fields: alwaysApply, title, description
@@ -352,7 +352,7 @@ Follow these {name.replace("-", " ")} guidelines.
 
 @pytest.fixture
 def sample_workflow_dir(tmp_path: Path) -> Path:
-    """Create a sample valid workflow directory per Skill Evaluator spec.
+    """Create a sample valid workflow directory per SkillEvaluator spec.
 
     Structure: workflows/<workflow-name>/
     Required files: README.md, workflow-rules.mdc
@@ -369,7 +369,7 @@ def sample_workflow_dir(tmp_path: Path) -> Path:
 
 ## Overview
 
-A sample workflow for testing Skill Evaluator validation.
+A sample workflow for testing SkillEvaluator validation.
 
 ## Prerequisites
 

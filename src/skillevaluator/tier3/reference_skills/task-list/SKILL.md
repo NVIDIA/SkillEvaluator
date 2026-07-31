@@ -2,7 +2,7 @@
 name: task-list
 description: Required for 4+ step requests; add tasks at start and update status after each step.
 metadata:
-  author: Skill Evaluator Maintainers <maintainers@example.com>
+  author: SkillEvaluator Maintainers <maintainers@example.com>
 ---
 
 # Task List Skill

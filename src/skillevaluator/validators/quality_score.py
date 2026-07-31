@@ -285,7 +285,7 @@ class QualityScoreValidator(ValidatorBase):
                 "Use forward slashes for cross-platform compatibility",
             )
 
-        # README.md is an allowed, human-facing supporting file per Skill Evaluator
+        # README.md is an allowed, human-facing supporting file per SkillEvaluator
         # HOW_TO_CONTRIBUTE_SKILLS.md ("Optional Supporting Directories") and is
         # listed as a valid optional file in docs/TIER1.md. Under progressive
         # disclosure, agents only load a supporting file when SKILL.md references

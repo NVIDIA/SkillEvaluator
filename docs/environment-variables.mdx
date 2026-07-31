@@ -1,10 +1,10 @@
 ---
 title: "Environment Variables"
-description: "The complete reference of every environment variable Skill Evaluator reads — providers, embeddings, validation, live evaluation, and telemetry."
+description: "The complete reference of every environment variable SkillEvaluator reads — providers, embeddings, validation, and live evaluation."
 layout: reference
 ---
 
-Every environment variable Skill Evaluator reads, grouped by feature area. Each group links to the guide that explains the workflow the variables belong to — this page is the inventory, not the tutorial.
+Every environment variable SkillEvaluator reads, grouped by feature area. Each group links to the guide that explains the workflow the variables belong to — this page is the inventory, not the tutorial.
 
 Boolean variables accept `1`, `true`, `yes`, or `on` (case-insensitive) as true, and `0`, `false`, `no`, or `off` as false.
 
@@ -38,7 +38,7 @@ If none is set, LLM-backed commands fail with a configuration error. If more tha
 
 ### SkillSpector bridge
 
-The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. Skill Evaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -90,42 +90,6 @@ These variables control where results land and how Harbor local mode is confined
 | `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. |
 | `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory; oversized artifacts are skipped and recorded in the artifact manifest. |
 
-## Telemetry
-
-Telemetry is opt-in and off by default — nothing is exported until both the enable flag and an OTLP endpoint are set. The privacy model is explained in [Providers & Credentials](configuration.mdx#telemetry).
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `SKILLEVALUATOR_TELEMETRY_ENABLED` | `false` | Master opt-in switch. |
-| `SKILLEVALUATOR_TELEMETRY_DISABLED` | — | Force-off switch; when true it always wins over the enable flag. |
-| `SKILLEVALUATOR_TELEMETRY_IDENTITY_MODE` | `team_only` | `team_only` exports no user identity; `hashed` exports a salted SHA-256 hash of the login; any other value (`raw`) exports the hash plus the raw login. |
-| `SKILLEVALUATOR_TELEMETRY_HASH_SALT` | empty | Salt for the hashed identity mode. |
-| `SKILLEVALUATOR_TELEMETRY_MAX_ATTR_LEN` | `2048` | Maximum length of any exported attribute value; longer values are truncated. |
-| `SKILLEVALUATOR_TELEMETRY_METRIC_EXPORT_MS` | `1000` | Metric export interval in milliseconds. |
-| `SKILLEVALUATOR_TELEMETRY_METRIC_USER_TAGS` | `false` | When true, user identity attributes are also attached to metrics (not just traces). |
-| `SKILLEVALUATOR_ENV` | `local` | Deployment-environment tag stamped on telemetry resources. |
-
-### Honored OTEL variables
-
-Export is configured through the standard OpenTelemetry environment:
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Base OTLP endpoint; required (or a per-signal endpoint) for any export to happen. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | derived from base | Per-signal endpoint overrides. |
-| `OTEL_EXPORTER_OTLP_HEADERS` | — | Comma-separated `key=value` headers for the exporter; `OTEL_EXPORTER_OTLP_TRACES_HEADERS` and `OTEL_EXPORTER_OTLP_METRICS_HEADERS` add per-signal headers. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | Export protocol. |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `2` | Export timeout in seconds. |
-| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | `delta` | Metric aggregation temporality; set `cumulative` to switch. |
-| `OTEL_SERVICE_NAME` | `skillevaluator` | Service name on exported resources. |
-| `OTEL_SERVICE_VERSION` | installed package version | Service version on exported resources. |
-| `OTEL_RESOURCE_ATTRIBUTES` | — | Comma-separated `key=value` resource attributes merged into every export. |
-| `OTEL_DEPLOYMENT_ENVIRONMENT` | — | Deployment-environment tag; precedence is `OTEL_DEPLOYMENT_ENVIRONMENT`, then the Datadog-style `DD_ENV`, then `SKILLEVALUATOR_ENV`. |
-
-<Note>
-Subprocesses that Skill Evaluator launches for live evaluation — Docker builds and Harbor runs, including the agent CLIs — never receive your `OTEL_*` or `SKILLEVALUATOR_TELEMETRY_*` variables and get telemetry force-disabled, so they cannot export their own spans or inherit your exporter credentials.
-</Note>
-
 ## In-container grader contract
 
 The `HARBOR_*` variables are read by your custom grader *inside* the task container — you never set them yourself, and each has a fixed in-container default. The full reward contract, with defaults and examples, lives in [Custom Graders & Tasks](custom-graders.mdx).
@@ -148,6 +112,6 @@ Keep credentials out of skill repositories and CI configuration files. Export pr
 
 ## See also
 
-- [Providers & Credentials](configuration.mdx) — the setup walkthrough behind the provider and telemetry variables
+- [Providers & Credentials](configuration.mdx) — the setup walkthrough behind the provider variables
 - [CLI Reference](cli-reference.mdx) — the per-run flags that override many of these variables
 - [Gate Your CI](ci-integration.mdx) — supplying these variables as masked CI secrets

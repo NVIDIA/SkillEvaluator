@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reporting module for Skill Evaluator validation results.
+"""Reporting module for SkillEvaluator validation results.
 
 This module provides reporters that render ValidationResult objects
 in various formats for different use cases:

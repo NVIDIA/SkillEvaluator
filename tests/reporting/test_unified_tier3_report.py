@@ -122,7 +122,7 @@ def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None
     assert "Tier 2: Deduplication" not in html
     assert 'data-tier3-tab="trials"' in html
     assert "Diagnostics" in html
-    assert "Skill Evaluator" in html
+    assert "SkillEvaluator" in html
 
 
 def test_canonical_report_prefers_agentskills_dataset_fields() -> None:

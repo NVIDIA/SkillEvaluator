@@ -4,7 +4,7 @@
 # Documentation
 
 Long-form documentation for SkillEvaluator. Pages are authored in MDX and
-published to <https://docs.nvidia.com/skillevaluator>. This page is the human
+published to <https://docs.nvidia.com/skills/skillevaluator>. This page is the human
 quickstart; [`AGENTS.md`](AGENTS.md) holds the detailed authoring rules (MDX
 gotchas, link conventions, page-adding checklist) for both AI agents and
 contributors making non-trivial edits.

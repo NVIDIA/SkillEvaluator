@@ -3,7 +3,7 @@
 
 """Regression tests for the SKILL.md shell-read routing detection.
 
-Ports Skill Evaluator 0.7.22 ``b656d5a`` ("recognize non-cat shell reads of SKILL.md in
+Ports SkillEvaluator 0.7.22 ``b656d5a`` ("recognize non-cat shell reads of SKILL.md in
 routing checks") into the in-process Tier 3 engine (``tier3/eval_core/checks.py``).
 """
 

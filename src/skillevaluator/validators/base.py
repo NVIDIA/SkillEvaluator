@@ -47,7 +47,7 @@ __all__ = [
 
 # When enabled (via ``run_validation`` honoring ``--continue-on-failure``),
 # batch folder validation records every skill instead of stopping at the first
-# CRITICAL finding. Defaults to Skill Evaluator's historical stop-on-critical behavior.
+# CRITICAL finding. Defaults to SkillEvaluator's historical stop-on-critical behavior.
 _CONTINUE_ON_FAILURE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "skillevaluator_continue_on_failure", default=False
 )
@@ -59,7 +59,7 @@ def continue_on_failure_scope(enabled: bool) -> Iterator[None]:
 
     While *enabled* is True, :meth:`ValidatorBase._validate_folder_or_skill`
     keeps scanning and recording every skill in a folder even after a CRITICAL
-    finding, rather than returning early (parity with Skill Evaluator
+    finding, rather than returning early (parity with SkillEvaluator
     ``--continue-on-failure``).
     """
     token = _CONTINUE_ON_FAILURE.set(enabled)

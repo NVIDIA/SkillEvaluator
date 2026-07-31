@@ -1,9 +1,9 @@
 ---
 title: "Reports & Results"
-description: "Every file Skill Evaluator writes — report formats, file naming, BENCHMARK.md, the Tier 3 results tree, and how to read dimensions, Skill Lift, and pass@k."
+description: "Every file SkillEvaluator writes — report formats, file naming, BENCHMARK.md, the Tier 3 results tree, and how to read dimensions, Skill Lift, and pass@k."
 ---
 
-This page maps everything Skill Evaluator writes to disk and how to read it.
+This page maps everything SkillEvaluator writes to disk and how to read it.
 Nothing here requires an API key — it is the output contract for every command,
 from a keyless `quality-check` to a full live evaluation.
 
@@ -82,7 +82,7 @@ its eval dataset materially changes.
 ## Safety guarantees
 
 Report writes are hardened: every file is written atomically (a temporary file
-renamed into place), and Skill Evaluator refuses to write through symlinks,
+renamed into place), and SkillEvaluator refuses to write through symlinks,
 Windows junctions, or paths with parent traversal. A run that is interrupted
 mid-write never leaves a half-written report, and a report path can't be used
 to redirect output somewhere unexpected.

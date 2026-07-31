@@ -3,7 +3,7 @@
     svg { color: #3a3f45; }
     @media (prefers-color-scheme: dark) { svg { color: #b0b6bd; } }
   </style>
-  <title id="pipeline-title">Skill Evaluator three-tier pipeline</title>
+  <title id="pipeline-title">SkillEvaluator three-tier pipeline</title>
   <desc id="pipeline-desc">A skill directory flows through Tier 1 static validation, Tier 2 semantic deduplication, and Tier 3 live agent evaluation, producing reports and a verdict.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">

@@ -3,7 +3,7 @@
 
 """Tests for Rules schema validation.
 
-Based on Skill Evaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
+Based on SkillEvaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
 """
 
 from pathlib import Path
@@ -23,7 +23,7 @@ class TestRulesSchemaValidator:
 
     @pytest.fixture
     def valid_rule_file(self, tmp_path: Path) -> Path:
-        """Create a valid .mdc rule file per Skill Evaluator spec."""
+        """Create a valid .mdc rule file per SkillEvaluator spec."""
         team_rules_dir = tmp_path / "team-rules" / "test-team"
         team_rules_dir.mkdir(parents=True)
 

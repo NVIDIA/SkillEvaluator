@@ -3,7 +3,7 @@
 
 """Tests for schema validator.
 
-Based on Skill Evaluator HOW_TO_CONTRIBUTE_SKILLS.md specification.
+Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md specification.
 """
 
 from pathlib import Path
@@ -12,10 +12,10 @@ from skillevaluator.validators.schema import SchemaValidator
 
 
 class TestSchemaValidator:
-    """Test cases for SchemaValidator based on Skill Evaluator spec."""
+    """Test cases for SchemaValidator based on SkillEvaluator spec."""
 
     def test_valid_skill(self, sample_skill_dir: Path):
-        """Test validation passes for valid skill with proper Skill Evaluator structure."""
+        """Test validation passes for valid skill with proper SkillEvaluator structure."""
         validator = SchemaValidator()
         result = validator.validate(sample_skill_dir)
 
@@ -286,7 +286,7 @@ Example usage.
         skill_md = skill_dir / "SKILL.md"
         skill_md.write_text("""---
 name: complete-metadata
-description: A skill with complete metadata structure per Skill Evaluator spec
+description: A skill with complete metadata structure per SkillEvaluator spec
 license: MIT
 compatibility: Requires Python 3.11+
 metadata:

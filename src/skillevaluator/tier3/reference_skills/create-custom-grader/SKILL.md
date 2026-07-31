@@ -2,7 +2,7 @@
 name: create-custom-grader
 description: Use when converting an existing benchmark, rubric, verifier, task YAML/JSON, or domain check into SkillEvaluator BYOG/BYOT custom evaluation.
 metadata:
-  author: Skill Evaluator Maintainers <maintainers@example.com>
+  author: SkillEvaluator Maintainers <maintainers@example.com>
 ---
 
 # Create Custom Grader

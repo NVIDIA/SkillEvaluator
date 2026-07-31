@@ -1,9 +1,9 @@
 ---
 title: Gate Your CI
-description: Make Skill Evaluator a merge gate — exit codes, a copy-paste GitHub Actions workflow, collection validation, progressive adoption, and machine-readable results.
+description: Make SkillEvaluator a merge gate — exit codes, a copy-paste GitHub Actions workflow, collection validation, progressive adoption, and machine-readable results.
 ---
 
-Turn Skill Evaluator into a merge gate for your skill repository. The recommended gate runs entirely offline — no API key, no network calls beyond installing the tools — so you can adopt it in any CI system today and layer LLM-backed checks on later.
+Turn SkillEvaluator into a merge gate for your skill repository. The recommended gate runs entirely offline — no API key, no network calls beyond installing the tools — so you can adopt it in any CI system today and layer LLM-backed checks on later.
 
 ## Exit codes
 
@@ -34,7 +34,9 @@ Each flag earns its place:
 
 ## GitHub Actions recipe
 
-A complete workflow: install with uv, add Gitleaks for a complete security result, validate, upload the reports, and post the Markdown report on the pull request.
+A complete workflow: install with uv, add the external Semgrep, SkillSpector,
+and Gitleaks scanners for a complete security result, validate, upload the
+reports, and post the Markdown report on the pull request.
 
 ```yaml title="ci.yml"
 name: Validate skills
@@ -58,8 +60,13 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Skill Evaluator
+      - name: Install SkillEvaluator
         run: uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+
+      - name: Install external Python scanners
+        run: |
+          uv tool install semgrep
+          uv tool install git+https://github.com/NVIDIA/SkillSpector.git
 
       - name: Install Gitleaks
         run: |
@@ -99,7 +106,13 @@ jobs:
             });
 ```
 
-The `security` extra installs the Python-packaged scanners (Bandit, Semgrep, pip-audit, SkillSpector); Gitleaks is a Go binary, so it is installed separately from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases). Report filenames embed a sortable timestamp (`skillevaluator-output-<timestamp>.md`), which is why a lexicographic sort finds the newest one. The `if: always()` conditions keep reports flowing even when validation fails — which is exactly when you want them.
+The `security` extra installs Bandit and pip-audit. Semgrep and SkillSpector
+stay in separate uv tool environments, while Gitleaks is installed from its
+official [releases](https://github.com/gitleaks/gitleaks/releases). Report
+filenames embed a sortable timestamp (`skillevaluator-output-<timestamp>.md`),
+which is why a lexicographic sort finds the newest one. The `if: always()`
+conditions keep reports flowing even when validation fails — which is exactly
+when you want them.
 
 The same shape ports to any CI system: install, run `validate`, gate on the exit code, archive `reports/`.
 
@@ -147,11 +160,11 @@ You do not have to turn on the strictest gate on day one. A path that works well
 
   ### Add an advisory Tier 3 job
 
-  Run live agent evaluation as a separate, non-blocking job — either `skillevaluator tier3 evaluate` on its own or `validate --tier3` (`--agent-eval` still works as an alias, and `validate --full` runs Tier 1+2+3 in one shot). Tier 3 results never gate `validate`'s exit code; the standalone `tier3 evaluate` exits non-zero only when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because Skill Evaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+  Run live agent evaluation as a separate, non-blocking job — either `skillevaluator tier3 evaluate` on its own or `validate --tier3` (`--agent-eval` still works as an alias, and `validate --full` runs Tier 1+2+3 in one shot). Tier 3 results never gate `validate`'s exit code; the standalone `tier3 evaluate` exits non-zero only when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
 </Steps>
 
 <Note>
-Keep provider and agent keys as masked CI secrets in the job environment — never in the repo or in `evals/config.yml`. Skill Evaluator enforces this: a `harbor.runtime_env` entry that names or `${VAR}`-references an operator-owned credential (such as `OPENAI_API_KEY` or `NVIDIA_API_KEY`) fails the Tier 3 run with a hard error. Telemetry is opt-in and off by default, so CI runs send nothing unless you explicitly enable it.
+Keep provider and agent keys as masked CI secrets in the job environment — never in the repo or in `evals/config.yml`. SkillEvaluator enforces this: a `harbor.runtime_env` entry that names or `${VAR}`-references an operator-owned credential (such as `OPENAI_API_KEY` or `NVIDIA_API_KEY`) fails the Tier 3 run with a hard error.
 </Note>
 
 ## Custom policy in CI

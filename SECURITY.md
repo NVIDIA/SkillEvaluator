@@ -23,12 +23,12 @@ While NVIDIA currently does not have a bug bounty program, we do offer acknowled
 
 For all security-related concerns, please visit NVIDIA's Product Security portal at https://www.nvidia.com/en-us/security
 
-## Reporting Details for Skill Evaluator
+## Reporting Details for SkillEvaluator
 
-When reporting a vulnerability in Skill Evaluator, include as much of the
+When reporting a vulnerability in SkillEvaluator, include as much of the
 following information as you can safely provide:
 
-- Product name: Skill Evaluator
+- Product name: SkillEvaluator
 - Affected version, branch, tag, or commit
 - Vulnerability type and potential impact
 - Reproduction steps
@@ -37,7 +37,7 @@ following information as you can safely provide:
 
 ## Supported Versions
 
-Security updates are provided for the latest public release of Skill Evaluator
+Security updates are provided for the latest public release of SkillEvaluator
 unless a release note states otherwise.
 
 For unreleased branches or pre-release snapshots, include the affected branch,

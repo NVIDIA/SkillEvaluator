@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Central report-artifact naming for Skill Evaluator.
+"""Central report-artifact naming for SkillEvaluator.
 
 All generated report basenames are derived here so the final ``skillevaluator``
 identity lives in exactly one place (and so an edition-aware rename, if ever
 needed, is a one-line change). The benchmark card has a fixed filename to match
-Skill Evaluator.
+SkillEvaluator.
 """
 
 from __future__ import annotations

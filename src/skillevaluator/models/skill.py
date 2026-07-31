@@ -3,7 +3,7 @@
 
 """Pydantic models for skill schema validation.
 
-Based on the Skill Evaluator HOW_TO_CONTRIBUTE_SKILLS.md specification
+Based on the SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md specification
 and agentskills.io standard.
 """
 
@@ -75,7 +75,7 @@ class SkillMetadata(BaseModel):
 class SkillFrontmatter(BaseModel):
     """Pydantic model for SKILL.md frontmatter validation.
 
-    Based on Skill Evaluator specification:
+    Based on SkillEvaluator specification:
     - Required: name, description
     - Optional: license, compatibility, metadata
     - Forbidden: alwaysApply, globs
@@ -127,7 +127,7 @@ class SkillFrontmatter(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name_format(cls, v: str) -> str:
-        """Validate that name follows Skill Evaluator and agentskills.io naming conventions.
+        """Validate that name follows SkillEvaluator and agentskills.io naming conventions.
 
         Rules:
         - 1-64 characters

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: Feature request
-description: Suggest an improvement to Skill Evaluator.
+description: Suggest an improvement to SkillEvaluator.
 title: "[FEA]: "
 labels:
   - enhancement

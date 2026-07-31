@@ -2,7 +2,7 @@
 
 Support level: **Experimental**.
 
-Skill Evaluator is community-supported software. Support is provided on a
+SkillEvaluator is community-supported software. Support is provided on a
 best-effort basis by the maintainers through
 [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues); there is no
 SLA and no NVIDIA enterprise support entitlement for this project.

@@ -99,10 +99,10 @@ class BenchmarkReporter(ReporterBase):
         lines: list[str] = [
             "# Evaluation Report",
             "",
-            (f"Evaluation of the `{skill_name}` skill before publication through Skill Evaluator."),
+            (f"Evaluation of the `{skill_name}` skill before publication through SkillEvaluator."),
             "",
             (
-                "This benchmark summarizes 3-Tier Evaluation from Skill Evaluator "
+                "This benchmark summarizes 3-Tier Evaluation from SkillEvaluator "
                 "results for the skill. The goal is to document whether the "
                 "skill is safe, discoverable, effective, and useful for agents before "
                 "it is published for broader workflow use."
@@ -334,7 +334,7 @@ class BenchmarkReporter(ReporterBase):
             status = "passed"
         lines.append(
             f"{title.split(':', 1)[0]} validation {status}. "
-            f"Skill Evaluator ran {len(results)} checks and found "
+            f"SkillEvaluator ran {len(results)} checks and found "
             f"{len(findings)} total findings."
         )
         lines.append("")
@@ -411,7 +411,7 @@ class BenchmarkReporter(ReporterBase):
             )
         else:
             lines.append(
-                "The skill is suitable to proceed toward Skill Evaluator publication "
+                "The skill is suitable to proceed toward SkillEvaluator publication "
                 "based on this benchmark. Skill owners should keep this file with the "
                 "skill and refresh it when the evaluation dataset, skill behavior, or "
                 "target agents materially change."
@@ -432,9 +432,9 @@ def _agent_eval_payload(results: list[ValidationResult]) -> dict[str, Any] | Non
 
 def _render_failed_benchmark_notes(lines: list[str]) -> None:
     lines.append(
-        "The skill should be reviewed before Skill Evaluator publication. "
+        "The skill should be reviewed before SkillEvaluator publication. "
         "**Skill owners should address the applicable findings below and rerun "
-        "Skill Evaluator to refresh this benchmark.**"
+        "SkillEvaluator to refresh this benchmark.**"
     )
 
 
@@ -468,7 +468,7 @@ def _render_incomplete_benchmark_notes(
     lines.append(
         "Required scanner evidence is incomplete "
         f"({', '.join(safe_tools)}). **Do not use this benchmark to recommend publication; "
-        "restore the scanners and rerun Skill Evaluator.**"
+        "restore the scanners and rerun SkillEvaluator.**"
     )
 
 
@@ -668,7 +668,7 @@ def _publication_safe_skill_name(value: object) -> str:
     if re.fullmatch(KEBAB_CASE_PATTERN, candidate) is not None:
         return candidate
     if _RETIRED_PRODUCT_NAME.fullmatch(candidate):
-        return "Skill Evaluator"
+        return "SkillEvaluator"
     return "skill"
 
 
@@ -691,7 +691,7 @@ def _publication_safe_label(value: object, private_labels: tuple[str, ...] = ())
     """Sanitize a classified display label and normalize only an exact retired product name."""
     label = _publication_safe_inline(value, private_labels)
     if _RETIRED_PRODUCT_NAME.fullmatch(label):
-        return "Skill Evaluator"
+        return "SkillEvaluator"
     return label
 
 

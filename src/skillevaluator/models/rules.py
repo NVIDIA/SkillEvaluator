@@ -3,7 +3,7 @@
 
 """Pydantic models for Rules (.mdc) schema validation.
 
-Based on Skill Evaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
+Based on SkillEvaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
 Rules use .mdc (Markdown Cursor) format with YAML frontmatter.
 
 Key differences from Skills:
@@ -30,7 +30,7 @@ from skillevaluator.models.field_validators import ensure_string_list, parse_nes
 class RulesMetadata(BaseModel):
     """Metadata object for Rules .mdc frontmatter.
 
-    Contains Skill Evaluator-specific categorization fields nested under 'metadata'.
+    Contains SkillEvaluator-specific categorization fields nested under 'metadata'.
     """
 
     model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
@@ -79,7 +79,7 @@ class RulesMetadata(BaseModel):
 class RulesFrontmatter(BaseModel):
     """Pydantic model for Rules .mdc frontmatter validation.
 
-    Based on Skill Evaluator specification for team-rules:
+    Based on SkillEvaluator specification for team-rules:
     - Required top-level: alwaysApply, title, description
     - Optional top-level: globs
     - Optional nested: metadata (with tags, language, framework, etc.)
@@ -113,10 +113,10 @@ class RulesFrontmatter(BaseModel):
         description="File patterns this rule applies to (e.g., '*.py', 'app/**/*.py')",
     )
 
-    # Skill Evaluator-specific metadata (nested)
+    # SkillEvaluator-specific metadata (nested)
     metadata: RulesMetadata | None = Field(
         default=None,
-        description="Skill Evaluator-specific metadata (tags, language, framework, etc.)",
+        description="SkillEvaluator-specific metadata (tags, language, framework, etc.)",
     )
 
     @field_validator("globs", mode="before")

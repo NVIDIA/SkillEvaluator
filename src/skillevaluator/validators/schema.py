@@ -4,7 +4,7 @@
 """Schema and Repository Governance Validator.
 
 Validates SKILL.md frontmatter against schema, enforces folder hierarchy
-and naming conventions per Skill Evaluator specification.
+and naming conventions per SkillEvaluator specification.
 """
 
 import os
@@ -35,7 +35,7 @@ logger = get_logger(__name__)
 
 
 class SchemaValidator(ValidatorBase):
-    """Validates skill schema and repository structure per Skill Evaluator spec.
+    """Validates skill schema and repository structure per SkillEvaluator spec.
 
     Checks: frontmatter schema, folder hierarchy, naming conventions,
     directory-name consistency, required/forbidden fields.
@@ -657,7 +657,7 @@ class SchemaValidator(ValidatorBase):
         return result
 
     def _validate_folder_compliance(self, folder_path: Path) -> ValidationResult:
-        """Check if folder contains standard Skill Evaluator directories (skills/, team-skills/)."""
+        """Check if folder contains standard SkillEvaluator directories (skills/, team-skills/)."""
         result = ValidationResult()
         has_skills = (folder_path / "skills").exists()
         has_team_skills = (folder_path / "team-skills").exists()
@@ -666,7 +666,7 @@ class SchemaValidator(ValidatorBase):
         if has_skills or has_team_skills:
             result.add_success(
                 check_name="folder_structure",
-                message="Folder structure compliant with Skill Evaluator guidelines",
+                message="Folder structure compliant with SkillEvaluator guidelines",
             )
             if has_skills:
                 count = len(list((folder_path / "skills").iterdir()))
@@ -693,7 +693,7 @@ class SchemaValidator(ValidatorBase):
                     category="SCHEMA",
                     severity=Severity.MEDIUM,
                     check_name="folder_structure",
-                    message="Folder doesn't follow Skill Evaluator structure (missing skills/ or team-skills/)",
+                    message="Folder doesn't follow SkillEvaluator structure (missing skills/ or team-skills/)",
                     file_path=file_path,
                     suggestion="Create skills/ and/or team-skills/ directories for organizing skills",
                 ),
@@ -707,7 +707,7 @@ class SchemaValidator(ValidatorBase):
         """Allowed skill-root subdirectories: built-in defaults plus per-repo extras.
 
         Recognised skill-root subdirectories (``DEFAULT_ALLOWED_SKILL_DIRS``):
-        - ``references/``, ``scripts/``, ``assets/`` — Skill Evaluator canonical content dirs.
+        - ``references/``, ``scripts/``, ``assets/`` — SkillEvaluator canonical content dirs.
         - ``evals/`` — canonical location for Tier 3 evaluation datasets
           (``evals/evals.json``, optional ``evals/EVAL.md``, and Harbor outputs
           under ``evals/results/``).

@@ -37,11 +37,12 @@ Tier 1 is exposed through one umbrella command and five standalone commands. Eac
   Install Gitleaks once, then disable dedup for a fully hermetic run:
 
   ```bash title="Complete offline Tier 1"
-  brew install gitleaks
+  brew install gitleaks semgrep
+  uv tool install git+https://github.com/NVIDIA/SkillSpector.git
   skillevaluator validate ./my-skill --no-dedup
   ```
 
-  With `skillevaluator[security]` and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine.
+  With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine.
 
   ### Narrow to specific checks
 

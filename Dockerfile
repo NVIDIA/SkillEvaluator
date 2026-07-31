@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Skill Evaluator public runtime image.
+# SkillEvaluator public runtime image.
 #
 # The image installs every public optional dependency. Tier 3 still requires
 # credentials for the selected provider and agent at runtime.

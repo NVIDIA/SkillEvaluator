@@ -228,7 +228,7 @@ class TestValidatorBase:
     def test_find_all_skills_skips_versions_snapshots(self, tmp_path):
         """Historical snapshots under ``.versions/`` must not be re-validated.
 
-        The resource versioning proposal (Skill Evaluator) lets contributors keep
+        The resource versioning proposal (SkillEvaluator) lets contributors keep
         immutable per-commit snapshots of a skill alongside the live
         ``SKILL.md`` (e.g. ``my-skill/.versions/v1.0.0/SKILL.md``).
         ``_find_all_skills`` must treat anything under a ``.versions``

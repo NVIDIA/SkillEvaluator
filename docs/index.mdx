@@ -1,13 +1,15 @@
 ---
-title: "Skill Evaluator"
-description: "A multi-tier framework for evaluating AI agent skills — offline quality and security gates, semantic overlap detection, and live agent A/B evaluation, from one CLI."
+title: "SkillEvaluator"
+description: "An open-source, multi-tier framework for evaluating AI agent artifacts, starting with agent skills."
 layout: overview
 ---
 
-Skill Evaluator measures whether an AI agent skill is safe, unique, and actually useful — a skill being a folder of instructions and scripts (a `SKILL.md` plus supporting files) that extends an AI agent, per the [Agent Skills specification](https://agentskills.io/). It gates skills through three progressively deeper tiers, from free offline checks to live agent A/B evaluation.
+SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent artifacts, starting with agent skills: deterministic quality gates, semantic overlap detection, synthetic eval dataset generation, and live agent evaluation.
+
+Agent skills are folders of instructions and supporting files that extend AI agents, as defined by the [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of the [NVIDIA Verified Skills pipeline](https://docs.nvidia.com/skills/). Tier 1 integrates [SkillSpector](https://github.com/NVIDIA/SkillSpector) for specialized security scanning; see [Installation](installation.mdx#system-tools) for the security setup.
 
 <Note>
-  Skill Evaluator's support level is **Experimental**: community-supported on a best-effort basis through [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues), with no SLA. See [SUPPORT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md).
+  SkillEvaluator's support level is **Experimental**: community-supported on a best-effort basis through [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues), with no SLA. See [SUPPORT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md).
 </Note>
 
 ## The three tiers
@@ -30,7 +32,7 @@ Every tier is an independent entry point — run any command directly; nothing r
 
 | Tier | Representative commands | Requires |
 | --- | --- | --- |
-| [Tier 1](tier1-validation.mdx) | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra and Gitleaks for full scanner coverage; a provider key for LLM checks |
+| [Tier 1](tier1-validation.mdx) | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra plus external Semgrep, SkillSpector, and Gitleaks executables for full scanner coverage; a provider key for LLM checks |
 | [Tier 2](tier2-deduplication.mdx) | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
 | [Tier 3](tier3-live-evaluation.mdx) | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
 
@@ -47,8 +49,8 @@ You get a 0–100 quality score with an A–F grade. From there, the [Quickstart
 
 ## How a run flows
 
-<Frame background="subtle" caption="The Skill Evaluator three-tier pipeline">
-  <img src="./assets/pipeline-overview.svg" alt="Skill Evaluator pipeline: skill directory through Tier 1 static validation, Tier 2 semantic deduplication, and Tier 3 live agent evaluation, producing reports and a verdict" />
+<Frame background="subtle" caption="The SkillEvaluator three-tier pipeline">
+  <img src="./assets/pipeline-overview.svg" alt="SkillEvaluator pipeline: skill directory through Tier 1 static validation, Tier 2 semantic deduplication, and Tier 3 live agent evaluation, producing reports and a verdict" />
 </Frame>
 
 Tier 1's deterministic gates run offline. Tier 2 and the optional Tier 1 LLM checks need a provider key, and Tier 3 adds the agent credential and a sandbox. Every run ends in [reports](reports.mdx) — CLI, JSON, HTML, or Markdown.
@@ -68,7 +70,7 @@ How to read all three, and the on-disk results contract, live in [Reports & Resu
     First evaluation result in about two minutes, no API key.
   </Card>
   <Card title="Gate Your CI" icon="shield" href="ci-integration.mdx">
-    Make Skill Evaluator a merge gate — exit codes, a GitHub Actions recipe, and progressive adoption.
+    Make SkillEvaluator a merge gate — exit codes, a GitHub Actions recipe, and progressive adoption.
   </Card>
   <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
     Every command, every flag, exact defaults.

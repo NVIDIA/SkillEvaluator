@@ -3,7 +3,7 @@
 
 """Workflows Schema and Structure Validator.
 
-Validates workflow directories against Skill Evaluator specification.
+Validates workflow directories against SkillEvaluator specification.
 Workflows are directory-based structures containing:
 - README.md (required)
 - workflow-rules.mdc (required)
@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 
 
 class WorkflowsSchemaValidator(ValidatorBase):
-    """Validates Workflows directory structure and content per Skill Evaluator spec.
+    """Validates Workflows directory structure and content per SkillEvaluator spec.
 
     Checks:
     - Directory structure (README.md, workflow-rules.mdc, references/)
@@ -340,13 +340,13 @@ class WorkflowsSchemaValidator(ValidatorBase):
         return result
 
     def _validate_folder_compliance(self, folder_path: Path) -> ValidationResult:
-        """Check if folder follows Skill Evaluator workflows structure."""
+        """Check if folder follows SkillEvaluator workflows structure."""
         result = ValidationResult()
         has_workflows = (folder_path / "workflows").exists()
         has_team_workflows = (folder_path / "team-workflows").exists()
 
         if has_workflows or has_team_workflows:
-            result.add_message("Folder structure compliant with Skill Evaluator guidelines")
+            result.add_message("Folder structure compliant with SkillEvaluator guidelines")
             if has_workflows:
                 workflows_dir = folder_path / "workflows"
                 count = len([d for d in workflows_dir.iterdir() if d.is_dir()])
@@ -359,7 +359,7 @@ class WorkflowsSchemaValidator(ValidatorBase):
             result.add_message("Validating workflows within standard folder structure")
         else:
             result.add_warning(
-                "Folder doesn't follow Skill Evaluator structure (missing workflows/ or team-workflows/)"
+                "Folder doesn't follow SkillEvaluator structure (missing workflows/ or team-workflows/)"
             )
 
         return result

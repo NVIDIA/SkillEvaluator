@@ -250,6 +250,7 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "\n## Tier 1:" not in readme
     assert "skillevaluator quality-check" not in readme
     assert "Skill Evaluator" not in readme
+    assert "Skillevaluator" not in readme
     assert len(readme.split()) <= 400
 
 
@@ -510,3 +511,59 @@ def test_ci_installs_the_security_wheel_on_rhel8() -> None:
     assert 'Version(version("pip-audit")) >= Version("2.10.0")' in rhel8_job
     assert ".rhel8-security-venv/bin/bandit --version" in rhel8_job
     assert ".rhel8-security-venv/bin/semgrep --version" not in rhel8_job
+
+
+def test_fern_docs_use_the_verified_skills_basepath_and_launch_positioning() -> None:
+    fern = (REPO_ROOT / "fern" / "docs.yml").read_text(encoding="utf-8")
+    overview = (REPO_ROOT / "docs" / "index.mdx").read_text(encoding="utf-8")
+    normalized_overview = " ".join(overview.split())
+
+    positioning = (
+        "SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent artifacts, "
+        "starting with agent skills: deterministic quality gates, semantic overlap detection, "
+        "synthetic eval dataset generation, and live agent evaluation."
+    )
+    assert "url: nvidia-skillevaluator.docs.buildwithfern.com/skills/skillevaluator" in fern
+    assert "custom-domain: docs.nvidia.com/skills/skillevaluator" in fern
+    assert "docs.nvidia.com/skillevaluator" not in fern
+    assert positioning in normalized_overview
+    assert "https://docs.nvidia.com/skills/" in overview
+    assert "https://github.com/NVIDIA/SkillSpector" in overview
+
+
+def test_tier3_docs_explain_cost_controls_and_local_mode_tradeoffs() -> None:
+    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(tier3.split())
+
+    assert "eval cases \u00d7 agents \u00d7 attempts \u00d7 arms" in normalized
+    assert "--skip-baseline" in tier3
+    assert "cannot produce Skill Lift" in normalized
+    assert "--n-concurrent" in tier3
+    assert "--max-agents" in tier3
+    assert "do not reduce the total planned trials" in tier3
+    assert "--env-mode local" in tier3
+    assert "does **not** automatically eliminate model charges" in tier3
+    assert "weaker isolation than Docker" in tier3
+
+
+def test_public_product_branding_uses_the_canonical_name() -> None:
+    paths = [
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "CHANGELOG.md",
+        REPO_ROOT / "CITATION.cff",
+        REPO_ROOT / "CODE_OF_CONDUCT.md",
+        REPO_ROOT / "SECURITY.md",
+        REPO_ROOT / "SUPPORT.md",
+        REPO_ROOT / "Dockerfile",
+        REPO_ROOT / "sonar-project.properties",
+        *(REPO_ROOT / ".github" / "ISSUE_TEMPLATE").glob("*.yml"),
+        *(REPO_ROOT / "docs").rglob("*.mdx"),
+        *(REPO_ROOT / "src" / "skillevaluator").rglob("*.py"),
+        *(REPO_ROOT / "src" / "skillevaluator").rglob("*.j2"),
+        *(REPO_ROOT / "src" / "skillevaluator").rglob("SKILL.md"),
+    ]
+
+    for path in paths:
+        content = path.read_text(encoding="utf-8")
+        assert "Skill Evaluator" not in content, path
+        assert "Skillevaluator" not in content, path

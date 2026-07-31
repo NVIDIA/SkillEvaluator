@@ -4,7 +4,7 @@
 """Rules Schema and Repository Governance Validator.
 
 Validates .mdc rule files against schema, enforces folder hierarchy
-and naming conventions per Skill Evaluator specification for Rules.
+and naming conventions per SkillEvaluator specification for Rules.
 
 Key differences from Skills validator:
 - Rules use .mdc extension (not SKILL.md)
@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 
 
 class RulesSchemaValidator(ValidatorBase):
-    """Validates Rules .mdc schema and repository structure per Skill Evaluator spec.
+    """Validates Rules .mdc schema and repository structure per SkillEvaluator spec.
 
     Checks: frontmatter schema, folder hierarchy, naming conventions,
     required fields (alwaysApply, title, description).
@@ -229,19 +229,19 @@ class RulesSchemaValidator(ValidatorBase):
         return result
 
     def _validate_folder_compliance(self, folder_path: Path) -> ValidationResult:
-        """Check if folder follows Skill Evaluator team-rules/ structure."""
+        """Check if folder follows SkillEvaluator team-rules/ structure."""
         result = ValidationResult()
         has_team_rules = (folder_path / "team-rules").exists()
 
         if has_team_rules:
-            result.add_message("Folder structure compliant with Skill Evaluator guidelines")
+            result.add_message("Folder structure compliant with SkillEvaluator guidelines")
             team_rules_dir = folder_path / "team-rules"
             teams = [d for d in team_rules_dir.iterdir() if d.is_dir()]
             result.add_message(f"Found 'team-rules/' directory with {len(teams)} team(s)")
         elif "team-rules" in folder_path.parts:
             result.add_message("Validating rules within team-rules/ structure")
         else:
-            result.add_warning("Folder doesn't follow Skill Evaluator structure (expected team-rules/ directory)")
+            result.add_warning("Folder doesn't follow SkillEvaluator structure (expected team-rules/ directory)")
 
         return result
 

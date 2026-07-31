@@ -4,7 +4,7 @@
 # AGENTS.md — `docs/`
 
 Guidance for AI agents editing SkillEvaluator's long-form documentation. This
-folder holds MDX pages published to <https://docs.nvidia.com/skillevaluator> via
+folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluator> via
 [Fern](https://buildwithfern.com/). Human-facing notes live in
 [`README.md`](README.md); this file is the machine-facing companion.
 

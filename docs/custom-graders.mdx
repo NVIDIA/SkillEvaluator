@@ -1,6 +1,6 @@
 ---
 title: "Custom Graders & Tasks"
-description: "Bring your own grader (BYOG) or a complete Harbor task (BYOT) when Skill Evaluator's default graders can't express what success means for your skill."
+description: "Bring your own grader (BYOG) or a complete Harbor task (BYOT) when SkillEvaluator's default graders can't express what success means for your skill."
 ---
 
 When your skill's success criteria can't be expressed by the default graders —
@@ -16,7 +16,7 @@ Every live evaluation runs in one of three grading modes:
 
 | Mode | What scores the run | Use when |
 | --- | --- | --- |
-| `default` | Skill Evaluator's standard graders — the five dimensions, Skill Lift, and pass@k | The standard graders express success for your skill |
+| `default` | SkillEvaluator's standard graders — the five dimensions, Skill Lift, and pass@k | The standard graders express success for your skill |
 | `default_plus_custom` | Standard grading runs first, then your grader adds domain-specific `custom_metrics` alongside it | You want the standard view **plus** your own checks — the safe extension point |
 | `custom_only` | Your grader alone defines the score; the standard dimension rows stay visible but show `NO SCORE` | Success can only be measured by your own logic |
 
@@ -179,7 +179,7 @@ Two rules keep BYOT predictable:
   match an entry `id` in `evals/evals.json`, or the run refuses to start.
   `custom_only` has no such requirement. See
   [Eval Datasets](eval-datasets.mdx).
-- **Your source is never mutated in place.** Skill Evaluator stages with-skill
+- **Your source is never mutated in place.** SkillEvaluator stages with-skill
   and baseline copies of `evals/harbor/` under the results directory for each
   run; the files you author stay untouched.
 

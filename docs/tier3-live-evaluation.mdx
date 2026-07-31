@@ -12,7 +12,7 @@ finished with-skill vs. without-skill comparison.
 
 ## What a live eval measures
 
-Skill Evaluator runs a real agent (`codex`, `claude-code`, or `opencode` —
+SkillEvaluator runs a real agent (`codex`, `claude-code`, or `opencode` —
 `claude` is accepted as an alias for `claude-code`) against the same eval
 cases twice: once with the skill installed
 (the with-skill arm) and, unless you pass `--skip-baseline`, once without it
@@ -140,7 +140,7 @@ runs one real, bounded smoke task per agent to confirm each agent runtime
 actually works (on by default; disable with `--no-agent-runtime-preflight`). Harbor then
 starts the selected environment and runs the agent in both arms; with standard
 grading, each transcript is judged against the case's expected output and
-assertions using the configured evaluator provider. Finally, Skill Evaluator
+assertions using the configured evaluator provider. Finally, SkillEvaluator
 collects the artifacts and computes the dimension scores, pass rates, and
 Skill Lift. Harbor task and job directories are transient: they are deleted
 after collection whether the run succeeds or fails, unless you pass
@@ -162,7 +162,7 @@ export OPENAI_API_KEY=sk-...          # evaluator, and codex's runtime
 export ANTHROPIC_API_KEY=sk-ant-...   # claude-code's runtime
 ```
 
-`evals/config.yml` may still add non-credential values through
+`evals/config.yml` may still add permitted task-scoped values through
 `harbor.runtime_env`, but any entry that names — or `${VAR}`-references — an
 operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `NVIDIA_API_KEY`, the base-URL variables, `AWS_*`) fails the run with a hard
@@ -170,15 +170,33 @@ error. This prevents a skill from swapping a credential or routing a trusted
 key to an attacker-controlled endpoint. [Providers &
 Credentials](configuration.mdx) lists every blocked name.
 
+`runtime_env` also cannot override host launcher, language-runtime, Docker,
+Compose, proxy, or tracing controls. Configure the selected backend in the
+host environment instead.
+
 One deliberate exception collapses the two roles: with the `nv_build` provider
 in `--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
 Codex and experimental Claude Code use a Docker or local compatibility bridge.
 SkillEvaluator never changes models silently: explicit overrides are preserved.
-Without an override, bridged agents default to
-`nvidia/nemotron-3-super-120b-a12b`; direct OpenCode defaults to
+Without an override, bridged agents default to Nemotron Super
+(`nvidia/nemotron-3-super-120b-a12b`); direct OpenCode defaults to
 `nvidia/nemotron-3-nano-30b-a3b` (rendered
-`nvidia/nvidia/nemotron-3-nano-30b-a3b`). On cloud env-modes the bridges are
+`nvidia/nvidia/nemotron-3-nano-30b-a3b`). Override models explicitly when you
+want to compare harnesses or models:
+
+```bash title="NVIDIA Build model overrides"
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker \
+  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
+```
+
+On cloud env-modes the bridges are
 unavailable: `opencode` still works with `NVIDIA_API_KEY` directly, but
 `codex` and `claude-code` fall back to their own native credentials and
 explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
@@ -218,6 +236,55 @@ enabled — via `--tier3`, `--autopilot`, `--full`, or the `--agent-eval` alias.
 See the [CLI Reference](cli-reference.mdx) for the full group.
 </Note>
 
+## Plan for cost
+
+Tier 3 performs live model and agent calls, so it can incur provider charges
+and, with a managed cloud environment, sandbox charges. A useful estimate of
+the trial volume is:
+
+```text
+eval cases × agents × attempts × arms
+```
+
+A standard comparison has two arms (with-skill and without-skill). Each trial
+can make multiple agent-model requests, standard grading adds evaluator-model
+calls, dataset generation can add more, and the default runtime preflight adds
+one small smoke task per agent. Actual charges therefore depend on the selected
+models, token usage, agent behavior, and environment pricing; SkillEvaluator
+does not estimate a fixed dollar amount. Check the current pricing for your
+[NVIDIA API Catalog](https://build.nvidia.com/),
+[OpenAI](https://openai.com/api/pricing/),
+[Anthropic](https://docs.anthropic.com/en/docs/about-claude/pricing), or
+[Amazon Bedrock](https://aws.amazon.com/bedrock/pricing/) provider and, when
+applicable, your cloud sandbox vendor.
+
+Start with one agent, a small reviewed dataset, and `--n-attempts 1`. During
+dataset iteration, `--skip-baseline` removes the without-skill arm and usually
+cuts the live trial count roughly in half, but that run cannot produce Skill
+Lift. Re-enable the baseline for any result you intend to compare or publish.
+For multi-attempt runs, `--stop-on-pass` can avoid remaining attempts after a
+pass; it is not applicable with `--n-attempts 1`. By contrast,
+`--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
+do not reduce the total planned trials or model work.
+
+### Cost and local mode
+
+`--env-mode local` avoids managed cloud-sandbox charges by running the agent
+on your machine. It does **not** automatically eliminate model charges: a
+hosted evaluator or agent provider is still billed normally, and local compute
+and runtime become your responsibility. If both the evaluator and agent are
+configured to use compatible locally hosted models, external API charges may
+also be avoided.
+
+```bash title="Small local trial"
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode local \
+  --n-attempts 1
+```
+
+Local mode is experimental and provides weaker isolation than Docker or a
+managed sandbox. Use it only for trusted skills and workspaces; saving sandbox
+cost is not worth running untrusted code directly on the host.
+
 ## Tune the run
 
 The high-signal flags, with defaults:
@@ -227,6 +294,7 @@ The high-signal flags, with defaults:
 | `--n-attempts` | `1` | Attempts per eval case; values above one add pass@k context |
 | `--pass-threshold` | `0.5` | Score an attempt needs to count as passed |
 | `--n-concurrent` | `4` | Concurrent eval cases per agent |
+| `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | on | One real, bounded smoke task per agent before the full A/B matrix; `--no-agent-runtime-preflight` skips it |

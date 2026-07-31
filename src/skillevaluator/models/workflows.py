@@ -3,7 +3,7 @@
 
 """Pydantic models for Workflows schema validation.
 
-Based on Skill Evaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
+Based on SkillEvaluator HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specification.
 Workflows are directory-based structures containing:
 - README.md (required)
 - workflow-rules.mdc (required)
@@ -33,7 +33,7 @@ from skillevaluator.models.field_validators import ensure_string_list, parse_nes
 class WorkflowsMetadata(BaseModel):
     """Metadata object for Workflows workflow-rules.mdc frontmatter.
 
-    Contains Skill Evaluator-specific categorization fields nested under 'metadata'.
+    Contains SkillEvaluator-specific categorization fields nested under 'metadata'.
     For workflows, 'author' is required.
     """
 
@@ -89,7 +89,7 @@ class WorkflowsMetadata(BaseModel):
 class WorkflowsFrontmatter(BaseModel):
     """Pydantic model for workflow-rules.mdc frontmatter validation.
 
-    Based on Skill Evaluator specification for workflows:
+    Based on SkillEvaluator specification for workflows:
     - Required top-level: alwaysApply, title, description
     - Optional top-level: globs
     - Required in metadata: author
@@ -122,10 +122,10 @@ class WorkflowsFrontmatter(BaseModel):
         description="File patterns this workflow applies to",
     )
 
-    # Skill Evaluator-specific metadata (nested) - author is required for workflows
+    # SkillEvaluator-specific metadata (nested) - author is required for workflows
     metadata: WorkflowsMetadata = Field(
         ...,
-        description="Skill Evaluator-specific metadata (author required, plus tags, language, etc.)",
+        description="SkillEvaluator-specific metadata (author required, plus tags, language, etc.)",
     )
 
     @field_validator("globs", mode="before")

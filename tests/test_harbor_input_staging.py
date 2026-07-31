@@ -3,7 +3,7 @@
 
 """Regression tests for per-entry eval input staging.
 
-Ports Skill Evaluator 0.7.22 ``0d17f5e`` ("upload staged eval inputs to standard sandboxes")
+Ports SkillEvaluator 0.7.22 ``0d17f5e`` ("upload staged eval inputs to standard sandboxes")
 into the in-process Tier 3 engine (``tier3/harbor/adapter.py``). The adapter now
 stages both the shared ``evals/files/`` directory and each entry's ``files`` refs
 into the task ``input/`` dir, with traversal protection.

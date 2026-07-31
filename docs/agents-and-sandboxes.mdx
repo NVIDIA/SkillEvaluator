@@ -41,7 +41,7 @@ To make an override persistent, set it in `evals/config.yml` under
 `harbor.agents.<name>.model` — see [Eval Datasets](eval-datasets.mdx).
 
 <Note>
-Agent CLIs are user-supplied: Skill Evaluator never installs an agent.
+Agent CLIs are user-supplied: SkillEvaluator never installs an agent.
 Operator credentials come only from the host environment — a
 `harbor.runtime_env` entry in `evals/config.yml` that sets an operator-owned
 credential name (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
@@ -58,7 +58,7 @@ evaluator and all three agents:
 
 - **OpenCode** calls NVIDIA Build directly through its `nvidia` provider
   adapter.
-- **Codex** runs against a Skill Evaluator-owned loopback compatibility
+- **Codex** runs against a SkillEvaluator-owned loopback compatibility
   bridge that translates the OpenAI Responses API into NVIDIA Build Chat
   Completions calls.
 - **Claude Code** (experimental on this path) runs against an equivalent
@@ -145,7 +145,7 @@ credentials that backend requires.
 | `local` | Host | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
 <Tip>
-Skill Evaluator documents setup for `docker` and `local`. For any other
+SkillEvaluator documents setup for `docker` and `local`. For any other
 backend, install the matching Harbor environment extra, set the credentials
 that backend requires, and confirm readiness with
 `skillevaluator doctor --env-mode <mode>` before a full run.
@@ -231,7 +231,7 @@ a run.
 
 ## Workspace modes
 
-Skill Evaluator stages the agent's workspace itself, in both arms, so the
+SkillEvaluator stages the agent's workspace itself, in both arms, so the
 skill under test never leaks into the without-skill baseline — that isolation
 is what keeps Skill Lift trustworthy. Three flags control what else the agent
 can see:
@@ -261,7 +261,7 @@ skillevaluator doctor --agents codex --env-mode docker
 
 | Check | What it verifies |
 | --- | --- |
-| CLI package | Skill Evaluator is installed, with its version. |
+| CLI package | SkillEvaluator is installed, with its version. |
 | Public LLM provider | The evaluator provider resolves — the key that powers dataset generation and grading. |
 | Agent runtime credential | The full credential and model plan for each selected agent resolves — the same plan a real run would use, including the host credentials the agents need. |
 | Harbor agents | Every requested agent name is known. |

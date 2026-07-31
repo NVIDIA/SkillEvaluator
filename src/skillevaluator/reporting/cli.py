@@ -500,7 +500,7 @@ class CLIReporter(ReporterBase):
     def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:
         """Print summary table for all validators."""
         table = Table(
-            title="Skill Evaluator Validation Results",
+            title="SkillEvaluator Validation Results",
             show_header=True,
             header_style="bold white on dark_green",
             border_style="green",

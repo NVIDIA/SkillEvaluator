@@ -3,7 +3,7 @@
 
 """Golden regression guard for the BENCHMARK.md skill evaluation card.
 
-The card content is a faithful Skill Evaluator 3.2.1 port and must not drift. If this
+The card content is a faithful SkillEvaluator 3.2.1 port and must not drift. If this
 test fails after an intentional change, regenerate the golden and review the
 diff. Timestamps are disabled so the snapshot is deterministic.
 """
@@ -48,7 +48,7 @@ def _deterministic_results() -> list[ValidationResult]:
 def test_benchmark_card_matches_golden() -> None:
     rendered = BenchmarkReporter(include_timestamp=False).render_all(_deterministic_results())
     assert rendered == GOLDEN.read_text(encoding="utf-8"), (
-        "BENCHMARK.md content drifted from the faithful Skill Evaluator golden. If intentional, "
+        "BENCHMARK.md content drifted from the faithful SkillEvaluator golden. If intentional, "
         "regenerate tests/golden/benchmark_tier1.md and review the diff."
     )
 
@@ -104,7 +104,7 @@ def test_benchmark_sanitizes_invalid_legacy_skill_label() -> None:
     )
 
     assert "LegacySkillsEval" not in rendered
-    assert "- Skill: `Skill Evaluator`" in rendered
+    assert "- Skill: `SkillEvaluator`" in rendered
 
 
 @pytest.mark.parametrize(
@@ -117,7 +117,7 @@ def test_benchmark_rebrands_retired_product_name_from_payload(retired_name: str)
     )
 
     assert retired_name not in rendered
-    assert "`accuracy` (Skill Evaluator)" in rendered
+    assert "`accuracy` (SkillEvaluator)" in rendered
 
 
 def test_benchmark_sanitizes_agent_and_model_labels() -> None:
@@ -254,7 +254,7 @@ def test_benchmark_preserves_relative_paths_and_non_label_text() -> None:
 
     assert "Runtime skills eval failed in docs/database-skills-eval/SKILL.md" in rendered
     assert "(`docs/database-skills-eval/SKILL.md`)" in rendered
-    assert "docs/Skill Evaluator/SKILL.md" not in rendered
+    assert "docs/SkillEvaluator/SKILL.md" not in rendered
 
 
 def test_benchmark_redacts_absolute_paths_from_dynamic_text() -> None:

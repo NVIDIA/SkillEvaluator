@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 instances:
-  - url: nvidia-skillevaluator.docs.buildwithfern.com/skillevaluator
-    custom-domain: docs.nvidia.com/skillevaluator
+  - url: nvidia-skillevaluator.docs.buildwithfern.com/skills/skillevaluator
+    custom-domain: docs.nvidia.com/skills/skillevaluator
     multi-source: true
 
-title: Skill Evaluator Documentation
+title: SkillEvaluator Documentation
 
 global-theme: nvidia
 
@@ -18,7 +18,7 @@ logo:
   light: ../docs/assets/skillevaluator-logo.svg
   dark: ../docs/assets/skillevaluator-logo.svg
   height: 28
-  right-text: Skill Evaluator
+  right-text: SkillEvaluator
 
 favicon: ../docs/assets/skillevaluator-logo.svg
 

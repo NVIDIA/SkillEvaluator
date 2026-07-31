@@ -1,9 +1,9 @@
 ---
 title: "Installation"
-description: "Install Skill Evaluator with uv, from source, or in Docker, and choose per-tier extras to keep the footprint small."
+description: "Install SkillEvaluator with uv, from source, or in Docker, and choose per-tier extras to keep the footprint small."
 ---
 
-This page gets Skill Evaluator installed the way you want it — the full bundle, a smaller per-tier install, an editable source checkout, or a container. No API key is needed to install or to run the deterministic Tier 1 checks; keys only come into play later, for LLM-backed features ([Providers & Credentials](configuration.mdx)).
+This page gets SkillEvaluator installed the way you want it — the full bundle, a smaller per-tier install, an editable source checkout, or a container. No API key is needed to install or to run the deterministic Tier 1 checks; keys only come into play later, for LLM-backed features ([Providers & Credentials](configuration.mdx)).
 
 If you just want the fastest path to a first result, the [Quickstart](quickstart.mdx) covers it in one command.
 
@@ -16,8 +16,8 @@ This project will download and install additional third-party open source softwa
 - Git for source installs and separately installed security scanners.
 - Docker, only for the container install and Tier 3 Docker-mode evaluation.
 - No API key is needed for deterministic Tier 1 checks. Full default scanner
-  coverage requires the `security` extra plus Gitleaks. LLM-backed checks and
-  Tiers 2–3 use a configured provider — see
+  coverage requires the `security` extra plus separate Semgrep, SkillSpector,
+  and Gitleaks executables. LLM-backed checks and Tiers 2–3 use a configured provider — see
   [Providers & Credentials](configuration.mdx).
 
 ## Install
@@ -38,23 +38,6 @@ uv tool install --python 3.13 "skillevaluator @ git+https://github.com/NVIDIA/Sk
 uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"  # + bundled Python security scanners
 uv tool install --python 3.13 "skillevaluator[tier2,tier3] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
-
-Semgrep and SkillSpector remain supported external scanners. Install them in
-separate tool environments so their CLI dependency stacks do not constrain or
-become part of the SkillEvaluator distribution:
-
-```bash
-brew install semgrep                                            # macOS
-uv tool install semgrep                                         # isolated Python tool environment
-uv tool install git+https://github.com/NVIDIA/SkillSpector.git   # isolated Python tool environment
-```
-
-The external executables must be on `PATH`, or their absolute paths can be set
-with `SKILLEVALUATOR_SEMGREP_PATH` and
-`SKILLEVALUATOR_SKILLSPECTOR_PATH`. RHEL 8 and compatible enterprise Linux
-systems can provide compatible executables independently of the Skill
-Evaluator Python environment. Use `all` only when Tier 2/Tier 3 and the
-bundled Python security tools are also needed.
 
 To pick up the latest commit later, rerun the install with `--reinstall`:
 
@@ -115,14 +98,14 @@ docker run --rm \
   skillevaluator:local validate /workspace/skills/simple --no-llm --no-dedup
 ```
 
-The image does not bundle the Gitleaks binary, so the `code-integrity` check reports its secrets scan as incomplete and `validate` exits non-zero — the other checks still run and the report is still produced (see [Troubleshooting](#troubleshooting)). Tier 3 still requires credentials for the selected provider and agent at runtime — pass them into the container as environment variables when you get there.
+The image does not bundle the external Semgrep, SkillSpector, or Gitleaks executables, so their required scanner evidence is incomplete and `validate` exits non-zero — the other checks still run and the report is still produced (see [Troubleshooting](#troubleshooting)). Tier 3 still requires credentials for the selected provider and agent at runtime — pass them into the container as environment variables when you get there.
 
 </Tab>
 </Tabs>
 
 ## Choosing extras
 
-The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own; the scanner-backed `security` and `code-integrity` checks still run but report INCOMPLETE until the `security` extra and Gitleaks are installed. Everything else lives behind an extra:
+The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own; scanner-backed checks still run but report INCOMPLETE until the `security` extra and the required external scanner executables are installed. Everything else lives behind an extra:
 
 | Extra | What it unlocks |
 | --- | --- |
@@ -134,15 +117,23 @@ The base package completes the schema, PII, license, quality, Unicode, script-li
 | `dev` | Build, test, coverage, and formatting tools for contributors |
 
 <Tip>
-`[all]` covers everything pip can install. System tools — Gitleaks, Docker, agent CLIs — stay separate no matter which extra you pick.
+`[all]` installs every SkillEvaluator extra. External scanner tools, Docker, and agent CLIs stay separate no matter which extra you pick.
 </Tip>
-
-Semgrep and SkillSpector remain supported external scanners. Keep them in separate tool environments so their dependency stacks do not constrain the SkillEvaluator distribution. Their executables must be on `PATH`, or configured with `SKILLEVALUATOR_SEMGREP_PATH` and `SKILLEVALUATOR_SKILLSPECTOR_PATH`. This separation also supports RHEL 8 and compatible enterprise Linux systems that supply compatible scanner executables independently.
 
 ## System tools
 
 <Note>
-Three dependencies live outside pip. Gitleaks is a Go binary — install it with `brew install gitleaks` (macOS), `go install github.com/gitleaks/gitleaks/v8@latest`, or a binary from the [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases). Docker is required only for Tier 3 Docker-mode evaluation. Agent CLIs and their credentials are user-supplied — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
+Install the required security scanners separately so their dependency stacks do not constrain the SkillEvaluator distribution:
+
+```bash title="External security scanners"
+brew install semgrep gitleaks                                  # macOS
+uv tool install semgrep                                       # isolated Python tool environment
+uv tool install git+https://github.com/NVIDIA/SkillSpector.git
+```
+
+On other systems, install Gitleaks with `go install github.com/gitleaks/gitleaks/v8@latest` or a binary from the [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases). Semgrep and SkillSpector must be on `PATH`, or configured with `SKILLEVALUATOR_SEMGREP_PATH` and `SKILLEVALUATOR_SKILLSPECTOR_PATH`. RHEL 8 and compatible enterprise Linux systems can supply compatible executables independently of the SkillEvaluator Python environment.
+
+Docker is required only for Tier 3 Docker-mode evaluation. Agent CLIs and their credentials are user-supplied — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 </Note>
 
 ## Verify your install
@@ -163,7 +154,7 @@ skillevaluator health-check
 uv installs tools to `~/.local/bin`, which may not be on PATH yet. Run `uv tool update-shell` and open a new terminal.
 </Accordion>
 <Accordion title="Validation reports INCOMPLETE and exits non-zero">
-The `gitleaks` secrets scanner is a required external Go binary that pip cannot install. When the `code-integrity` check runs without it, validation is `INCOMPLETE` and returns non-zero. Install it separately — `brew install gitleaks` on macOS, or download a binary from the [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases) — and rerun.
+Install any missing required scanner named in the report. The `security` extra supplies Bandit and pip-audit; Semgrep, SkillSpector, and Gitleaks are separate executables. Missing required evidence leaves validation `INCOMPLETE` and non-zero.
 </Accordion>
 </AccordionGroup>
 

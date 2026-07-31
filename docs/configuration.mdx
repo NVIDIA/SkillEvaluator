@@ -3,7 +3,7 @@ title: "Providers & Credentials"
 description: "Configure LLM providers, embeddings, and agent credentials for SkillEvaluator — and see exactly which commands run with no key at all."
 ---
 
-This page gets Skill Evaluator's LLM-backed features working: choosing a provider, wiring embeddings for Tier 2, and separating evaluator credentials from agent credentials in Tier 3. Most of Tier 1 needs no credential at all — start with the map below to see whether you need a key in the first place.
+This page gets SkillEvaluator's LLM-backed features working: choosing a provider, wiring embeddings for Tier 2, and separating evaluator credentials from agent credentials in Tier 3. Most of Tier 1 needs no credential at all — start with the map below to see whether you need a key in the first place.
 
 For the exhaustive variable-by-variable inventory, see [Environment Variables](environment-variables.mdx).
 
@@ -24,7 +24,7 @@ Tiers describe evaluation depth; credentials are a separate axis. This is the co
 
 ## Choose an LLM provider
 
-Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. The selected provider determines which credential Skill Evaluator reads. All but `openai-compatible` ship a default model that `SKILL_EVAL_LLM_MODEL` overrides.
+Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. The selected provider determines which credential SkillEvaluator reads. All but `openai-compatible` ship a default model that `SKILL_EVAL_LLM_MODEL` overrides.
 
 <Tabs>
   <Tab title="OpenAI" language="openai">
@@ -79,7 +79,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
 
 ### Auto-selection
 
-When `SKILL_EVAL_LLM_PROVIDER` is unset and exactly one of these credentials is present, Skill Evaluator selects the matching provider:
+When `SKILL_EVAL_LLM_PROVIDER` is unset and exactly one of these credentials is present, SkillEvaluator selects the matching provider:
 
 - `NVIDIA_API_KEY` → `nv_build`
 - `OPENAI_API_KEY` → `openai`
@@ -100,7 +100,7 @@ Tier 2 uses an OpenAI-compatible embeddings API. `SKILL_EVAL_EMBEDDING_PROVIDER`
 Use `SKILL_EVAL_EMBEDDING_MODEL` and `SKILL_EVAL_EMBEDDING_BASE_URL` to override defaults; for `openai-compatible`, the base URL falls back to `SKILL_EVAL_LLM_BASE_URL`. The `nv_build` endpoint is fixed to `https://integrate.api.nvidia.com/v1` — only its model can be overridden.
 
 <Note>
-Anthropic and Bedrock do not provide embeddings, and Skill Evaluator rejects them as embedding providers. When one of those is your LLM provider, configure an embedding-capable provider separately for Tier 2:
+Anthropic and Bedrock do not provide embeddings, and SkillEvaluator rejects them as embedding providers. When one of those is your LLM provider, configure an embedding-capable provider separately for Tier 2:
 
 ```bash title="Separate embedding provider"
 export SKILL_EVAL_EMBEDDING_PROVIDER=openai
@@ -121,7 +121,7 @@ The `openai-compatible` provider accepts any local OpenAI-compatible server (Oll
   docker exec ollama ollama pull qwen2.5:0.5b       # chat LLM for dedup analysis
   ```
 
-  ### Point Skill Evaluator at it
+  ### Point SkillEvaluator at it
 
   ```bash title="Local provider configuration"
   export SKILL_EVAL_EMBEDDING_PROVIDER=openai-compatible
@@ -152,12 +152,12 @@ Live evaluation involves two distinct credentials, and they are not interchangea
 
 | Role | Who uses it | How you configure it |
 | --- | --- | --- |
-| Evaluator key | Skill Evaluator itself — dataset generation and verifier-side judging | The provider setup above (`SKILL_EVAL_LLM_PROVIDER` + its key) |
+| Evaluator key | SkillEvaluator itself — dataset generation and verifier-side judging | The provider setup above (`SKILL_EVAL_LLM_PROVIDER` + its key) |
 | Agent credential | The live agent under test (Codex, Claude Code, ...) inside its task environment | Your host environment only — export the agent's native variables (for example `OPENAI_API_KEY` and `OPENAI_BASE_URL` for Codex) before the run |
 
 Both roles resolve from the operator's environment; a skill's `evals/config.yml` can never supply, rename, or redirect a credential. What each agent needs depends on the provider and `--env-mode`:
 
-- **NVIDIA Build, one key** (`--env-mode docker` or `local`): a single `NVIDIA_API_KEY` powers the evaluator and all three supported agents — `opencode` calls NVIDIA Build directly, while `claude-code` and `codex` route through Skill Evaluator's compatibility bridge (in-container in Docker mode; an authenticated in-process host bridge in `local` mode). Agent models must be full NVIDIA Build catalog IDs in `publisher/model` form.
+- **NVIDIA Build, one key** (`--env-mode docker` or `local`): a single `NVIDIA_API_KEY` powers the evaluator and all three supported agents — `opencode` calls NVIDIA Build directly, while `claude-code` and `codex` route through SkillEvaluator's compatibility bridge (in-container in Docker mode; an authenticated in-process host bridge in `local` mode). Agent models must be full NVIDIA Build catalog IDs in `publisher/model` form.
 - **NVIDIA Build on Harbor cloud modes** (`daytona`, `e2b`, ...): the bridge is not available. `claude-code` needs its own native `ANTHROPIC_API_KEY`, `codex` needs a full OpenAI Responses API credential (`OPENAI_API_KEY` plus `OPENAI_BASE_URL`), and each needs an explicit model via `--agent-model` or `harbor.agents.<agent>.model`.
 - **Matching native provider**: when the evaluator provider is the agent's own (for example `anthropic` with `claude-code`, or `openai` with `codex`), the same key serves both roles automatically.
 
@@ -204,13 +204,13 @@ Names that control the launcher, credentials, or dynamic runtime are rejected:
 | Container and backend selection | `DOCKER_*`, `COMPOSE_*`, `HARBOR_*`, plus each Harbor backend's own credential variables |
 | AWS credential chain | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_ROLE_ARN`, and the rest of the `AWS_*` credential-chain variables |
 | Network and TLS control | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `SSLKEYLOGFILE`, `SSH_AUTH_SOCK` |
-| Telemetry and tooling | `OTEL_*`, `SKILL_EVAL_*`, `SKILLEVALUATOR_*`, `GIT_*`, `NODE_*`, `PIP_*`, `UV_*` |
+| Tracing and tooling | `OTEL_*`, `SKILL_EVAL_*`, `SKILLEVALUATOR_*`, `GIT_*`, `NODE_*`, `PIP_*`, `UV_*` |
 
 Configure the selected Harbor backend in the host environment instead.
 
 ## SkillSpector bridge
 
-The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment (`SKILLSPECTOR_PROVIDER` plus per-provider credential variables). Skill Evaluator bridges your configured provider automatically for that invocation, so the one key above is all you need. For `nv_build`, the bridge uses SkillSpector's OpenAI-compatible provider path pointed at the public Build endpoint, so the same `NVIDIA_API_KEY` covers this too; it does not create a second NVIDIA credential name.
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment (`SKILLSPECTOR_PROVIDER` plus per-provider credential variables). SkillEvaluator bridges your configured provider automatically for that invocation, so the one key above is all you need. For `nv_build`, the bridge uses SkillSpector's OpenAI-compatible provider path pointed at the public Build endpoint, so the same `NVIDIA_API_KEY` covers this too; it does not create a second NVIDIA credential name.
 
 The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded.
 

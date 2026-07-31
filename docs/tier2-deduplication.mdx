@@ -31,7 +31,7 @@ No external vector database or catalog service is required.
 </CardGroup>
 
 <Note>
-`dedup-scan` is a functional alias for `context-optimization-check` with the
+`dedup-scan` is an alias for `context-optimization-check` with the
 same analysis options. The default report basenames identify which command name
 was invoked.
 </Note>
@@ -233,7 +233,7 @@ intentional batches rather than scanning an unbounded directory tree.
   embeddings provider. Only candidate clusters found by the embedding stage are
   sent to the configured chat LLM for classification.
 - `similarity-check` never calls a chat LLM.
-- Catalog files are read and written locally; Skill Evaluator does not upload
+- Catalog files are read and written locally; SkillEvaluator does not upload
   them to a catalog service.
 
 Use the [fully local provider recipe](configuration.mdx#fully-local-setup) when

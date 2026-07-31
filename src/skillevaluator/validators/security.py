@@ -358,7 +358,7 @@ class SecurityValidator(ValidatorBase):
 
         Reads the SKILL.md manifest in ``skill_path`` (if any) and extracts the
         author identity from either the top-level ``author`` field or
-        ``metadata.author`` (Skill Evaluator nests it under ``metadata``). Returns the
+        ``metadata.author`` (SkillEvaluator nests it under ``metadata``). Returns the
         empty set when there is no manifest or no parseable author.
         """
         return self._usernames_from_identity(self._author_identity(skill_path))

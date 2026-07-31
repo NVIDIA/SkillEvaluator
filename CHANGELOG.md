@@ -36,9 +36,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- Simplified the repository README into a documentation landing page, broadened
-  the project description to agent artifacts starting with agent skills, and
-  moved setup and usage guidance to `docs.nvidia.com/skills/skillevaluator`.
+- Simplified the repository README into a concise documentation landing page,
+  retained a compact install/quickstart and LLM-provider setup, broadened the
+  project description to agent artifacts starting with agent skills, and moved
+  detailed guidance to `docs.nvidia.com/skills/skillevaluator`.
 - Added Tier 3 cost-planning guidance, including trial-volume multipliers,
   cost-saving flags, and the cost and isolation tradeoffs of local mode.
 - Standardized the product name as `SkillEvaluator` across documentation,

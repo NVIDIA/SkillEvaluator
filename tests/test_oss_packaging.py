@@ -246,12 +246,18 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "https://docs.nvidia.com/skills/" in readme
     assert "https://github.com/NVIDIA/SkillSpector" in readme
     assert "\n## Three-tier overview\n" not in readme
-    assert "\n## Quickstart\n" not in readme
+    assert "\n## Quickstart\n" in readme
+    assert "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git" in readme
+    assert "skillevaluator quality-check ./my-skill" in readme
+    assert "SKILL_EVAL_LLM_PROVIDER=nv_build" in readme
+    assert "NVIDIA_API_KEY='nvapi-...'" in readme
+    assert "skillevaluator context-optimization-check ./my-skill" in readme
+    assert "skillevaluator tier3 evaluate ./my-skill" in readme
+    assert "tier3-live-evaluation#plan-for-cost" in readme
     assert "\n## Tier 1:" not in readme
-    assert "skillevaluator quality-check" not in readme
     assert "Skill Evaluator" not in readme
     assert "Skillevaluator" not in readme
-    assert len(readme.split()) <= 400
+    assert len(readme.split()) <= 750
 
 
 def test_release_metadata_is_public_facing_and_version_consistent() -> None:

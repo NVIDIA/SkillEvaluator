@@ -18,6 +18,79 @@ security-scanning capability used by Tier 1 and
 [Harbor](https://github.com/harbor-framework/harbor) powering Tier 3 sandboxed
 agent evaluation.
 
+## Quickstart
+
+Install all SkillEvaluator evaluation extras with
+[uv](https://docs.astral.sh/uv/), then run a deterministic quality check. This
+first result needs no API key, Docker daemon, or repository clone:
+
+```bash
+uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+skillevaluator quality-check ./my-skill
+```
+
+`./my-skill` is any directory containing a `SKILL.md`. The command returns a
+0–100 quality score and an A–F grade; the default passing score is 70. If your
+shell cannot find the command after installation, run `uv tool update-shell`
+and open a new terminal.
+
+## LLM provider setup
+
+LLM-backed security analysis, rubric judging, Tier 2 deduplication, dataset
+generation, and Tier 3 grading need a configured provider. For NVIDIA Build,
+one API Catalog key covers both chat and embeddings:
+
+```bash
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+export NVIDIA_API_KEY='nvapi-...'
+skillevaluator models --limit 10
+```
+
+Other supported provider setups are:
+
+- OpenAI: `SKILL_EVAL_LLM_PROVIDER=openai` and `OPENAI_API_KEY`.
+- Anthropic: `SKILL_EVAL_LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`.
+- Amazon Bedrock: `SKILL_EVAL_LLM_PROVIDER=bedrock` plus the standard AWS
+  credential chain and region.
+- Local or hosted OpenAI-compatible endpoint: set
+  `SKILL_EVAL_LLM_PROVIDER=openai-compatible`,
+  `SKILL_EVAL_LLM_BASE_URL`, `SKILL_EVAL_LLM_MODEL`, and
+  `SKILL_EVAL_LLM_API_KEY`.
+
+When exactly one of `NVIDIA_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`
+is present, SkillEvaluator can auto-select that provider. Anthropic and Bedrock
+do not provide embeddings, so Tier 2 also needs a separate OpenAI, NVIDIA
+Build, or OpenAI-compatible embedding provider. See
+[Providers & Credentials](https://docs.nvidia.com/skills/skillevaluator/configuration)
+for model defaults, endpoint overrides, and fully local setup.
+
+## Run deeper evaluations
+
+With a chat and embeddings provider configured, check one skill for repeated
+guidance or compare a collection for semantic overlap:
+
+```bash
+skillevaluator context-optimization-check ./my-skill
+skillevaluator similarity-check ./skills
+```
+
+For a live Tier 3 comparison, create or review an evaluation dataset, verify
+the selected agent runtime, and run the with-skill and without-skill arms:
+
+```bash
+skillevaluator create-eval-dataset ./my-skill --full
+skillevaluator doctor --agents codex --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
+  --n-attempts 1
+```
+
+Tier 3 requires the evaluator provider, the selected agent's credential, and a
+Docker, local, or cloud sandbox. Live model calls and managed sandboxes can
+incur charges; local mode avoids managed sandbox charges but not necessarily
+hosted model charges. Start with one agent, a small dataset, and one attempt.
+See the [Tier 3 guide](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation#plan-for-cost)
+before scaling a run.
+
 ## Documentation
 
 Read the complete documentation at

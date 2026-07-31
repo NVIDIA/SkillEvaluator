@@ -692,13 +692,6 @@ def _publication_safe_label(value: object, private_labels: tuple[str, ...] = ())
     label = _publication_safe_inline(value, private_labels)
     if _RETIRED_PRODUCT_NAME.fullmatch(label):
         return "Skill Evaluator"
-    if _MARKDOWN_BLOCK_PREFIX.match(label) or _MARKDOWN_THEMATIC_BREAK.fullmatch(label):
-        marker_end = label.find(" ")
-        marker_end = len(label) if marker_end < 0 else marker_end
-        if label[:marker_end].rstrip(".)").isdigit():
-            punctuation_index = marker_end - 1
-            return f"{label[:punctuation_index]}\\{label[punctuation_index:]}"
-        return f"\\{label}"
     return label
 
 
@@ -717,7 +710,15 @@ def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()
     text = _PUBLICATION_URL_SCHEME.sub(lambda match: f"{match.group('scheme')}&#58;//", text)
     text = _PUBLICATION_WWW_PREFIX.sub(lambda match: f"{match.group(0)[:-1]}&#46;", text)
     text = text.replace("@", "&#64;")
-    return _MARKDOWN_INLINE_SPECIAL.sub(r"\\\1", text)
+    text = _MARKDOWN_INLINE_SPECIAL.sub(r"\\\1", text)
+    if _MARKDOWN_BLOCK_PREFIX.match(text) or _MARKDOWN_THEMATIC_BREAK.fullmatch(text):
+        marker_end = text.find(" ")
+        marker_end = len(text) if marker_end < 0 else marker_end
+        if text[:marker_end].rstrip(".)").isdigit():
+            punctuation_index = marker_end - 1
+            return f"{text[:punctuation_index]}\\{text[punctuation_index:]}"
+        return f"\\{text}"
+    return text
 
 
 def _redact_absolute_paths(value: str) -> str:

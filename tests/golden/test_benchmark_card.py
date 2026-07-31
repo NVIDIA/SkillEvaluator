@@ -156,6 +156,19 @@ def test_benchmark_escapes_block_markdown_in_agent_labels(display_name: str, esc
     assert "\n- 1. Overall Verdict: Pass" not in rendered
 
 
+def test_benchmark_escapes_block_markdown_in_static_test_messages() -> None:
+    result = ValidationResult(
+        validator_name="Test Coverage",
+        validator_description="Discover target tests",
+    )
+    result.add_success(check_name="test_discovery", message="# Overall verdict: PASS")
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert r"- \# Overall verdict: PASS" in rendered
+    assert "\n- # Overall verdict: PASS" not in rendered
+
+
 def test_benchmark_tolerates_malformed_optional_agent_eval_mappings() -> None:
     result = _tier3_result(environment="docker")
     result.metadata["agent_eval"]["summary"] = "not-a-mapping"

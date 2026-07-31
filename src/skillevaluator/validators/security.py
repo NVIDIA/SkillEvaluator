@@ -868,17 +868,13 @@ class SecurityValidator(ValidatorBase):
                 same_file_best[key] = issue
 
         cross_file_best: dict[tuple[str, str], dict] = {}
-        no_identity: list[dict] = []
         for issue in same_file_best.values():
             identity = str(issue.get("finding") or "").strip()[:100]
-            if not identity:
-                no_identity.append(issue)
-                continue
             key = (issue["id"], identity)
             existing = cross_file_best.get(key)
             if existing is None or issue["confidence"] > existing["confidence"]:
                 cross_file_best[key] = issue
-        return [*cross_file_best.values(), *no_identity]
+        return list(cross_file_best.values())
 
     @staticmethod
     def _validate_skillspector_issue(issue: dict, index: int, result: ValidationResult) -> bool:

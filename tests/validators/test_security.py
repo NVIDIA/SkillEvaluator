@@ -1256,6 +1256,37 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.passed
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_risk_reconciliation_allows_private_cross_file_identity(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": "RP1",
+                "severity": "MEDIUM",
+                "pattern": "Rogue behavior",
+                "confidence": 0.7,
+                "location": {"file": file_name, "start_line": 1},
+            }
+            for file_name in ("a.md", "b.md")
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {"score": 7, "severity": "LOW", "recommendation": "SAFE"}
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status != "incomplete"
+        assert result.passed
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_risk_reconciliation_applies_executable_multiplier(
         self,
         mock_tools,

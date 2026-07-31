@@ -154,7 +154,7 @@ def cli(verbose: bool) -> None:
 
     Three-tier quality gatekeeper for AI agent skills and plugins.
 
-    For setup and usage examples, see: README.md
+    Documentation: https://docs.nvidia.com/skills/skillevaluator/
     """
     setup_logging(verbose=verbose)
 

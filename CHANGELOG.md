@@ -36,6 +36,9 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Changed
 
+- Simplified the repository README into a documentation landing page, broadened
+  the project description to agent artifacts starting with agent skills, and
+  moved setup and usage guidance to `docs.nvidia.com/skills/skillevaluator`.
 - Removed the optional OpenTelemetry integration, the
   `skillevaluator[telemetry]` extra, and the `skillevaluator.telemetry` Python
   module from the public distribution. Imports of that module now fail rather

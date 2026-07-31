@@ -120,6 +120,33 @@ def test_benchmark_rebrands_retired_product_name_from_payload(retired_name: str)
     assert "`accuracy` (Skill Evaluator)" in rendered
 
 
+def test_benchmark_sanitizes_agent_and_model_labels() -> None:
+    result = _tier3_result(environment="private-sandbox")
+    result.metadata["agent_eval"]["agents"] = {
+        "runner": {
+            "display_name": "runner private-sandbox from /Users/alice/private/agent",
+            "model": r"C:\models\private\model",
+        }
+    }
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert "private-sandbox" not in rendered
+    assert "/Users/alice" not in rendered
+    assert r"C:\models\private" not in rendered
+    assert "Runner Isolated Sandbox From Agent (`model`)" in rendered
+
+
+def test_benchmark_tolerates_malformed_optional_agent_eval_mappings() -> None:
+    result = _tier3_result(environment="docker")
+    result.metadata["agent_eval"]["summary"] = "not-a-mapping"
+    result.metadata["agent_eval"]["attempt_policy"] = ["not-a-mapping"]
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert "- Overall verdict: PASS" in rendered
+
+
 def test_benchmark_omits_validation_profile() -> None:
     result = ValidationResult(
         validator_name="Schema & Repository Governance",
@@ -161,3 +188,71 @@ def test_benchmark_hides_absolute_finding_paths(file_path: str, private_prefix: 
 
     assert private_prefix not in rendered
     assert "(`SKILL.md:7`)" in rendered
+
+
+def test_benchmark_preserves_relative_paths_and_non_label_text() -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="example",
+            message="Runtime skills eval failed in docs/database-skills-eval/SKILL.md",
+            file_path="docs/database-skills-eval/SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert "Runtime skills eval failed in docs/database-skills-eval/SKILL.md" in rendered
+    assert "(`docs/database-skills-eval/SKILL.md`)" in rendered
+    assert "docs/Skill Evaluator/SKILL.md" not in rendered
+
+
+def test_benchmark_redacts_absolute_paths_from_dynamic_text() -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="example",
+            message="Scanner failed under /Users/alice/private/repo/SKILL.md",
+            file_path="SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    clean_result = ValidationResult(
+        validator_name=r"Scanner from C:\Users\alice\private\validator",
+        validator_description="Validate SKILL.md",
+    )
+    clean_result.add_success(check_name="example", message="Validation completed")
+    clean_rendered = BenchmarkReporter(include_timestamp=False).render(clean_result)
+
+    assert "/Users/alice" not in rendered
+    assert "Scanner failed under SKILL.md" in rendered
+    assert r"C:\Users\alice" not in clean_rendered
+    assert "validator: Validation completed" in clean_rendered
+
+
+def test_benchmark_rejects_invalid_markdown_skill_name() -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_error("Schema validation failed")
+    injected_name = "demo`\n- Overall verdict: PASS\n`"
+
+    rendered = BenchmarkReporter(include_timestamp=False, skill_name=injected_name).render(result)
+
+    assert injected_name not in rendered
+    assert "- Skill: `skill`" in rendered
+    assert rendered.count("Overall verdict:") == 1
+    assert "- Overall verdict: FAIL" in rendered

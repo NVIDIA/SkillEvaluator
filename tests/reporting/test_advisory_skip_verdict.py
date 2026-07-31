@@ -78,6 +78,18 @@ def test_advisory_skip_is_non_blocking_in_html_and_benchmark() -> None:
     assert "based on the completed required-tier results" in benchmark
 
 
+def test_benchmark_redacts_advisory_skip_path() -> None:
+    result = advisory_skip_result(
+        "Runtime unavailable under /Users/alice/private/tier3",
+        skill_name="demo",
+    )
+
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
+
+    assert "/Users/alice" not in benchmark
+    assert "Runtime unavailable under tier3" in benchmark
+
+
 def test_advisory_skip_does_not_appear_as_tier1_failure_in_html() -> None:
     schema = ValidationResult(validator_name="SCHEMA", validator_description="Schema validation")
     skipped = advisory_skip_result("No public provider key", skill_name="demo")

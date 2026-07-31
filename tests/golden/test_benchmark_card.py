@@ -89,6 +89,24 @@ def test_benchmark_preserves_non_sandbox_skill_name() -> None:
     assert "Isolated sandbox-db" not in rendered
 
 
+def test_benchmark_preserves_product_shaped_skill_name() -> None:
+    rendered = BenchmarkReporter(include_timestamp=False).render(
+        _tier3_result(environment="docker", skill_name="database-skills-eval")
+    )
+
+    assert "- Skill: `database-skills-eval`" in rendered
+    assert "Evaluation of the `database-skills-eval` skill" in rendered
+
+
+def test_benchmark_sanitizes_invalid_legacy_skill_label() -> None:
+    rendered = BenchmarkReporter(include_timestamp=False).render(
+        _tier3_result(environment="docker", skill_name="LegacySkillsEval")
+    )
+
+    assert "LegacySkillsEval" not in rendered
+    assert "- Skill: `Skill Evaluator`" in rendered
+
+
 @pytest.mark.parametrize(
     "retired_name",
     ["LegacySkills-Eval", "LegacySkills Eval", "LegacySkillsEval", "legacyskillseval"],
@@ -120,6 +138,7 @@ def test_benchmark_omits_validation_profile() -> None:
     [
         ("/Users/example/private/skills/demo-skill/SKILL.md", "/Users/example"),
         (r"C:\Users\example\private\skills\demo-skill\SKILL.md", r"C:\Users\example"),
+        (r"\Users\example\private\skills\demo-skill\SKILL.md", r"\Users\example"),
     ],
 )
 def test_benchmark_hides_absolute_finding_paths(file_path: str, private_prefix: str) -> None:

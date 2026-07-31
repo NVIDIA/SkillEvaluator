@@ -645,7 +645,10 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     report_path = result.get("report_path")
     if report_path:
         report_name = Path(str(report_path)).name
-        artifact_rows.append(("📊 HTML report", f"{report_name} · {safe(report_path)}"))
+        safe_name = safe(report_name)
+        safe_path = safe(report_path)
+        report_display = safe_name if str(report_path) == report_name else f"{safe_name} · {safe_path}"
+        artifact_rows.append(("📊 HTML report", report_display))
     output_dir = result.get("run_dir") or result.get("output_dir")
     if output_dir:
         artifact_rows.append(("📁 Output", safe(output_dir)))

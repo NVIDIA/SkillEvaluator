@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.constants import DIMENSION_HINTS, DIMENSION_MAPPING
+from skillevaluator.constants import DIMENSION_HINTS, DIMENSION_MAPPING, KEBAB_CASE_PATTERN
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
@@ -46,14 +46,22 @@ _TIER2_VALIDATORS = {
 }
 
 _RETIRED_PRODUCT_NAME = re.compile(r"\b[a-z]*[\s_-]*skills[\s_-]*eval\b", flags=re.IGNORECASE)
+_SKILL_NAME_SENTINEL = "\ue000PUBLICATION_SKILL_NAME\ue001"
 
 
 class BenchmarkReporter(ReporterBase):
     """Render a stable ``BENCHMARK.md`` skill evaluation card."""
 
-    def __init__(self, *, include_timestamp: bool = True, max_findings_shown: int = 5) -> None:
+    def __init__(
+        self,
+        *,
+        include_timestamp: bool = True,
+        max_findings_shown: int = 5,
+        skill_name: str | None = None,
+    ) -> None:
         self.include_timestamp = include_timestamp
         self.max_findings_shown = max_findings_shown
+        self.skill_name = skill_name
 
     @property
     def name(self) -> str:
@@ -68,12 +76,14 @@ class BenchmarkReporter(ReporterBase):
 
     def render_all(self, results: list[ValidationResult]) -> str:
         ae = _agent_eval_payload(results)
-        skill_name = _skill_name(results, ae)
+        skill_name = self.skill_name or _skill_name(results, ae)
+        preserve_skill_name = re.fullmatch(KEBAB_CASE_PATTERN, skill_name) is not None
+        rendered_skill_name = _SKILL_NAME_SENTINEL if preserve_skill_name else skill_name
 
         lines: list[str] = [
             "# Evaluation Report",
             "",
-            (f"Evaluation of the `{skill_name}` skill before publication through Skill Evaluator."),
+            (f"Evaluation of the `{rendered_skill_name}` skill before publication through Skill Evaluator."),
             "",
             (
                 "This benchmark summarizes 3-Tier Evaluation from Skill Evaluator "
@@ -84,7 +94,7 @@ class BenchmarkReporter(ReporterBase):
             "",
         ]
 
-        self._render_evaluation_summary(lines, results, ae, skill_name)
+        self._render_evaluation_summary(lines, results, ae, rendered_skill_name)
         self._render_agents_used(lines, ae)
         self._render_metrics_used(lines, ae)
         self._render_test_tasks(lines, ae)
@@ -93,7 +103,8 @@ class BenchmarkReporter(ReporterBase):
         self._render_tier_summary(lines, "Tier 2: Deduplication Summary", _tier2_results(results))
         self._render_publication_recommendation(lines, results, ae)
 
-        return _publication_safe_text("\n".join(lines).rstrip() + "\n")
+        publication_text = _publication_safe_text("\n".join(lines).rstrip() + "\n")
+        return publication_text.replace(_SKILL_NAME_SENTINEL, skill_name) if preserve_skill_name else publication_text
 
     def _render_evaluation_summary(
         self,
@@ -607,7 +618,7 @@ def _publication_safe_location(finding: Finding) -> str:
     windows_path = PureWindowsPath(file_path)
     if posix_path.is_absolute():
         file_path = posix_path.name
-    elif windows_path.is_absolute():
+    elif windows_path.is_absolute() or windows_path.root:
         file_path = windows_path.name
     if finding.line_number:
         file_path += f":{finding.line_number}"

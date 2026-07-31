@@ -621,6 +621,19 @@ def test_compact_footer_is_last_and_omits_result_json(tmp_path: Path) -> None:
     assert output.index("Time: 1.0s") < output.index("📊 HTML report")
 
 
+def test_artifact_footer_does_not_duplicate_basename_only_report_path() -> None:
+    output = render_result(
+        {
+            "execution_status": "succeeded",
+            "report_path": "report.html",
+            "agents": {},
+        }
+    )
+
+    assert output.count("report.html") == 1
+    assert "report.html · report.html" not in output
+
+
 def test_feedback_and_suggestions_render_before_artifacts(tmp_path: Path) -> None:
     report = tmp_path / "report.html"
     report.touch()

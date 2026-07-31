@@ -54,6 +54,7 @@ _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY = {
     "LOW": "SAFE",
 }
 _SKILLSPECTOR_SEVERITY_POINTS = {"CRITICAL": 50, "HIGH": 25, "MEDIUM": 10, "LOW": 5, "INFO": 5}
+_SKILLSPECTOR_DIMINISHING_WEIGHTS = (1.0, 0.5, 0.25)
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
@@ -821,33 +822,63 @@ class SecurityValidator(ValidatorBase):
         *,
         use_executable_multiplier: bool,
     ) -> int:
-        """Return a lower bound after accounting for upstream deduplication."""
+        """Recompute the score from the public issue identity fields."""
         executable_paths = {
             component.get("path")
             for component in components
             if component.get("executable") is True and isinstance(component.get("path"), str)
         }
+        deduplicated = SecurityValidator._deduplicate_skillspector_issues_for_scoring(issues)
         by_rule: dict[str, list[dict]] = {}
-        for issue in issues:
+        for issue in deduplicated:
             by_rule.setdefault(issue["id"], []).append(issue)
 
         score = 0.0
         for rule_issues in by_rule.values():
-            highest_confidence = max(issue["confidence"] for issue in rule_issues)
-            candidates = [issue for issue in rule_issues if issue["confidence"] == highest_confidence]
-            contributions: list[float] = []
-            for issue in candidates:
+            ordered = sorted(
+                rule_issues,
+                key=lambda issue: _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]],
+                reverse=True,
+            )
+            for index, issue in enumerate(ordered[: len(_SKILLSPECTOR_DIMINISHING_WEIGHTS)]):
                 location = issue.get("location") or {}
                 multiplier = (
                     1.3
                     if use_executable_multiplier and location.get("file") in executable_paths
                     else 1.0
                 )
-                contributions.append(
-                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]] * highest_confidence * multiplier
+                score += (
+                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
+                    * _SKILLSPECTOR_DIMINISHING_WEIGHTS[index]
+                    * issue["confidence"]
+                    * multiplier
                 )
-            score += min(contributions)
         return min(100, max(0, int(score)))
+
+    @staticmethod
+    def _deduplicate_skillspector_issues_for_scoring(issues: list[dict]) -> list[dict]:
+        """Mirror scanner dedup using ``finding`` as its serialized match identity."""
+        same_file_best: dict[tuple[str, str, str], dict] = {}
+        for issue in issues:
+            location = issue.get("location") or {}
+            identity = str(issue.get("finding") or "").strip()[:100]
+            key = (issue["id"], str(location.get("file") or "SKILL.md"), identity)
+            existing = same_file_best.get(key)
+            if existing is None or issue["confidence"] > existing["confidence"]:
+                same_file_best[key] = issue
+
+        cross_file_best: dict[tuple[str, str], dict] = {}
+        no_identity: list[dict] = []
+        for issue in same_file_best.values():
+            identity = str(issue.get("finding") or "").strip()[:100]
+            if not identity:
+                no_identity.append(issue)
+                continue
+            key = (issue["id"], identity)
+            existing = cross_file_best.get(key)
+            if existing is None or issue["confidence"] > existing["confidence"]:
+                cross_file_best[key] = issue
+        return [*cross_file_best.values(), *no_identity]
 
     @staticmethod
     def _validate_skillspector_issue(issue: dict, index: int, result: ValidationResult) -> bool:

@@ -61,7 +61,7 @@ def _skillspector_json_report(
         "risk_assessment": {
             "score": 0 if not issues else 80,
             "severity": "LOW" if not issues else "HIGH",
-            "recommendation": "No action required" if not issues else "Review findings",
+            "recommendation": "SAFE" if not issues else "DO_NOT_INSTALL",
         },
         "components": [],
         "issues": issues or [],
@@ -530,6 +530,40 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not any(detail.check_name == "skillspector" for detail in result.success_details)
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_deeply_nested_skillspector_json_fails_closed(self, mock_tools, sample_skill_dir: Path):
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout="[" * 10_000 + "]" * 10_000,
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("JSON" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_unbounded_json_integer_fails_closed(self, mock_tools, sample_skill_dir: Path):
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=(
+                '{"issues":[],"risk_assessment":{"score":'
+                + "9" * 5000
+                + ',"severity":"LOW"}}'
+            ),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("JSON" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_unexpected_skillspector_exit_fails_closed(self, mock_tools, sample_skill_dir: Path):
         """Exit codes other than the scanner's clean/findings policy codes are tool failures."""
         mock_tools.skillspector.is_available = True
@@ -833,7 +867,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             success=False,
             stdout=json.dumps(
                 {
-                    "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "Review"},
+                    "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
                     "issues": [
                         {
                             "id": "PI-1",
@@ -921,6 +955,11 @@ Call us at 555-123-4567 or +1-555-987-6543
                 id="string-risk-score",
             ),
             pytest.param(
+                {"risk_assessment": {"score": 10**399, "severity": "LOW"}, "issues": []},
+                "risk_assessment.score",
+                id="unbounded-integer-risk-score",
+            ),
+            pytest.param(
                 {"risk_assessment": {"score": 0, "severity": "LOW"}, "issues": [{}]},
                 "issues[0].id",
                 id="empty-issue",
@@ -958,6 +997,21 @@ Call us at 555-123-4567 or +1-555-987-6543
             pytest.param(
                 {
                     "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "issues": [
+                        {
+                            "id": "P1",
+                            "severity": "LOW",
+                            "finding": "unsafe",
+                            "confidence": 10**399,
+                        }
+                    ],
+                },
+                "confidence",
+                id="unbounded-integer-confidence",
+            ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 0, "severity": "LOW"},
                     "issues": [],
                     "suppressed_count": 1,
                 },
@@ -982,6 +1036,50 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "metadata.has_executable_scripts",
                 id="non-boolean-metadata-field",
             ),
+            pytest.param(
+                {"risk_assessment": {"score": 0, "severity": "NOT-A-SEVERITY"}, "issues": []},
+                "risk_assessment.severity",
+                id="unknown-risk-severity",
+            ),
+            pytest.param(
+                {"risk_assessment": {"score": 100, "severity": "CRITICAL"}, "issues": []},
+                "nonzero risk score without any issues",
+                id="risk-without-issues",
+            ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "DO_NOT_INSTALL"},
+                    "issues": [],
+                },
+                "risk_assessment.recommendation",
+                id="contradictory-risk-recommendation",
+            ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 80, "severity": "HIGH"},
+                    "issues": [{"id": "P1", "severity": " HIGH", "finding": "unsafe"}],
+                },
+                "issues[0].severity",
+                id="padded-issue-severity",
+            ),
+            pytest.param(
+                {
+                    "failed": "true",
+                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "issues": [],
+                },
+                "field 'failed'",
+                id="non-boolean-failed-marker",
+            ),
+            pytest.param(
+                {
+                    "status": "incomplete",
+                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "issues": [],
+                },
+                "failure status",
+                id="incomplete-status",
+            ),
         ),
     )
     def test_skillspector_rejects_untrustworthy_json_reports(
@@ -1004,6 +1102,37 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not result.passed
         assert any(expected_error in error.lower() for error in result.errors)
         assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"llm_requested": True, "llm_available": True},
+            {"llm_requested": True, "llm_available": False},
+            {"llm_requested": False, "llm_available": True},
+            {"llm_requested": False, "llm_available": False, "meta_analysis_applied": True},
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_deterministic_skillspector_stage_rejects_llm_metadata(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        metadata: dict,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["metadata"].update(metadata)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("--no-llm" in error for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_accepts_valid_clean_report(self, mock_tools, sample_skill_dir: Path) -> None:
@@ -1067,7 +1196,19 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         with (
             patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector"),
-            patch.object(Tools.skillspector, "run", return_value=tool_result) as mock_run,
+            patch.object(
+                Tools.skillspector,
+                "run",
+                side_effect=[
+                    ToolResult(
+                        success=True,
+                        stdout=json.dumps(_skillspector_json_report()),
+                        stderr="",
+                        exit_code=0,
+                    ),
+                    tool_result,
+                ],
+            ) as mock_run,
         ):
             result = SecurityValidator(use_llm=True).validate_security_only(sample_skill_dir)
 
@@ -1275,7 +1416,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         mock_tools.skillspector.is_available = True
         cli_json = {
             "skill": {"name": "test", "source": "/tmp", "scanned_at": "2026-01-01T00:00:00Z"},
-            "risk_assessment": {"score": 10, "severity": "LOW", "recommendation": "All good"},
+            "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
             "components": [],
             "issues": [],
             "metadata": {
@@ -1285,12 +1426,15 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "llm_available": True,
             },
         }
-        mock_tools.skillspector.run.return_value = ToolResult(
-            success=True,
-            stdout=json.dumps(cli_json),
-            stderr="",
-            exit_code=0,
-        )
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(
+                success=True,
+                stdout=json.dumps(_skillspector_json_report()),
+                stderr="",
+                exit_code=0,
+            ),
+            ToolResult(success=True, stdout=json.dumps(cli_json), stderr="", exit_code=0),
+        ]
 
         validator = SecurityValidator(use_llm=True)
         result = validator.validate_security_only(sample_skill_dir)
@@ -1309,7 +1453,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "source": "/tmp/test",
                 "scanned_at": "2026-01-01T00:00:00Z",
             },
-            "risk_assessment": {"score": 50, "severity": "HIGH", "recommendation": "Review"},
+            "risk_assessment": {"score": 50, "severity": "MEDIUM", "recommendation": "CAUTION"},
             "components": [
                 {
                     "path": "scripts/connections.py",
@@ -1341,8 +1485,8 @@ Call us at 555-123-4567 or +1-555-987-6543
             "metadata": {
                 "has_executable_scripts": True,
                 "skillspector_version": "1.0.0",
-                "llm_requested": True,
-                "llm_available": True,
+                "llm_requested": False,
+                "llm_available": False,
             },
         }
         mock_tools.skillspector.run.return_value = ToolResult(
@@ -1352,7 +1496,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             exit_code=0,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
         assert len(result.findings) >= 1
@@ -1371,7 +1515,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "source": "/tmp/sample",
                 "scanned_at": "2026-01-01T00:00:00Z",
             },
-            "risk_assessment": {"score": 90, "severity": "HIGH", "recommendation": "Review"},
+            "risk_assessment": {"score": 90, "severity": "CRITICAL", "recommendation": "DO_NOT_INSTALL"},
             "components": [
                 {
                     "path": "skill-card.md",
@@ -1399,18 +1543,18 @@ Call us at 555-123-4567 or +1-555-987-6543
             "metadata": {
                 "has_executable_scripts": False,
                 "skillspector_version": "1.0.0",
-                "llm_requested": True,
-                "llm_available": True,
+                "llm_requested": False,
+                "llm_available": False,
             },
         }
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
             stdout=json.dumps(cli_json),
             stderr="",
-            exit_code=0,
+            exit_code=1,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
         assert result.passed
@@ -1429,7 +1573,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                         "source": "/tmp",
                         "scanned_at": "2026-01-01T00:00:00Z",
                     },
-                    "risk_assessment": {"score": 5, "severity": "LOW", "recommendation": "OK"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "components": [],
                     "issues": [],
                     "metadata": {"has_executable_scripts": False, "skillspector_version": "1.0.0"},
@@ -2034,8 +2178,8 @@ class TestFalsePositivePrevention:
                     "metadata": {
                         "has_executable_scripts": True,
                         "skillspector_version": "1.0.0",
-                        "llm_requested": True,
-                        "llm_available": True,
+                        "llm_requested": False,
+                        "llm_available": False,
                     },
                 }
             ),
@@ -2043,7 +2187,7 @@ class TestFalsePositivePrevention:
             exit_code=0,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
         assert len(result.findings) >= 1
@@ -2084,8 +2228,8 @@ class TestFalsePositivePrevention:
                     ],
                     "metadata": {
                         "skillspector_version": "1.0.0",
-                        "llm_requested": True,
-                        "llm_available": True,
+                        "llm_requested": False,
+                        "llm_available": False,
                     },
                 }
             ),
@@ -2093,7 +2237,7 @@ class TestFalsePositivePrevention:
             exit_code=0,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
         assert len(result.findings) >= 1
@@ -2112,8 +2256,8 @@ class TestFalsePositivePrevention:
                 {
                     "risk_assessment": {
                         "score": 20,
-                        "severity": "MEDIUM",
-                        "recommendation": "CAUTION",
+                        "severity": "LOW",
+                        "recommendation": "SAFE",
                     },
                     "issues": [
                         {
@@ -2130,14 +2274,14 @@ class TestFalsePositivePrevention:
                             "intent": None,
                         }
                     ],
-                    "metadata": {"llm_requested": True, "llm_available": True},
+                    "metadata": {"llm_requested": False, "llm_available": False},
                 }
             ),
             stderr="",
             exit_code=0,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
         assert result.status == "incomplete"
@@ -2157,7 +2301,7 @@ class TestFalsePositivePrevention:
                         "source": "/path/to/skill",
                         "scanned_at": "2026-03-20T00:00:00Z",
                     },
-                    "risk_assessment": {"score": 5, "severity": "LOW", "recommendation": "SAFE"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "components": [
                         {
                             "path": "SKILL.md",
@@ -2178,8 +2322,8 @@ class TestFalsePositivePrevention:
                     "metadata": {
                         "has_executable_scripts": True,
                         "skillspector_version": "1.0.0",
-                        "llm_requested": True,
-                        "llm_available": True,
+                        "llm_requested": False,
+                        "llm_available": False,
                     },
                 }
             ),
@@ -2187,7 +2331,7 @@ class TestFalsePositivePrevention:
             exit_code=0,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
         assert result.metadata["skillspector_version"] == "1.0.0"
@@ -2209,7 +2353,7 @@ class TestFalsePositivePrevention:
             success=True,
             stdout=json.dumps(
                 {
-                    "risk_assessment": {"score": 70, "severity": "HIGH", "recommendation": "Fix"},
+                    "risk_assessment": {"score": 70, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
                     "issues": [
                         {
                             "id": "SC1",
@@ -2227,16 +2371,16 @@ class TestFalsePositivePrevention:
                     ],
                     "metadata": {
                         "skillspector_version": "1.0.0",
-                        "llm_requested": True,
-                        "llm_available": True,
+                        "llm_requested": False,
+                        "llm_available": False,
                     },
                 }
             ),
             stderr="",
-            exit_code=0,
+            exit_code=1,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(skill_dir)
 
         success_msgs = [s.message for s in result.success_details]
@@ -2255,7 +2399,7 @@ class TestFalsePositivePrevention:
             success=True,
             stdout=json.dumps(
                 {
-                    "risk_assessment": {"score": 30, "severity": "MEDIUM", "recommendation": "OK"},
+                    "risk_assessment": {"score": 30, "severity": "MEDIUM", "recommendation": "CAUTION"},
                     "issues": [
                         {
                             "id": "SC1",
@@ -2273,8 +2417,8 @@ class TestFalsePositivePrevention:
                     ],
                     "metadata": {
                         "skillspector_version": "1.0.0",
-                        "llm_requested": True,
-                        "llm_available": True,
+                        "llm_requested": False,
+                        "llm_available": False,
                     },
                 }
             ),
@@ -2282,7 +2426,7 @@ class TestFalsePositivePrevention:
             exit_code=0,
         )
 
-        validator = SecurityValidator(use_llm=True)
+        validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(skill_dir)
 
         success_msgs = [s.message for s in result.success_details]
@@ -2450,3 +2594,79 @@ class TestSpdxAndIpFalsePositiveHardening:
         result = SecurityValidator().validate_pii_only(skill_dir)
 
         assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'registry_wheel = "package-4.5.1.2-py312.whl"\n',
+            'filename = "package-4.5.1.2-py312.whl"  # upload to registry\n',
+        ],
+    )
+    def test_explicit_wheel_artifact_wins_over_nearby_network_words(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "package-artifact-network-context-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'download = "https://files.example.com/package-4.5.1.2-py312.whl"\n',
+            'package_url = "https://files.example.com/package-4.5.1.2-py312.whl"\n',
+            "Download https://files.example.com/package-4.5.1.2-py312.whl\n",
+        ],
+    )
+    def test_package_artifact_url_path_is_not_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "package-artifact-url-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "suffix",
+        ["tar.bz2", "tgz", "egg", "rpm", "deb", "jar", "nupkg"],
+    )
+    def test_common_package_artifact_suffixes_are_not_pii(self, tmp_path: Path, suffix: str) -> None:
+        skill_dir = tmp_path / "package-artifact-suffix-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(f"package-4.5.1.2.{suffix}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    def test_real_ip_is_not_suppressed_by_later_matching_artifact_version(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "ip-before-artifact-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            'server = "8.8.8.8"; download = "https://files.example.com/pkg-8.8.8.8.whl"\n',
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        matching = [finding for finding in result.findings if finding.check_name == "ip_addresses"]
+        assert len(matching) == 1
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'registry_package("8.8.8.8")\n',
+            'proxy_package("8.8.8.8")\n',
+            'fetch_package_from_registry("8.8.8.8")\n',
+        ],
+    )
+    def test_network_named_package_calls_remain_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "network-package-call-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert any(finding.check_name == "ip_addresses" for finding in result.findings)

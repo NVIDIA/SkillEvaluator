@@ -32,8 +32,11 @@ def _extract_version(frontmatter: dict[str, Any]) -> str:
     avoids breaking those skills when the validator runs by default.
     """
     metadata = frontmatter.get("metadata")
-    if isinstance(metadata, dict):
-        value = str(metadata.get("version") or "").strip()
+    if isinstance(metadata, dict) and "version" in metadata:
+        raw_value = metadata["version"]
+        if raw_value is None:
+            return ""
+        value = str(raw_value).strip()
         if value:
             return value
     return ""

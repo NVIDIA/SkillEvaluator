@@ -94,6 +94,16 @@ def test_unbounded_previous_version_is_rejected_without_crashing(tmp_path: Path)
     assert "previous_version_semver" in _finding_names(result)
 
 
+@pytest.mark.parametrize("version", ["0", "false", "[]", "{}"])
+def test_explicit_falsey_non_string_version_is_rejected(tmp_path: Path, version: str) -> None:
+    skill_dir = _write_skill(tmp_path, version)
+
+    result = VersionValidator(previous_version="1.2.0").validate(skill_dir)
+
+    assert not result.passed
+    assert "version_semver" in _finding_names(result)
+
+
 def test_equal_version_label_is_rejected(tmp_path: Path) -> None:
     skill_dir = _write_skill(tmp_path, "1.2.0")
 

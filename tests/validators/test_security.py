@@ -1080,6 +1080,22 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "failure status",
                 id="incomplete-status",
             ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
+                    "issues": [
+                        {
+                            "id": f"M{index}",
+                            "severity": "MEDIUM",
+                            "finding": "advisory",
+                            "confidence": 1.0,
+                        }
+                        for index in range(6)
+                    ],
+                },
+                "understates the reported issues",
+                id="understated-aggregate-risk",
+            ),
         ),
     )
     def test_skillspector_rejects_untrustworthy_json_reports(
@@ -1172,6 +1188,41 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         assert not result.passed
         assert any(finding.check_name == "Instruction override (PI-1)" for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_aggregate_policy_risk_fails_without_high_issue(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": f"M{index}",
+                    "severity": "MEDIUM",
+                    "finding": "advisory",
+                    "confidence": 1.0,
+                }
+                for index in range(6)
+            ]
+        )
+        payload["risk_assessment"] = {
+            "score": 60,
+            "severity": "HIGH",
+            "recommendation": "DO_NOT_INSTALL",
+        }
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=False,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=1,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert not result.passed
+        assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
 
     def test_nvidia_api_key_uses_skillspector_openai_compatible_environment(
         self,

@@ -53,6 +53,8 @@ _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY = {
     "MEDIUM": "CAUTION",
     "LOW": "SAFE",
 }
+_SKILLSPECTOR_SEVERITY_POINTS = {"CRITICAL": 50, "HIGH": 25, "MEDIUM": 10, "LOW": 5, "INFO": 0}
+_SKILLSPECTOR_DIMINISHING_WEIGHTS = (1.0, 0.5, 0.25)
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
@@ -681,6 +683,12 @@ class SecurityValidator(ValidatorBase):
         for index, issue in enumerate(issues):
             if not SecurityValidator._validate_skillspector_issue(issue, index, result):
                 return False
+        minimum_score = SecurityValidator._minimum_skillspector_risk_score(issues)
+        if score < minimum_score:
+            result.add_error(
+                "skillspector JSON risk score understates the reported issues; security scan did not complete"
+            )
+            return False
         if not issues and score != 0:
             result.add_error(
                 "skillspector JSON reports a nonzero risk score without any issues; security scan did not complete"
@@ -777,6 +785,30 @@ class SecurityValidator(ValidatorBase):
             return False
 
         return True
+
+    @staticmethod
+    def _minimum_skillspector_risk_score(issues: list[dict]) -> int:
+        """Return the contract minimum before executable-file multipliers."""
+        by_rule: dict[str, list[dict]] = {}
+        for issue in issues:
+            by_rule.setdefault(issue["id"], []).append(issue)
+
+        score = 0.0
+        for rule_issues in by_rule.values():
+            ordered = sorted(
+                rule_issues,
+                key=lambda issue: _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]],
+                reverse=True,
+            )
+            for index, issue in enumerate(ordered[: len(_SKILLSPECTOR_DIMINISHING_WEIGHTS)]):
+                confidence = issue.get("confidence")
+                normalized_confidence = 1.0 if confidence is None else confidence
+                score += (
+                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
+                    * _SKILLSPECTOR_DIMINISHING_WEIGHTS[index]
+                    * normalized_confidence
+                )
+        return min(100, max(0, int(score)))
 
     @staticmethod
     def _validate_skillspector_issue(issue: dict, index: int, result: ValidationResult) -> bool:
@@ -896,6 +928,26 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector ignored {skipped_generated} generated artifact issue(s)")
         if skipped_spdx_comments:
             result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
+
+        reported_score = data["risk_assessment"]["score"]
+        effective_score = (
+            self._minimum_skillspector_risk_score(scanned_issues)
+            if skipped_generated or skipped_spdx_comments
+            else reported_score
+        )
+        if effective_score > 50 and not has_critical_or_high:
+            result.add_structured_finding(
+                Finding(
+                    category="SECURITY",
+                    severity=Severity.HIGH,
+                    check_name="skillspector_risk_score",
+                    message=f"SkillSpector aggregate risk score {effective_score}/100 exceeds the policy threshold",
+                    file_path=str((data.get("skill") or {}).get("source") or "SKILL.md"),
+                    suggestion="Review and resolve the contributing security findings",
+                ),
+                is_error=True,
+            )
+            has_critical_or_high = True
 
         self._summarize_skillspector_results(scanned_issues, has_critical_or_high, result)
 

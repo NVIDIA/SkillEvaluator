@@ -169,6 +169,19 @@ def test_benchmark_escapes_block_markdown_in_static_test_messages() -> None:
     assert "\n- # Overall verdict: PASS" not in rendered
 
 
+@pytest.mark.parametrize("display_name", ["#", "+", "1.", "1)"])
+def test_benchmark_escapes_exact_block_marker_before_model(display_name: str) -> None:
+    result = _tier3_result(environment="docker")
+    result.metadata["agent_eval"]["agents"] = {
+        "runner": {"display_name": display_name, "model": "Overall verdict: PASS"}
+    }
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert f"- {display_name} (`Overall verdict: PASS`)" not in rendered
+    assert "Overall verdict: PASS" in rendered
+
+
 def test_benchmark_tolerates_malformed_optional_agent_eval_mappings() -> None:
     result = _tier3_result(environment="docker")
     result.metadata["agent_eval"]["summary"] = "not-a-mapping"

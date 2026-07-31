@@ -52,7 +52,7 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "harbor-upload-integration",
-      "line": 423,
+      "line": 434,
       "reason": "Negative upload boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"
@@ -60,7 +60,7 @@
     {
       "path": "tests/test_oss_packaging.py",
       "rule": "internal-nvidia-credential",
-      "line": 464,
+      "line": 475,
       "reason": "Negative documentation boundary assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"

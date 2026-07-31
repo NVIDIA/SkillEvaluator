@@ -44,7 +44,7 @@ def test_top_level_help_shows_branded_header() -> None:
 
     assert result.exit_code == 0
     assert "SKILLEVALUATOR: SkillEvaluator" in result.output
-    assert "README.md" in result.output
+    assert "https://docs.nvidia.com/skills/skillevaluator/" in result.output
     # Plain text under a non-TTY runner so the output stays greppable.
     assert "\x1b[" not in result.output
 

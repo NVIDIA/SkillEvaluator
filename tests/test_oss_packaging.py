@@ -232,14 +232,25 @@ def test_public_docs_declare_support_and_security_sections() -> None:
     assert "Support level: **Experimental**" in support
 
 
-def test_public_quickstart_is_one_install_command_without_a_fixture_clone() -> None:
+def test_public_readme_is_a_concise_docs_landing_page() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    quickstart = readme.split("\n## Quickstart\n", 1)[1].split("\n## Tier 1:", 1)[0]
+    normalized = " ".join(readme.split())
 
-    install = 'uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
-    assert install in quickstart
-    assert "skillevaluator quality-check ./my-skill" in quickstart
-    assert "git clone" not in quickstart
+    positioning = (
+        "SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent artifacts, "
+        "starting with agent skills: deterministic quality gates, semantic overlap detection, "
+        "synthetic eval dataset generation, and live agent evaluation."
+    )
+    assert positioning in normalized
+    assert "https://docs.nvidia.com/skills/skillevaluator/" in readme
+    assert "https://docs.nvidia.com/skills/" in readme
+    assert "https://github.com/NVIDIA/SkillSpector" in readme
+    assert "\n## Three-tier overview\n" not in readme
+    assert "\n## Quickstart\n" not in readme
+    assert "\n## Tier 1:" not in readme
+    assert "skillevaluator quality-check" not in readme
+    assert "Skill Evaluator" not in readme
+    assert len(readme.split()) <= 400
 
 
 def test_release_metadata_is_public_facing_and_version_consistent() -> None:

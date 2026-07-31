@@ -242,6 +242,39 @@ def test_benchmark_redacts_absolute_paths_from_dynamic_text() -> None:
     assert "validator: Validation completed" in clean_rendered
 
 
+def test_benchmark_sanitizes_file_uris_markdown_and_private_dimension_values() -> None:
+    result = _tier3_result(environment="private-sandbox")
+    result.metadata["agent_eval"]["agents"] = {
+        "claude-code": {
+            "dimensions": [{"id": "security", "num": "private-sandbox", "with_skill": 1.0}]
+        }
+    }
+    tier1 = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    tier1.add_finding(
+        Finding(
+            category="[fake](https://attacker.example)",
+            severity=Severity.LOW,
+            check_name="<img src=x onerror=alert(1)>",
+            message="![PASS](https://attacker.example/pass.svg) at file:///Users/alice/private/SKILL.md",
+            file_path="SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render_all([tier1, result])
+
+    assert "private-sandbox" not in rendered
+    assert "/Users/alice" not in rendered
+    assert "file:///" not in rendered
+    assert "https://attacker.example" not in rendered
+    assert "\\[fake\\](https&#58;//attacker.example)" in rendered
+    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
+    assert "!\\[PASS\\](https&#58;//attacker.example/pass.svg) at SKILL.md" in rendered
+    assert "| Security | Isolated sandbox |" in rendered
+
+
 def test_benchmark_rejects_invalid_markdown_skill_name() -> None:
     result = ValidationResult(
         validator_name="Schema & Repository Governance",

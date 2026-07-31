@@ -50,6 +50,14 @@ _PATH_START = re.compile(r"(?<![A-Za-z0-9:/])(?:[A-Za-z]:[\\/]|\\\\|\\|/)")
 _QUOTED_ABSOLUTE_PATH = re.compile(
     r"(?P<quote>['\"])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|\\|/)[^'\"\r\n]+)(?P=quote)"
 )
+_QUOTED_FILE_URI_PATH = re.compile(
+    r"(?P<quote>['\"])(?:file://)(?P<path>/[^'\"\r\n]+)(?P=quote)",
+    flags=re.IGNORECASE,
+)
+_FILE_URI_PATH = re.compile(r"\bfile://(?P<path>/[^\s'\"<>]+)", flags=re.IGNORECASE)
+_MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\*_\[\]~])")
+_PUBLICATION_URL_SCHEME = re.compile(r"(?P<scheme>https?|ftp)://", flags=re.IGNORECASE)
+_PUBLICATION_WWW_PREFIX = re.compile(r"\bwww\.", flags=re.IGNORECASE)
 _TRAILING_PATH_PUNCTUATION = ".,;!?)]}>`'\""
 
 
@@ -277,13 +285,13 @@ class BenchmarkReporter(ReporterBase):
             "Num",
             *[_agent_label(name, agent, private_labels) for name, agent in agents.items()],
         ]
-        lines.append("| " + " | ".join(_md_cell(cell) for cell in header) + " |")
+        lines.append("| " + " | ".join(_md_cell(cell, private_labels) for cell in header) + " |")
         lines.append("|---|---:|" + "|".join(["---:"] * len(agents)) + "|")
         for dim_id in DIMENSION_MAPPING:
             row = [dim_id.title(), _dimension_num(ae, dim_id)]
             for agent in agents.values():
                 row.append(_score_lift_cell(_agent_dimension(agent, dim_id)))
-            lines.append("| " + " | ".join(_md_cell(cell) for cell in row) + " |")
+            lines.append("| " + " | ".join(_md_cell(cell, private_labels) for cell in row) + " |")
         lines.append("")
         lines.append(
             "Score values show skill-assisted performance. Values in parentheses show "
@@ -643,8 +651,8 @@ def _top_findings(findings: list[Finding], *, limit: int) -> list[Finding]:
     return sorted(findings, key=lambda f: (order.get(f.severity.value, 99), f.category))[:limit]
 
 
-def _md_cell(value: object) -> str:
-    return _publication_safe_inline(value).replace("|", "\\|")
+def _md_cell(value: object, private_labels: tuple[str, ...] = ()) -> str:
+    return _publication_safe_inline(value, private_labels).replace("|", "\\|")
 
 
 def _publication_safe_skill_name(value: object) -> str:
@@ -689,18 +697,35 @@ def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()
             text,
             flags=re.IGNORECASE,
         )
-    return text.replace("`", "'")
+    text = text.replace("`", "'").replace("<", "&lt;").replace(">", "&gt;")
+    text = _PUBLICATION_URL_SCHEME.sub(lambda match: f"{match.group('scheme')}&#58;//", text)
+    text = _PUBLICATION_WWW_PREFIX.sub(lambda match: f"{match.group(0)[:-1]}&#46;", text)
+    text = text.replace("@", "&#64;")
+    return _MARKDOWN_INLINE_SPECIAL.sub(r"\\\1", text)
 
 
 def _redact_absolute_paths(value: str) -> str:
     """Reduce absolute POSIX and Windows paths embedded in free text to basenames."""
+
+    def redact_quoted_file_uri(match: re.Match[str]) -> str:
+        basename = _absolute_path_basename(match.group("path"))
+        return f"{match.group('quote')}{basename}{match.group('quote')}" if basename else match.group(0)
+
+    def redact_file_uri(match: re.Match[str]) -> str:
+        candidate = match.group("path")
+        core = candidate.rstrip(_TRAILING_PATH_PUNCTUATION)
+        suffix = candidate[len(core) :]
+        basename = _absolute_path_basename(core)
+        return f"{basename}{suffix}" if basename else match.group(0)
 
     def redact_quoted(match: re.Match[str]) -> str:
         path = match.group("path")
         basename = _absolute_path_basename(path)
         return f"{match.group('quote')}{basename}{match.group('quote')}" if basename else match.group(0)
 
-    text = _QUOTED_ABSOLUTE_PATH.sub(redact_quoted, value)
+    text = _QUOTED_FILE_URI_PATH.sub(redact_quoted_file_uri, value)
+    text = _FILE_URI_PATH.sub(redact_file_uri, text)
+    text = _QUOTED_ABSOLUTE_PATH.sub(redact_quoted, text)
     tokens: list[str] = []
     for token in text.split(" "):
         match = _PATH_START.search(token)

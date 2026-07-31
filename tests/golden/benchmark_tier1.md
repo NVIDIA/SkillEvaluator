@@ -42,7 +42,7 @@ Tier 1 validation passed. Skill Evaluator ran 1 checks and found 0 total finding
 
 Notable observations:
 
-- Schema & Repository Governance: Valid author format: Dev One <dev@example.com>
+- Schema & Repository Governance: Valid author format: Dev One &lt;dev&#64;example.com&gt;
 
 ## Tier 2: Deduplication Summary
 
@@ -50,7 +50,7 @@ Tier 2 validation passed with observations. Skill Evaluator ran 1 checks and fou
 
 Top findings:
 
-- LOW CONTENT_DEDUP/partial_overlap: Partial overlap with another skill (`SKILL.md`)
+- LOW CONTENT\_DEDUP/partial\_overlap: Partial overlap with another skill (`SKILL.md`)
 
 ## Publication Recommendation
 

@@ -275,6 +275,37 @@ def test_benchmark_sanitizes_file_uris_markdown_and_private_dimension_values() -
     assert "| Security | Isolated sandbox |" in rendered
 
 
+@pytest.mark.parametrize(
+    "file_uri",
+    [
+        "file:/Users/alice/private/SKILL.md",
+        "file://build-host/Users/alice/private/SKILL.md",
+        "file://C:/Users/alice/private/SKILL.md",
+    ],
+)
+def test_benchmark_redacts_file_uri_authorities(file_uri: str) -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="example",
+            message=f"Scanner failed under {file_uri}",
+            file_path="SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert file_uri not in rendered
+    assert "alice" not in rendered
+    assert "build-host" not in rendered
+    assert "Scanner failed under SKILL.md" in rendered
+
+
 def test_benchmark_rejects_invalid_markdown_skill_name() -> None:
     result = ValidationResult(
         validator_name="Schema & Repository Governance",

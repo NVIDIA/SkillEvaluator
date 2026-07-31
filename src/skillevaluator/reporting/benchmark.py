@@ -51,10 +51,13 @@ _QUOTED_ABSOLUTE_PATH = re.compile(
     r"(?P<quote>['\"])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|\\|/)[^'\"\r\n]+)(?P=quote)"
 )
 _QUOTED_FILE_URI_PATH = re.compile(
-    r"(?P<quote>['\"])(?:file://)(?P<path>/[^'\"\r\n]+)(?P=quote)",
+    r"(?P<quote>['\"])(?:file:)(?://[^/'\"\r\n]*)?(?P<path>/[^'\"\r\n]+)(?P=quote)",
     flags=re.IGNORECASE,
 )
-_FILE_URI_PATH = re.compile(r"\bfile://(?P<path>/[^\s'\"<>]+)", flags=re.IGNORECASE)
+_FILE_URI_PATH = re.compile(
+    r"\bfile:(?://[^/\s'\"<>]*)?(?P<path>/[^\s'\"<>]+)",
+    flags=re.IGNORECASE,
+)
 _MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\*_\[\]~])")
 _PUBLICATION_URL_SCHEME = re.compile(r"(?P<scheme>https?|ftp)://", flags=re.IGNORECASE)
 _PUBLICATION_WWW_PREFIX = re.compile(r"\bwww\.", flags=re.IGNORECASE)

@@ -1329,6 +1329,45 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.status == "incomplete"
         assert any("understates the reported issues" in error for error in result.errors)
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_zero_confidence_does_not_consume_occurrence_weight(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{rule_index}",
+                "severity": "MEDIUM",
+                "finding": f"distinct-{rule_index}-{occurrence_index}",
+                "confidence": confidence,
+                "location": {
+                    "file": f"scripts/check_{rule_index}_{occurrence_index}.py",
+                    "start_line": 1,
+                },
+            }
+            for rule_index in range(4)
+            for occurrence_index, confidence in enumerate((0.0, 1.0, 1.0))
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {"score": 39, "severity": "MEDIUM", "recommendation": "CAUTION"}
+        payload["components"] = [
+            {"path": issue["location"]["file"], "executable": True} for issue in issues
+        ]
+        payload["metadata"]["has_executable_scripts"] = True
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("understates the reported issues" in error for error in result.errors)
+
     def test_nvidia_api_key_uses_skillspector_openai_compatible_environment(
         self,
         monkeypatch,

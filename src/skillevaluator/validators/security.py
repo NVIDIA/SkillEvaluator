@@ -836,7 +836,7 @@ class SecurityValidator(ValidatorBase):
         score = 0.0
         for rule_issues in by_rule.values():
             ordered = sorted(
-                rule_issues,
+                (issue for issue in rule_issues if issue["confidence"] > 0),
                 key=lambda issue: _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]],
                 reverse=True,
             )

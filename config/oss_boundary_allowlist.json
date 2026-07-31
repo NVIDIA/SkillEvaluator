@@ -76,7 +76,7 @@
     {
       "path": "tests/validators/test_security.py",
       "rule": "internal-nvidia-credential",
-      "line": 1339,
+      "line": 1378,
       "reason": "Negative subprocess credential assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"

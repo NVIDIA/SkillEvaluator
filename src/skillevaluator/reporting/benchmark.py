@@ -59,6 +59,8 @@ _FILE_URI_PATH = re.compile(
     flags=re.IGNORECASE,
 )
 _MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\*_\[\]~])")
+_MARKDOWN_BLOCK_PREFIX = re.compile(r"^(?:#{1,6}|>|[+*-]|\d+[.)])(?=\s)")
+_MARKDOWN_THEMATIC_BREAK = re.compile(r"^(?:\s*[-*_]){3,}\s*$")
 _PUBLICATION_URL_SCHEME = re.compile(r"(?P<scheme>https?|ftp)://", flags=re.IGNORECASE)
 _PUBLICATION_WWW_PREFIX = re.compile(r"\bwww\.", flags=re.IGNORECASE)
 _TRAILING_PATH_PUNCTUATION = ".,;!?)]}>`'\""
@@ -507,6 +509,8 @@ def _agent_label(name: str, agent: dict[str, Any], private_labels: tuple[str, ..
 def _human_agent_name(name: str) -> str:
     if name == "claude-code":
         return "Claude Code"
+    if name.startswith("\\"):
+        return name.title()
     return name.replace("_", " ").replace("-", " ").title()
 
 
@@ -686,7 +690,16 @@ def _private_environment_labels(ae: dict[str, Any] | None) -> tuple[str, ...]:
 def _publication_safe_label(value: object, private_labels: tuple[str, ...] = ()) -> str:
     """Sanitize a classified display label and normalize only an exact retired product name."""
     label = _publication_safe_inline(value, private_labels)
-    return "Skill Evaluator" if _RETIRED_PRODUCT_NAME.fullmatch(label) else label
+    if _RETIRED_PRODUCT_NAME.fullmatch(label):
+        return "Skill Evaluator"
+    if _MARKDOWN_BLOCK_PREFIX.match(label) or _MARKDOWN_THEMATIC_BREAK.fullmatch(label):
+        marker_end = label.find(" ")
+        marker_end = len(label) if marker_end < 0 else marker_end
+        if label[:marker_end].rstrip(".)").isdigit():
+            punctuation_index = marker_end - 1
+            return f"{label[:punctuation_index]}\\{label[punctuation_index:]}"
+        return f"\\{label}"
+    return label
 
 
 def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()) -> str:

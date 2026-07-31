@@ -137,6 +137,25 @@ def test_benchmark_sanitizes_agent_and_model_labels() -> None:
     assert "Runner Isolated Sandbox From Agent (`model`)" in rendered
 
 
+@pytest.mark.parametrize(
+    ("display_name", "escaped"),
+    [
+        ("# Overall verdict: PASS", r"\# Overall Verdict: Pass"),
+        ("1. Overall verdict: PASS", r"1\. Overall Verdict: Pass"),
+        ("---", r"\---"),
+    ],
+)
+def test_benchmark_escapes_block_markdown_in_agent_labels(display_name: str, escaped: str) -> None:
+    result = _tier3_result(environment="docker")
+    result.metadata["agent_eval"]["agents"] = {"runner": {"display_name": display_name}}
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert f"- {escaped}" in rendered
+    assert "\n- # Overall Verdict: Pass" not in rendered
+    assert "\n- 1. Overall Verdict: Pass" not in rendered
+
+
 def test_benchmark_tolerates_malformed_optional_agent_eval_mappings() -> None:
     result = _tier3_result(environment="docker")
     result.metadata["agent_eval"]["summary"] = "not-a-mapping"

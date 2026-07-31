@@ -39,9 +39,13 @@ def _extract_version(frontmatter: dict[str, Any]) -> str:
     return ""
 
 
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    major, minor, patch = version.split(".")
-    return int(major), int(minor), int(patch)
+def _version_tuple(version: str) -> tuple[int, int, int] | None:
+    """Parse a prevalidated version without allowing conversion failures to escape."""
+    try:
+        major, minor, patch = version.split(".")
+        return int(major), int(minor), int(patch)
+    except (TypeError, ValueError):
+        return None
 
 
 class VersionValidator(ValidatorBase):
@@ -80,7 +84,7 @@ class VersionValidator(ValidatorBase):
             return True
 
         previous = self.previous_version.strip()
-        if not SEMVER_RE.match(previous):
+        if not SEMVER_RE.fullmatch(previous):
             result.add_finding(
                 Finding(
                     category="VERSION",
@@ -93,7 +97,24 @@ class VersionValidator(ValidatorBase):
             )
             return False
 
-        if _version_tuple(current) <= _version_tuple(previous):
+        current_tuple = _version_tuple(current)
+        previous_tuple = _version_tuple(previous)
+        if current_tuple is None or previous_tuple is None:
+            check_name = "version_semver" if current_tuple is None else "previous_version_semver"
+            invalid_value = current if current_tuple is None else previous
+            result.add_finding(
+                Finding(
+                    category="VERSION",
+                    severity=Severity.HIGH,
+                    check_name=check_name,
+                    message=f"Version '{invalid_value}' could not be parsed as strict semantic version x.y.z",
+                    file_path=str(manifest),
+                    suggestion="Use bounded ASCII major.minor.patch components without leading zeroes",
+                )
+            )
+            return False
+
+        if current_tuple <= previous_tuple:
             result.add_finding(
                 Finding(
                     category="VERSION",
@@ -145,7 +166,7 @@ class VersionValidator(ValidatorBase):
             )
             return result
 
-        if not SEMVER_RE.match(current):
+        if not SEMVER_RE.fullmatch(current):
             result.add_finding(
                 Finding(
                     category="VERSION",

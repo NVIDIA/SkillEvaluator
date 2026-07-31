@@ -66,7 +66,8 @@ All notable changes to Skill Evaluator are documented in this file.
   `agents/` and `tests/` support directories, and keep Ruff on the validated
   0.15 release line.
 - Accepted structurally complete SkillSpector finding reports on policy exit 1
-  and updated the public scanner pin to the reviewed 2.4 release line.
+  and hardened validation of the external scanner's untrusted JSON contract;
+  SkillSpector remains separately installed and unpinned by this distribution.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
   Linux systems by selecting a compatible Semgrep and pip-audit pair, while
   macOS and Windows retain the newer scanner release lines.

@@ -66,6 +66,34 @@ def test_malformed_version_is_rejected_when_present(
     assert "version_semver" in _finding_names(result)
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "01.2.3",
+        "1.02.3",
+        "1.2.03",
+        f"{chr(0xFF11)}.2.3",
+        f"{'9' * 5000}.2.3",
+    ],
+)
+def test_untrusted_or_unbounded_version_is_rejected_without_crashing(tmp_path: Path, version: str) -> None:
+    skill_dir = _write_skill(tmp_path, f'"{version}"')
+
+    result = VersionValidator(previous_version="1.2.0").validate(skill_dir)
+
+    assert not result.passed
+    assert "version_semver" in _finding_names(result)
+
+
+def test_unbounded_previous_version_is_rejected_without_crashing(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path, '"1.2.3"')
+
+    result = VersionValidator(previous_version=f"{'9' * 5000}.2.3").validate(skill_dir)
+
+    assert not result.passed
+    assert "previous_version_semver" in _finding_names(result)
+
+
 def test_equal_version_label_is_rejected(tmp_path: Path) -> None:
     skill_dir = _write_skill(tmp_path, "1.2.0")
 

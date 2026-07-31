@@ -858,10 +858,11 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not any("unexpected exit code" in error for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
-    def test_completed_scan_preserves_suppression_metadata(self, mock_tools, sample_skill_dir: Path):
+    def test_unexpected_skillspector_suppression_fails_closed(self, mock_tools, sample_skill_dir: Path):
         mock_tools.skillspector.is_available = True
         payload = _skillspector_json_report()
         payload["suppressed_count"] = 2
+        payload["suppressed"] = [{"id": "one"}, {"id": "two"}]
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
             stdout=json.dumps(payload),
@@ -871,8 +872,8 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
 
-        assert result.metadata["skillspector_suppressed_count"] == 2
-        assert any("suppressed 2" in message for message in result.messages)
+        assert result.status == "incomplete"
+        assert any("unexpected suppressed findings" in error.lower() for error in result.errors)
 
     @pytest.mark.parametrize(
         ("payload", "expected_error"),
@@ -908,6 +909,78 @@ Call us at 555-123-4567 or +1-555-987-6543
                 },
                 "suppressed_count",
                 id="invalid-suppressed-count",
+            ),
+            pytest.param(
+                {"risk_assessment": {}, "issues": []},
+                "risk_assessment.score",
+                id="empty-risk-assessment",
+            ),
+            pytest.param(
+                {"risk_assessment": {"score": "0", "severity": "LOW"}, "issues": []},
+                "risk_assessment.score",
+                id="string-risk-score",
+            ),
+            pytest.param(
+                {"risk_assessment": {"score": 0, "severity": "LOW"}, "issues": [{}]},
+                "issues[0].id",
+                id="empty-issue",
+            ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 80, "severity": "HIGH"},
+                    "issues": [
+                        {
+                            "id": "P1",
+                            "severity": "HIGH",
+                            "pattern": "Instruction override",
+                            "location": {"file": ["SKILL.md"], "start_line": 1},
+                        }
+                    ],
+                },
+                "location.file",
+                id="non-string-issue-file",
+            ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 80, "severity": "HIGH"},
+                    "issues": [
+                        {
+                            "id": "P1",
+                            "severity": "HIGH",
+                            "pattern": "Instruction override",
+                            "code_snippet": {"text": "unsafe"},
+                        }
+                    ],
+                },
+                "code_snippet",
+                id="non-string-code-snippet",
+            ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "issues": [],
+                    "suppressed_count": 1,
+                },
+                "suppressed_count",
+                id="suppression-count-without-list",
+            ),
+            pytest.param(
+                {
+                    "success": "true",
+                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "issues": [],
+                },
+                "field 'success'",
+                id="non-boolean-success",
+            ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "issues": [],
+                    "metadata": {"has_executable_scripts": "false"},
+                },
+                "metadata.has_executable_scripts",
+                id="non-boolean-metadata-field",
             ),
         ),
     )
@@ -2030,8 +2103,8 @@ class TestFalsePositivePrevention:
         assert finding.check_name == "Unknown (SQP1)"
 
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_10_all_null_fields_handled(self, mock_tools, sample_skill_dir: Path):
-        """When skillspector returns null for all optional fields, no crash or 'None' display."""
+    def test_skillspector_issue_without_required_fields_fails_closed(self, mock_tools, sample_skill_dir: Path):
+        """An issue without a severity or usable content is not trustworthy evidence."""
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
@@ -2067,11 +2140,9 @@ class TestFalsePositivePrevention:
         validator = SecurityValidator(use_llm=True)
         result = validator.validate_security_only(sample_skill_dir)
 
-        assert len(result.findings) >= 1
-        finding = result.findings[0]
-        assert "None" not in finding.message
-        assert finding.message == "Unknown"
-        assert finding.file_path == "unknown"
+        assert result.status == "incomplete"
+        assert result.findings == []
+        assert any("severity" in error.lower() for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_10_metadata_captured(self, mock_tools, sample_skill_dir: Path):
@@ -2342,6 +2413,37 @@ class TestSpdxAndIpFalsePositiveHardening:
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
             'source_version = "4.4.0.1"; target_version = "5.5.0.2"\n',
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'endpoint_version = "8.8.0.8"\n',
+            'gateway_version = "8.8.0.8"\n',
+            'proxy_version = "8.8.0.8"\n',
+            'registry_version = "8.8.0.8"\n',
+            'mirror = "download package from 8.8.0.8"\n',
+        ],
+    )
+    def test_network_and_prose_contexts_are_not_versions(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "adversarial-network-context-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    def test_nonzero_four_component_package_artifact_is_not_pii(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "package-artifact-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            'filename = "package-4.5.1.2-py312.whl"\n',
             encoding="utf-8",
         )
 

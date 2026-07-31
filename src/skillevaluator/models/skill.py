@@ -25,8 +25,9 @@ from skillevaluator.constants import (
 
 _XML_TAG_RE = re.compile(r"<[a-zA-Z][^>]*>")
 
-#: Strict semantic-version pattern (x.y.z) for optional metadata.version labels.
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+#: Strict, bounded ASCII semantic-version pattern for optional metadata.version labels.
+_SEMVER_COMPONENT = r"(?:0|[1-9][0-9]{0,8})"
+SEMVER_RE = re.compile(rf"^{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}$", re.ASCII)
 
 
 class SkillMetadata(BaseModel):

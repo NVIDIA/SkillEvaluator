@@ -360,7 +360,9 @@ Tier 1 gate fail.
 ### version check
 
 The default `version` check validates an optional `metadata.version` as a
-three-part numeric value in `major.minor.patch` form:
+three-part numeric value in `major.minor.patch` form. Components use ASCII
+digits, contain at most nine digits, and do not use leading zeroes unless the
+component is exactly `0`:
 
 ```yaml
 metadata:

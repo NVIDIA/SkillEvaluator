@@ -1358,7 +1358,7 @@ def validate(
         from skillevaluator.reporting.naming import BENCHMARK_FILENAME
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        BenchmarkReporter().save(results, output_dir / BENCHMARK_FILENAME)
+        BenchmarkReporter(skill_name=target_path.name).save(results, output_dir / BENCHMARK_FILENAME)
 
     gate_failed = not all(r.passed for r in tier_gate_results)
     if quiet:

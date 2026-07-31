@@ -54,7 +54,6 @@ _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY = {
     "LOW": "SAFE",
 }
 _SKILLSPECTOR_SEVERITY_POINTS = {"CRITICAL": 50, "HIGH": 25, "MEDIUM": 10, "LOW": 5, "INFO": 5}
-_SKILLSPECTOR_DIMINISHING_WEIGHTS = (1.0, 0.5, 0.25)
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
@@ -683,12 +682,6 @@ class SecurityValidator(ValidatorBase):
         for index, issue in enumerate(issues):
             if not SecurityValidator._validate_skillspector_issue(issue, index, result):
                 return False
-        minimum_score = SecurityValidator._minimum_skillspector_risk_score(issues)
-        if score < minimum_score:
-            result.add_error(
-                "skillspector JSON risk score understates the reported issues; security scan did not complete"
-            )
-            return False
         if not issues and score != 0:
             result.add_error(
                 "skillspector JSON reports a nonzero risk score without any issues; security scan did not complete"
@@ -751,6 +744,41 @@ class SecurityValidator(ValidatorBase):
                 "skillspector JSON 'components' entries must be objects; security scan did not complete"
             )
             return False
+        normalized_components = components or []
+        for index, component in enumerate(normalized_components):
+            path = component.get("path")
+            if path is not None and not isinstance(path, str):
+                result.add_error(
+                    f"skillspector JSON field 'components[{index}].path' must be a string or null; "
+                    "security scan did not complete"
+                )
+                return False
+            executable = component.get("executable")
+            if executable is not None and not isinstance(executable, bool):
+                result.add_error(
+                    f"skillspector JSON field 'components[{index}].executable' must be a boolean or null; "
+                    "security scan did not complete"
+                )
+                return False
+        component_has_executable = any(component.get("executable") is True for component in normalized_components)
+        if component_has_executable and metadata.get("has_executable_scripts") is False:
+            result.add_error(
+                "skillspector JSON executable component contradicts metadata.has_executable_scripts; "
+                "security scan did not complete"
+            )
+            return False
+        minimum_score = SecurityValidator._minimum_skillspector_risk_score(
+            issues,
+            normalized_components,
+            use_executable_multiplier=(
+                component_has_executable or metadata.get("has_executable_scripts") is True
+            ),
+        )
+        if score < minimum_score:
+            result.add_error(
+                "skillspector JSON risk score understates the reported issues; security scan did not complete"
+            )
+            return False
         suppressed_count = data.get("suppressed_count")
         if suppressed_count is not None and (
             isinstance(suppressed_count, bool) or not isinstance(suppressed_count, int) or suppressed_count < 0
@@ -787,27 +815,38 @@ class SecurityValidator(ValidatorBase):
         return True
 
     @staticmethod
-    def _minimum_skillspector_risk_score(issues: list[dict]) -> int:
-        """Return the contract minimum before executable-file multipliers."""
+    def _minimum_skillspector_risk_score(
+        issues: list[dict],
+        components: list[dict],
+        *,
+        use_executable_multiplier: bool,
+    ) -> int:
+        """Return a lower bound after accounting for upstream deduplication."""
+        executable_paths = {
+            component.get("path")
+            for component in components
+            if component.get("executable") is True and isinstance(component.get("path"), str)
+        }
         by_rule: dict[str, list[dict]] = {}
         for issue in issues:
             by_rule.setdefault(issue["id"], []).append(issue)
 
         score = 0.0
         for rule_issues in by_rule.values():
-            ordered = sorted(
-                rule_issues,
-                key=lambda issue: _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]],
-                reverse=True,
-            )
-            for index, issue in enumerate(ordered[: len(_SKILLSPECTOR_DIMINISHING_WEIGHTS)]):
-                confidence = issue.get("confidence")
-                normalized_confidence = 1.0 if confidence is None else confidence
-                score += (
-                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
-                    * _SKILLSPECTOR_DIMINISHING_WEIGHTS[index]
-                    * normalized_confidence
+            highest_confidence = max(issue["confidence"] for issue in rule_issues)
+            candidates = [issue for issue in rule_issues if issue["confidence"] == highest_confidence]
+            contributions: list[float] = []
+            for issue in candidates:
+                location = issue.get("location") or {}
+                multiplier = (
+                    1.3
+                    if use_executable_multiplier and location.get("file") in executable_paths
+                    else 1.0
                 )
+                contributions.append(
+                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]] * highest_confidence * multiplier
+                )
+            score += min(contributions)
         return min(100, max(0, int(score)))
 
     @staticmethod
@@ -855,7 +894,7 @@ class SecurityValidator(ValidatorBase):
             return False
 
         confidence = issue.get("confidence")
-        if confidence is not None and (
+        if (
             isinstance(confidence, bool)
             or not isinstance(confidence, (int, float))
             or (isinstance(confidence, float) and not math.isfinite(confidence))
@@ -930,8 +969,14 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
 
         reported_score = data["risk_assessment"]["score"]
+        report_components = data.get("components") if isinstance(data.get("components"), list) else []
+        report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         effective_score = (
-            self._minimum_skillspector_risk_score(scanned_issues)
+            self._minimum_skillspector_risk_score(
+                scanned_issues,
+                report_components,
+                use_executable_multiplier=report_metadata.get("has_executable_scripts") is True,
+            )
             if skipped_generated or skipped_spdx_comments
             else reported_score
         )

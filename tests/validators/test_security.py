@@ -52,6 +52,7 @@ def _skillspector_json_report(
     llm_available: bool = False,
 ) -> dict:
     """Return the pinned SkillSpector JSON report shape used by contract tests."""
+    normalized_issues = [{"confidence": 1.0, **issue} for issue in (issues or [])]
     return {
         "skill": {
             "name": "test-skill",
@@ -64,7 +65,7 @@ def _skillspector_json_report(
             "recommendation": "SAFE" if not issues else "DO_NOT_INSTALL",
         },
         "components": [],
-        "issues": issues or [],
+        "issues": normalized_issues,
         "suppressed_count": 0,
         "suppressed": [],
         "metadata": {
@@ -874,6 +875,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                             "category": "Prompt Injection",
                             "pattern": "Instruction override",
                             "severity": "HIGH",
+                            "confidence": 1.0,
                             "finding": "Ignore prior instructions",
                             "location": {"file": "SKILL.md", "start_line": 8},
                         }
@@ -971,6 +973,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                         {
                             "id": "P1",
                             "severity": "HIGH",
+                            "confidence": 1.0,
                             "pattern": "Instruction override",
                             "location": {"file": ["SKILL.md"], "start_line": 1},
                         }
@@ -1223,6 +1226,69 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         assert not result.passed
         assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_risk_reconciliation_allows_upstream_deduplication(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        duplicate = {
+            "id": "TM1",
+            "severity": "MEDIUM",
+            "finding": "same advisory",
+            "confidence": 1.0,
+            "location": {"file": "SKILL.md", "start_line": 4},
+        }
+        payload = _skillspector_json_report([duplicate, duplicate.copy()])
+        payload["risk_assessment"] = {"score": 10, "severity": "LOW", "recommendation": "SAFE"}
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status != "incomplete"
+        assert result.passed
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_risk_reconciliation_applies_executable_multiplier(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{index}",
+                "severity": "MEDIUM",
+                "finding": "advisory",
+                "confidence": 1.0,
+                "location": {"file": f"scripts/check_{index}.py", "start_line": 1},
+            }
+            for index in range(5)
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {"score": 50, "severity": "MEDIUM", "recommendation": "CAUTION"}
+        payload["components"] = [
+            {"path": f"scripts/check_{index}.py", "executable": True} for index in range(5)
+        ]
+        payload["metadata"]["has_executable_scripts"] = True
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("understates the reported issues" in error for error in result.errors)
 
     def test_nvidia_api_key_uses_skillspector_openai_compatible_environment(
         self,

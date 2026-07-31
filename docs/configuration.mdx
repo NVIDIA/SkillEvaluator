@@ -1,6 +1,6 @@
 ---
 title: "Providers & Credentials"
-description: "Configure LLM providers, embeddings, agent credentials, and telemetry for Skill Evaluator — and see exactly which commands run with no key at all."
+description: "Configure LLM providers, embeddings, and agent credentials for SkillEvaluator — and see exactly which commands run with no key at all."
 ---
 
 This page gets Skill Evaluator's LLM-backed features working: choosing a provider, wiring embeddings for Tier 2, and separating evaluator credentials from agent credentials in Tier 3. Most of Tier 1 needs no credential at all — start with the map below to see whether you need a key in the first place.
@@ -215,22 +215,6 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded.
 
 Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name a supported public provider (`openai`, `anthropic`, or `bedrock` — or `nv_build` to force the Build mapping); anything else fails closed and the subprocess receives no credential.
-
-## Telemetry
-
-Telemetry is opt-in and off by default. To enable it, install `skillevaluator[telemetry]`, set `SKILLEVALUATOR_TELEMETRY_ENABLED=true`, and configure a standard `OTEL_EXPORTER_OTLP_ENDPOINT` — nothing is exported until both are in place. `SKILLEVALUATOR_TELEMETRY_DISABLED=true` force-disables export and always wins over the enable flag.
-
-Identity export is controlled by `SKILLEVALUATOR_TELEMETRY_IDENTITY_MODE`:
-
-| Mode | What is exported |
-| --- | --- |
-| `team_only` (default) | No user identity |
-| `hashed` | A salted SHA-256 hash of the login only (`SKILLEVALUATOR_TELEMETRY_HASH_SALT` sets the salt) |
-| any other value | The hash plus the raw login — leave the mode unset unless you need attribution |
-
-Privacy guarantees apply regardless of mode: attribute values pass through secret-pattern redaction (bearer tokens, `sk-`/`nvapi-` style keys, credential-looking assignments) and are capped in length, and live-evaluation subprocesses — Docker and the Harbor agent runtime — are launched with `OTEL_*` and telemetry variables stripped so child processes never export their own spans.
-
-The complete variable list, including OTLP protocol, timeout, and per-signal endpoint options, lives in [Environment Variables](environment-variables.mdx#telemetry).
 
 ## Troubleshooting
 

@@ -30,10 +30,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from skillevaluator.telemetry import child_process_env
 from skillevaluator.tier3.case_ids import safe_child, validate_case_ids
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.utils.process_environment import child_process_env
 
 logger = logging.getLogger(__name__)
 
@@ -1311,16 +1311,16 @@ def _write_agent_configs(env_dir: Path) -> list[str]:
     return []
 
 
-def _rebase_custom_dockerfile(
-    dockerfile_path: Path,
+def _rebase_custom_dockerfile_content(
+    content: str,
     base_image: str,
     *,
     agent_config_lines: list[str],
     include_input: bool,
     include_repo: bool = False,
     include_repo_linked_root: bool = False,
-) -> None:
-    """Rewrite a custom Dockerfile to layer on top of the eval base image.
+) -> tuple[str, str] | None:
+    """Return custom Dockerfile content layered on top of the eval base image.
 
     The base image already contains: python:3.12-slim, system packages
     (bash/curl/git/jq), verifier dependencies, and the
@@ -1329,8 +1329,9 @@ def _rebase_custom_dockerfile(
     The custom Dockerfile's FROM line is replaced so the skill author's
     additions (extra apt/pip packages, COPY, RUN) layer on top.  Multi-agent
     skill discovery paths are appended if not already present.
+    Returns the rebased content and original ``FROM`` instruction, or ``None``
+    when the content has no ``FROM`` instruction.
     """
-    content = dockerfile_path.read_text(encoding="utf-8")
     lines = content.splitlines(keepends=True)
     rebased: list[str] = []
     from_replaced = False
@@ -1345,18 +1346,19 @@ def _rebase_custom_dockerfile(
         else:
             rebased.append(line)
 
-    if from_replaced:
-        rebased_content = _append_missing_lines(
-            "".join(rebased),
-            _runtime_copy_lines(
-                agent_config_lines,
-                include_input,
-                include_repo=include_repo,
-                include_repo_linked_root=include_repo_linked_root,
-            ),
-        )
-        dockerfile_path.write_text(rebased_content, encoding="utf-8")
-        logger.warning("Rebased custom Dockerfile from '%s' onto '%s'", original_from, base_image)
+    if not from_replaced:
+        return None
+
+    rebased_content = _append_missing_lines(
+        "".join(rebased),
+        _runtime_copy_lines(
+            agent_config_lines,
+            include_input,
+            include_repo=include_repo,
+            include_repo_linked_root=include_repo_linked_root,
+        ),
+    )
+    return rebased_content, original_from
 
 
 def _ensure_verifier_deps(
@@ -1605,14 +1607,23 @@ def _write_dockerfile(
 
             if custom_dockerfile_accepted:
                 if base_image and custom_dockerfile_mode == "rebase":
-                    _rebase_custom_dockerfile(
-                        env_dir / "Dockerfile",
+                    dockerfile_path = env_dir / "Dockerfile"
+                    rebased = _rebase_custom_dockerfile_content(
+                        dockerfile_path.read_text(encoding="utf-8"),
                         base_image,
                         agent_config_lines=agent_config_lines,
                         include_input=include_input,
                         include_repo=include_repo,
                         include_repo_linked_root=include_repo_linked_root,
                     )
+                    if rebased is not None:
+                        rebased_content, original_from = rebased
+                        dockerfile_path.write_text(rebased_content, encoding="utf-8")
+                        logger.warning(
+                            "Rebased custom Dockerfile from '%s' onto '%s'",
+                            original_from,
+                            base_image,
+                        )
                 else:
                     _ensure_verifier_deps(
                         env_dir / "Dockerfile",
@@ -1880,14 +1891,22 @@ def _prepare_native_environment(
         if err:
             raise ValueError(f"{dockerfile_path}: {err}")
         if base_image and custom_dockerfile_mode == "rebase":
-            _rebase_custom_dockerfile(
-                dockerfile_path,
+            rebased = _rebase_custom_dockerfile_content(
+                dockerfile_path.read_text(encoding="utf-8"),
                 base_image,
                 agent_config_lines=agent_config_lines,
                 include_input=include_input,
                 include_repo=include_repo,
                 include_repo_linked_root=include_repo_linked_root,
             )
+            if rebased is not None:
+                rebased_content, original_from = rebased
+                dockerfile_path.write_text(rebased_content, encoding="utf-8")
+                logger.warning(
+                    "Rebased custom Dockerfile from '%s' onto '%s'",
+                    original_from,
+                    base_image,
+                )
         elif grading_mode == "custom_only":
             content = dockerfile_path.read_text(encoding="utf-8")
             updated = _append_missing_lines(

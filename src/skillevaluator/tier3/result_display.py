@@ -10,7 +10,7 @@ import logging
 import math
 import os
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from rich.box import SIMPLE
@@ -644,7 +644,19 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     artifact_rows: list[tuple[str, str]] = []
     report_path = result.get("report_path")
     if report_path:
-        artifact_rows.append(("📊 HTML report", safe(report_path)))
+        raw_report_path = str(report_path)
+        windows_path = PureWindowsPath(raw_report_path)
+        report_name = (
+            windows_path.name
+            if "\\" in raw_report_path or windows_path.drive or windows_path.root
+            else PurePosixPath(raw_report_path).name
+        )
+        safe_name = safe(report_name)
+        safe_path = safe(report_path)
+        normalized_relative = PurePosixPath(raw_report_path.replace("\\", "/"))
+        basename_only = not normalized_relative.is_absolute() and normalized_relative.parts == (report_name,)
+        report_display = safe_name if basename_only else f"{safe_name} · {safe_path}"
+        artifact_rows.append(("📊 HTML report", report_display))
     output_dir = result.get("run_dir") or result.get("output_dir")
     if output_dir:
         artifact_rows.append(("📁 Output", safe(output_dir)))

@@ -39,7 +39,7 @@ WASTE_INDICATORS = [
 #      -- a contiguous run of >=20 alphanumerics containing lower, upper AND a
 #      digit. This excludes dictionary words ("task-granularity"), lowercase
 #      hex IDs/hashes ("task-3f9a..."), and short tokens.
-# Mirrors src/skillevaluator.telemetry. Kept byte-for-byte in sync with the standalone
+# Mirrors skillevaluator.utils.redaction. Kept byte-for-byte in sync with the standalone
 # Harbor verifier (src/skillevaluator.tier3/harbor/templates/eval.py) -- see the drift guard
 # in tests/unit/skillevaluator.tier3/test_harbor_template_secret_patterns.py.
 # Mixed-case glued body for sk-/nvapi- keys (lower + upper + digit, >=20).

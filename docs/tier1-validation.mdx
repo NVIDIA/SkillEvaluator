@@ -269,11 +269,11 @@ The default set is `schema`, `security`, `pii`, `license`, `code-integrity`, `un
 
 ## Scanner setup
 
-Install `skillevaluator[security]` for the bundled Python scanners (Bandit, Semgrep, SkillSpector, pip-audit) and install Gitleaks separately — it is a Go binary, not a pip package (`brew install gitleaks` or a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases)). See [Installation](installation.mdx) for the extras table.
+Install `skillevaluator[security]` for the bundled Python scanners (Bandit and pip-audit). Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
 
 Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/external.yaml`.
 
-Bundled scanners resolve next to the Skill Evaluator interpreter before `PATH`. Intentional replacements require an auditable absolute executable path in `SKILLEVALUATOR_BANDIT_PATH`, `SKILLEVALUATOR_SEMGREP_PATH`, or `SKILLEVALUATOR_SKILLSPECTOR_PATH`.
+Bundled Python scanners resolve next to the SkillEvaluator interpreter before `PATH`; external Semgrep and SkillSpector installations resolve from `PATH`. Intentional replacements require an auditable absolute executable path in `SKILLEVALUATOR_BANDIT_PATH`, `SKILLEVALUATOR_SEMGREP_PATH`, or `SKILLEVALUATOR_SKILLSPECTOR_PATH`.
 
 <Warning>
   Scanner path overrides fail closed: a relative, missing, or non-executable override path fails the run rather than silently falling back. Required scanners that are missing or produce malformed output leave the run `INCOMPLETE` and non-green.
@@ -298,8 +298,8 @@ Tier 1 checks — and the Tier 2 dedup pass, when it runs — gate the exit code
   <Accordion title="Gitleaks is not installed">
     Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
   </Accordion>
-  <Accordion title="A Python scanner is missing">
-    Install the security extra with `skillevaluator[security]`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
+  <Accordion title="A scanner is missing">
+    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
   </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or omit `--llm`/`--llm-verify`. Use `--no-tier2` (or `--no-dedup`) to disable dedup when a fully key-free Tier 1 run is required.

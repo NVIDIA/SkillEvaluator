@@ -34,10 +34,10 @@ license-files = [
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
 ]
-# Base install is static-validation capable (Tier 1) and must NOT pull Harbor,
-# LLM, or OpenTelemetry. Those live behind the extras below.
+# Base install is static-validation capable (Tier 1) and must NOT pull Harbor
+# or LLM clients. Those live behind the extras below.
 dependencies = [
-    "click>=8.1.8,<8.2",
+    "click>=8.3.3,<9",
     "jinja2>=3.1",
     "pydantic>=2.11.0",
     "pyyaml>=6.0",
@@ -51,7 +51,6 @@ llm = [
     "boto3>=1.34.0",
     "litellm>=1.83.10,<1.89.0.dev0",
     "openai>=2.21.0",
-    "protobuf>=6.33.5",
 ]
 # Tier 2 intra-skill deduplication and local-catalog inter-skill similarity.
 tier2 = [
@@ -61,28 +60,19 @@ tier2 = [
 tier3 = [
     "skillevaluator[llm]",
     "harbor==0.13.2",
-]
-# OpenTelemetry export (optional; telemetry degrades gracefully when absent).
-telemetry = [
-    "opentelemetry-api>=1.37.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.37.0",
-    "opentelemetry-sdk>=1.37.0",
-    # CVE-2026-0994 / BDSA-2025-123809 fixed floor.
-    "protobuf>=6.33.5",
+    # CVE-2026-59950, CVE-2026-52870, and CVE-2026-52869 fixed floor.
+    "mcp>=1.28.1,<2",
+    # CVE-2026-48522 through CVE-2026-48526 fixed floor.
+    "pyjwt[crypto]>=2.13.0",
 ]
 # Static security scanners (floors raised to the established release baseline).
 security = [
     "bandit>=1.9.4",
-    # CVE-2026-45134 / BDSA-2026-10450 fixed floor.
-    "langchain-core>=1.4.9",
     "pip-audit>=2.10.0",
-    "protobuf>=6.33.5",
-    "semgrep>=1.162.0",
-    "skillspector @ git+https://github.com/NVIDIA/SkillSpector.git@ad55ceb60bcf38feb12227531c17b620c8b416af",
 ]
 # Full public install convenience bundle.
 all = [
-    "skillevaluator[tier2,tier3,telemetry,security]",
+    "skillevaluator[tier2,tier3,security]",
 ]
 dev = [
     # PyPA build backs the `make build` target.

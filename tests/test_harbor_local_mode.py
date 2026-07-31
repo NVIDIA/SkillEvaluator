@@ -13,6 +13,7 @@ import os
 import shlex
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -377,6 +378,46 @@ def test_local_nvidia_build_bridge_cleanup_preserves_cancellation(
     assert close_finished.is_set()
 
 
+def test_start_in_process_bridge_waits_for_readiness_worker_to_finish(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor import nvidia_build_bridge
+
+    release_started = threading.Event()
+    release_allowed = threading.Event()
+    release_lock = threading.Lock()
+    original_release_request = nvidia_build_bridge._BridgeHTTPServer.release_request
+    first_release = True
+
+    def delayed_first_release(server: object, request: object) -> None:
+        nonlocal first_release
+        with release_lock:
+            delay_release = first_release
+            first_release = False
+        if delay_release:
+            release_started.set()
+            release_timer = threading.Timer(1.0, release_allowed.set)
+            release_timer.daemon = True
+            release_timer.start()
+            assert release_allowed.wait(timeout=2)
+        original_release_request(server, request)
+
+    monkeypatch.setattr(nvidia_build_bridge._BridgeHTTPServer, "release_request", delayed_first_release)
+
+    running = nvidia_build_bridge.start_in_process_bridge(
+        api_key="test-readiness-worker-key",
+        build_base_url="http://127.0.0.1:8080/v1",
+        log_path=tmp_path / "nvidia-build-bridge.log",
+        request_transport=lambda _endpoint, _body: b"{}",
+    )
+    try:
+        assert release_started.wait(timeout=1)
+        assert running._server.active_workers == 0
+    finally:
+        release_allowed.set()
+        running.close()
+
+
 def test_local_nvidia_build_bridge_repeated_cancellation_releases_slow_header_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -681,13 +722,21 @@ def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentin
     agent._nvidia_build_bridge_started = False
     agent._nvidia_build_bridge_key_file = None
     commands: list[str] = []
-    uploads: list[tuple[str, str]] = []
+    uploads: list[tuple[str, str, str, int]] = []
     host_key_file = tmp_path / "nvidia-build-host-key"
     host_key_file.write_text("real-nvidia-secret", encoding="utf-8")
 
     class Environment:
         async def upload_file(self, source: object, destination: object) -> None:
-            uploads.append((str(destination), Path(source).read_text(encoding="utf-8")))
+            source_path = Path(source)
+            uploads.append(
+                (
+                    source_path.name,
+                    str(destination),
+                    source_path.read_text(encoding="utf-8"),
+                    stat.S_IMODE(source_path.stat().st_mode),
+                )
+            )
 
     async def root_exec(
         _self: Codex,
@@ -706,8 +755,14 @@ def test_nvidia_build_bridge_prefers_file_backed_host_key_over_subprocess_sentin
     asyncio.run(agent._start_bridge(Environment()))
     asyncio.run(agent._cleanup_bridge(Environment()))
 
-    key_upload = next(content for destination, content in uploads if destination.startswith("/tmp/"))
+    key_source_name, _, key_upload, key_mode = next(upload for upload in uploads if upload[1].endswith(".key"))
+    token_source_name, _, _, token_mode = next(upload for upload in uploads if upload[1].endswith(".token"))
     assert key_upload == "real-nvidia-secret"
+    assert key_source_name.startswith("nvidia-api-key-")
+    assert token_source_name.startswith("nvidia-client-token-")
+    if os.name != "nt":
+        assert key_mode == 0o600
+        assert token_mode == 0o600
     assert host_key_file.exists()
     assert all("real-nvidia-secret" not in command for command in commands)
     assert all("skillevaluator-file-backed-nvidia-key" not in command for command in commands)

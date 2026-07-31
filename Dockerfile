@@ -13,10 +13,7 @@ ENV PIP_NO_INPUT=1 \
 WORKDIR /app
 COPY . /app
 
-RUN apt-get update && \
-    apt-get install --yes --no-install-recommends git && \
-    rm -rf /var/lib/apt/lists/* && \
-    python -m pip install --no-cache-dir --upgrade pip && \
+RUN python -m pip install --no-cache-dir --upgrade pip && \
     python -m pip install --no-cache-dir ".[all]" && \
     skillevaluator --help >/dev/null
 

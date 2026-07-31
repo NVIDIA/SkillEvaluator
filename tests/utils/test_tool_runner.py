@@ -210,8 +210,8 @@ class TestResolveToolPath:
         """A tool missing from PATH is found next to the running interpreter.
 
         This is the ``uv tool install`` / ``pipx`` layout: console scripts of
-        bundled extras (semgrep, bandit, skillspector, ...) land in the tool
-        venv's bin directory, which is not on the user's PATH.
+        bundled extras such as Bandit land in the tool venv's bin directory,
+        which is not on the user's PATH.
         """
         script = tmp_path / "sk-test-scanner"
         script.write_text("#!/bin/sh\nexit 0\n")
@@ -354,6 +354,7 @@ class TestExternalTool:
             tool = ExternalTool("SkillSpector", "skillspector")
 
         assert tool.get_install_hint() == "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git"
+        assert "[security]" not in tool.get_install_hint()
 
     def test_bundled_scanner_hints_point_at_security_extra(self):
         """Scanners shipped via the security extra hint at reinstalling with extras.
@@ -363,9 +364,16 @@ class TestExternalTool:
         skillevaluator with the extras enabled.
         """
         with patch("shutil.which", return_value=None):
-            for command in ("bandit", "semgrep", "pip-audit"):
+            for command in ("bandit", "pip-audit"):
                 hint = ExternalTool(command, command).get_install_hint()
                 assert "[all]" in hint or "[security]" in hint, f"{command}: {hint}"
+
+    def test_semgrep_hint_uses_a_separate_tool_install(self):
+        with patch("shutil.which", return_value=None):
+            hint = ExternalTool("Semgrep", "semgrep").get_install_hint()
+
+        assert "uv tool install semgrep" in hint
+        assert "[security]" not in hint
 
     def test_optional_safety_hint_uses_a_separate_public_install(self):
         with patch("shutil.which", return_value=None):

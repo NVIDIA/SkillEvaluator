@@ -900,6 +900,15 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "reported success=false",
                 id="explicit-failure",
             ),
+            pytest.param(
+                {
+                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "issues": [],
+                    "suppressed_count": "unknown",
+                },
+                "suppressed_count",
+                id="invalid-suppressed-count",
+            ),
         ),
     )
     def test_skillspector_rejects_untrustworthy_json_reports(
@@ -2312,3 +2321,30 @@ class TestSpdxAndIpFalsePositiveHardening:
         result = SecurityValidator().validate_pii_only(skill_dir)
 
         assert any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    def test_later_zero_component_ip_is_not_hidden_by_version_context(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "mixed-version-and-network-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            'versions = ["4.4.0.1", "8.8.0.8"]\n',
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert any(
+            finding.check_name == "ip_addresses" and finding.metadata.get("matched_value") == "8.8.0.8"
+            for finding in result.findings
+        )
+
+    def test_separate_explicit_version_labels_stay_non_pii(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "multiple-release-version-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            'source_version = "4.4.0.1"; target_version = "5.5.0.2"\n',
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)

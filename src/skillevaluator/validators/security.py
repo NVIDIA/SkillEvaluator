@@ -609,6 +609,15 @@ class SecurityValidator(ValidatorBase):
         if components is not None and not isinstance(components, list):
             result.add_error("skillspector JSON field 'components' must be a list; security scan did not complete")
             return False
+        suppressed_count = data.get("suppressed_count")
+        if suppressed_count is not None and (
+            isinstance(suppressed_count, bool) or not isinstance(suppressed_count, int) or suppressed_count < 0
+        ):
+            result.add_error(
+                "skillspector JSON field 'suppressed_count' must be a non-negative integer; "
+                "security scan did not complete"
+            )
+            return False
 
         return True
 
@@ -684,7 +693,7 @@ class SecurityValidator(ValidatorBase):
         risk = data.get("risk_assessment") or {}
         score = risk.get("score", 0)
         severity = risk.get("severity", "UNKNOWN")
-        suppressed_count = int(data.get("suppressed_count") or 0)
+        suppressed_count = data.get("suppressed_count") or 0
 
         result.metadata.update(
             {
@@ -1002,6 +1011,7 @@ class SecurityValidator(ValidatorBase):
         r"(?i)(?:^|[^a-z0-9])(?:address|dns|host|hostname|ip|nameserver|resolver|server)(?=$|[^a-z0-9])"
     )
     _URL_AUTHORITY_PREFIX_PATTERN = re.compile(r"(?i)[a-z][a-z0-9+.-]*://[^/\s\"']*\Z")
+    _IPV4_LITERAL_PATTERN = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 
     @staticmethod
     def _is_near_zero_gps(line: str) -> bool:
@@ -1024,8 +1034,13 @@ class SecurityValidator(ValidatorBase):
         context = line[context_start:context_end]
         if cls._NETWORK_ADDRESS_PATTERN.search(context):
             return False
-        if cls._VERSION_LABEL_PATTERN.search(context):
-            return True
+        prefix_context = line[context_start : match.start()]
+        version_labels = list(cls._VERSION_LABEL_PATTERN.finditer(prefix_context))
+        if version_labels:
+            nearest_label = version_labels[-1]
+            between_label_and_value = prefix_context[nearest_label.end() :]
+            if not cls._IPV4_LITERAL_PATTERN.search(between_label_and_value):
+                return True
 
         quote_start = max(line.rfind('"', 0, match.start()), line.rfind("'", 0, match.start()))
         if quote_start >= 0:

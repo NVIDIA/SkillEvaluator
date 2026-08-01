@@ -2763,6 +2763,44 @@ class TestSpdxAndIpFalsePositiveHardening:
 
         assert any(finding.check_name == "ip_addresses" for finding in result.findings)
 
+    @pytest.mark.parametrize(
+        "field_name",
+        ["conversion", "diversion", "staging", "tagline"],
+    )
+    def test_identifier_substrings_are_not_version_labels(self, tmp_path: Path, field_name: str) -> None:
+        skill_dir = tmp_path / "version-substring-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(f'{field_name} = "8.8.0.8"\n', encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "version",
+            "versions",
+            "source_version",
+            "release_version_info",
+            "build-version",
+            "release-tag-id",
+            "sourceVersion",
+            "versionInfo",
+            "releaseTag",
+            "tagName",
+            "tags",
+        ],
+    )
+    def test_explicit_version_label_variants_stay_non_pii(self, tmp_path: Path, field_name: str) -> None:
+        skill_dir = tmp_path / "explicit-version-label-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(f'{field_name} = "4.4.0.1"\n', encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
     def test_later_zero_component_ip_is_not_hidden_by_version_context(self, tmp_path: Path) -> None:
         skill_dir = tmp_path / "mixed-version-and-network-skill"
         skill_dir.mkdir()

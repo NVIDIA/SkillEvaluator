@@ -1359,7 +1359,17 @@ class SecurityValidator(ValidatorBase):
         return root.lower() in protected_usernames
 
     _GPS_ZERO_PATTERN = re.compile(r"[-+]?0+\.0+[,\s]+[-+]?0+\.0+")
-    _VERSION_LABEL_PATTERN = re.compile(r"(?i)\b(?:[a-z_][\w-]*(?:version|tag)[\w-]*|(?:version|tag)[\w-]*)\b")
+    # Match version/tag as identifier tokens, including separator and camel-case styles.
+    # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
+    _VERSION_LABEL_PATTERN = re.compile(
+        r"(?:"
+        r"(?i:(?<![a-z0-9])(?:[a-z0-9]+[_-])*(?:versions?|tags?)(?:[_-][a-z0-9]+)*(?![a-z0-9]))"
+        r"|(?<![A-Za-z0-9])(?:[A-Za-z][a-z0-9]*)*(?:Version|Versions|Tag|Tags)"
+        r"(?:[A-Z][A-Za-z0-9]*)*(?![A-Za-z0-9])"
+        r"|(?<![A-Za-z0-9])(?:version|versions|tag|tags)"
+        r"(?:[A-Z][A-Za-z0-9]*)+(?![A-Za-z0-9])"
+        r")"
+    )
     _PACKAGE_VERSION_CALL_PATTERN = re.compile(
         r"(?i)\b[a-z_]\w*(?:wheel|archive|artifact|package|conda)[a-z_]*\([^)]*\Z"
     )

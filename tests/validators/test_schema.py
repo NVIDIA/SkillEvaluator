@@ -623,12 +623,11 @@ print("hello")
 
         assert result.passed, f"Skill with complete body should pass. Errors: {result.errors}"
 
-    def test_tools_and_config_dirs_accepted(self, tmp_path: Path):
-        """``tools/`` and ``config/`` skill-root dirs must not be flagged.
+    def test_canonical_support_dirs_accepted(self, tmp_path: Path):
+        """Canonical public skill support directories must not be flagged.
 
-        The skill_evaluator onboarding renames ``scripts/`` -> ``tools/`` (agentskills.io
-        convention) and skills may carry a ``config/`` dir for data-driven runtime
-        config. Neither should produce an ``unexpected_file`` finding.
+        Skills may carry agent metadata, local verification, executable helpers,
+        and runtime configuration without producing an ``unexpected_file`` finding.
         """
         skill_dir = tmp_path / "spec-layout-skill"
         skill_dir.mkdir()
@@ -636,6 +635,10 @@ print("hello")
         (skill_dir / "tools" / "run.py").write_text("print('hi')\n")
         (skill_dir / "config").mkdir()
         (skill_dir / "config" / "settings.json").write_text('{"k": "v"}\n')
+        (skill_dir / "agents").mkdir()
+        (skill_dir / "agents" / "openai.yaml").write_text("name: spec-layout-skill\n")
+        (skill_dir / "tests").mkdir()
+        (skill_dir / "tests" / "test_skill.py").write_text("def test_skill():\n    assert True\n")
 
         (skill_dir / "SKILL.md").write_text("""---
 name: spec-layout-skill
@@ -658,7 +661,7 @@ Example usage.
         result = SchemaValidator().validate(skill_dir)
 
         unexpected = [f.message for f in result.findings if f.check_name == "unexpected_file"]
-        assert not unexpected, f"tools/ and config/ should be allowed, got: {unexpected}"
+        assert not unexpected, f"Canonical support directories should be allowed, got: {unexpected}"
 
     def test_allowed_dirs_extended_via_env(self, tmp_path: Path, monkeypatch):
         """``SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS`` extends the allowed skill-root dirs.

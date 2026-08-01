@@ -7,6 +7,9 @@ All notable changes to Skill Evaluator are documented in this file.
 ### Added
 
 - Initial public release candidate.
+- Enabled optional semantic-version validation in the default Tier 1 pipeline,
+  including a public `--previous-version` monotonic-bump bound.
+
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.
@@ -58,6 +61,15 @@ All notable changes to Skill Evaluator are documented in this file.
 
 - Public benchmark cards now omit policy profiles, redact absolute host paths,
   and normalize imported internal or retired metadata before publication.
+- Previous-version validation now rejects catalog-wide scalar reuse and removal
+  of an already bounded `metadata.version` label.
+- Tier 1 and Tier 2 now ignore only the exact public SPDX metadata preamble,
+  distinguish package versions from network addresses, recognize canonical
+  `agents/` and `tests/` support directories, and keep Ruff on the validated
+  0.15 release line.
+- Accepted structurally complete SkillSpector finding reports on policy exit 1
+  and hardened validation of the external scanner's untrusted JSON contract;
+  SkillSpector remains separately installed and unpinned by this distribution.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
   Linux systems by selecting a compatible Semgrep and pip-audit pair, while
   macOS and Windows retain the newer scanner release lines.

@@ -132,6 +132,10 @@ them like any other generated project artifact.
 
 ## Intra-Skill Context Deduplication (`context-optimization-check`)
 
+The repository's exact SPDX-only HTML preamble is excluded from Markdown
+chunks, so required license metadata cannot create duplicate-content findings.
+Comments with any additional text or directive remain part of the comparison.
+
 As a skill grows, its directory can accumulate repeated content: copied sections
 between `SKILL.md` and reference documents, near-identical guidance under
 different headings, or script docstrings that restate the main instructions.

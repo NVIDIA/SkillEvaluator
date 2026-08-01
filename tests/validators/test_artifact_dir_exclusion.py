@@ -104,7 +104,18 @@ class TestIterScannableFilesPrunes:
 
 
 def _clean_spector_result():
-    return ToolResult(success=True, stdout=json.dumps({"issues": []}), stderr="", exit_code=0)
+    return ToolResult(
+        success=True,
+        stdout=json.dumps(
+            {
+                "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
+                "issues": [],
+                "metadata": {"llm_requested": False, "llm_available": False},
+            }
+        ),
+        stderr="",
+        exit_code=0,
+    )
 
 
 class TestSkillspectorFilteredCopy:
@@ -150,19 +161,20 @@ class TestSkillspectorFilteredCopy:
             scanned = args[args.index("scan") + 1]
             data = {
                 "skill": {"name": "my-skill", "source": scanned},
-                "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "Review"},
+                "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
                 "issues": [
                     {
                         "id": "SS001",
                         "category": "execution",
                         "pattern": "eval-usage",
                         "severity": "HIGH",
+                        "confidence": 1.0,
                         "location": {"file": f"{scanned}/payload.py", "start_line": 1},
                         "finding": "dangerous call",
                     }
                 ],
             }
-            return ToolResult(success=True, stdout=json.dumps(data), stderr="", exit_code=0)
+            return ToolResult(success=False, stdout=json.dumps(data), stderr="", exit_code=1)
 
         mock_run.side_effect = report_on_copy
         result = SecurityValidator()._run_skillspector(skill_with_artifacts)

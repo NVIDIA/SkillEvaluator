@@ -48,12 +48,22 @@ progress_console = Console(stderr=True)
 
 ValidatorRunner = Callable[[Path], ValidationResult]
 
-DEFAULT_CHECKS = ("schema", "security", "pii", "license", "code-integrity", "unicode", "quality", "lint")
+DEFAULT_CHECKS = (
+    "schema",
+    "version",
+    "security",
+    "pii",
+    "license",
+    "code-integrity",
+    "unicode",
+    "quality",
+    "lint",
+)
 # Opt-in checks: recognized by ``--checks`` but excluded from the default run.
 # Mirrors Skill Evaluator, where the semantic-version bump check and the pip-audit /
 # Safety dependency CVE audit (shipped as the standalone ``dependency-audit``
 # command) were opt-in rather than part of the default validate pipeline.
-OPTIONAL_CHECKS = ("version", "dependency")
+OPTIONAL_CHECKS = ("dependency",)
 # Every canonical check name ``run_validation`` understands after alias
 # resolution (the default run plus the opt-in checks).
 RECOGNIZED_CHECKS = frozenset(DEFAULT_CHECKS) | frozenset(OPTIONAL_CHECKS)
@@ -129,6 +139,7 @@ def run_validation(
     use_llm: bool = False,
     llm_verify: bool = False,
     min_score: int = 70,
+    previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
     fail_fast: bool = False,
@@ -188,7 +199,7 @@ def run_validation(
         return [_as_result(v.name, v.description, v.validate, target_path)]
 
     def _version_results() -> list[ValidationResult]:
-        v = VersionValidator()
+        v = VersionValidator(previous_version=previous_version)
         return [_as_result(v.name, v.description, v.validate, target_path)]
 
     def _license_results() -> list[ValidationResult]:
@@ -206,6 +217,7 @@ def run_validation(
     # selected validation profile.
     steps = (
         ("schema", _schema_results, True),
+        ("version", _version_results, skill_like),
         ("security", _security_results, True),
         ("pii", _pii_results, True),
         ("license", _license_results, True),
@@ -214,7 +226,6 @@ def run_validation(
         ("unicode", _unicode_results, True),
         ("quality", _quality_results, skill_like),
         ("lint", _lint_results, skill_like),
-        ("version", _version_results, True),
     )
     active = [
         (check_name, builder) for check_name, builder, applicable in steps if check_name in enabled and applicable

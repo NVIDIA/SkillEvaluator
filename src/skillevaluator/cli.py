@@ -146,7 +146,29 @@ Examples:
 """
 
 
-@click.group(cls=RichGroup, context_settings=CONTEXT_SETTINGS)
+_TOP_LEVEL_COMMAND_HELP_GROUPS = (
+    ("Core workflows", ("validate", "health-check", "doctor", "models")),
+    (
+        "Tier 1 · Static and security",
+        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
+    ),
+    (
+        "Tier 2 · Deduplication",
+        ("similarity-check", "context-optimization-check", "dedup-scan"),
+    ),
+    (
+        "Tier 3 · Live evaluation",
+        ("create-eval-dataset", "init-custom-grader", "init-harbor-task", "compare", "view", "harbor-view"),
+    ),
+    ("Expert aliases", ("tier1", "tier2", "tier3")),
+)
+
+
+@click.group(
+    cls=RichGroup,
+    context_settings=CONTEXT_SETTINGS,
+    help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
+)
 @click.version_option(version=__version__, prog_name="skillevaluator")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging.")
 def cli(verbose: bool) -> None:
@@ -664,6 +686,12 @@ def _validate_catalog(
     (under ``<output_dir>/<skill>/``), and verdict; the catalog exits nonzero
     when any skill failed.
     """
+    if ctx.params.get("previous_version"):
+        raise click.ClickException(
+            "--previous-version applies to one skill and cannot be reused for a catalog; "
+            "validate each skill separately with its own previous version"
+        )
+
     skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
     failures: list[tuple[str, str]] = []
     for index, skill_dir in enumerate(skill_dirs, start=1):
@@ -819,9 +847,18 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
-    "Choices: schema, security, pii, license, code-integrity, unicode, quality, lint; "
-    "opt-in (not run by default): version, dependency. "
+    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
+    "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--previous-version",
+    default=None,
+    metavar="VERSION",
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Previous released version for strictly increasing SemVer validation. "
+    "Can also be supplied via SKILLEVALUATOR_PREVIOUS_VERSION.",
 )
 @click.option(
     "--fail-fast",
@@ -1049,6 +1086,7 @@ def validate(
     full: bool,
     verbose: bool,
     checks: str | None,
+    previous_version: str | None,
     fail_fast: bool,
     continue_on_failure: bool,
     llm: bool,
@@ -1196,6 +1234,7 @@ def validate(
         use_llm=llm,
         llm_verify=llm_verify,
         min_score=min_score,
+        previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
         fail_fast=fail_fast,

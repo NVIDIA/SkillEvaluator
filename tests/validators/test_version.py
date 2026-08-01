@@ -46,7 +46,7 @@ def _finding_names(result) -> set[str]:
 def test_missing_version_is_valid_commit_hash_only_history(tmp_path: Path) -> None:
     skill_dir = _write_skill(tmp_path)
 
-    result = VersionValidator(previous_version="1.2.0").validate(skill_dir)
+    result = VersionValidator().validate(skill_dir)
 
     assert result.passed
     assert _finding_names(result) == set()
@@ -61,6 +61,44 @@ def test_malformed_version_is_rejected_when_present(
     skill_dir = _write_skill(tmp_path, version)
 
     result = VersionValidator().validate(skill_dir)
+
+    assert not result.passed
+    assert "version_semver" in _finding_names(result)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "01.2.3",
+        "1.02.3",
+        "1.2.03",
+        f"{chr(0xFF11)}.2.3",
+        f"{'9' * 5000}.2.3",
+    ],
+)
+def test_untrusted_or_unbounded_version_is_rejected_without_crashing(tmp_path: Path, version: str) -> None:
+    skill_dir = _write_skill(tmp_path, f'"{version}"')
+
+    result = VersionValidator(previous_version="1.2.0").validate(skill_dir)
+
+    assert not result.passed
+    assert "version_semver" in _finding_names(result)
+
+
+def test_unbounded_previous_version_is_rejected_without_crashing(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path, '"1.2.3"')
+
+    result = VersionValidator(previous_version=f"{'9' * 5000}.2.3").validate(skill_dir)
+
+    assert not result.passed
+    assert "previous_version_semver" in _finding_names(result)
+
+
+@pytest.mark.parametrize("version", ["0", "false", "[]", "{}"])
+def test_explicit_falsey_non_string_version_is_rejected(tmp_path: Path, version: str) -> None:
+    skill_dir = _write_skill(tmp_path, version)
+
+    result = VersionValidator(previous_version="1.2.0").validate(skill_dir)
 
     assert not result.passed
     assert "version_semver" in _finding_names(result)
@@ -111,7 +149,7 @@ def test_top_level_version_is_ignored_when_metadata_version_missing(tmp_path: Pa
     """
     skill_dir = _write_skill(tmp_path, top_level_version='"1.0"')
 
-    result = VersionValidator(previous_version="1.2.0").validate(skill_dir)
+    result = VersionValidator().validate(skill_dir)
 
     assert result.passed
     assert _finding_names(result) == set()
@@ -220,36 +258,20 @@ def test_previous_version_unset_skips_monotonic_check(
     assert "previous_version_semver" not in _finding_names(result)
 
 
-def test_removing_version_label_is_allowed_even_with_previous_version(tmp_path: Path) -> None:
-    """Opting back out of a semver label is intentional and must pass.
-
-    The proposal models ``metadata.version`` as an **opt-in re-tag** on
-    top of immutable commit-hash history. A skill that previously
-    published ``metadata.version: 1.2.0`` and now removes the label
-    entirely is therefore allowed, even when ``--previous-version`` is
-    supplied: the contributor is choosing to fall back to commit-hash
-    history rather than continue re-tagging. The validator must short-
-    circuit on the empty label and never evaluate the previous-version
-    bound.
-
-    Locks in the design decision documented on
-    :meth:`VersionValidator._validate_single_skill`. If we ever decide
-    that removing a published label should be a regression, this test
-    must change in lockstep with that policy shift so the behavior
-    change is explicit rather than incidental.
-    """
+def test_removing_version_label_is_rejected_with_previous_version(tmp_path: Path) -> None:
+    """A previous-version bound cannot be bypassed by removing the current label."""
     skill_dir = _write_skill(tmp_path)
 
     result = VersionValidator(previous_version="1.2.0").validate(skill_dir)
 
-    assert result.passed
-    assert _finding_names(result) == set(), (
-        f"removing metadata.version must not emit any finding; got {_finding_names(result)}"
-    )
-    optional_details = [d for d in result.success_details if d.check_name == "version_optional"]
-    assert optional_details, "expected a version_optional success detail"
-    assert "opting back out" in optional_details[0].message.lower()
-    assert optional_details[0].metadata.get("previous_version") == "1.2.0", (
-        "the previous_version bound should still be reflected on the success detail "
-        "for observability, even though it does not gate the result"
-    )
+    assert not result.passed
+    assert _finding_names(result) == {"version_missing"}
+
+
+def test_missing_version_reports_malformed_previous_bound(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path)
+
+    result = VersionValidator(previous_version="1.2").validate(skill_dir)
+
+    assert not result.passed
+    assert _finding_names(result) == {"previous_version_semver"}

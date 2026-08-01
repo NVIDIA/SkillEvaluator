@@ -82,7 +82,8 @@ dev = [
     "pytest-cov>=6.2.0",
     # pytest-xdist carried over for parallel test execution (-n auto).
     "pytest-xdist>=3.6.0",
-    "ruff>=0.15.4",
+    # Ruff 0.16 enables new rules that require a dedicated repository-wide cleanup.
+    "ruff>=0.15.4,<0.16",
 ]
 
 [project.urls]

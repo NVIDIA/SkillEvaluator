@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import math
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -44,6 +46,15 @@ logger = get_logger(__name__)
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
+_SKILLSPECTOR_RISK_BANDS = ((81, "CRITICAL"), (51, "HIGH"), (21, "MEDIUM"), (0, "LOW"))
+_SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY = {
+    "CRITICAL": "DO_NOT_INSTALL",
+    "HIGH": "DO_NOT_INSTALL",
+    "MEDIUM": "CAUTION",
+    "LOW": "SAFE",
+}
+_SKILLSPECTOR_SEVERITY_POINTS = {"CRITICAL": 50, "HIGH": 25, "MEDIUM": 10, "LOW": 5, "INFO": 5}
+_SKILLSPECTOR_DIMINISHING_WEIGHTS = (1.0, 0.5, 0.25)
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
@@ -498,16 +509,12 @@ class SecurityValidator(ValidatorBase):
         child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
         tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
 
-        if not tool_result.success or tool_result.error_message:
-            result.add_error(tool_result.error_message or f"{stage_name} failed to execute")
-            result.mark_scan_incomplete(stage_name)
-            return result
-
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
-            result.add_error(
+            detail = tool_result.error_message or (
                 f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
                 "scanner diagnostics were redacted"
             )
+            result.add_error(detail)
             result.mark_scan_incomplete(stage_name)
             return result
 
@@ -518,7 +525,10 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        data = parse_json_output(tool_result.stdout)
+        try:
+            data = parse_json_output(tool_result.stdout)
+        except (RecursionError, ValueError):
+            data = None
         if data is None:
             result.add_error(
                 f"{stage_name} did not return valid JSON (exit code {tool_result.exit_code}); "
@@ -532,9 +542,14 @@ class SecurityValidator(ValidatorBase):
             return result
 
         if original_root is not None:
-            data = _rewrite_path_prefix(data, str(scan_root), str(original_root))
+            try:
+                data = _rewrite_path_prefix(data, str(scan_root), str(original_root))
+            except RecursionError:
+                result.add_error(f"{stage_name} JSON output was nested too deeply; security scan did not complete")
+                result.mark_scan_incomplete(stage_name)
+                return result
 
-        if not self._validate_skillspector_report(data, result):
+        if not self._validate_skillspector_report(data, tool_result.exit_code, use_llm, result):
             result.mark_scan_incomplete(stage_name)
             return result
 
@@ -564,25 +579,59 @@ class SecurityValidator(ValidatorBase):
             result.recalculate_from_findings()
 
     @staticmethod
-    def _validate_skillspector_report(data: dict, result: ValidationResult) -> bool:
+    def _validate_skillspector_report(
+        data: dict,
+        process_exit_code: int,
+        use_llm: bool,
+        result: ValidationResult,
+    ) -> bool:
         """Return whether JSON is a trustworthy SkillSpector findings report."""
-        if data.get("error"):
+        if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
-        if data.get("errors"):
+        if "errors" in data and (not isinstance(data["errors"], list) or data["errors"]):
             result.add_error("skillspector reported errors; security scan did not complete")
             return False
-        if data.get("failure") or data.get("failed") is True:
-            result.add_error("skillspector reported a failure; security scan did not complete")
-            return False
+        for field in ("failure", "failed"):
+            marker = data.get(field)
+            if marker is not None and not isinstance(marker, bool):
+                result.add_error(
+                    f"skillspector JSON field '{field}' must be a boolean; security scan did not complete"
+                )
+                return False
+            if marker is True:
+                result.add_error("skillspector reported a failure; security scan did not complete")
+                return False
         if data.get("success") is False:
             result.add_error("skillspector reported success=false; security scan did not complete")
             return False
+        if data.get("success") is not None and not isinstance(data["success"], bool):
+            result.add_error("skillspector JSON field 'success' must be a boolean; security scan did not complete")
+            return False
 
         status = data.get("status")
-        if isinstance(status, str) and status.strip().lower() in {"error", "failed", "failure"}:
-            result.add_error(f"skillspector reported failure status '{status}'; security scan did not complete")
+        if status is not None and not isinstance(status, str):
+            result.add_error("skillspector JSON field 'status' must be a string; security scan did not complete")
             return False
+        if isinstance(status, str):
+            normalized_status = status.strip().lower()
+            if normalized_status in {
+                "cancelled",
+                "canceled",
+                "error",
+                "failed",
+                "failure",
+                "fatal",
+                "incomplete",
+                "partial",
+                "timed_out",
+                "timeout",
+            }:
+                result.add_error(f"skillspector reported failure status '{status}'; security scan did not complete")
+                return False
+            if normalized_status not in {"complete", "completed", "ok", "success", "successful"}:
+                result.add_error("skillspector JSON field 'status' is not recognized; security scan did not complete")
+                return False
 
         if "issues" not in data:
             result.add_error(
@@ -597,9 +646,53 @@ class SecurityValidator(ValidatorBase):
             result.add_error("skillspector JSON 'issues' entries must be objects; security scan did not complete")
             return False
 
-        if not isinstance(data.get("risk_assessment"), dict):
+        risk = data.get("risk_assessment")
+        if not isinstance(risk, dict):
             result.add_error(
                 "skillspector JSON report is missing required 'risk_assessment' object; security scan did not complete"
+            )
+            return False
+        score = risk.get("score")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or (isinstance(score, float) and not math.isfinite(score))
+            or not 0 <= score <= 100
+        ):
+            result.add_error(
+                "skillspector JSON field 'risk_assessment.score' must be a finite number from 0 to 100; "
+                "security scan did not complete"
+            )
+            return False
+        severity = risk.get("severity")
+        expected_severity = next(band for threshold, band in _SKILLSPECTOR_RISK_BANDS if score >= threshold)
+        if not isinstance(severity, str) or severity != expected_severity:
+            result.add_error(
+                "skillspector JSON field 'risk_assessment.severity' does not match the risk score; "
+                "security scan did not complete"
+            )
+            return False
+        recommendation = risk.get("recommendation")
+        if recommendation is not None and recommendation != _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY[severity]:
+            result.add_error(
+                "skillspector JSON field 'risk_assessment.recommendation' does not match the risk severity; "
+                "security scan did not complete"
+            )
+            return False
+
+        for index, issue in enumerate(issues):
+            if not SecurityValidator._validate_skillspector_issue(issue, index, result):
+                return False
+        if not issues and score != 0:
+            result.add_error(
+                "skillspector JSON reports a nonzero risk score without any issues; security scan did not complete"
+            )
+            return False
+
+        expected_exit_code = 1 if score > 50 else 0
+        if process_exit_code != expected_exit_code:
+            result.add_error(
+                "skillspector process exit code does not match the report risk score; security scan did not complete"
             )
             return False
 
@@ -608,11 +701,257 @@ class SecurityValidator(ValidatorBase):
             if value is not None and not isinstance(value, dict):
                 result.add_error(f"skillspector JSON field '{field}' must be an object; security scan did not complete")
                 return False
+        skill = data.get("skill") or {}
+        for field in ("name", "source", "scanned_at"):
+            value = skill.get(field)
+            if value is not None and not isinstance(value, str):
+                result.add_error(
+                    f"skillspector JSON field 'skill.{field}' must be a string or null; "
+                    "security scan did not complete"
+                )
+                return False
+        metadata = data.get("metadata") or {}
+        for field in ("skillspector_version", "filtering_mode"):
+            value = metadata.get(field)
+            if value is not None and not isinstance(value, str):
+                result.add_error(
+                    f"skillspector JSON field 'metadata.{field}' must be a string or null; "
+                    "security scan did not complete"
+                )
+                return False
+        for field in ("has_executable_scripts", "llm_requested", "llm_available", "meta_analysis_applied"):
+            value = metadata.get(field)
+            if value is not None and not isinstance(value, bool):
+                result.add_error(
+                    f"skillspector JSON field 'metadata.{field}' must be a boolean or null; "
+                    "security scan did not complete"
+                )
+                return False
+        if not use_llm and (
+            metadata.get("llm_requested") not in {None, False}
+            or metadata.get("llm_available") not in {None, False}
+            or metadata.get("meta_analysis_applied") not in {None, False}
+        ):
+            result.add_error(
+                "skillspector deterministic report contradicts the --no-llm stage; security scan did not complete"
+            )
+            return False
         components = data.get("components")
         if components is not None and not isinstance(components, list):
             result.add_error("skillspector JSON field 'components' must be a list; security scan did not complete")
             return False
+        if isinstance(components, list) and not all(isinstance(component, dict) for component in components):
+            result.add_error(
+                "skillspector JSON 'components' entries must be objects; security scan did not complete"
+            )
+            return False
+        normalized_components = components or []
+        for index, component in enumerate(normalized_components):
+            path = component.get("path")
+            if path is not None and not isinstance(path, str):
+                result.add_error(
+                    f"skillspector JSON field 'components[{index}].path' must be a string or null; "
+                    "security scan did not complete"
+                )
+                return False
+            executable = component.get("executable")
+            if executable is not None and not isinstance(executable, bool):
+                result.add_error(
+                    f"skillspector JSON field 'components[{index}].executable' must be a boolean or null; "
+                    "security scan did not complete"
+                )
+                return False
+        component_has_executable = any(component.get("executable") is True for component in normalized_components)
+        if component_has_executable and metadata.get("has_executable_scripts") is False:
+            result.add_error(
+                "skillspector JSON executable component contradicts metadata.has_executable_scripts; "
+                "security scan did not complete"
+            )
+            return False
+        minimum_score = SecurityValidator._minimum_skillspector_risk_score(
+            issues,
+            normalized_components,
+            use_executable_multiplier=(
+                component_has_executable or metadata.get("has_executable_scripts") is True
+            ),
+        )
+        if score < minimum_score:
+            result.add_error(
+                "skillspector JSON risk score understates the reported issues; security scan did not complete"
+            )
+            return False
+        suppressed_count = data.get("suppressed_count")
+        if suppressed_count is not None and (
+            isinstance(suppressed_count, bool) or not isinstance(suppressed_count, int) or suppressed_count < 0
+        ):
+            result.add_error(
+                "skillspector JSON field 'suppressed_count' must be a non-negative integer; "
+                "security scan did not complete"
+            )
+            return False
+        suppressed = data.get("suppressed")
+        if suppressed is not None and not isinstance(suppressed, list):
+            result.add_error("skillspector JSON field 'suppressed' must be a list; security scan did not complete")
+            return False
+        if isinstance(suppressed, list) and not all(isinstance(item, dict) for item in suppressed):
+            result.add_error(
+                "skillspector JSON 'suppressed' entries must be objects; security scan did not complete"
+            )
+            return False
+        normalized_suppressed_count = suppressed_count or 0
+        normalized_suppressed = suppressed or []
+        if normalized_suppressed_count != len(normalized_suppressed):
+            result.add_error(
+                "skillspector JSON suppressed_count does not match the suppressed findings list; "
+                "security scan did not complete"
+            )
+            return False
+        if normalized_suppressed_count:
+            result.add_error(
+                "skillspector reported unexpected suppressed findings without a requested baseline; "
+                "security scan did not complete"
+            )
+            return False
 
+        return True
+
+    @staticmethod
+    def _minimum_skillspector_risk_score(
+        issues: list[dict],
+        components: list[dict],
+        *,
+        use_executable_multiplier: bool,
+    ) -> int:
+        """Recompute the score from the public issue identity fields."""
+        executable_paths = {
+            component.get("path")
+            for component in components
+            if component.get("executable") is True and isinstance(component.get("path"), str)
+        }
+        deduplicated = SecurityValidator._deduplicate_skillspector_issues_for_scoring(issues)
+        by_rule: dict[str, list[dict]] = {}
+        for issue in deduplicated:
+            by_rule.setdefault(issue["id"], []).append(issue)
+
+        score = 0.0
+        for rule_issues in by_rule.values():
+            ordered = sorted(
+                (issue for issue in rule_issues if issue["confidence"] > 0),
+                key=lambda issue: _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]],
+                reverse=True,
+            )
+            for index, issue in enumerate(ordered[: len(_SKILLSPECTOR_DIMINISHING_WEIGHTS)]):
+                location = issue.get("location") or {}
+                multiplier = (
+                    1.3
+                    if use_executable_multiplier and location.get("file") in executable_paths
+                    else 1.0
+                )
+                score += (
+                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
+                    * _SKILLSPECTOR_DIMINISHING_WEIGHTS[index]
+                    * issue["confidence"]
+                    * multiplier
+                )
+        return min(100, max(0, int(score)))
+
+    @staticmethod
+    def _deduplicate_skillspector_issues_for_scoring(issues: list[dict]) -> list[dict]:
+        """Mirror scanner dedup using ``finding`` as its serialized match identity."""
+        same_file_best: dict[tuple[str, str, str], dict] = {}
+        for issue in issues:
+            location = issue.get("location") or {}
+            identity = str(issue.get("finding") or "").strip()[:100]
+            key = (issue["id"], str(location.get("file") or "SKILL.md"), identity)
+            existing = same_file_best.get(key)
+            if existing is None or issue["confidence"] > existing["confidence"]:
+                same_file_best[key] = issue
+
+        cross_file_best: dict[tuple[str, str], dict] = {}
+        for issue in same_file_best.values():
+            identity = str(issue.get("finding") or "").strip()[:100]
+            key = (issue["id"], identity)
+            existing = cross_file_best.get(key)
+            if existing is None or issue["confidence"] > existing["confidence"]:
+                cross_file_best[key] = issue
+        return list(cross_file_best.values())
+
+    @staticmethod
+    def _validate_skillspector_issue(issue: dict, index: int, result: ValidationResult) -> bool:
+        """Validate every nested issue field consumed by the report converter."""
+        prefix = f"skillspector JSON field 'issues[{index}]"
+        issue_id = issue.get("id")
+        if not isinstance(issue_id, str) or not issue_id.strip():
+            result.add_error(f"{prefix}.id' must be a non-empty string; security scan did not complete")
+            return False
+
+        severity = issue.get("severity")
+        if not isinstance(severity, str) or severity not in {
+            "CRITICAL",
+            "HIGH",
+            "MEDIUM",
+            "LOW",
+            "INFO",
+        }:
+            result.add_error(f"{prefix}.severity' must be a recognized severity; security scan did not complete")
+            return False
+
+        optional_strings = (
+            "category",
+            "pattern",
+            "finding",
+            "explanation",
+            "remediation",
+            "code_snippet",
+            "intent",
+        )
+        for field in optional_strings:
+            value = issue.get(field)
+            if value is not None and not isinstance(value, str):
+                result.add_error(f"{prefix}.{field}' must be a string or null; security scan did not complete")
+                return False
+        if not any(
+            isinstance(issue.get(field), str) and issue[field].strip()
+            for field in ("pattern", "finding", "explanation")
+        ):
+            result.add_error(
+                f"{prefix}' must include a non-empty pattern, finding, or explanation; "
+                "security scan did not complete"
+            )
+            return False
+
+        confidence = issue.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or (isinstance(confidence, float) and not math.isfinite(confidence))
+            or not 0 <= confidence <= 1
+        ):
+            result.add_error(
+                f"{prefix}.confidence' must be a finite number from 0 to 1; security scan did not complete"
+            )
+            return False
+
+        location = issue.get("location")
+        if location is None:
+            return True
+        if not isinstance(location, dict):
+            result.add_error(f"{prefix}.location' must be an object or null; security scan did not complete")
+            return False
+        file_path = location.get("file")
+        if file_path is not None and not isinstance(file_path, str):
+            result.add_error(f"{prefix}.location.file' must be a string or null; security scan did not complete")
+            return False
+        for field in ("start_line", "line", "end_line"):
+            line_number = location.get(field)
+            if line_number is not None and (
+                isinstance(line_number, bool) or not isinstance(line_number, int) or line_number < 1
+            ):
+                result.add_error(
+                    f"{prefix}.location.{field}' must be a positive integer or null; "
+                    "security scan did not complete"
+                )
+                return False
         return True
 
     def _process_skillspector_cli_result(self, data: dict, result: ValidationResult) -> None:
@@ -634,12 +973,16 @@ class SecurityValidator(ValidatorBase):
         issues = data.get("issues", [])
         scanned_issues = []
         skipped_generated = 0
+        skipped_spdx_comments = 0
         has_critical_or_high = False
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
             if self._is_generated_artifact_issue(issue):
                 skipped_generated += 1
+                continue
+            if self._is_spdx_only_hidden_instruction(issue):
+                skipped_spdx_comments += 1
                 continue
             scanned_issues.append(issue)
             finding, is_error = self._convert_skillspector_issue(issue)
@@ -649,6 +992,34 @@ class SecurityValidator(ValidatorBase):
 
         if skipped_generated:
             result.add_message(f"skillspector ignored {skipped_generated} generated artifact issue(s)")
+        if skipped_spdx_comments:
+            result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
+
+        reported_score = data["risk_assessment"]["score"]
+        report_components = data.get("components") if isinstance(data.get("components"), list) else []
+        report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        effective_score = (
+            self._minimum_skillspector_risk_score(
+                scanned_issues,
+                report_components,
+                use_executable_multiplier=report_metadata.get("has_executable_scripts") is True,
+            )
+            if skipped_generated or skipped_spdx_comments
+            else reported_score
+        )
+        if effective_score > 50 and not has_critical_or_high:
+            result.add_structured_finding(
+                Finding(
+                    category="SECURITY",
+                    severity=Severity.HIGH,
+                    check_name="skillspector_risk_score",
+                    message=f"SkillSpector aggregate risk score {effective_score}/100 exceeds the policy threshold",
+                    file_path=str((data.get("skill") or {}).get("source") or "SKILL.md"),
+                    suggestion="Review and resolve the contributing security findings",
+                ),
+                is_error=True,
+            )
+            has_critical_or_high = True
 
         self._summarize_skillspector_results(scanned_issues, has_critical_or_high, result)
 
@@ -662,6 +1033,16 @@ class SecurityValidator(ValidatorBase):
         return any(part in SCAN_EXCLUDED_DIRS for part in path.parts)
 
     @staticmethod
+    def _is_spdx_only_hidden_instruction(issue: dict) -> bool:
+        """Suppress only the exact public SPDX comment false positive."""
+        if issue.get("id") != "P2" or issue.get("pattern") != "Hidden Instructions":
+            return False
+        return is_spdx_only_html_comment(
+            str(issue.get("code_snippet") or ""),
+            allow_frontmatter_separator=True,
+        )
+
+    @staticmethod
     def _store_skillspector_metadata(data: dict, result: ValidationResult) -> None:
         """Extract and store top-level skillspector 1.0 metadata on the result."""
         skill_info = data.get("skill") or {}
@@ -671,6 +1052,7 @@ class SecurityValidator(ValidatorBase):
         risk = data.get("risk_assessment") or {}
         score = risk.get("score", 0)
         severity = risk.get("severity", "UNKNOWN")
+        suppressed_count = data.get("suppressed_count") or 0
 
         result.metadata.update(
             {
@@ -682,8 +1064,12 @@ class SecurityValidator(ValidatorBase):
                 "skillspector_scanned_at": skill_info.get("scanned_at"),
                 "skillspector_components_count": len(components),
                 "skillspector_has_executable_scripts": sp_metadata.get("has_executable_scripts", False),
+                "skillspector_suppressed_count": suppressed_count,
             }
         )
+
+        if suppressed_count:
+            result.add_message(f"skillspector suppressed {suppressed_count} audited finding(s)")
 
         if sp_metadata.get("llm_requested") and not sp_metadata.get("llm_available"):
             result.add_warning(
@@ -973,11 +1359,77 @@ class SecurityValidator(ValidatorBase):
         return root.lower() in protected_usernames
 
     _GPS_ZERO_PATTERN = re.compile(r"[-+]?0+\.0+[,\s]+[-+]?0+\.0+")
+    # Match version/tag as identifier tokens, including separator and camel-case styles.
+    # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
+    _VERSION_LABEL_PATTERN = re.compile(
+        r"(?:"
+        r"(?i:(?<![a-z0-9])(?:[a-z0-9]+[_-])*(?:versions?|tags?)(?:[_-][a-z0-9]+)*(?![a-z0-9]))"
+        r"|(?<![A-Za-z0-9])(?:[A-Za-z][a-z0-9]*)*(?:Version|Versions|Tag|Tags)"
+        r"(?:[A-Z][A-Za-z0-9]*)*(?![A-Za-z0-9])"
+        r"|(?<![A-Za-z0-9])(?:version|versions|tag|tags)"
+        r"(?:[A-Z][A-Za-z0-9]*)+(?![A-Za-z0-9])"
+        r")"
+    )
+    _PACKAGE_VERSION_CALL_PATTERN = re.compile(
+        r"(?i)\b[a-z_]\w*(?:wheel|archive|artifact|package|conda)[a-z_]*\([^)]*\Z"
+    )
+    _PACKAGE_ARTIFACT_SUFFIX_PATTERN = (
+        r"(?:7z|apk|conda|crate|deb|egg|gem|jar|nupkg|rpm|tgz|tbz2|txz|whl|zip|"
+        r"tar\.(?:bz2|gz|xz|zst))"
+    )
+    _NETWORK_ADDRESS_PATTERN = re.compile(
+        r"(?i)(?:^|[^a-z0-9])(?:address|dns|endpoint|gateway|host|hostname|ip|mirror|nameserver|proxy|"
+        r"registry|resolver|server|uri|url)(?=$|[^a-z0-9])"
+    )
+    _URL_AUTHORITY_PREFIX_PATTERN = re.compile(r"(?i)[a-z][a-z0-9+.-]*://[^/\s\"']*\Z")
+    _IPV4_LITERAL_PATTERN = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 
     @staticmethod
     def _is_near_zero_gps(line: str) -> bool:
         """Check if a GPS match contains only near-zero coordinates (Null Island)."""
         return bool(SecurityValidator._GPS_ZERO_PATTERN.search(line))
+
+    @classmethod
+    def _is_version_literal(cls, match: re.Match, line: str) -> bool:
+        """Return whether an IPv4-shaped match is clearly a release version."""
+        prefix = line[: match.start()]
+        if cls._URL_AUTHORITY_PREFIX_PATTERN.search(prefix):
+            return False
+
+        literal = re.escape(match.group())
+        artifact_pattern = re.compile(
+            rf"(?i)[a-z0-9_./+\\-]*{literal}[a-z0-9_.+\\-]*\."
+            rf"{cls._PACKAGE_ARTIFACT_SUFFIX_PATTERN}(?:[?#][^\s\"']*)?"
+        )
+        if any(
+            artifact.start() <= match.start() and artifact.end() >= match.end()
+            for artifact in artifact_pattern.finditer(line)
+        ):
+            return True
+
+        quoted_value: str | None = None
+        quote_start = max(line.rfind('"', 0, match.start()), line.rfind("'", 0, match.start()))
+        if quote_start >= 0:
+            quote = line[quote_start]
+            quote_end = line.find(quote, match.end())
+            if quote_end >= 0:
+                quoted_value = line[quote_start + 1 : quote_end]
+
+        context_start = max(0, match.start() - 80)
+        context_end = min(len(line), match.end() + 80)
+        context = line[context_start:context_end]
+        if cls._NETWORK_ADDRESS_PATTERN.search(context):
+            return False
+        prefix_context = line[context_start : match.start()]
+        version_labels = list(cls._VERSION_LABEL_PATTERN.finditer(prefix_context))
+        if version_labels:
+            nearest_label = version_labels[-1]
+            between_label_and_value = prefix_context[nearest_label.end() :]
+            assignment_prefix = re.fullmatch(r"\s*(?::|=)\s*[\[({'\"]*\s*", between_label_and_value)
+            if assignment_prefix and not cls._IPV4_LITERAL_PATTERN.search(between_label_and_value):
+                return True
+
+        return bool(quoted_value == match.group() and cls._PACKAGE_VERSION_CALL_PATTERN.search(prefix))
 
     @staticmethod
     def _passes_luhn(digits: str) -> bool:
@@ -1095,9 +1547,14 @@ class SecurityValidator(ValidatorBase):
             if category == "emails" and (author_email := author_emails.get(line_num)):
                 scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
 
-            match = regex.search(scan_line)
-            if not match or any(exc in line for exc in exceptions):
+            matches = list(regex.finditer(scan_line))
+            if not matches or any(exc in line for exc in exceptions):
                 continue
+            if category == "ip_addresses":
+                matches = [match for match in matches if not self._is_version_literal(match, line)]
+                if not matches:
+                    continue
+            match = matches[0]
 
             # /home/<root>/ is PII only when <root> is the author/submitter
             # username; unrelated roots are skipped.

@@ -136,7 +136,7 @@ class TestScanIncompleteMarking:
             success=True,
             stdout=json.dumps(
                 {
-                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "Proceed"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "issues": [],
                     "metadata": {},
                 }

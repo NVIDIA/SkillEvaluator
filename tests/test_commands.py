@@ -15,6 +15,44 @@ from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_age
 FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "simple"
 
 
+def test_version_check_is_in_the_default_tier1_lineup() -> None:
+    from skillevaluator.tier1.commands import DEFAULT_CHECKS, OPTIONAL_CHECKS, enabled_check_lineup
+
+    assert "version" in DEFAULT_CHECKS
+    assert "version" not in OPTIONAL_CHECKS
+    assert enabled_check_lineup(None) == list(DEFAULT_CHECKS)
+    assert enabled_check_lineup("security,version") == ["version", "security"]
+
+
+def test_validate_passes_explicit_previous_version(monkeypatch) -> None:
+    from skillevaluator import cli as cli_module
+
+    captured: list[str | None] = []
+
+    def _run_validation(_target: Path, **kwargs):
+        captured.append(kwargs["previous_version"])
+        return []
+
+    monkeypatch.setattr(cli_module, "run_validation", _run_validation)
+    monkeypatch.setattr(cli_module, "emit_reports", lambda *_args, **_kwargs: True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(FIXTURE),
+            "--no-dedup",
+            "--checks",
+            "version",
+            "--previous-version",
+            "1.2.0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == ["1.2.0"]
+
+
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
     assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
 
@@ -287,6 +325,34 @@ def test_validate_catalog_runs_each_skill_as_separate_job() -> None:
         assert result.exit_code == 0, result.output
         assert any(Path("out/simple").glob("*.html"))
         assert any(Path("out/simple2").glob("*.html"))
+
+
+def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        for name in ("simple", "simple2"):
+            shutil.copytree(FIXTURE, catalog / name)
+        second = catalog / "simple2" / "SKILL.md"
+        second.write_text(second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"), encoding="utf-8")
+
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "version",
+                "--previous-version",
+                "1.2.0",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "cannot be reused for a catalog" in result.output
+        assert not Path("skillevaluator-results").exists()
 
 
 def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatch) -> None:

@@ -115,7 +115,7 @@ skillevaluator rubric-eval ./my-skill           # LLM-as-judge scoring — the o
 | `unicode` | Invisible Unicode, bidirectional overrides, and ASCII smuggling |
 | `quality` | Deterministic quality scoring with a 0–100 score and A–F grade |
 | `lint` | Advisory script structure, nesting, constants, shebang, and input-validation checks |
-| `version` | Optional version metadata validation |
+| `version` | Default optional-version and monotonic SemVer validation |
 | `dependency` | Optional dependency vulnerability audit |
 
 `rubric-eval` adds an LLM-as-judge review across nine instruction-quality

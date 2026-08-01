@@ -27,7 +27,7 @@ configured provider (see [CONFIGURATION.md](configuration.mdx)).
   - [quality](#quality-scoring)
   - [Rubric evaluation](#rubric-evaluation-llm-as-judge)
   - [lint](#lint-script-linting-advisory)
-  - [version](#version-check-opt-in)
+  - [version](#version-check)
 - [LLM Verification](#llm-verification)
 - [Reports](#reports)
 - [Using validate in CI](#using-validate-in-ci)
@@ -131,6 +131,7 @@ reviewers can see which gate was applied.
 | Check | What it covers |
 | --- | --- |
 | `schema` | `SKILL.md` frontmatter, repository governance, and naming |
+| `version` | Optional three-part numeric version label and monotonic bump validation |
 | `security` | SkillSpector static scan; `--llm` adds analysis without replacing static findings |
 | `pii` | Personally identifiable information, credentials, and local identifiers |
 | `license` | License evidence and compliance |
@@ -138,12 +139,11 @@ reviewers can see which gate was applied.
 | `unicode` | Unicode smuggling and invisible-character detection |
 | `quality` | Four-category quality score; threshold via `--min-score` (default 70) |
 | `lint` | Advisory Python script linting |
-| `version` | Opt-in three-part numeric version check |
 | `dependency` | Opt-in dependency vulnerability audit |
 
-The default set is `schema`, `security`, `pii`, `license`, `code-integrity`,
-`unicode`, `quality`, and `lint`. `version` and `dependency` run only when
-selected explicitly.
+The default set is `schema`, `version`, `security`, `pii`, `license`,
+`code-integrity`, `unicode`, `quality`, and `lint`. Only `dependency` requires
+explicit selection.
 
 ```bash
 skillevaluator validate ./my-skill --checks schema,pii
@@ -188,6 +188,13 @@ Static scanning covers common patterns in four broad areas:
   system-configuration modification.
 - **Supply chain** — unpinned dependencies, external script fetching, and code
   obfuscation.
+
+The exact two-line SPDX HTML preamble used by this public repository is treated
+as license metadata rather than a hidden instruction. Any extra line,
+surrounding content, modified field, or embedded directive remains a security
+finding. PII scanning similarly distinguishes zero-bearing, explicitly
+versioned package artifacts from network addresses; URL, endpoint, host, server,
+and resolver contexts are never suppressed.
 
 ```bash
 skillevaluator security-scan ./my-skill
@@ -350,23 +357,30 @@ Tier 1 gate fail.
 | `missing_shebang` | LOW | No leading shebang (`#!`) |
 | `no_input_validation` | LOW | No `argparse`, `click`, `typer`, or explicit raise pattern |
 
-### version check (opt-in)
+### version check
 
-The opt-in `version` check validates `metadata.version` as a three-part numeric
-value in `major.minor.patch` form:
+The default `version` check validates an optional `metadata.version` as a
+three-part numeric value in `major.minor.patch` form. Components use ASCII
+digits, contain at most nine digits, and do not use leading zeroes unless the
+component is exactly `0`:
 
 ```yaml
 metadata:
   version: "1.2.3"
 ```
 
-When `SKILLEVALUATOR_PREVIOUS_VERSION` is set, the current version must be
-numerically greater than the previous value. A missing version remains valid;
-the skill then relies on commit history.
+When `--previous-version` or `SKILLEVALUATOR_PREVIOUS_VERSION` is set, the
+current version must be present and numerically greater than the previous
+value. Without a previous-version bound, the version remains optional and the
+skill can rely on commit history.
+
+`--previous-version` is valid only when checking one skill. Catalog validation
+must run each skill separately with its own previous version.
 
 ```bash
 SKILLEVALUATOR_PREVIOUS_VERSION=1.2.2 \
-  skillevaluator validate ./my-skill --checks schema,version
+  skillevaluator validate ./my-skill
+skillevaluator validate ./my-skill --previous-version 1.2.2
 ```
 
 ## LLM Verification
@@ -423,8 +437,8 @@ Markdown report can be posted directly as a PR comment:
 
 Run with `--no-llm --no-dedup` for a hermetic, key-free gate. For LLM-enriched
 default validation coverage, configure a provider, replace `--no-llm` with
-`--llm`, and remove `--no-dedup`. The opt-in `version` and `dependency` checks
-and standalone `rubric-eval` remain separate choices.
+`--llm`, and remove `--no-dedup`. The opt-in `dependency` check and standalone
+`rubric-eval` remain separate choices.
 
 ## Configuration
 
@@ -475,7 +489,7 @@ credential configuration is documented in [CONFIGURATION.md](configuration.mdx).
 | Forbidden frontmatter | `alwaysApply`, `globs` |
 | Naming | Kebab-case; directory name matches frontmatter `name` |
 | Recommended maximum | 500 lines in `SKILL.md` |
-| Default supporting directories | `references/`, `scripts/`, `assets/`, `evals/`, `tools/`, `config/` |
+| Default supporting directories | `agents/`, `references/`, `scripts/`, `assets/`, `evals/`, `tests/`, `tools/`, `config/` |
 
 ## See Also
 

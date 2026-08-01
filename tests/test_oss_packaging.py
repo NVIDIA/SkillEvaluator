@@ -234,6 +234,8 @@ def test_public_docs_declare_support_and_security_sections() -> None:
 
 def test_public_readme_is_a_concise_docs_landing_page() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    quickstart = readme.partition("\n## Quickstart\n")[2].partition("\n## LLM provider setup\n")[0]
+    deeper_evaluations = readme.partition("\n## Run deeper evaluations\n")[2].partition("\n## Documentation\n")[0]
     normalized = " ".join(readme.split())
 
     positioning = (
@@ -248,11 +250,23 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "\n## Three-tier overview\n" not in readme
     assert "\n## Quickstart\n" in readme
     assert "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git" in readme
-    assert "skillevaluator quality-check ./my-skill" in readme
+    assert (
+        "skillevaluator validate ./my-skill \\\n  --checks schema,pii,license,quality,unicode,lint \\\n  --no-dedup"
+    ) in quickstart
+    assert "skillevaluator quality-check ./my-skill" not in quickstart
     assert "SKILL_EVAL_LLM_PROVIDER=nv_build" in readme
     assert "NVIDIA_API_KEY='nvapi-...'" in readme
     assert "skillevaluator context-optimization-check ./my-skill" in readme
-    assert "skillevaluator tier3 evaluate ./my-skill" in readme
+    assert (
+        "skillevaluator validate ./my-skill \\\n  --full \\\n  --agents codex \\\n  --env-mode docker"
+    ) in deeper_evaluations
+    assert "Semgrep, SkillSpector, and Gitleaks" in deeper_evaluations
+    assert "enables autopilot" in deeper_evaluations
+    assert "evals/evals.json" in deeper_evaluations
+    assert "only for trusted skills and workspaces" in deeper_evaluations
+    assert "skillevaluator create-eval-dataset ./my-skill --full" in deeper_evaluations
+    assert "skillevaluator tier3 evaluate ./my-skill" not in deeper_evaluations
+    assert "--n-attempts 1" not in deeper_evaluations
     assert "tier3-live-evaluation#plan-for-cost" in readme
     assert "\n## Tier 1:" not in readme
     assert "Skill Evaluator" not in readme

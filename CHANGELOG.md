@@ -37,7 +37,8 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Changed
 
 - Simplified the repository README into a concise documentation landing page,
-  retained a compact install/quickstart and LLM-provider setup, broadened the
+  retained a compact keyless `validate` quickstart, LLM-provider setup, and a
+  one-command `validate --full` path through all three tiers, broadened the
   project description to agent artifacts starting with agent skills, and moved
   detailed guidance to `docs.nvidia.com/skills/skillevaluator`.
 - Added Tier 3 cost-planning guidance, including trial-volume multipliers,

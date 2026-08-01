@@ -21,18 +21,23 @@ agent evaluation.
 ## Quickstart
 
 Install all SkillEvaluator evaluation extras with
-[uv](https://docs.astral.sh/uv/), then run a deterministic quality check. This
-first result needs no API key, Docker daemon, or repository clone:
+[uv](https://docs.astral.sh/uv/), then run the built-in deterministic validation
+gates. This first result needs no API key, Docker daemon, or repository clone:
 
 ```bash
 uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-skillevaluator quality-check ./my-skill
+skillevaluator validate ./my-skill \
+  --checks schema,pii,license,quality,unicode,lint \
+  --no-dedup
 ```
 
-`./my-skill` is any directory containing a `SKILL.md`. The command returns a
-0–100 quality score and an A–F grade; the default passing score is 70. If your
-shell cannot find the command after installation, run `uv tool update-shell`
-and open a new terminal.
+`./my-skill` is any directory containing a `SKILL.md`. The command checks its
+schema, PII, license, quality, Unicode safety, and scripts. The scoped check
+list keeps this first run keyless; the complete Tier 1 security scan also uses
+external tools described in the
+[installation guide](https://docs.nvidia.com/skills/skillevaluator/installation).
+If your shell cannot find the command after installation, run
+`uv tool update-shell` and open a new terminal.
 
 ## LLM provider setup
 
@@ -66,30 +71,44 @@ for model defaults, endpoint overrides, and fully local setup.
 
 ## Run deeper evaluations
 
-With a chat and embeddings provider configured, check one skill for repeated
-guidance or compare a collection for semantic overlap:
+`similarity-check` needs an embeddings provider. `context-optimization-check`
+also needs a chat provider to check one skill for repeated guidance:
 
 ```bash
 skillevaluator context-optimization-check ./my-skill
 skillevaluator similarity-check ./skills
 ```
 
-For a live Tier 3 comparison, create or review an evaluation dataset, verify
-the selected agent runtime, and run the with-skill and without-skill arms:
+Install Semgrep, SkillSpector, and Gitleaks before a full run; missing Tier 1
+scanner evidence makes validation incomplete. Then verify the selected agent
+runtime and use `validate --full`:
+
+```bash
+skillevaluator doctor --agents codex --env-mode docker
+skillevaluator validate ./my-skill \
+  --full \
+  --agents codex \
+  --env-mode docker
+```
+
+`--full` runs Tiers 1, 2, and 3 and enables autopilot. If the skill has no
+accepted evaluation source, autopilot creates one initial case at
+`evals/evals.json`; if the file already exists, SkillEvaluator reuses it. For a
+broader four-bucket dataset, generate and review it first:
 
 ```bash
 skillevaluator create-eval-dataset ./my-skill --full
-skillevaluator doctor --agents codex --env-mode docker
-skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --n-attempts 1
 ```
 
-Tier 3 requires the evaluator provider, the selected agent's credential, and a
-Docker, local, or cloud sandbox. Live model calls and managed sandboxes can
-incur charges; local mode avoids managed sandbox charges but not necessarily
-hosted model charges. Start with one agent, a small dataset, and one attempt.
+Tier 2 needs chat and embedding providers. Tier 3 also needs the evaluator
+provider, the selected agent's credential, and a Docker, local, or cloud
+sandbox. Live model calls and managed sandboxes can incur charges; local mode
+avoids managed sandbox charges, not hosted model charges. It is experimental
+and only for trusted skills and workspaces; use Docker or cloud for untrusted
+code. Start with one agent and a small dataset.
 See the [Tier 3 guide](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation#plan-for-cost)
-before scaling a run.
+before scaling a run. Tier 3 results are advisory within `validate`; Tier 1 and
+Tier 2 determine its exit status.
 
 ## Documentation
 

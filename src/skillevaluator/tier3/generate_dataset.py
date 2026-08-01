@@ -44,11 +44,14 @@ import asyncio
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
+
+from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 
 _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
@@ -854,28 +857,30 @@ def _refine_from_trajectory_template(
     return refined
 
 
-@dataclass(frozen=True)
-class DatasetGenerationResult:
-    """Structured outcome shared by CLI and programmatic dataset generation."""
-
-    status: Literal["created", "preview", "unchanged"]
-    path: Path
-    dataset: dict[str, Any] | None = None
-    cases_count: int = 0
-
-
-class DatasetGenerationExit(SystemExit):
-    """CLI-compatible exit that preserves an actionable failure diagnostic."""
-
-    def __init__(self, diagnostic: str, code: int = 1) -> None:
-        super().__init__(code)
-        self.diagnostic = diagnostic
-
-
 def _abort(message: str) -> None:
-    """Print the established CLI error and retain it for in-process callers."""
-    print(f"Error: {message}")
-    raise DatasetGenerationExit(message)
+    """Raise an actionable error shared by CLI and in-process callers."""
+    raise DatasetGenerationError(message)
+
+
+def _write_dataset(output_path: Path, dataset: dict[str, Any]) -> None:
+    """Atomically replace a dataset without corrupting an existing file."""
+    temporary_path: Path | None = None
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_mode = stat.S_IMODE(output_path.stat().st_mode) if output_path.exists() else None
+        temporary_path = output_path.with_name(f".{output_path.name}.{secrets.token_hex(16)}.tmp")
+        with temporary_path.open("x", encoding="utf-8") as temporary:
+            json.dump(dataset, temporary, indent=2, ensure_ascii=False)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        if existing_mode is not None:
+            temporary_path.chmod(existing_mode)
+        temporary_path.replace(output_path)
+    except Exception as exc:
+        raise DatasetGenerationError(f"Could not write dataset {output_path}: {exc}") from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def main(argv: Sequence[str] | None = None) -> DatasetGenerationResult:
@@ -1024,9 +1029,7 @@ Agent-refined mode (--refine):
         )
 
     # Save
-    evals_dir.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as f:
-        json.dump(dataset, f, indent=2, ensure_ascii=False)
+    _write_dataset(output_path, dataset)
 
     print(f"\nSaved: {output_path}")
     print(f"  {len(cases)} test case(s)")
@@ -1044,4 +1047,8 @@ Agent-refined mode (--refine):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except DatasetGenerationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

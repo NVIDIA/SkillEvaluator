@@ -15,9 +15,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+# These lightweight imports intentionally remain available at runtime so API
+# frameworks and callers can resolve the public method annotations.
+from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions  # noqa: TC001
+from skillevaluator.evaluation.results import DatasetGenerationResult  # noqa: TC001
+
 if TYPE_CHECKING:
-    from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions
-    from skillevaluator.tier3.generate_dataset import DatasetGenerationResult
     from skillevaluator.tier3.harbor.progress import ProgressReporter
 
 

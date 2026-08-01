@@ -1822,21 +1822,24 @@ def create_dataset(
     results_dir: Path | None,
 ) -> None:
     """Create synthetic eval datasets for agent skill evaluation."""
-    from skillevaluator.evaluation import DatasetOptions, EvaluationService
+    from skillevaluator.evaluation import DatasetGenerationError, DatasetOptions, EvaluationService
 
-    EvaluationService().create_dataset(
-        DatasetOptions(
-            skill_path=skill_path,
-            full=full,
-            no_llm=no_llm,
-            dry_run=dry_run,
-            force=force,
-            prompt=prompt,
-            refine=refine,
-            from_results=from_results,
-            results_dir=results_dir,
+    try:
+        EvaluationService().create_dataset(
+            DatasetOptions(
+                skill_path=skill_path,
+                full=full,
+                no_llm=no_llm,
+                dry_run=dry_run,
+                force=force,
+                prompt=prompt,
+                refine=refine,
+                from_results=from_results,
+                results_dir=results_dir,
+            )
         )
-    )
+    except DatasetGenerationError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @cli.command("init-custom-grader")

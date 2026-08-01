@@ -16,9 +16,12 @@ from skillevaluator.evaluation.dimension_judge import (
 )
 from skillevaluator.evaluation.insights_judge import InsightsJudge, build_insights
 from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions
+from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.evaluation.service import EvaluationService
 
 __all__ = [
+    "DatasetGenerationError",
+    "DatasetGenerationResult",
     "DatasetOptions",
     "DimensionJudge",
     "EvaluationOptions",

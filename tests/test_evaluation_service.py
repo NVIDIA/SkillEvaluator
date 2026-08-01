@@ -11,6 +11,7 @@ import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 from click.testing import CliRunner
@@ -21,12 +22,64 @@ from skillevaluator.evaluation import DatasetOptions, EvaluationOptions, Evaluat
 FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "simple"
 
 
-def test_service_preserves_dataset_generation_failure_diagnostic(tmp_path: Path) -> None:
+def test_dataset_result_and_error_are_public_runtime_types() -> None:
+    from skillevaluator import evaluation
+
+    assert evaluation.DatasetGenerationResult.__module__ == "skillevaluator.evaluation.results"
+    assert evaluation.DatasetGenerationError.__module__ == "skillevaluator.evaluation.results"
+    assert get_type_hints(EvaluationService.create_dataset)["return"] is evaluation.DatasetGenerationResult
+
+
+def test_service_preserves_dataset_generation_failure_without_printing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from skillevaluator import evaluation
+
     invalid_skill = tmp_path / "not-a-skill"
     invalid_skill.mkdir()
 
-    with pytest.raises(ValueError, match=rf"{invalid_skill} does not contain a SKILL\.md"):
+    with pytest.raises(evaluation.DatasetGenerationError, match=rf"{invalid_skill} does not contain a SKILL\.md"):
         EvaluationService().create_dataset(DatasetOptions(skill_path=invalid_skill, no_llm=True))
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("command", [("create-eval-dataset",), ("tier3", "create-eval-dataset")])
+def test_cli_formats_dataset_generation_failure_without_raw_exception(
+    tmp_path: Path,
+    command: tuple[str, ...],
+) -> None:
+    invalid_skill = tmp_path / "not-a-skill"
+    invalid_skill.mkdir()
+
+    result = CliRunner().invoke(cli, [*command, str(invalid_skill), "--no-llm"])
+
+    assert result.exit_code == 1
+    assert not isinstance(result.exception, ValueError)
+    assert result.output == f"Error: {invalid_skill} does not contain a SKILL.md\n"
+
+
+@pytest.mark.parametrize("dependent_option", ["--from-results", "--results-dir"])
+def test_cli_formats_dataset_option_dependency_failure(
+    tmp_path: Path,
+    dependent_option: str,
+) -> None:
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+    results = tmp_path / "results"
+    results.mkdir()
+
+    result = CliRunner().invoke(
+        cli,
+        ["create-eval-dataset", str(skill), "--no-llm", dependent_option, str(results)],
+    )
+
+    assert result.exit_code == 1
+    assert result.output == f"Error: {dependent_option} requires --refine\n"
 
 
 def test_options_fields_match_engine_signature() -> None:
@@ -37,6 +90,14 @@ def test_options_fields_match_engine_signature() -> None:
 
     sig_params = set(inspect.signature(engine_evaluate).parameters) - {"skill_path", "progress_reporter"}
     option_fields = set(EvaluationOptions.__dataclass_fields__) - {"skill_path"}
+    assert option_fields == sig_params
+
+
+def test_dataset_options_fields_match_engine_signature() -> None:
+    from skillevaluator.tier3.commands import create_dataset as engine_create_dataset
+
+    sig_params = set(inspect.signature(engine_create_dataset).parameters) - {"skill_path"}
+    option_fields = set(DatasetOptions.__dataclass_fields__) - {"skill_path"}
     assert option_fields == sig_params
 
 

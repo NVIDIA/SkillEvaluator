@@ -13,7 +13,7 @@ import tempfile
 import tomllib
 import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import yaml
 from rich.box import SIMPLE
@@ -23,6 +23,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator import __version__
+from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate_case_ids
@@ -53,9 +54,6 @@ from skillevaluator.tier3.results_location import (
     resolve_results_root,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
-
-if TYPE_CHECKING:
-    from skillevaluator.tier3.generate_dataset import DatasetGenerationResult
 
 console = Console()
 
@@ -403,8 +401,8 @@ def create_dataset(
     except SystemExit as exc:
         diagnostic = getattr(exc, "diagnostic", None)
         if isinstance(diagnostic, str) and diagnostic.strip():
-            raise ValueError(diagnostic) from exc
-        raise ValueError(f"Dataset generation failed with exit code {exc.code}") from exc
+            raise DatasetGenerationError(diagnostic) from exc
+        raise DatasetGenerationError(f"Dataset generation failed with exit code {exc.code}") from exc
 
 
 def init_custom_grader(

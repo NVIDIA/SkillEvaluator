@@ -157,6 +157,7 @@ jobs:
           tests/validators/test_similarity.py
           tests/reporting
           tests/test_cli.py
+          tests/utils/test_secure_fs_platform.py
           tests/test_oss_packaging.py
 
   native-windows-local-mode:

@@ -819,6 +819,7 @@ class SecureRoot:
 
         directory_handles: list[int] = []
         parent_handle = self._windows_root_handles[-1]
+        declared_path = self.root / relative_path
         descriptor = -1
         native_file_handle = -1
         try:
@@ -840,6 +841,21 @@ class SecureRoot:
                 directory_handles.append(native_directory_handle)
                 parent_handle = native_directory_handle
 
+            # Python's Windows path stat and CRT descriptor stat do not expose
+            # a reliably comparable ``st_dev``/``st_ino`` pair. Revalidate the
+            # declared name with the same no-follow stat family used during
+            # discovery, then pin it with a native handle that denies delete
+            # sharing and require the declared name to remain unchanged.
+            try:
+                before_open = declared_path.lstat()
+            except OSError as exc:
+                raise SecurePathError(
+                    "unsafe_path",
+                    f"Cannot inspect selected Tier 2 file securely: {relative_path.as_posix()}: {exc}",
+                    relative_path=relative_path.as_posix(),
+                ) from exc
+            _validate_opened_file(before_open, relative_path, expected)
+
             native_file_handle = _windows_open_relative_handle(
                 parent_handle,
                 relative_path.name,
@@ -850,13 +866,22 @@ class SecureRoot:
                 create_options=_WINDOWS_FILE_OPEN_OPTIONS,
             )
             _validate_windows_read_file_handle(native_file_handle, relative_path)
+            try:
+                after_open = declared_path.lstat()
+            except OSError as exc:
+                raise SecurePathError(
+                    "unsafe_path",
+                    f"Cannot revalidate selected Tier 2 file securely: {relative_path.as_posix()}: {exc}",
+                    relative_path=relative_path.as_posix(),
+                ) from exc
+            _validate_opened_file(after_open, relative_path, before_open)
             descriptor = msvcrt.open_osfhandle(
                 native_file_handle,
                 os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
             )
             native_file_handle = -1  # ownership transferred to the CRT descriptor
             opened = os.fstat(descriptor)
-            _validate_opened_file(opened, relative_path, expected)
+            _validate_opened_file(opened, relative_path, None)
             return descriptor
         except OSError as exc:
             if descriptor >= 0:
@@ -1333,13 +1358,17 @@ def _validate_windows_entry_snapshot(
 ) -> None:
     handle_is_reparse = bool(handle_metadata.attributes & 0x400)
     handle_is_directory = bool(handle_metadata.attributes & 0x10)
-    changed = (
-        stat_is_link_or_reparse(metadata) != handle_is_reparse
-        or stat.S_ISDIR(metadata.st_mode) != handle_is_directory
-        or getattr(metadata, "st_nlink", 1) != handle_metadata.link_count
+    changed = stat_is_link_or_reparse(metadata) != handle_is_reparse or (
+        stat.S_ISDIR(metadata.st_mode) != handle_is_directory
     )
-    if not handle_is_reparse and not handle_is_directory and metadata.st_size != handle_metadata.size:
-        changed = True
+    # Windows reports reparse-point link counts inconsistently between path
+    # stat and native handle APIs. Type parity is sufficient here because the
+    # redirect is rejected (or exact-alias validated) immediately afterward.
+    if not handle_is_reparse:
+        if getattr(metadata, "st_nlink", 1) != handle_metadata.link_count:
+            changed = True
+        if not handle_is_directory and metadata.st_size != handle_metadata.size:
+            changed = True
     if changed:
         raise SecurePathError(
             "unsafe_path",

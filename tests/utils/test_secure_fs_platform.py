@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -174,6 +175,19 @@ def test_windows_discovery_reparse_fallback_opens_object_without_follow(monkeypa
     assert calls[1]["share"] & 0x4 == 0
     assert calls[1]["object_attributes_flags"] == secure_fs._WINDOWS_OBJ_CASE_INSENSITIVE
     assert calls[1]["create_options"] & secure_fs._WINDOWS_FILE_OPEN_REPARSE_POINT
+
+
+def test_windows_reparse_snapshot_ignores_cross_api_link_count_difference() -> None:
+    path_metadata = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, 0, 0, 9, 0, 0, 0))
+    handle_metadata = secure_fs._WindowsHandleMetadata(
+        attributes=0x400,
+        volume_serial=7,
+        file_id=11,
+        size=9,
+        link_count=0,
+    )
+
+    secure_fs._validate_windows_entry_snapshot(path_metadata, handle_metadata, Path("CLAUDE.md"))
 
 
 def test_windows_directory_name_enumeration_occurs_between_handle_snapshots(

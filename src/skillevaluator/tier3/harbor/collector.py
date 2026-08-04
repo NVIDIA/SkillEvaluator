@@ -425,8 +425,16 @@ def _can_preserve_partial_rewards(job_dir: Path, trial_failures: list[dict[str, 
     """Return whether every aggregate job error maps to a concrete failed trial."""
     result = _read_json(job_dir / "result.json")
     stats = result.get("stats") if isinstance(result, dict) else None
-    if not isinstance(stats, dict):
+    if not isinstance(result, dict) or not isinstance(stats, dict):
         return False
+
+    status = str(result.get("status") or "").strip().lower()
+    if status in {"failed", "error", "errored", "cancelled", "canceled"}:
+        return False
+    for key in ("exit_code", "returncode"):
+        value = result.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value != 0:
+            return False
 
     current_schema = "n_errored_trials" in stats
     errors = stats.get("n_errored_trials" if current_schema else "n_errors")
@@ -440,6 +448,7 @@ def _can_preserve_partial_rewards(job_dir: Path, trial_failures: list[dict[str, 
         or isinstance(completed, bool)
         or not isinstance(total, int)
         or isinstance(total, bool)
+        or total <= 0
         or completed != total
     ):
         return False

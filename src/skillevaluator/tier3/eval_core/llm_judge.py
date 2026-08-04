@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_JUDGE_MODEL = "gpt-5.4-mini"
+DEFAULT_JUDGE_MODEL = "gpt-5.6-sol"
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 # Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
@@ -158,8 +158,10 @@ def _should_try_fallback(error: str) -> bool:
 
 def _supports_custom_temperature(model: str) -> bool:
     """Return false for chat models that only accept their default temperature."""
-    lowered = str(model or "").lower()
-    return not lowered.startswith("openai/openai/gpt-5")
+    # Bare ``gpt-5*`` and provider-prefixed forms (``openai/gpt-5*``,
+    # ``openai/openai/gpt-5*``) reject custom temperature on the Chat Completions API.
+    leaf = str(model or "").lower().rsplit("/", 1)[-1]
+    return not leaf.startswith("gpt-5")
 
 
 def _chat_completion_payload(

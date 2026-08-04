@@ -4,6 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Updated public OpenAI / Anthropic / Bedrock chat defaults to pinned frontier
+  models (`gpt-5.6-sol`, `claude-sonnet-5`, `us.anthropic.claude-sonnet-5`).
+  Documented `gpt-5.4-mini` as the lower-cost OpenAI `SKILL_EVAL_LLM_MODEL`
+  alternative. Raised dimension/insights judge token budgets to 4096 and
+  widened the gpt-5\* temperature guard to bare model IDs.
+
 ### Added
 
 - Initial public release candidate.

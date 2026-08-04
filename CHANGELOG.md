@@ -21,7 +21,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Expanded the documentation site to fifteen pages — quickstart, eval
   datasets, agents and sandboxes, custom graders, reports, CI integration,
   CLI reference, and environment variables — under a task-oriented
-  navigation, with every command verified against the current CLI.
+  navigation, with every command verified against the current CLI. The public
+  guides now cover plugin evaluation flags, per-case input isolation, live
+  progress, partial-result safeguards, and context-aware quality scoring.
 
 ### Security
 

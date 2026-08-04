@@ -338,6 +338,21 @@ Local mode is experimental and provides weaker isolation than Docker or a
 managed sandbox. Use it only for trusted skills and workspaces; saving sandbox
 cost is not worth running untrusted code directly on the host.
 
+## Follow progress
+
+The default `--progress auto` uses a fixed-height Rich view on an interactive
+terminal and durable line-oriented output in redirected or CI logs. The run
+reports configuration, model resolution, environment and credential preflight,
+input staging, image preparation, agent execution, result collection, and
+report writing. Plain mode also emits heartbeats while a stage is still active;
+use `--progress rich`, `plain`, or `off` to choose explicitly.
+
+Progress details remove terminal control sequences and redact known credentials
+and key-like assignments. The Rich view keeps a bounded recent-stage history so
+the frame does not grow as agents complete. Progress rendering is best effort:
+if its initialization, refresh thread, or terminal redraw fails, the reporter
+disables itself without aborting the evaluation.
+
 ## Tune the run
 
 The high-signal flags, with defaults:
@@ -392,6 +407,15 @@ Missing metrics are never coerced to `0.0`: an unscored run reports an
 `overall_score` of `None`, averages omit unscored metrics, and the affected
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
 `execution_status` is not `succeeded`.
+
+A partially errored Harbor job remains an execution failure, but rewards from
+its completed trials are preserved when every aggregate error maps to a
+concrete failed trial and Harbor reports no failed status or non-zero aggregate
+exit code. Inspect `expected_attempts`, `scored_attempts`, `trial_failures`, and
+`execution_errors` before using those partial scores. When the error count is
+ambiguous, trials are still pending or cancelled, or the aggregate job itself
+failed, all rewards for that job are suppressed instead of presenting an
+uncertain score.
 
 [Reports & Results](reports.mdx) covers the full on-disk layout, the
 machine-readable JSON contract, and how to judge whether a given lift is good.

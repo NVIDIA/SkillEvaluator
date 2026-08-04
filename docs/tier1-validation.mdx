@@ -207,6 +207,15 @@ The default set is `schema`, `version`, `security`, `pii`, `license`, `code-inte
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70.
 
     The checker detects five skill shapes and applies relevant checks: **script-based** (Python or shell files under `scripts/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
+
+    Quality heuristics match complete terms and their Markdown context rather
+    than raw substrings. Reserved-name, XML-tag, trigger-word, API, error,
+    MCP-guidance, README, time-reference, exclusivity, instruction-action, and
+    nested-reference checks therefore ignore incidental text. The README and
+    MCP-context checks disregard fenced examples and HTML comments, distinguish
+    negated guidance such as "do not load README.md" or "MCP is disabled," and
+    do not attribute another tool's behavior to the current skill. Markdown
+    link targets with balanced parentheses are handled as complete paths.
   </Accordion>
 
   <Accordion title="rubric-eval — LLM-as-judge (requires a provider)">

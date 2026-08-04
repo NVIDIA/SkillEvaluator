@@ -49,12 +49,20 @@ _ERROR_HANDLING_RE = re.compile(
 )
 _MCP_RE = re.compile(r"\bmcp\b", re.IGNORECASE)
 _NEGATED_MCP_RES = (
-    re.compile(r"\b(?:does|do|did)\s+not\s+(?:\w+\s+){0,3}mcp\b", re.IGNORECASE),
-    re.compile(r"\b(?:doesn't|don't|didn't|never)\s+(?:\w+\s+){0,3}mcp\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:(?:does|do|did|should|must|shall|can|could|would)\s+not|"
+        r"(?:doesn't|don't|didn't|shouldn't|mustn't|shan't|can't|couldn't|wouldn't)|never)\s+"
+        r"(?:\w+\s+){0,3}mcp\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bwithout\s+(?:an?\s+)?mcp\b", re.IGNORECASE),
     re.compile(r"\b(?:no|not\s+(?:an?\s+)?)mcp\b", re.IGNORECASE),
     re.compile(
-        r"\bmcp\b\s+(?:(?:is|are|was|were)\s+not|(?:isn't|aren't|wasn't|weren't))\s+"
+        r"\bmcp\b\s+(?:"
+        r"(?:(?:is|are|was|were)\s+not|(?:isn't|aren't|wasn't|weren't))|"
+        r"(?:(?:should|must|shall|can|could|would)\s+not|"
+        r"(?:shouldn't|mustn't|shan't|can't|couldn't|wouldn't))\s+be"
+        r")\s+"
         r"(?:used|required|needed|enabled|supported|involved)\b",
         re.IGNORECASE,
     ),
@@ -67,14 +75,9 @@ _MCP_GUIDANCE_RES = (
     re.compile(r"\bserver\b[^\n.!?]{0,80}\brunning\b", re.IGNORECASE),
     re.compile(r"\bapi\b[^\n.!?]{0,40}\bkeys?\b", re.IGNORECASE),
 )
-_MCP_SUPPORT_SECTION_RE = re.compile(
-    r"^##\s+(?:Troubleshooting|Common Issues|FAQ)\s*$\n?(.*?)(?=^##\s+|\Z)",
-    re.IGNORECASE | re.MULTILINE | re.DOTALL,
-)
-_MCP_SUPPORT_SUBJECT_RE = re.compile(
-    r"\b(?:mcp|connections?|servers?|sessions?|api\s+keys?)\b",
-    re.IGNORECASE,
-)
+_MARKDOWN_H2_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*\r?$", re.MULTILINE)
+_MCP_SUPPORT_HEADINGS = frozenset({"troubleshooting", "common issues", "faq"})
+_MCP_SUPPORT_SUBJECT_RE = re.compile(r"\b(?:connections?|sessions?|api\s+keys?)\b", re.IGNORECASE)
 _TIME_REFERENCE_RE = re.compile(
     r"\b(?:before|after|as of|until)\s+(?:the\s+year\s+)?(?:19\d{2}|2\d{3})\b",
     re.IGNORECASE,
@@ -85,8 +88,13 @@ _NON_TEMPORAL_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _EXCLUSIVITY_RE = re.compile(
-    r"\breplaces\s+all(?:\s+\w+){0,3}\s+(?:tools?|skills?|alternatives?|solutions?|approaches?)\b",
+    r"\breplaces\s+all\s+"
+    r"(?P<modifiers>(?:(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\s+){0,6})"
+    r"(?:tools|skills|alternatives|solutions|approaches)\b",
     re.IGNORECASE,
+)
+_NON_EXCLUSIVE_REPLACEMENT_MODIFIERS = frozenset(
+    {"deprecated", "legacy", "obsolete", "old", "removed", "retired", "superseded"}
 )
 
 
@@ -120,10 +128,50 @@ def _has_api_documentation(content: str) -> bool:
     return any(re.search(pattern, content, re.IGNORECASE) for pattern in api_patterns)
 
 
+def _without_fenced_code(content: str) -> str:
+    """Mask fenced Markdown code while preserving line boundaries."""
+    if "```" not in content and "~~~" not in content:
+        return content
+
+    visible = []
+    fence_char = ""
+    fence_length = 0
+    for line in content.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        line_ending = line[len(body) :]
+        leading_spaces = len(body) - len(body.lstrip(" "))
+        marker = None
+        if leading_spaces <= 3:
+            stripped = body[leading_spaces:]
+            if stripped.startswith(("`", "~")):
+                char = stripped[0]
+                run_length = len(stripped) - len(stripped.lstrip(char))
+                remainder = stripped[run_length:]
+                if run_length >= 3 and (char != "`" or "`" not in remainder):
+                    marker = (char, run_length, remainder)
+
+        if not fence_char:
+            if marker is None:
+                visible.append(line)
+                continue
+            fence_char, fence_length, _ = marker
+        elif marker is not None:
+            char, run_length, remainder = marker
+            if char == fence_char and run_length >= fence_length and not remainder.strip():
+                fence_char = ""
+                fence_length = 0
+        visible.append(line_ending)
+    return "".join(visible)
+
+
 def _markdown_link_targets(content: str) -> list[str]:
     """Extract inline Markdown link targets, including balanced parentheses."""
+    content = _without_fenced_code(content)
     targets = []
+    skip_until = 0
     for match in _MARKDOWN_LINK_START_RE.finditer(content):
+        if match.start() < skip_until:
+            continue
         cursor = match.end()
         if cursor >= len(content):
             continue
@@ -131,6 +179,10 @@ def _markdown_link_targets(content: str) -> list[str]:
             end = content.find(">", cursor + 1)
             if end != -1 and _MARKDOWN_LINK_CLOSER_RE.match(content[end + 1 :]):
                 targets.append(content[cursor + 1 : end])
+            elif end == -1:
+                skip_until = len(content)
+            else:
+                skip_until = end + 1
             continue
 
         chars = []
@@ -157,11 +209,14 @@ def _markdown_link_targets(content: str) -> list[str]:
             cursor += 1
         if chars and depth == 0 and closed:
             targets.append("".join(chars))
+        elif not closed:
+            skip_until = max(skip_until, cursor)
     return targets
 
 
 def _mcp_usage_contexts(content: str) -> list[str]:
     """Return paragraphs where MCP is used as a capability rather than negated."""
+    content = _without_fenced_code(content)
     contexts = []
     for paragraph in re.split(r"\n\s*\n", content):
         for match in _MCP_RE.finditer(paragraph):
@@ -181,13 +236,49 @@ def _mcp_usage_contexts(content: str) -> list[str]:
     return contexts
 
 
+def _markdown_h2_sections(content: str) -> Iterable[tuple[str, str]]:
+    """Yield H2 headings and bodies without a backtracking multi-line pattern."""
+    content = _without_fenced_code(content)
+    matches = list(_MARKDOWN_H2_RE.finditer(content))
+    for index, match in enumerate(matches):
+        body_start = match.end()
+        if body_start < len(content) and content[body_start] == "\n":
+            body_start += 1
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        yield match.group(1).strip(), content[body_start:body_end]
+
+
 def _has_mcp_guidance(content: str, usage_contexts: list[str]) -> bool:
     """Return whether usage or a clearly MCP-related support section has guidance."""
     if any(pattern.search(context) for context in usage_contexts for pattern in _MCP_GUIDANCE_RES):
         return True
-    for match in _MCP_SUPPORT_SECTION_RE.finditer(content):
-        section = match.group(1)
-        if _MCP_SUPPORT_SUBJECT_RE.search(section) and any(pattern.search(section) for pattern in _MCP_GUIDANCE_RES):
+    previous_heading = ""
+    previous_section = ""
+    for heading, section in _markdown_h2_sections(content):
+        normalized_heading = heading.casefold()
+        heading_mentions_mcp = bool(_MCP_RE.search(heading))
+        is_support_section = normalized_heading in _MCP_SUPPORT_HEADINGS or (
+            heading_mentions_mcp and any(label in normalized_heading for label in _MCP_SUPPORT_HEADINGS)
+        )
+        has_guidance = any(pattern.search(section) for pattern in _MCP_GUIDANCE_RES)
+        explicitly_mcp_related = heading_mentions_mcp or bool(_MCP_RE.search(section))
+        follows_mcp_section = bool(
+            _MCP_RE.search(previous_heading)
+            and _mcp_usage_contexts(previous_section)
+            and _MCP_SUPPORT_SUBJECT_RE.search(section)
+        )
+        if is_support_section and has_guidance and (explicitly_mcp_related or follows_mcp_section):
+            return True
+        previous_heading = heading
+        previous_section = section
+    return False
+
+
+def _has_exclusive_replacement(content: str) -> bool:
+    """Return whether content claims to replace a category of composable tooling."""
+    for match in _EXCLUSIVITY_RE.finditer(content):
+        modifiers = set(re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", match.group("modifiers").lower()))
+        if not modifiers.intersection(_NON_EXCLUSIVE_REPLACEMENT_MODIFIERS):
             return True
     return False
 
@@ -487,9 +578,10 @@ class QualityScoreValidator(ValidatorBase):
         Merely naming README.md, including negative guidance not to load it, does
         not pull the file into agent context.
         """
+        content = _without_fenced_code(content)
         for link_target in _markdown_link_targets(content):
             target = re.split(r"[?#]", link_target, maxsplit=1)[0].replace("\\", "/")
-            if target.lower().endswith("readme.md"):
+            if posixpath.basename(posixpath.normpath(target)).lower() == "readme.md":
                 return True
 
         action_re = re.compile(
@@ -498,9 +590,14 @@ class QualityScoreValidator(ValidatorBase):
             re.IGNORECASE,
         )
         negated_action_re = re.compile(
-            r"\b(?:do\s+not|don't|never|not\s+to)\s+"
-            r"(?:read|open|load|consult|review|see|use|follow)\b"
-            r"[^\n.!?]{0,40}\breadme\.md\b",
+            r"\b(?:(?:(?:do|does|did|should|must|shall|can|could|would)\s+not|"
+            r"(?:don't|doesn't|didn't|shouldn't|mustn't|shan't|can't|couldn't|wouldn't))"
+            r"(?:\s+need\s+to)?|"
+            r"(?:is|are|was|were)\s+not\s+(?:allowed|permitted|required|expected)\s+to|"
+            r"cannot|never|not\s+to|need\s+not|no\s+need\s+to)\s+"
+            r"(?:(?:ever|directly|automatically|accidentally|normally)\s+){0,2}"
+            r"(?:read|open|load|consult|review|see|use|follow|refer\s+to)\b"
+            r"[^\n.!?]{0,40}?\breadme\.md\b",
             re.IGNORECASE,
         )
         passive_action_re = re.compile(
@@ -511,9 +608,8 @@ class QualityScoreValidator(ValidatorBase):
         )
         normalized_content = re.sub(r"\s+", " ", content)
         for sentence in re.split(r"(?<=[.!?])\s+", normalized_content):
-            if negated_action_re.search(sentence):
-                continue
-            if action_re.search(sentence) or passive_action_re.search(sentence):
+            affirmative_content = negated_action_re.sub(" ", sentence)
+            if action_re.search(affirmative_content) or passive_action_re.search(affirmative_content):
                 return True
         return False
 
@@ -735,9 +831,8 @@ class QualityScoreValidator(ValidatorBase):
             "the only way to",
             "do not use any other",
             "this skill handles everything",
-            "replaces all other",
         ]
-        if _contains_any_term(content, exclusivity) or _EXCLUSIVITY_RE.search(content):
+        if _contains_any_term(content, exclusivity) or _has_exclusive_replacement(content):
             dim.deduct(
                 5,
                 "info",

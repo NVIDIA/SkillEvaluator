@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.models.quality import QualityScoreResult, score_to_grade
-from skillevaluator.validators.quality_score import QualityScoreValidator
+from skillevaluator.validators.quality_score import QualityScoreValidator, _markdown_link_targets
 
 
 @pytest.fixture
@@ -546,6 +546,23 @@ class TestQualityScoreKeywordBoundaries:
 
         assert "MCP skill lacks connection/error guidance" not in messages
 
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "This skill should not use MCP.",
+            "MCP should not be used by this skill.",
+        ],
+    )
+    def test_modal_negated_mcp_mention_does_not_classify_mcp_skill(self, tmp_path: Path, statement: str):
+        messages = _finding_messages(_write_issue_skill(tmp_path, extra_body=f"\n{statement}\n"))
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
+    def test_fenced_mcp_example_does_not_classify_mcp_skill(self, tmp_path: Path):
+        messages = _finding_messages(_write_issue_skill(tmp_path, extra_body="\n```text\nMCP example output\n```\n"))
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
     def test_interconnect_does_not_satisfy_mcp_connection_guidance(self, tmp_path: Path):
         messages = _finding_messages(
             _write_issue_skill(tmp_path, extra_body="\nUse the MCP server for GPU interconnect analysis.\n")
@@ -589,6 +606,19 @@ class TestQualityScoreKeywordBoundaries:
 
         assert "MCP skill lacks connection/error guidance" not in messages
 
+    def test_mcp_guidance_in_explicitly_titled_support_section_is_accepted(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                extra_body=(
+                    "\n## MCP Usage\n\nUse the MCP server to enumerate tools.\n\n"
+                    "## MCP Troubleshooting\n\nReconnect the server and retry after a timeout.\n"
+                ),
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
     def test_unrelated_troubleshooting_does_not_satisfy_mcp_guidance(self, tmp_path: Path):
         messages = _finding_messages(
             _write_issue_skill(
@@ -596,6 +626,19 @@ class TestQualityScoreKeywordBoundaries:
                 extra_body=(
                     "\n## MCP Usage\n\nUse the MCP server to enumerate tools.\n\n"
                     "## Troubleshooting\n\nRetry compilation if the local cache is unavailable.\n"
+                ),
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" in messages
+
+    def test_unrelated_build_server_troubleshooting_does_not_satisfy_mcp_guidance(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                extra_body=(
+                    "\n## MCP Usage\n\nUse the MCP server to enumerate tools.\n\n"
+                    "## Troubleshooting\n\nIf the build server fails, retry compilation.\n"
                 ),
             )
         )
@@ -630,6 +673,19 @@ class TestQualityScoreKeywordBoundaries:
 
         assert "Skill uses exclusivity language that conflicts with composability" not in messages
 
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "This release replaces all deprecated tool calls.",
+            "This migration replaces all legacy build tools.",
+            "This migration replaces all other deprecated tool calls.",
+        ],
+    )
+    def test_replacing_obsolete_implementation_details_is_not_exclusivity(self, tmp_path: Path, statement: str):
+        messages = _finding_messages(_write_issue_skill(tmp_path, extra_body=f"\n{statement}\n"))
+
+        assert "Skill uses exclusivity language that conflicts with composability" not in messages
+
     def test_replacing_all_other_tools_remains_exclusivity(self, tmp_path: Path):
         messages = _finding_messages(
             _write_issue_skill(tmp_path, extra_body="\nThis skill replaces all other build tools.\n")
@@ -643,6 +699,8 @@ class TestQualityScoreKeywordBoundaries:
             "This skill replaces all tools.",
             "This skill replaces all competing build tools.",
             "This skill replaces all alternative skills.",
+            "This skill replaces all competing third-party tools.",
+            "This skill replaces all currently available competing build tools.",
         ],
     )
     def test_replacing_all_tooling_remains_exclusivity(self, tmp_path: Path, statement: str):
@@ -694,6 +752,91 @@ class TestQualityScoreKeywordBoundaries:
         assert all("SKILL.md references README.md" not in message for message in messages)
 
     @pytest.mark.parametrize(
+        "statement",
+        [
+            "Agents should not read README.md.",
+            "Agents must not load README.md.",
+            "Agents shouldn't consult README.md.",
+            "Agents should not ever read README.md.",
+            "Agents should not refer to README.md.",
+            "Agents don't need to read README.md.",
+            "Agents are not required to read README.md.",
+            "Agents are not allowed to load README.md.",
+        ],
+    )
+    def test_modal_negative_readme_guidance_is_not_a_reference(self, tmp_path: Path, statement: str):
+        skill_dir = _write_issue_skill(tmp_path, extra_body=f"\n{statement}\n")
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("SKILL.md references README.md" not in message for message in messages)
+
+    def test_not_only_readme_instruction_remains_a_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body="\nAgents should not only read README.md; they should also inspect the release notes.\n",
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert any("SKILL.md references README.md" in message for message in messages)
+
+    def test_affirmative_readme_instruction_after_negative_one_remains_a_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body="\nDo not read README.md for setup; review README.md before publishing.\n",
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert any("SKILL.md references README.md" in message for message in messages)
+
+    def test_markdown_link_to_readme_suffix_is_not_a_readme_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path, extra_body="\nSee [release notes](NOTREADME.md).\n")
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+        (skill_dir / "NOTREADME.md").write_text("# Release notes\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("SKILL.md references README.md" not in message for message in messages)
+
+    def test_fenced_readme_link_example_is_not_a_readme_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body="\n```markdown\nSee [human documentation](README.md).\n```\n",
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("SKILL.md references README.md" not in message for message in messages)
+
+    def test_markdown_link_parser_scans_malformed_nested_input_linearly(self):
+        read_count = 0
+
+        class CountingText(str):
+            __slots__ = ()
+
+            def __getitem__(self, key):
+                nonlocal read_count
+                if isinstance(key, int):
+                    read_count += 1
+                return super().__getitem__(key)
+
+        content = CountingText("[x](" * 200)
+
+        assert _markdown_link_targets(content) == []
+        assert read_count <= len(content)
+
+    def test_inline_backtick_span_at_line_start_does_not_mask_following_links(self):
+        content = "```literal```\n[details](advanced.md)\n"
+
+        assert _markdown_link_targets(content) == ["advanced.md"]
+
+    @pytest.mark.parametrize(
         "target",
         [
             "https://agentskills.io/specification.md",
@@ -743,6 +886,16 @@ class TestQualityScoreKeywordBoundaries:
         references = skill_dir / "references"
         references.mkdir()
         (references / "mechanisms.md").write_text("See [the specification](https://example.com/spec(v2).md).\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("Deeply nested references" not in message for message in messages)
+
+    def test_fenced_markdown_link_example_is_not_nested(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "mechanisms.md").write_text("```markdown\n[example](advanced.md)\n```\n")
 
         messages = _finding_messages(skill_dir)
 

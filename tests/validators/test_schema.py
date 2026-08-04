@@ -354,6 +354,26 @@ Example.
             assert not result.passed, f"Name containing '{word}' should be rejected"
             assert any("reserved" in err.lower() for err in result.errors)
 
+    def test_reserved_word_substring_in_name_is_allowed(self, tmp_path: Path):
+        """Reserved providers only match complete hyphen-delimited name segments."""
+        skill_dir = tmp_path / "philanthropic-grant-matcher"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: philanthropic-grant-matcher\n"
+            "description: Use when matching philanthropic grants to eligible programs.\n"
+            "metadata:\n"
+            "  author: Test User <test@nvidia.com>\n"
+            "---\n\n"
+            "# Philanthropic Grant Matcher\n\n"
+            "## Instructions\n\n1. Match each grant to an eligible program.\n\n"
+            "## Examples\n\nMatch the example grant.\n"
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, result.errors
+
     def test_xml_tags_in_name_rejected(self, tmp_path: Path):
         """Test validation fails when name contains XML tags."""
         skill_dir = tmp_path / "xml-name"

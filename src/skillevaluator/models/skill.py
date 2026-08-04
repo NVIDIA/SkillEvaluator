@@ -150,7 +150,7 @@ class SkillFrontmatter(BaseModel):
         if v.endswith("-"):
             raise ValueError(f"Skill name '{v}' cannot end with a hyphen")
 
-        if any(w in v.lower() for w in RESERVED_SKILL_NAMES):
+        if any(segment in RESERVED_SKILL_NAMES for segment in v.lower().split("-")):
             raise ValueError(f"Skill name '{v}' must not contain reserved words {RESERVED_SKILL_NAMES}")
 
         if _XML_TAG_RE.search(v):

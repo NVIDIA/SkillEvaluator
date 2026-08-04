@@ -19,6 +19,7 @@ gap analysis (H1-H4, M1-M5, L1, L4), OpenAI Skill Evals.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 import yaml
@@ -35,6 +36,105 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase
 
 logger = get_logger(__name__)
+
+_WORD_CHAR = r"A-Za-z0-9_"
+_XML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:\s[^<>]*)?>|</?[A-Za-z][A-Za-z0-9_-]*\s[^<>]*$")
+_MARKDOWN_LINK_TARGET_RE = re.compile(r"\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+[^)]*)?\)", re.IGNORECASE)
+_ERROR_HANDLING_RE = re.compile(
+    r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
+    r"validat(?:e|es|ed|ing|ion|ions))\b",
+    re.IGNORECASE,
+)
+_MCP_RE = re.compile(r"\bmcp\b", re.IGNORECASE)
+_NEGATED_MCP_RES = (
+    re.compile(r"\b(?:does|do|did)\s+not\s+(?:\w+\s+){0,3}mcp\b", re.IGNORECASE),
+    re.compile(r"\b(?:doesn't|don't|didn't|never)\s+(?:\w+\s+){0,3}mcp\b", re.IGNORECASE),
+    re.compile(r"\bwithout\s+(?:an?\s+)?mcp\b", re.IGNORECASE),
+    re.compile(r"\b(?:no|not\s+(?:an?\s+)?)mcp\b", re.IGNORECASE),
+)
+_MCP_GUIDANCE_RES = (
+    re.compile(r"\bconnect(?:s|ed|ing|ion|ions)?\b", re.IGNORECASE),
+    re.compile(r"\breconnect(?:s|ed|ing|ion|ions)?\b", re.IGNORECASE),
+    re.compile(r"\bretr(?:y|ies|ied|ying)\b", re.IGNORECASE),
+    re.compile(r"\btimeouts?\b", re.IGNORECASE),
+    re.compile(r"\bserver\b[^\n.!?]{0,80}\brunning\b", re.IGNORECASE),
+    re.compile(r"\bapi\b[^\n.!?]{0,40}\bkeys?\b", re.IGNORECASE),
+)
+_TIME_REFERENCE_RE = re.compile(r"\b(?:before|after|as of|until)\s+(?:the\s+year\s+)?(?:19|20)\d{2}\b", re.IGNORECASE)
+_NON_TEMPORAL_COUNT_RE = re.compile(
+    r"^\s+(?:iterations?|tokens?|bytes?|kilobytes?|megabytes?|gigabytes?|"
+    r"milliseconds?|seconds?|minutes?|hours?|rows?|items?|attempts?|samples?|steps?|calls?)\b",
+    re.IGNORECASE,
+)
+
+
+def _contains_term(text: str, term: str) -> bool:
+    """Match a word or phrase without accepting it inside another word."""
+    normalized = term.strip()
+    return bool(
+        re.search(
+            rf"(?<![{_WORD_CHAR}]){re.escape(normalized)}(?![{_WORD_CHAR}])",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
+    return any(_contains_term(text, term) for term in terms)
+
+
+def _has_api_documentation(content: str) -> bool:
+    api_patterns = (
+        r"\bimport\s+[A-Za-z_][A-Za-z0-9_.]*",
+        r"\bfrom\s+[A-Za-z_][A-Za-z0-9_.]*\s+import\b",
+        r"\bapi\b",
+        r"\bmodules?\b",
+        r"\blibrar(?:y|ies)\b",
+        r"\bpackages?\b",
+        r"\bclasses?\b",
+        r"\bfunctions?\b",
+    )
+    return any(re.search(pattern, content, re.IGNORECASE) for pattern in api_patterns)
+
+
+def _mcp_usage_contexts(content: str) -> list[str]:
+    """Return paragraphs where MCP is used as a capability rather than negated."""
+    contexts = []
+    for paragraph in re.split(r"\n\s*\n", content):
+        for match in _MCP_RE.finditer(paragraph):
+            sentence_start = max(paragraph.rfind(mark, 0, match.start()) for mark in ".!?") + 1
+            prefix = paragraph[sentence_start : match.end()]
+            is_negated = any(
+                negated.end() == len(prefix) for pattern in _NEGATED_MCP_RES for negated in pattern.finditer(prefix)
+            )
+            if not is_negated:
+                contexts.append(paragraph)
+                break
+    return contexts
+
+
+def _has_time_reference(content: str) -> bool:
+    for match in _TIME_REFERENCE_RE.finditer(content):
+        if not _NON_TEMPORAL_COUNT_RE.match(content[match.end() : match.end() + 32]):
+            return True
+    return False
+
+
+def _has_nested_markdown_reference(content: str) -> bool:
+    """Return whether a reference document links to another local Markdown document."""
+    for match in _MARKDOWN_LINK_TARGET_RE.finditer(content):
+        target = match.group(1)
+        path = re.split(r"[?#]", target, maxsplit=1)[0].replace("\\", "/")
+        lowered = path.lower()
+        if not lowered.endswith(".md"):
+            continue
+        if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE) or path.startswith(("//", "/", "../")):
+            continue
+        if lowered == "skill.md" or lowered.endswith("/skill.md"):
+            continue
+        return True
+    return False
 
 
 class QualityScoreValidator(ValidatorBase):
@@ -306,11 +406,32 @@ class QualityScoreValidator(ValidatorBase):
     def _references_readme(content: str) -> bool:
         """Return True if SKILL.md points agents at a README.md.
 
-        A markdown link (``[text](README.md)``), an inline-code path
-        (```` `README.md` ````), or a bare path mention all count, since any of
-        them can cause an agent to load the README under progressive disclosure.
+        Markdown links and explicit instructions to read/open/load the file count.
+        Merely naming README.md, including negative guidance not to load it, does
+        not pull the file into agent context.
         """
-        return bool(re.search(r"README\.md", content, re.IGNORECASE))
+        for match in _MARKDOWN_LINK_TARGET_RE.finditer(content):
+            target = re.split(r"[?#]", match.group(1), maxsplit=1)[0].replace("\\", "/")
+            if target.lower().endswith("readme.md"):
+                return True
+
+        action_re = re.compile(
+            r"\b(?:read|open|load|consult|review|see|use|follow|refer\s+to)\b"
+            r"[^\n.!?]{0,40}\breadme\.md\b",
+            re.IGNORECASE,
+        )
+        negated_action_re = re.compile(
+            r"\b(?:do\s+not|don't|never|not\s+to)\s+"
+            r"(?:read|open|load|consult|review|see|use|follow)\b"
+            r"[^\n.!?]{0,40}\breadme\.md\b",
+            re.IGNORECASE,
+        )
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", content):
+            if negated_action_re.search(sentence):
+                continue
+            if action_re.search(sentence):
+                return True
+        return False
 
     def _check_frontmatter_correctness(
         self,
@@ -320,11 +441,10 @@ class QualityScoreValidator(ValidatorBase):
     ) -> None:
         """Validate frontmatter fields that go beyond basic SchemaValidator checks."""
         # XML tags in non-name/description fields (Anthropic H3)
-        xml_tag_re = re.compile(r"</?[a-zA-Z][a-zA-Z0-9_-]*[\s>]")
         for key, val in fm.items():
             if key in ("name", "description"):
                 continue
-            if xml_tag_re.search(str(val)):
+            if _XML_TAG_RE.search(str(val)):
                 dim.deduct(
                     15,
                     "error",
@@ -344,17 +464,17 @@ class QualityScoreValidator(ValidatorBase):
                     f"Invalid name format: '{name}' (lowercase/numbers/hyphens only)",
                     "Use only lowercase letters, numbers, and hyphens",
                 )
-            if any(w in name.lower() for w in QUALITY_RESERVED_NAMES):
+            if _contains_any_term(name, QUALITY_RESERVED_NAMES):
                 dim.deduct(
                     15,
                     "error",
                     "Name contains reserved word (anthropic, claude)",
                     "Remove reserved words from skill name",
                 )
-            if "<" in name or ">" in name:
+            if _XML_TAG_RE.search(name):
                 dim.deduct(15, "error", "Name contains XML tags", "Remove XML tags from skill name")
 
-        if desc and ("<" in desc or ">" in desc):
+        if desc and _XML_TAG_RE.search(desc):
             dim.deduct(15, "error", "Description contains XML tags", "Remove XML tags from description")
 
     def _check_type_specific(
@@ -409,17 +529,7 @@ class QualityScoreValidator(ValidatorBase):
                         "Lib-based skill missing pyproject.toml",
                         "Add pyproject.toml with package metadata and dependencies",
                     )
-                api_kw = [
-                    "import",
-                    "from ",
-                    "api",
-                    "module",
-                    "library",
-                    "package",
-                    "class ",
-                    "function",
-                ]
-                if not any(kw in content.lower() for kw in api_kw):
+                if not _has_api_documentation(content):
                     dim.deduct(
                         10,
                         "warning",
@@ -437,7 +547,7 @@ class QualityScoreValidator(ValidatorBase):
             present_res = [d for d in QUALITY_RESOURCE_DIRS if (skill_path / d).exists()]
             if present_res:
                 res_kw = ["template", "asset", "design", "style", "css", "html", "resource"]
-                if not any(kw in content.lower() for kw in res_kw):
+                if not _contains_any_term(content, res_kw):
                     dim.deduct(
                         5,
                         "info",
@@ -447,7 +557,7 @@ class QualityScoreValidator(ValidatorBase):
 
         elif skill_type == "resource-based":
             res_kw = ["template", "asset", "design", "style", "css", "html", "resource"]
-            if not any(kw in content.lower() for kw in res_kw):
+            if not _contains_any_term(content, res_kw):
                 dim.deduct(
                     10,
                     "warning",
@@ -498,7 +608,7 @@ class QualityScoreValidator(ValidatorBase):
                 )
 
             trigger_words = ["use", "when", "for", "helps", "allows"]
-            if not any(w in desc.lower() for w in trigger_words):
+            if not _contains_any_term(desc, trigger_words):
                 dim.deduct(
                     10,
                     "info",
@@ -507,7 +617,7 @@ class QualityScoreValidator(ValidatorBase):
                 )
 
             vague_words = ["something", "things", "stuff", "various", "general"]
-            if any(w in desc.lower() for w in vague_words):
+            if _contains_any_term(desc, vague_words):
                 dim.deduct(
                     15,
                     "warning",
@@ -516,7 +626,7 @@ class QualityScoreValidator(ValidatorBase):
                 )
 
             person_phrases = ["i can", "i will", "you can", "you should", "your", "my", "we can"]
-            if any(p in desc.lower() for p in person_phrases):
+            if _contains_any_term(desc, person_phrases):
                 dim.deduct(
                     15,
                     "warning",
@@ -527,11 +637,7 @@ class QualityScoreValidator(ValidatorBase):
             # Broad description without negative triggers (M1)
             generic = ["data", "files", "documents", "project", "manage", "handle", "process"]
             negatives = ["not for", "do not use", "instead use", "except when", "not when"]
-            if (
-                len(desc) > 100
-                and any(t in desc.lower() for t in generic)
-                and not any(n in desc.lower() for n in negatives)
-            ):
+            if len(desc) > 100 and _contains_any_term(desc, generic) and not _contains_any_term(desc, negatives):
                 dim.deduct(
                     5,
                     "info",
@@ -546,10 +652,8 @@ class QualityScoreValidator(ValidatorBase):
             "do not use any other",
             "this skill handles everything",
             "replaces all other",
-            "replaces all",
         ]
-        cl = content.lower()
-        if any(p in cl for p in exclusivity):
+        if _contains_any_term(content, exclusivity):
             dim.deduct(
                 5,
                 "info",
@@ -588,8 +692,7 @@ class QualityScoreValidator(ValidatorBase):
     ) -> None:
         dim = qs.reliability
 
-        err_kw = ["error", "exception", "invalid", "fail", "validation", "check"]
-        if any(kw in content.lower() for kw in err_kw):
+        if _ERROR_HANDLING_RE.search(content):
             qs.has_error_handling = True
         else:
             dim.deduct(
@@ -629,15 +732,16 @@ class QualityScoreValidator(ValidatorBase):
             )
 
         # MCP connection guidance (M2)
-        if re.search(r"\bmcp\b", content, re.IGNORECASE):
-            conn_kw = ["connect", "reconnect", "retry", "timeout", "server.*running", "api.*key"]
-            if not any(re.search(kw, content, re.IGNORECASE) for kw in conn_kw):
-                dim.deduct(
-                    10,
-                    "warning",
-                    "MCP skill lacks connection/error guidance",
-                    "Add MCP troubleshooting: connection verification, retry logic",
-                )
+        mcp_contexts = _mcp_usage_contexts(content)
+        if mcp_contexts and not any(
+            pattern.search(context) for context in mcp_contexts for pattern in _MCP_GUIDANCE_RES
+        ):
+            dim.deduct(
+                10,
+                "warning",
+                "MCP skill lacks connection/error guidance",
+                "Add MCP troubleshooting: connection verification, retry logic",
+            )
 
     def _check_script_reliability(self, dim, skill_path: Path) -> None:
         scripts_dir = skill_path / "scripts"
@@ -729,7 +833,8 @@ class QualityScoreValidator(ValidatorBase):
                     f"large skill bodies increase token cost after invocation; long or unfocused "
                     f"top-level descriptions can degrade agent routing accuracy"
                 ),
-                "Move examples, reference material, and detailed docs to the references/ directory",
+                "Keep required sections concise; move detailed examples, reference material, "
+                "and supporting docs to the references/ directory",
             )
 
         # Repetition (compare against non-empty lines to avoid false positives from blank lines)
@@ -754,7 +859,7 @@ class QualityScoreValidator(ValidatorBase):
             section = ""
         if section:
             action_words = ["use", "call", "run", "execute", "pass", "set"]
-            if not any(w in section.lower() for w in action_words):
+            if not _contains_any_term(section, action_words):
                 dim.deduct(
                     15,
                     "warning",
@@ -771,7 +876,7 @@ class QualityScoreValidator(ValidatorBase):
 
         # Corporate buzzwords
         complex_words = ["utilize", "facilitate", "leverage", "paradigm", "synergy"]
-        if any(w in content.lower() for w in complex_words):
+        if _contains_any_term(content, complex_words):
             dim.deduct(
                 5,
                 "info",
@@ -780,16 +885,13 @@ class QualityScoreValidator(ValidatorBase):
             )
 
         # Time-sensitive info
-        time_pats = [r"before \d{4}", r"after \d{4}", r"as of \d{4}", r"until \d{4}"]
-        for pat in time_pats:
-            if re.search(pat, content, re.IGNORECASE):
-                dim.deduct(
-                    5,
-                    "info",
-                    "Time-sensitive information detected",
-                    "Avoid dates that become outdated; use 'old patterns' section",
-                )
-                break
+        if _has_time_reference(content):
+            dim.deduct(
+                5,
+                "info",
+                "Time-sensitive information detected",
+                "Avoid dates that become outdated; use 'old patterns' section",
+            )
 
         # Reference file naming
         refs_dir = skill_path / "references"
@@ -810,7 +912,7 @@ class QualityScoreValidator(ValidatorBase):
             for ref in refs_dir.glob("*.md"):
                 try:
                     rc = ref.read_text(encoding="utf-8")
-                    if re.findall(r"\[[^\]]*\]\([^)]*\.md\)", rc):
+                    if _has_nested_markdown_reference(rc):
                         dim.deduct(
                             10,
                             "warning",

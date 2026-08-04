@@ -91,6 +91,46 @@ def bad_skill(tmp_path: Path) -> Path:
     return skill_dir
 
 
+def _write_issue_skill(
+    tmp_path: Path,
+    *,
+    name: str = "compile-time-probe",
+    description: str = "Use when mapping kernels to modules and finding redundant builds.",
+    instructions: str = "- Run the probe.\n- Read the report.",
+    troubleshooting: str = "Read diagnostic output when the probe reports an error.",
+    extra_body: str = "",
+) -> Path:
+    """Write a complete guide skill for issue #30 scoring regressions."""
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "version: 0.1.0\n"
+        "metadata:\n"
+        "  author: Example\n"
+        "  tags:\n"
+        "    - performance\n"
+        "---\n\n"
+        "## Purpose\n\nMeasure compile time.\n\n"
+        "## Instructions\n\n"
+        f"{instructions}\n\n"
+        "## Examples\n\n```bash\nprobe measure -- python app.py\n```\n\n"
+        "## Prerequisites\n\nNone.\n\n"
+        "## Limitations\n\nNone known.\n\n"
+        "## Troubleshooting\n\n"
+        f"{troubleshooting}\n"
+        f"{extra_body}"
+    )
+    return skill_dir
+
+
+def _finding_messages(skill_dir: Path) -> list[str]:
+    result = QualityScoreValidator(min_score=0).validate(skill_dir)
+    return [finding.message for finding in result.findings]
+
+
 class TestScoreToGrade:
     def test_grade_a(self):
         assert score_to_grade(95.0) == "A"
@@ -355,6 +395,8 @@ class TestQualityScoreValidator:
         assert large_findings[0].severity == Severity.HIGH
         assert "recommended max <5000" in large_findings[0].message
         assert "long or unfocused top-level descriptions" in large_findings[0].message
+        assert "Keep required sections concise" in large_findings[0].suggestion
+        assert "references/" in large_findings[0].suggestion
 
     def test_above_6000_tokens_uses_same_5000_recommendation(self, tmp_path):
         """Skills above 6000 tokens should still use the single >5000 recommendation."""
@@ -390,3 +432,205 @@ class TestQualityScoreValidator:
         v = QualityScoreValidator()
         assert "Quality" in v.name
         assert "Correctness" in v.description
+
+
+class TestQualityScoreKeywordBoundaries:
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "Use when mapping kernel -> module relationships during builds.",
+            "Use when cutting rebuild cost by >30% for large modules.",
+            "Use when targeting compile steps that should finish in <1s.",
+        ],
+    )
+    def test_comparison_syntax_is_not_reported_as_xml(self, tmp_path: Path, description: str):
+        messages = _finding_messages(_write_issue_skill(tmp_path, description=description))
+
+        assert "Description contains XML tags" not in messages
+
+    def test_reserved_names_match_complete_name_segments(self, tmp_path: Path):
+        messages = _finding_messages(_write_issue_skill(tmp_path, name="philanthropic-grant-matcher"))
+
+        assert "Name contains reserved word (anthropic, claude)" not in messages
+
+    def test_reserved_name_segment_is_still_reported(self, tmp_path: Path):
+        messages = _finding_messages(_write_issue_skill(tmp_path, name="anthropic-grant-matcher"))
+
+        assert "Name contains reserved word (anthropic, claude)" in messages
+
+    def test_person_phrases_do_not_match_inside_words(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                description="Use when generating dummy data fixtures for compile probes.",
+            )
+        )
+
+        assert "Description uses first/second person" not in messages
+
+    def test_when_to_use_trigger_does_not_match_inside_performance(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                description="Maps performance characteristics across compilation workloads.",
+            )
+        )
+
+        assert "Description doesn't mention WHEN to use this skill" in messages
+
+    @pytest.mark.parametrize("incidental_word", ["important", "rapid"])
+    def test_lib_documentation_requires_complete_api_terms(self, tmp_path: Path, incidental_word: str):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            description="Use when analyzing compile speed across build targets.",
+            extra_body=f"\n## Notes\n\nThis is {incidental_word} for compile analysis.\n",
+        )
+        module = skill_dir / "probe"
+        module.mkdir()
+        (module / "__init__.py").write_text("")
+        (skill_dir / "pyproject.toml").write_text("[project]\nname = 'probe'\nversion = '0.1.0'\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert "Lib-based skill lacks API/import documentation" in messages
+
+    def test_check_by_itself_does_not_claim_error_handling(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            troubleshooting="Check the output directory.",
+        )
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is False
+        assert "No mention of error handling or validation" in [finding.message for finding in result.findings]
+
+    def test_error_terms_still_record_error_handling(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            troubleshooting="If validation fails, report the error and retry the probe.",
+        )
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+        assert "No mention of error handling or validation" not in [finding.message for finding in result.findings]
+
+    def test_negated_mcp_mention_does_not_classify_mcp_skill(self, tmp_path: Path):
+        messages = _finding_messages(_write_issue_skill(tmp_path, extra_body="\nThis skill does not use MCP.\n"))
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
+    def test_interconnect_does_not_satisfy_mcp_connection_guidance(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(tmp_path, extra_body="\nUse the MCP server for GPU interconnect analysis.\n")
+        )
+
+        assert "MCP skill lacks connection/error guidance" in messages
+
+    def test_unrelated_connection_text_does_not_satisfy_mcp_guidance(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                extra_body=(
+                    "\nUse the MCP server to enumerate tools.\n\n"
+                    "## Compilation Cache\n\nConnect to the compilation cache before measuring.\n"
+                ),
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" in messages
+
+    def test_mcp_reconnect_guidance_is_still_accepted(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                extra_body="\nUse the MCP server. Reconnect the server if the session expires.\n",
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
+    def test_iteration_count_is_not_time_sensitive_information(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(tmp_path, extra_body="\nUnrolling stops after 2048 iterations.\n")
+        )
+
+        assert "Time-sensitive information detected" not in messages
+
+    def test_actual_year_reference_remains_time_sensitive(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(tmp_path, extra_body="\nUse this compatibility path after 2025.\n")
+        )
+
+        assert "Time-sensitive information detected" in messages
+
+    def test_replacing_deprecated_calls_is_not_exclusivity(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(tmp_path, extra_body="\nThis release replaces all deprecated launch calls.\n")
+        )
+
+        assert "Skill uses exclusivity language that conflicts with composability" not in messages
+
+    def test_replacing_all_other_tools_remains_exclusivity(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(tmp_path, extra_body="\nThis skill replaces all other build tools.\n")
+        )
+
+        assert "Skill uses exclusivity language that conflicts with composability" in messages
+
+    def test_readme_negative_guidance_is_not_a_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body="\nREADME.md is human-facing; do not load it.\n",
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("SKILL.md references README.md" not in message for message in messages)
+
+    def test_readme_load_instruction_is_still_a_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path, extra_body="\nRead README.md before publishing.\n")
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert any("SKILL.md references README.md" in message for message in messages)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "https://agentskills.io/specification.md",
+            "../SKILL.md",
+        ],
+    )
+    def test_external_and_parent_markdown_links_are_not_nested_references(self, tmp_path: Path, target: str):
+        skill_dir = _write_issue_skill(tmp_path)
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "mechanisms.md").write_text(f"See [the specification]({target}).\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("Deeply nested references" not in message for message in messages)
+
+    def test_local_markdown_link_remains_a_nested_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "mechanisms.md").write_text("See [more details](advanced.md).\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert "Deeply nested references in mechanisms.md" in messages
+
+    def test_instruction_action_verbs_do_not_match_inside_words(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                instructions="- Because the offset is a runtime property, results vary.",
+            )
+        )
+
+        assert "Instructions lack clear action verbs" in messages

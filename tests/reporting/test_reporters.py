@@ -337,6 +337,7 @@ class TestBenchmarkReporter:
             execution_performed=False,
             coverage_measured=False,
         )
+        hygiene.metadata["benchmark_policy"] = {"tier3_required": False}
         advisory = ValidationResult(validator_name="Advisory")
         advisory.add_finding(
             Finding(

@@ -39,6 +39,9 @@ navigation:
       - page: "Tier 3: Live Agent Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: "BENCHMARK.md Rollout and Backfill"
+        path: ../docs/benchmark-rollout.mdx
+        slug: benchmark-rollout
       - page: Developer Guide
         path: ../docs/developer-guide.mdx
         slug: developer-guide

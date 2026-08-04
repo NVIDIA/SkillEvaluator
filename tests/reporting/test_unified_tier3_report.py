@@ -25,6 +25,7 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
 
 
 def _write_summary(
@@ -840,6 +841,59 @@ def test_standalone_tier3_persists_the_canonical_feedback_payload(tmp_path: Path
     assert persisted["tier3_feedback"]["suggestions"]
     assert persisted["tier3_feedback"]["conclusions"]
     assert "agent_eval" not in persisted
+
+
+def test_rerender_uses_run_owned_dataset_and_evaluator_version(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "current-1"}, {"id": "current-2"}]),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "results" / "20260709_120006"
+    _write_summary(run_dir)
+    snapshot = build_dataset_snapshot(
+        [{"id": "historical-1", "expected_skill": "demo"}],
+        evaluator_version="evaluated-version-1.2.3",
+    )
+    (run_dir / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(
+        skill,
+        run_dir,
+        use_llm_judge=False,
+    )
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["dataset"] == [{"id": "historical-1", "expected_skill": "demo"}]
+    assert payload["dataset_summary"] == snapshot["dataset_summary"]
+    assert payload["dataset_digest"] == snapshot["dataset_digest"]
+    assert payload["evaluator_version"] == "evaluated-version-1.2.3"
+
+
+def test_legacy_rerender_does_not_claim_current_dataset_or_reader_version(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "current-1"}, {"id": "current-2"}]),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "results" / "20260709_120007"
+    _write_summary(run_dir)
+
+    tier3 = agent_eval_result_from_directory(
+        skill,
+        run_dir,
+        use_llm_judge=False,
+    )
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["dataset"] == []
+    assert payload["dataset_summary"]["source"] == "unavailable"
+    assert payload["dataset_digest"] is None
+    assert payload["evaluator_version"] is None
 
 
 def test_standalone_failed_tier3_report_shows_error_without_score(tmp_path: Path) -> None:

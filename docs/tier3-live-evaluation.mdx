@@ -527,18 +527,31 @@ The terminal output separates persisted truth into **Results by Evaluator**
 report and output directory. It adds **Inspect jobs** only when a retained jobs
 directory actually exists.
 
-| Dimension | Question answered |
-| --- | --- |
-| Security | Is the result safe to use? |
-| Correctness | Does it do what the skill promises? |
-| Discoverability | Is the skill used when it should be? |
-| Effectiveness | Is the result better with the skill? |
-| Efficiency | Does the skill reduce unnecessary effort? |
+| Dimension | Key question | Maps to | Weights |
+| --- | --- | --- | --- |
+| Security | Is it safe to use? | `security` | 1.0 |
+| Correctness | Is the answer correct? | `accuracy` | 1.0 |
+| Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 |
+| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 |
 
-Each dimension receives a score and PASS, NEUTRAL, or FAIL status. Skill Lift
-is the signed difference between the with-skill result and the without-skill
-baseline. Positive lift means the skill helped; negative lift means it hurt;
-the report's verdict applies the release's current noise band.
+`token_efficiency` is a standalone report signal, not a dimension source. It
+never changes a dimension score or the overall verdict.
+
+Each dimension receives a score and a diagnostic band: PASS at 0.50 or above,
+NEUTRAL from 0.40 to below 0.50, and FAIL below 0.40. A supported agent passes
+only when every dimension passes. The top-level Tier 3 verdict is:
+
+| Verdict | Condition |
+| --- | --- |
+| Pass | At least one successful agent has every dimension ≥ 0.50 |
+| Neutral | No agent passes, but at least one has no dimension below 0.40 |
+| Fail | Every successful agent has a dimension below 0.40 |
+
+Skill Lift is the signed difference between the with-skill result and the
+without-skill baseline. Its independent band is PASS at +0.05 or above,
+NEUTRAL between -0.10 and +0.05, and FAIL at -0.10 or below. Lift is diagnostic
+evidence and does not override the every-dimension gate.
 
 With multiple attempts, pass@k shows whether at least one attempt for each case
 met `--pass-threshold`. Under standard grading it is reliability context
@@ -549,8 +562,14 @@ rows remain unscored.
 The canonical Tier 3 payload embedded by both standalone `evaluate` and
 `validate --agent-eval` reports uses schema version 2.0. A completed
 standard-grading payload includes the summary, five dimensions, per-agent
-results, trials, pass@k, attempt policy, and dataset; advisory or skipped
-payloads may leave some of those sections empty.
+results, trials, pass@k, attempt policy, run-owned dataset summary and digest,
+evaluation timestamp, evaluator version, and verdict policy; advisory or
+skipped payloads may leave live-evidence sections empty.
+
+Generated `BENCHMARK.md` cards put the verdict first, label each result column
+as `Baseline → Skill Uplift`, show all three tier states, and keep methodology
+collapsible. See the [rollout and backfill runbook](benchmark-rollout.mdx) before
+regenerating already-published cards.
 
 Keep raw Harbor artifacts for debugging and open them with the bundled viewer:
 

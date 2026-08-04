@@ -7,6 +7,8 @@ All notable changes to Skill Evaluator are documented in this file.
 ### Added
 
 - Initial public release candidate.
+- Added a public benchmark publication gate, regression coverage, and a
+  documented rollout plan for generated `BENCHMARK.md` cards.
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.
@@ -32,6 +34,9 @@ All notable changes to Skill Evaluator are documented in this file.
 
 ### Changed
 
+- Unified Tier 3 scoring around the canonical five dimensions, persisted an
+  immutable dataset-truth snapshot with provenance metadata, and redesigned
+  `BENCHMARK.md` as a decision-first publication card.
 - Removed the optional OpenTelemetry integration, the
   `skillevaluator[telemetry]` extra, and the `skillevaluator.telemetry` Python
   module from the public distribution. Imports of that module now fail rather

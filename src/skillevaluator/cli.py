@@ -162,7 +162,15 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ),
     (
         "Tier 3 · Live evaluation",
-        ("create-eval-dataset", "init-custom-grader", "init-harbor-task", "compare", "view", "harbor-view"),
+        (
+            "evaluate",
+            "create-eval-dataset",
+            "init-custom-grader",
+            "init-harbor-task",
+            "compare",
+            "view",
+            "harbor-view",
+        ),
     ),
     ("Expert aliases", ("tier1", "tier2", "tier3")),
 )
@@ -1855,9 +1863,9 @@ def dedup_scan(
         raise click.ClickException("dedup scan failed")
 
 
-# Hidden top-level spelling of ``tier3 evaluate`` — kept working for scripts,
-# but the tier namespace is the advertised name to avoid a duplicate surface.
-@cli.command(hidden=True)
+# Keep the focused Tier 3 workflow discoverable at the top level while also
+# retaining the namespaced ``tier3 evaluate`` spelling used in documentation.
+@cli.command()
 @_skill_argument
 @click.option(
     "-a",
@@ -2393,10 +2401,10 @@ tier2.add_command(similarity_check, "similarity-check")
 tier2.add_command(context_optimization_check, "context-optimization-check")
 tier2.add_command(dedup_scan, "dedup-scan")
 
-# The namespace registration stays visible; only the top-level duplicate is
-# hidden (same underlying command, shared params and behavior).
+# Register an independent command object for the namespaced spelling so future
+# Click metadata changes on one help surface cannot leak into the other.
 _tier3_evaluate_visible = copy.copy(evaluate)
-# The shallow copy shares the mutable params list; give the visible twin its
+# The shallow copy shares the mutable params list; give the namespaced twin its
 # own list so in-place registration on one can never leak into the other.
 _tier3_evaluate_visible.params = list(evaluate.params)
 _tier3_evaluate_visible.hidden = False

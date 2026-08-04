@@ -74,6 +74,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Kept Tier 3's interactive progress frame at a stable height, bounded visible
+  stage history, serialized terminal redraws, and safely disabled a reporter
+  when initialization or background refresh fails.
+- Made the `evaluate` workflow visible in top-level CLI help while retaining
+  the documented `skillevaluator tier3 evaluate` spelling.
 - Tier 3 now stages only an eval case's declared `files` into its trial input;
   cases that omit `files` retain the legacy shared-corpus behavior, while an
   explicit empty or `null` value stages no fixtures.

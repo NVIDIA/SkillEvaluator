@@ -351,7 +351,7 @@ The high-signal flags, with defaults:
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | on | One real, bounded smoke task per agent before the full A/B matrix; `--no-agent-runtime-preflight` skips it |
-| `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
+| `--progress` | `auto` | Progress rendering: `auto`, `rich` (fixed-height live TTY view with secret redaction), `plain`, or `off` |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |

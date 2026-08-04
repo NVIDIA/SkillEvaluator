@@ -28,9 +28,7 @@ def test_top_level_help_lists_primary_commands() -> None:
     assert tier3_result.exit_code == 0
     assert "validate" in result.output
     assert "create-eval-dataset" in result.output
-    # `evaluate` is intentionally hidden at top level: `tier3 evaluate` is the
-    # advertised spelling (the top-level alias keeps working for scripts).
-    assert "\n  evaluate" not in result.output
+    assert "\n  evaluate" in result.output
     assert "evaluate" in tier3_result.output
     assert "tier1" in result.output
     assert "tier2" in result.output
@@ -66,7 +64,10 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
     core = result.output.split(headings[0], 1)[1].split(headings[1], 1)[0]
     assert all(command in core for command in ("validate", "health-check", "doctor", "models"))
     tier3 = result.output.split(headings[3], 1)[1].split(headings[4], 1)[0]
-    assert all(command in tier3 for command in ("create-eval-dataset", "compare", "view", "harbor-view"))
+    assert all(
+        command in tier3
+        for command in ("evaluate", "create-eval-dataset", "compare", "view", "harbor-view")
+    )
     assert "Other commands:" not in result.output
 
 

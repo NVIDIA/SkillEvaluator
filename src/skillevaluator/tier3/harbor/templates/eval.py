@@ -77,7 +77,7 @@ SKILL_EVALUATOR_REWARD_JSON = _env_path(
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_JUDGE_MODEL = "gpt-5.6-sol"
+DEFAULT_JUDGE_MODEL = "gpt-5.4-mini"
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 # Shorter placeholders are not credible provider credentials and can corrupt report schema keys.
@@ -1107,10 +1107,8 @@ def _should_try_fallback(error):
 
 
 def _supports_custom_temperature(model):
-    # Bare ``gpt-5*`` and provider-prefixed forms (``openai/gpt-5*``,
-    # ``openai/openai/gpt-5*``) reject custom temperature on the Chat Completions API.
-    leaf = str(model or "").lower().rsplit("/", 1)[-1]
-    return not leaf.startswith("gpt-5")
+    lowered = str(model or "").lower()
+    return not lowered.startswith("openai/openai/gpt-5")
 
 
 def _is_native_openai_chat_url(provider, request_url):

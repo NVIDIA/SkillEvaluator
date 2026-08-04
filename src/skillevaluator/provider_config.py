@@ -12,18 +12,11 @@ from dataclasses import dataclass
 PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
-# Pinned frontier chat defaults (not floating aliases like ``gpt-5.6`` / ``claude-sonnet-latest``).
-CHAT_DEFAULT_OPENAI = "gpt-5.6-sol"
-CHAT_DEFAULT_ANTHROPIC = "claude-sonnet-5"
-CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-sonnet-5"
-# Lower-cost OpenAI alternative for ``SKILL_EVAL_LLM_MODEL`` overrides.
-CHAT_CHEAP_OPENAI = "gpt-5.4-mini"
-
 _CHAT_DEFAULT_MODELS = {
-    "openai": CHAT_DEFAULT_OPENAI,
-    "anthropic": CHAT_DEFAULT_ANTHROPIC,
+    "openai": "gpt-5.4-mini",
+    "anthropic": "claude-sonnet-4-5",
     "nv_build": "nvidia/nemotron-3-nano-30b-a3b",
-    "bedrock": CHAT_DEFAULT_BEDROCK,
+    "bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
 }
 _EMBEDDING_DEFAULT_MODELS = {
     "openai": "text-embedding-3-small",

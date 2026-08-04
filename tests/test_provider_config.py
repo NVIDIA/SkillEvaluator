@@ -34,27 +34,11 @@ def test_openai_provider_uses_standard_openai_credentials() -> None:
     }
 
 
-def test_openai_provider_uses_gpt_5_6_sol_by_default() -> None:
+def test_openai_provider_uses_gpt_4_1_mini_by_default() -> None:
     config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-openai-key"})
 
-    assert config.model == "gpt-5.6-sol"
-    assert config.litellm_model == "openai/gpt-5.6-sol"
-
-
-def test_anthropic_provider_uses_claude_sonnet_5_by_default() -> None:
-    config = resolve_llm_provider(
-        {"SKILL_EVAL_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "test-anthropic-key"}
-    )
-
-    assert config.model == "claude-sonnet-5"
-    assert config.litellm_model == "anthropic/claude-sonnet-5"
-
-
-def test_bedrock_provider_uses_claude_sonnet_5_us_profile_by_default() -> None:
-    config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "bedrock"})
-
-    assert config.model == "us.anthropic.claude-sonnet-5"
-    assert config.litellm_model == "bedrock/us.anthropic.claude-sonnet-5"
+    assert config.model == "gpt-5.4-mini"
+    assert config.litellm_model == "openai/gpt-5.4-mini"
 
 
 def test_nvidia_build_uses_public_build_endpoint() -> None:

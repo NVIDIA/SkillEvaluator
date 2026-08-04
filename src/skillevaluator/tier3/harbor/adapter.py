@@ -1468,21 +1468,35 @@ def _stage_task_inputs(
     source_skill_path: Path,
     evals_dir: Path,
 ) -> bool:
-    input_dir = env_dir / "input"
-    if input_files_dir and input_files_dir.exists():
-        if input_dir.exists():
-            shutil.rmtree(input_dir)
-        copytree_secure(input_files_dir, input_dir, dirs_exist_ok=True)
+    """Stage only the inputs selected for one eval case.
 
-    for ref in _entry_file_refs(entry):
-        source, rel = _resolve_entry_file_ref(
-            ref,
-            skill_path=source_skill_path,
-            evals_dir=evals_dir,
-            input_files_dir=input_files_dir,
-        )
-        input_dir.mkdir(parents=True, exist_ok=True)
-        _copy_input_ref(source, input_dir, rel)
+    A present ``files`` key is authoritative, including an explicit empty or
+    null value. Entries that omit the key retain the legacy behavior of
+    receiving the complete ``evals/files`` corpus.
+    """
+    input_dir = env_dir / "input"
+    if os.path.lexists(input_dir):
+        if input_dir.is_symlink() or not input_dir.is_dir():
+            input_dir.unlink()
+        else:
+            shutil.rmtree(input_dir)
+
+    if "files" not in entry:
+        if input_files_dir and input_files_dir.exists():
+            copytree_secure(input_files_dir, input_dir, dirs_exist_ok=True)
+    else:
+        resolved_refs = [
+            _resolve_entry_file_ref(
+                ref,
+                skill_path=source_skill_path,
+                evals_dir=evals_dir,
+                input_files_dir=input_files_dir,
+            )
+            for ref in _entry_file_refs(entry)
+        ]
+        for source, rel in resolved_refs:
+            input_dir.mkdir(parents=True, exist_ok=True)
+            _copy_input_ref(source, input_dir, rel)
 
     return input_dir.exists()
 
@@ -1704,7 +1718,7 @@ def _write_dockerfile(
     )
     dockerfile_lines.extend(agent_config_lines)
 
-    if input_files_dir and input_files_dir.exists():
+    if include_input:
         dockerfile_lines.append("COPY input/ /workspace/input/")
     if include_repo:
         dockerfile_lines.append("COPY repo/ /workspace/repo/")

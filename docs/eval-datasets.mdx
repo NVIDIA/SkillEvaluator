@@ -47,7 +47,7 @@ Only the dataset is required. Everything else is optional and additive:
 | `evals/evals.json` | The eval dataset. Without it, live evaluation cannot run. | Yes — required |
 | `evals/config.yml` | Run policy: attempts, thresholds, runtime env, agent models, grading mode. | Yes |
 | `evals/EVAL.md` | Developer guidance that steers dataset generation. | Yes |
-| `evals/files/` | Input fixtures, staged into `/workspace/input/` in the container. | Yes |
+| `evals/files/` | Input fixtures. Legacy cases receive the full directory; cases with a `files` field receive only their declared fixtures. | Yes |
 | `evals/environment/` | Custom container environment: Dockerfile, sidecars, MCP servers. | Yes |
 | `evals/harbor/` | Bring-your-own-task native Harbor tasks — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
 | `evals/grader.py` or `evals/grader.sh` | Bring-your-own-grader script — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
@@ -86,12 +86,20 @@ top-level object with `skill_name` and an `evals` array.
 | `prompt` | Yes | The user request the agent receives. |
 | `expected_output` | Yes | Outcome-oriented description of what a successful agent produced. |
 | `assertions` | No | Observable agent behaviors to verify, one per entry. |
+| `files` | No | Relative fixture path or list of paths under `evals/`. When present, only these fixtures are staged into `/workspace/input/`; an empty or `null` value stages none. Omit the field to stage all of `evals/files/` for legacy datasets. |
 | `expected_skill` | No | Skill the agent should route to; `null` for negative cases. |
 | `expected_script` | No | Script the agent should run; `null` if none applies. |
 | `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
 
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.
+
+<Note>
+Declare `files` on new cases so each trial receives only the fixtures it needs.
+This prevents negative or unrelated cases from seeing other cases' inputs.
+Paths are resolved within `evals/`; absolute paths, URI schemes, and traversal
+outside the directory are rejected before the trial is staged.
+</Note>
 
 <AccordionGroup>
   <Accordion title="Legacy flat format">

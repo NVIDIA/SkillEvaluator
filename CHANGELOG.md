@@ -74,6 +74,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 now stages only an eval case's declared `files` into its trial input;
+  cases that omit `files` retain the legacy shared-corpus behavior, while an
+  explicit empty or `null` value stages no fixtures.
 - Quality scoring now uses boundary-aware and context-aware matching for XML
   tags, reserved names, MCP guidance, README references, time references,
   exclusivity language, instruction action verbs, and nested Markdown links,

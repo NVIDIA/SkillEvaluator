@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from skillevaluator.constants import MAX_PLUGIN_DEDUP_LLM_CALLS, MAX_PLUGIN_DEDUP_SKILLS
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier1.commands import emit_reports
+from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.validators.similarity import SimilarityValidator
 
 
@@ -90,6 +93,14 @@ def run_dedup_scan(
 
 def _make_advisory(result: ValidationResult) -> ValidationResult:
     """Cap plugin Tier 2 findings and legacy errors at advisory severity."""
+    if result.metadata.get("security_failure"):
+        # Filesystem-integrity failures mean the requested check could not be
+        # executed safely. Keep them blocking instead of disguising them as an
+        # ordinary advisory deduplication finding.
+        result.passed = False
+        result.metadata.update({"execution_status": "failed", "optional": False})
+        return result
+
     legacy_errors = list(result.errors)
     for finding in result.findings:
         if finding.severity in (Severity.CRITICAL, Severity.HIGH):
@@ -108,6 +119,57 @@ def _make_advisory(result: ValidationResult) -> ValidationResult:
     return result
 
 
+def _unsafe_plugin_result(reason: Exception | str) -> ValidationResult:
+    """Return a blocking result when plugin content cannot be read safely."""
+    result = ValidationResult(
+        validator_name="Context Deduplication",
+        validator_description="Detect redundant content within each bundled plugin skill",
+    )
+    result.add_finding(
+        Finding(
+            category="PLUGIN_SECURITY",
+            severity=Severity.HIGH,
+            check_name="unsafe_plugin_filesystem",
+            message=f"Unsafe plugin filesystem input refused: {reason}",
+            file_path="<plugin-filesystem>",
+            suggestion="Replace links, hardlinks, and special selected files with regular files inside the plugin root.",
+        )
+    )
+    result.metadata.update(
+        {
+            "security_failure": True,
+            "execution_status": "failed",
+            "optional": False,
+        }
+    )
+    return result
+
+
+def _plugin_work_limit_result(actual_skills: int) -> ValidationResult:
+    """Return an advisory skip before an oversized plugin triggers paid work."""
+    reason = (
+        f"Plugin bundles {actual_skills} skills, exceeding the automatic Tier 2 "
+        f"limit of {MAX_PLUGIN_DEDUP_SKILLS}; no embedding or LLM calls were made."
+    )
+    result = ValidationResult(
+        validator_name="Context Deduplication",
+        validator_description="Detect redundant content within each bundled plugin skill",
+    )
+    result.add_warning(reason)
+    result.metadata.update(
+        {
+            "advisory_tier2": True,
+            "execution_status": "skipped",
+            "optional": True,
+            "skip_reason": reason,
+            "work_limit_exceeded": True,
+            "actual_skills": actual_skills,
+            "skill_limit": MAX_PLUGIN_DEDUP_SKILLS,
+        }
+    )
+    return result
+
+
 def run_plugin_skill_context_dedup(
     plugin_root: Path,
     *,
@@ -123,17 +185,31 @@ def run_plugin_skill_context_dedup(
         validator_description="Detect redundant content within each bundled plugin skill",
     )
     aggregate.metadata["advisory_tier2"] = True
-    skill_dirs = find_bundled_plugin_skills(plugin_root)
+    try:
+        skill_dirs = find_bundled_plugin_skills(plugin_root)
+    except ValueError as exc:
+        return [_unsafe_plugin_result(exc)]
     if not skill_dirs:
         aggregate.add_success("context_dedup", "No bundled skills to deduplicate")
         return [aggregate]
+    if len(skill_dirs) > MAX_PLUGIN_DEDUP_SKILLS:
+        return [_plugin_work_limit_result(len(skill_dirs))]
 
     skills_root = plugin_root / "skills"
-    validator = IntraSkillValidator(threshold=threshold, embedding_model=model, llm_model=llm_model)
+    per_skill_llm_budget = max(1, MAX_PLUGIN_DEDUP_LLM_CALLS // len(skill_dirs))
+    validator = IntraSkillValidator(
+        threshold=threshold,
+        embedding_model=model,
+        llm_model=llm_model,
+        max_llm_clusters=per_skill_llm_budget,
+    )
+    aggregate.metadata["max_llm_calls"] = per_skill_llm_budget * len(skill_dirs)
     for skill_dir in skill_dirs:
         skill_name = skill_dir.relative_to(skills_root).as_posix()
         try:
             skill_result = validator.validate(skill_dir)
+        except (SecurePathError, SkillCollectionError) as exc:
+            skill_result = _unsafe_plugin_result(exc)
         except Exception as exc:
             skill_result = ValidationResult(
                 validator_name="Context Deduplication",
@@ -155,7 +231,15 @@ def run_plugin_skill_context_dedup(
         aggregate.summary.high_count += skill_result.summary.high_count
         aggregate.summary.medium_count += skill_result.summary.medium_count
         aggregate.summary.low_count += skill_result.summary.low_count
-    aggregate.passed = True
+        if skill_result.metadata.get("security_failure"):
+            aggregate.metadata.update(
+                {
+                    "security_failure": True,
+                    "execution_status": "failed",
+                    "optional": False,
+                }
+            )
+    aggregate.passed = not aggregate.metadata.get("security_failure", False)
     aggregate.metadata["advisory_tier2"] = True
     return [aggregate]
 
@@ -170,8 +254,14 @@ def run_plugin_dedup_scan(
 ) -> list[ValidationResult]:
     """Run the public plugin Tier 2 contract: offline Check A and C-intra."""
     from skillevaluator.deduplication.plugin import IntraPluginValidator
+    from skillevaluator.utils.helpers import find_bundled_plugin_skills
 
     results = [_make_advisory(IntraPluginValidator().validate(plugin_root))]
+    try:
+        find_bundled_plugin_skills(plugin_root)
+    except ValueError as exc:
+        results.append(_unsafe_plugin_result(exc))
+        return results
     if run_context:
         results.extend(
             run_plugin_skill_context_dedup(

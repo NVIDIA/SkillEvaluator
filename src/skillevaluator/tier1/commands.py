@@ -18,7 +18,7 @@ from skillevaluator.constants import (
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
 )
-from skillevaluator.models.result import ValidationResult
+from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
@@ -117,7 +117,7 @@ def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | N
     if content_type == CONTENT_TYPE_WORKFLOWS:
         return WorkflowsSchemaValidator()
     if content_type == CONTENT_TYPE_PLUGIN:
-        return PluginSchemaValidator()
+        return PluginSchemaValidator(policy=policy)
     return SchemaValidator(policy=policy)
 
 
@@ -166,6 +166,33 @@ def run_validation(
     """
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
+    if content_type == CONTENT_TYPE_PLUGIN:
+        from skillevaluator.cli_core import resolve_plugin_path
+        from skillevaluator.utils.helpers import find_bundled_plugin_skills
+
+        target_path = resolve_plugin_path(target_path)
+        try:
+            find_bundled_plugin_skills(target_path)
+        except ValueError as exc:
+            if "schema" in enabled:
+                validator = PluginSchemaValidator(policy=policy)
+                return [_as_result(validator.name, validator.description, validator.validate, target_path)]
+            security_result = ValidationResult(
+                validator_name="Plugin Bundle Security",
+                validator_description="Securely discover skills bundled inside the plugin",
+            )
+            security_result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="bundled_skill_path_unsafe",
+                    message=f"Could not securely discover bundled skills: {exc}",
+                    file_path="<plugin-skills>",
+                    suggestion="Replace linked or special bundled-skill paths with regular contained directories.",
+                )
+            )
+            security_result.metadata["security_failure"] = True
+            return [security_result]
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
 
     def _schema_results() -> list[ValidationResult]:
@@ -239,6 +266,9 @@ def run_validation(
             started = time.monotonic()
             step_results = builder()
             results.extend(step_results)
+
+            if any(result.metadata.get("security_failure") for result in step_results):
+                return results
 
             error_count = sum(r.summary.errors for r in step_results)
             warning_count = sum(r.summary.warnings for r in step_results)

@@ -3,6 +3,7 @@
 
 """Tests for PluginSchemaValidator (bundle-reference plugin manifest validation)."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,21 @@ class TestPluginSchemaValidator:
         assert not result.passed
         assert {finding.check_name for finding in result.findings} == {"manifest_outside_root"}
 
+    def test_rejects_hardlinked_manifest(self, tmp_path: Path):
+        outside = tmp_path / "outside.yaml"
+        outside.write_text(_VALID_MANIFEST, encoding="utf-8")
+        plugin = tmp_path / "plugin"
+        plugin.mkdir()
+        try:
+            os.link(outside, plugin / "agent_plugin.yaml")
+        except OSError:
+            pytest.skip("hardlinks are unavailable")
+
+        result = PluginSchemaValidator().validate(plugin)
+
+        assert not result.passed
+        assert result.metadata["security_failure"] is True
+
     def test_valid_manifest_passes_with_metadata(self, tmp_path: Path):
         _write_manifest(tmp_path, _VALID_MANIFEST)
         result = PluginSchemaValidator().validate(tmp_path)
@@ -78,6 +94,16 @@ class TestPluginSchemaValidator:
         result = PluginSchemaValidator().validate(tmp_path)
         assert not result.passed
         assert any(f.check_name == "manifest_invalid_yaml" for f in result.findings)
+
+    def test_deep_yaml_produces_bounded_complexity_finding(self, tmp_path: Path):
+        nested = "[" * 1_500 + "safe" + "]" * 1_500
+        _write_manifest(tmp_path, f"name: safe\ndescription: {nested}\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        assert len(result.findings) == 1
+        assert result.findings[0].check_name == "manifest_complexity_limit"
 
     def test_non_mapping_manifest_produces_finding(self, tmp_path: Path):
         _write_manifest(tmp_path, "- just\n- a\n- list\n")
@@ -123,6 +149,18 @@ skills:
 
         assert not result.passed
         assert any(f.check_name == "schema:name:missing" for f in result.findings)
+
+    def test_deep_contained_json_produces_bounded_complexity_finding(self, tmp_path: Path):
+        manifest = tmp_path / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir()
+        nested = "[" * 1_500 + "0" + "]" * 1_500
+        manifest.write_text('{"name":"deep","metadata":' + nested + "}", encoding="utf-8")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        assert len(result.findings) == 1
+        assert result.findings[0].check_name == "manifest_complexity_limit"
 
     def test_bundle_manifest_wins_over_contained_manifest(self, tmp_path: Path):
         _write_manifest(tmp_path, _VALID_MANIFEST)

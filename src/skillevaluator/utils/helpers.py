@@ -5,11 +5,17 @@
 
 import os
 import re
+import stat
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_FILE, SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
+    SCAN_EXCLUDED_DIRS,
+    SKILL_MANIFEST_VARIANTS,
+)
+from skillevaluator.utils.secure_fs import discover_secure_files, stat_is_link_or_reparse
 
 
 def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
@@ -36,39 +42,46 @@ def find_skills_in_directory(root_path: Path) -> list[Path]:
     Returns:
         Sorted list of unique paths to skill directories
     """
-    skill_dirs: set[Path] = set()
+    try:
+        metadata = root_path.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise ValueError(f"Cannot inspect skill root safely: {exc}") from exc
+    if stat_is_link_or_reparse(metadata):
+        raise ValueError(f"Skill root is a symlink, junction, or reparse point: {root_path.name}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        if root_path.name not in SKILL_MANIFEST_VARIANTS:
+            return []
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"Refusing selected manifest that is not a regular file: {root_path.name}")
+        if getattr(metadata, "st_nlink", 1) != 1:
+            raise ValueError(f"Refusing hard-linked selected manifest: {root_path.name}")
+        return [root_path.parent]
 
-    if root_path.is_file():
-        if root_path.name.upper() == SKILL_MANIFEST_FILE.upper():
-            skill_dirs.add(root_path.parent)
-        return sorted(skill_dirs)
-
-    for manifest_name in SKILL_MANIFEST_VARIANTS:
-        for skill_md in root_path.rglob(manifest_name):
-            skill_dirs.add(skill_md.parent)
-
-    return sorted(skill_dirs)
+    manifests = discover_secure_files(
+        root_path,
+        selected=lambda relative: relative.name in SKILL_MANIFEST_VARIANTS,
+        excluded_dirs=SCAN_EXCLUDED_DIRS,
+        max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
+    )
+    return sorted({(root_path / manifest.relative_path).parent for manifest in manifests})
 
 
 def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
-    """Find live, contained skills under a plugin's ``skills/`` directory."""
+    """Find live, regular skills under a plugin's ``skills/`` directory."""
     skills_root = plugin_root / "skills"
-    if not skills_root.is_dir():
+    try:
+        metadata = skills_root.lstat()
+    except FileNotFoundError:
         return []
-    plugin_root_resolved = plugin_root.resolve()
-
-    def _within_plugin(skill_dir: Path) -> bool:
-        try:
-            return skill_dir.resolve().is_relative_to(plugin_root_resolved)
-        except OSError:
-            return False
-
-    return [
-        skill_dir
-        for skill_dir in find_skills_in_directory(skills_root)
-        if not any(part in SCAN_EXCLUDED_DIRS for part in skill_dir.relative_to(skills_root).parts)
-        and _within_plugin(skill_dir)
-    ]
+    except OSError as exc:
+        raise ValueError(f"Cannot inspect bundled plugin skills safely: {exc}") from exc
+    if stat_is_link_or_reparse(metadata):
+        raise ValueError("Plugin skills root is a symlink, junction, or reparse point")
+    if not stat.S_ISDIR(metadata.st_mode):
+        return []
+    return find_skills_in_directory(skills_root)
 
 
 def resolve_git_remote_url(local_path: Path) -> str | None:

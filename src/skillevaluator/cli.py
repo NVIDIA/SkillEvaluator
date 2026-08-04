@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -892,7 +893,14 @@ def _validate_catalog(
             "validate each skill separately with its own previous version"
         )
 
-    skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
+    from skillevaluator.utils.helpers import find_skills_in_directory
+
+    try:
+        skill_dirs = sorted(
+            skill_dir for skill_dir in find_skills_in_directory(resolved_target) if skill_dir.parent == resolved_target
+        )
+    except ValueError as exc:
+        raise click.ClickException(f"Cannot discover catalog skills safely: {exc}") from exc
     failures: list[tuple[str, str]] = []
     for index, skill_dir in enumerate(skill_dirs, start=1):
         _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
@@ -1338,8 +1346,20 @@ def validate(
     validated against its public contract. Quality/lint/version checks are
     skill-only and skipped for plugins.
     """
-    if dedup:
-        _reject_linked_tier2_root(target_path)
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+    try:
+        declared_metadata = target_path.lstat()
+    except OSError as exc:
+        raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
+    if stat_is_link_or_reparse(declared_metadata):
+        raise click.UsageError(
+            f"Validation target root is a symlink or reparse point (including a junction): {target_path.name or '.'}"
+        )
+    if stat.S_ISREG(declared_metadata.st_mode) and getattr(declared_metadata, "st_nlink", 1) != 1:
+        raise click.UsageError(f"Validation target is a hard-linked file: {target_path.name or '.'}")
+    if not (stat.S_ISREG(declared_metadata.st_mode) or stat.S_ISDIR(declared_metadata.st_mode)):
+        raise click.UsageError(f"Validation target is not a regular file or directory: {target_path.name or '.'}")
     target_path = target_path.resolve()
 
     from skillevaluator.cli_core import detect_content_type, resolve_content_path
@@ -1389,11 +1409,18 @@ def validate(
 
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
     # once per skill, serially, each as its own job with its own reports.
+    discovered_skill_dirs: list[Path] = []
+    if resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN) and target_path.is_dir():
+        from skillevaluator.utils.helpers import find_skills_in_directory
+
+        try:
+            discovered_skill_dirs = find_skills_in_directory(target_path)
+        except ValueError as exc:
+            raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
     if (
-        resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
-        and target_path.is_dir()
-        and not (target_path / "SKILL.md").exists()
-        and any(target_path.glob("*/SKILL.md"))
+        discovered_skill_dirs
+        and resolved_target not in discovered_skill_dirs
+        and any(skill_dir.parent == resolved_target for skill_dir in discovered_skill_dirs)
     ):
         _validate_catalog(
             click.get_current_context(),

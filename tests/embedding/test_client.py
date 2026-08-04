@@ -210,6 +210,16 @@ class TestEmbedChunked:
 
         assert result == pytest.approx([0.5, 0.5])
 
+    def test_many_tiny_heading_chunks_fail_before_provider_call(self) -> None:
+        client = EmbeddingClient(api_key="unused")
+        client.embed = MagicMock(side_effect=AssertionError("provider must not be called"))
+        text = "\n".join(f"## Heading {index}\nx" for index in range(513))
+
+        with pytest.raises(SimilarityConfigError, match=r"chunk.*limit|too many"):
+            client.embed_chunked(text)
+
+        client.embed.assert_not_called()
+
 
 class TestSplitIntoChunks:
     def test_short_text_single_chunk(self) -> None:
@@ -242,6 +252,14 @@ class TestSplitIntoChunks:
         assert any("# Title" in s for s in sections)
         assert any("## Part 1" in s for s in sections)
 
+    @pytest.mark.parametrize(
+        ("chunk_size", "overlap"),
+        [(0, 0), (-1, 0), (10, -1), (10, 10), (10, 11)],
+    )
+    def test_rejects_invalid_chunk_window(self, chunk_size: int, overlap: int) -> None:
+        with pytest.raises(SimilarityConfigError, match=r"chunk_size|overlap|positive|range"):
+            _split_into_chunks("safe", chunk_size=chunk_size, overlap=overlap)
+
 
 class TestAveragePool:
     def test_single_vector(self) -> None:
@@ -253,3 +271,10 @@ class TestAveragePool:
 
     def test_empty_returns_empty(self) -> None:
         assert _average_pool([]) == []
+
+    def test_large_stable_components_do_not_overflow_during_pooling(self) -> None:
+        vectors = [[8e153, 8e153] for _ in range(100)]
+
+        result = _average_pool(vectors)
+
+        assert result == pytest.approx([8e153, 8e153])

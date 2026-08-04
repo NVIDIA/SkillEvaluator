@@ -16,15 +16,29 @@ from pathlib import Path
 from skillevaluator.constants import (
     CONTENT_DEDUP_EMBEDDING_BATCH_SIZE,
     CONTENT_DEDUP_MAX_CHUNKS,
+    CONTENT_DEDUP_MAX_CLUSTER_MEMBERS,
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
+    CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS,
+    CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
+    CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS,
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
     CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS,
+    LLM_VERIFY_MAX_TOKENS,
 )
-from skillevaluator.deduplication.intra_skill.llm_analyzer import analyze_cluster, verdict_to_severity
+from skillevaluator.deduplication.intra_skill.llm_analyzer import (
+    analyze_cluster,
+    build_user_prompt,
+    verdict_to_severity,
+)
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster, build_clusters
 from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError, collect_files
-from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
+from skillevaluator.embedding.client import (
+    EmbeddingClient,
+    SimilarityConfigError,
+    validate_embedding_vector,
+    validate_similarity_threshold,
+)
 from skillevaluator.inference import LLMClient, LLMClientError
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.tier2_paths import safe_path_label
@@ -37,9 +51,6 @@ logger = logging.getLogger(__name__)
 # config assignment. Used to recognize repeated config/comment snippets.
 _COMMENT_PREFIXES = ("#", ";", "//", "--", "!")
 _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
-CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = 25_000_000
-
-
 def _is_comment_or_config_line(line: str) -> bool:
     """Return True for comment lines or simple ``key=value``/``key: value`` config lines."""
     stripped = line.strip()
@@ -90,12 +101,17 @@ class IntraSkillValidator(ValidatorBase):
         threshold: float = CONTENT_DEDUP_SIMILARITY_THRESHOLD,
         embedding_model: str | None = None,
         llm_model: str | None = None,
+        max_llm_clusters: int | None = None,
     ) -> None:
-        self._threshold = threshold
+        self._threshold = validate_similarity_threshold(threshold, context="Content deduplication")
+        max_llm_clusters = CONTENT_DEDUP_MAX_LLM_CLUSTERS if max_llm_clusters is None else max_llm_clusters
+        if type(max_llm_clusters) is not int or not 1 <= max_llm_clusters <= CONTENT_DEDUP_MAX_LLM_CLUSTERS:
+            raise ValueError(f"max_llm_clusters must be within [1, {CONTENT_DEDUP_MAX_LLM_CLUSTERS}]")
         # None defers to provider resolution (SKILL_EVAL_EMBEDDING_MODEL);
         # pinning SIMILARITY_DEFAULT_MODEL here would override the env var.
         self._embedding_model = embedding_model
         self._llm_model = llm_model
+        self._max_llm_clusters = max_llm_clusters
 
     @property
     def name(self) -> str:
@@ -246,19 +262,65 @@ class IntraSkillValidator(ValidatorBase):
         clusters = build_clusters(all_chunks, self._threshold)
         logger.info("Found %d cluster(s)", len(clusters))
 
-        if len(clusters) > CONTENT_DEDUP_MAX_LLM_CLUSTERS:
+        if len(clusters) > self._max_llm_clusters:
             result.add_finding(
                 Finding(
                     category="CONTENT_DEDUP",
                     severity=Severity.CRITICAL,
                     check_name="llm_cluster_count_limit",
-                    message=f"Tier 2 found more than {CONTENT_DEDUP_MAX_LLM_CLUSTERS} clusters requiring LLM review.",
+                    message=f"Tier 2 found more than {self._max_llm_clusters} clusters requiring LLM review.",
                     file_path=report_path,
                     suggestion="Reduce duplicated content or split the skill before rerunning Tier 2.",
-                    metadata={"actual": len(clusters), "limit": CONTENT_DEDUP_MAX_LLM_CLUSTERS},
+                    metadata={"actual": len(clusters), "limit": self._max_llm_clusters},
                 )
             )
             return result
+
+        cluster_prompts: dict[int, str] = {}
+        total_prompt_chars = 0
+        for cluster in clusters:
+            if len(cluster.members) > CONTENT_DEDUP_MAX_CLUSTER_MEMBERS:
+                result.add_finding(
+                    Finding(
+                        category="CONTENT_DEDUP",
+                        severity=Severity.CRITICAL,
+                        check_name="llm_cluster_member_limit",
+                        message="A Tier 2 cluster exceeds the LLM member limit.",
+                        file_path=report_path,
+                        metadata={"actual": len(cluster.members), "limit": CONTENT_DEDUP_MAX_CLUSTER_MEMBERS},
+                    )
+                )
+                return result
+            prompt = build_user_prompt(cluster)
+            if len(prompt) > CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS:
+                result.add_finding(
+                    Finding(
+                        category="CONTENT_DEDUP",
+                        severity=Severity.CRITICAL,
+                        check_name="llm_prompt_size_limit",
+                        message="A Tier 2 cluster exceeds the LLM prompt character limit.",
+                        file_path=report_path,
+                        metadata={"actual": len(prompt), "limit": CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS},
+                    )
+                )
+                return result
+            total_prompt_chars += len(prompt)
+            if total_prompt_chars > CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS:
+                result.add_finding(
+                    Finding(
+                        category="CONTENT_DEDUP",
+                        severity=Severity.CRITICAL,
+                        check_name="llm_total_prompt_size_limit",
+                        message="Tier 2 aggregate LLM prompt characters exceed the configured limit.",
+                        file_path=report_path,
+                        metadata={
+                            "actual": total_prompt_chars,
+                            "limit": CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS,
+                        },
+                    )
+                )
+                return result
+            cluster_prompts[id(cluster)] = prompt
 
         if not clusters:
             result.add_success(
@@ -269,7 +331,7 @@ class IntraSkillValidator(ValidatorBase):
 
         # Step 5: LLM analysis for each cluster (concurrent)
         logger.info("Running LLM analysis on %d cluster(s) concurrently...", len(clusters))
-        llm = LLMClient(model=self._llm_model)
+        llm = LLMClient(model=self._llm_model, max_tokens=LLM_VERIFY_MAX_TOKENS)
 
         def analyze_one(cluster):
             logger.info(
@@ -278,7 +340,7 @@ class IntraSkillValidator(ValidatorBase):
                 cluster.max_similarity,
             )
             try:
-                verdict = analyze_cluster(llm, cluster)
+                verdict = analyze_cluster(llm, cluster, user_prompt=cluster_prompts[id(cluster)])
                 logger.info("  [thread] Verdict: %s (confidence: %.2f)", verdict.verdict, verdict.confidence)
                 return (cluster, verdict)
             except LLMClientError as e:

@@ -226,7 +226,7 @@ def test_validate_rejects_linked_root_before_default_tier2_run(tmp_path: Path, m
     assert str(target) not in result.output
 
 
-def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path: Path, monkeypatch) -> None:
+def test_validate_rejects_linked_root_when_tier2_is_disabled(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "real-skill"
     target.mkdir()
     (target / "SKILL.md").write_text(
@@ -239,22 +239,19 @@ def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path:
     except OSError as exc:
         pytest.skip(f"Directory symlinks are unavailable: {exc}")
 
-    observed_targets: list[Path] = []
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("Validation must reject an unsafe root before Tier 1 runs")
 
-    def record_validation(path: Path, **_kwargs) -> list[ValidationResult]:
-        observed_targets.append(path)
-        return [ValidationResult(validator_name="schema", passed=True)]
-
-    monkeypatch.setattr("skillevaluator.cli.run_validation", record_validation)
+    monkeypatch.setattr("skillevaluator.cli.run_validation", must_not_run)
 
     result = CliRunner().invoke(
         cli,
         ["validate", str(linked_target), "--no-dedup", "--checks", "schema"],
     )
 
-    assert result.exit_code == 0, result.output
-    assert "symlink or reparse point" not in result.output
-    assert observed_targets == [target.resolve()]
+    assert result.exit_code == 2, result.output
+    assert "symlink" in result.output or "reparse point" in result.output
+    assert str(target) not in result.output
 
 
 @pytest.mark.parametrize("extension", [".json", ".html", ".md"])

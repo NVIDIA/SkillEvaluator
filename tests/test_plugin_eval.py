@@ -115,11 +115,11 @@ def test_prepare_rejects_out_of_root_manifest_symlink(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlinks are unavailable")
 
-    with pytest.raises(ValueError, match="outside the plugin root"):
+    with pytest.raises(ValueError, match=r"symlink|reparse"):
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
 
 
-def test_symlinked_standalone_plugin_directory_is_supported(tmp_path: Path) -> None:
+def test_symlinked_standalone_plugin_directory_is_rejected(tmp_path: Path) -> None:
     real_plugin = tmp_path / "real-plugin"
     manifest = real_plugin / ".claude-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
@@ -131,14 +131,10 @@ def test_symlinked_standalone_plugin_directory_is_supported(tmp_path: Path) -> N
     except OSError:
         pytest.skip("symlinks are unavailable")
 
-    located = locate_plugin_manifest(linked_plugin)
-    package = prepare_plugin_eval_package(linked_plugin, stage_root=tmp_path / "stage")
-
-    assert located is not None
-    assert located.root == linked_plugin
-    assert located.path == manifest.resolve()
-    assert not package.skipped
-    assert package.plugin_name == "linked-plugin"
+    with pytest.raises(ValueError, match=r"symlink|junction|reparse"):
+        locate_plugin_manifest(linked_plugin)
+    with pytest.raises(ValueError, match=r"symlink|junction|reparse"):
+        prepare_plugin_eval_package(linked_plugin, stage_root=tmp_path / "stage")
 
 
 def test_remote_only_public_bundle_is_honestly_skipped(tmp_path: Path) -> None:
@@ -197,7 +193,7 @@ def test_contained_mcp_secret_is_rejected_before_toml_write(tmp_path: Path) -> N
         json.dumps({"evals": [{"id": "case", "prompt": "Use server", "expected_output": "done"}]}),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="static safety validation"):
+    with pytest.raises(ValueError, match=r"static (?:safety )?validation"):
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
 
 
@@ -217,6 +213,38 @@ def test_contained_mcp_shell_command_is_rejected_before_execution(tmp_path: Path
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
 
 
+def test_prepare_rejects_nonstring_mcp_args_before_staging(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "agent_plugin.yaml").write_text(
+        """
+name: unsafe-args
+description: Direct Tier 3 input must preserve scalar argument boundaries.
+author: {email: dev@example.com}
+mcp:
+  - name: runner
+    command: runner
+    args:
+      - [--unsafe]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"args\[0\].*string|args.*strings"):
+        prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+
+@pytest.mark.parametrize("field", ["name", "description"])
+def test_prepare_rejects_oversized_manifest_text(field: str, tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "plugin", field: "x" * 20_000}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"{field}|character limit|bounded string"):
+        prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+
 def test_plugin_evals_symlink_escape_is_rejected(tmp_path: Path) -> None:
     plugin = tmp_path / "plugin"
     manifest = plugin / ".claude-plugin" / "plugin.json"
@@ -229,11 +257,11 @@ def test_plugin_evals_symlink_escape_is_rejected(tmp_path: Path) -> None:
         (plugin / "evals").symlink_to(outside, target_is_directory=True)
     except OSError:
         pytest.skip("symlinks are unavailable")
-    with pytest.raises(ValueError, match="outside"):
+    with pytest.raises(ValueError, match=r"linked directory|reparse"):
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
 
 
-def test_symlinked_member_skill_outside_plugin_is_not_staged(tmp_path: Path) -> None:
+def test_symlinked_member_skill_outside_plugin_is_rejected(tmp_path: Path) -> None:
     plugin = tmp_path / "plugin"
     manifest = plugin / ".claude-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
@@ -247,6 +275,5 @@ def test_symlinked_member_skill_outside_plugin_is_not_staged(tmp_path: Path) -> 
         (skills / "outside").symlink_to(outside, target_is_directory=True)
     except OSError:
         pytest.skip("symlinks are unavailable")
-    package = prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
-    assert package.skipped
-    assert package.include_skills == ()
+    with pytest.raises(ValueError, match=r"linked directory|reparse"):
+        prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")

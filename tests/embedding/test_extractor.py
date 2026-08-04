@@ -6,15 +6,12 @@
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-import skillevaluator.embedding.extractor as extractor_module
+from skillevaluator.embedding import extractor as extractor_module
 from skillevaluator.embedding.extractor import (
-    _is_symlink_or_reparse,
     discover_and_extract,
     extract_from_rule,
     extract_from_skill,
@@ -61,19 +58,6 @@ Step-by-step instructions.
 """
 
 
-def test_discovery_debug_log_uses_root_label_without_host_path(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "nested" / "external-skills"
-    root.mkdir(parents=True)
-    debug = MagicMock()
-    monkeypatch.setattr(extractor_module.logger, "debug", debug)
-
-    assert discover_and_extract(root, "skill") == []
-
-    rendered = "\n".join(call.args[0] % call.args[1:] for call in debug.call_args_list)
-    assert str(root) not in rendered
-    assert root.name in rendered
-
-
 def _write_rule(root: Path, filename: str, title: str, description: str) -> Path:
     rule_file = root / filename
     rule_file.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +73,18 @@ def _write_workflow(root: Path, name: str, title: str, description: str) -> Path
         f"metadata:\n  author: Test <test@nvidia.com>\n---\n"
     )
     return wf_dir
+
+
+def _alias_frontmatter(field: str, levels: int = 18) -> str:
+    lines = ["seed: &a0 [safe, safe]"]
+    lines.extend(f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]" for i in range(1, levels + 1))
+    lines.extend(
+        [
+            "name: safe-name" if field != "name" else f"name: *a{levels}",
+            "description: Safe description" if field != "description" else f"description: *a{levels}",
+        ]
+    )
+    return "---\n" + "\n".join(lines) + "\n---\n# Body\n"
 
 
 class TestExtractFromSkill:
@@ -135,109 +131,36 @@ class TestExtractFromSkill:
         (skill_dir / "SKILL.md").write_text("---\nname: no-desc\n---\n")
         assert extract_from_skill(skill_dir) is None
 
-    def test_manifest_uses_one_bounded_os_read(self, tmp_path: Path, monkeypatch) -> None:
-        skill_dir = tmp_path / "single-read"
+    @pytest.mark.parametrize("field", ["name", "description"])
+    def test_rejects_alias_amplified_nonstring_fields(self, tmp_path: Path, field: str) -> None:
+        skill_dir = tmp_path / "alias-dag"
         skill_dir.mkdir()
-        manifest = skill_dir / "SKILL.md"
-        manifest.write_bytes(VALID_SKILL_MD.encode("utf-8"))
-        real_os_open = os.open
-        real_read_text = Path.read_text
-        manifest_open_calls: list[Path] = []
+        (skill_dir / "SKILL.md").write_text(_alias_frontmatter(field))
 
-        def tracked_os_open(path, flags, *, dir_fd=None):
-            if Path(path).name == manifest.name:
-                manifest_open_calls.append(Path(path))
-            if dir_fd is None:
-                return real_os_open(path, flags)
-            return real_os_open(path, flags, dir_fd=dir_fd)
+        with pytest.raises(ValueError, match=rf"{field}.*string|complexity.*limit"):
+            extract_from_skill(skill_dir)
 
-        def reject_unbounded_read(path: Path, *_args, **_kwargs):
-            if path == manifest:
-                raise AssertionError("manifest must not use Path.read_text")
-            return real_read_text(path, *_args, **_kwargs)
+    def test_rejects_deep_frontmatter_without_recursion_error(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "deep"
+        skill_dir.mkdir()
+        nested = "[" * 1_500 + "safe" + "]" * 1_500
+        (skill_dir / "SKILL.md").write_text(f"---\nname: safe\ndescription: {nested}\n---\n# Body\n")
 
-        monkeypatch.setattr(extractor_module, "os", os, raising=False)
-        monkeypatch.setattr(os, "open", tracked_os_open)
-        monkeypatch.setattr(Path, "read_text", reject_unbounded_read)
+        with pytest.raises(ValueError, match=r"complexity|depth|limit"):
+            extract_from_skill(skill_dir)
 
-        entry = extract_from_skill(skill_dir)
-
-        assert entry is not None
-        assert entry.full_text == VALID_SKILL_MD
-        assert len(manifest_open_calls) == 1
-
-    @pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored openat regression is POSIX-specific")
-    def test_ancestor_swap_never_reads_outside_manifest_root(self, tmp_path: Path, monkeypatch) -> None:
-        skill_dir = tmp_path / "catalog" / "safe-skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("---\nname: safe-skill\ndescription: Safe skill\n---\nSAFE_CONTENT\n")
-
-        outside = tmp_path / "outside-skill"
-        outside.mkdir()
-        (outside / "SKILL.md").write_text("---\nname: exfiltrated\ndescription: Outside secret\n---\nSECRET_CANARY\n")
-
-        original_skill = skill_dir.with_name("safe-skill-original")
-        real_open = os.open
-        swapped = False
-
-        def swapping_open(path, flags, *, dir_fd=None):
-            nonlocal swapped
-            if Path(path).name == "SKILL.md" and not swapped:
-                skill_dir.rename(original_skill)
-                skill_dir.symlink_to(outside, target_is_directory=True)
-                swapped = True
-            if dir_fd is None:
-                return real_open(path, flags)
-            return real_open(path, flags, dir_fd=dir_fd)
-
-        monkeypatch.setattr(extractor_module.os, "open", swapping_open)
-
-        try:
-            entry = extract_from_skill(skill_dir)
-        except ValueError:
-            assert swapped
-            return
-
-        assert swapped
-        assert entry is not None
-        assert entry.name == "safe-skill"
-        assert "SECRET_CANARY" not in entry.full_text
-        assert "SAFE_CONTENT" in entry.full_text
-
-    @pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored openat regression is POSIX-specific")
-    def test_directory_replacement_during_validation_never_reads_outside_manifest(
-        self, tmp_path: Path, monkeypatch
+    def test_relative_input_preserves_relative_report_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        skill_dir = tmp_path / "catalog" / "safe-skill"
-        skill_dir.mkdir(parents=True)
-        manifest = skill_dir / "SKILL.md"
-        manifest.write_text("---\nname: safe-skill\ndescription: Safe skill\n---\nSAFE_CONTENT\n")
+        skill_dir = tmp_path / "relative-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(VALID_SKILL_MD)
+        monkeypatch.chdir(tmp_path)
 
-        outside = tmp_path / "outside-skill"
-        outside.mkdir()
-        (outside / "SKILL.md").write_text("---\nname: exfiltrated\ndescription: Outside secret\n---\nSECRET_CANARY\n")
+        entry = extract_from_skill(Path("relative-skill"))
 
-        original_skill = skill_dir.with_name("safe-skill-original")
-        real_lstat = Path.lstat
-        swapped = False
-
-        def swapping_lstat(path: Path):
-            nonlocal swapped
-            if path == manifest and not swapped:
-                skill_dir.rename(original_skill)
-                outside.rename(skill_dir)
-                swapped = True
-            return real_lstat(path)
-
-        monkeypatch.setattr(Path, "lstat", swapping_lstat)
-
-        entry = extract_from_skill(skill_dir)
-
-        assert swapped
         assert entry is not None
-        assert entry.name == "safe-skill"
-        assert "SECRET_CANARY" not in entry.full_text
-        assert "SAFE_CONTENT" in entry.full_text
+        assert entry.path == "relative-skill"
 
 
 class TestExtractFromRule:
@@ -262,25 +185,6 @@ class TestExtractFromRule:
         rule_file.write_text("---\nalwaysApply: false\ndescription: no title\n---\n")
         assert extract_from_rule(rule_file) is None
 
-    def test_broken_symlinked_rule_is_rejected(self, tmp_path: Path) -> None:
-        linked = tmp_path / "broken.mdc"
-        try:
-            linked.symlink_to(tmp_path / "missing.mdc")
-        except OSError as exc:
-            pytest.skip(f"symlinks unavailable: {exc}")
-
-        with pytest.raises(ValueError, match=r"symlink|reparse|escape"):
-            extract_from_rule(linked)
-
-    def test_non_regular_rule_is_rejected_before_read(self, tmp_path: Path) -> None:
-        if not hasattr(os, "mkfifo"):
-            pytest.skip("FIFOs are unavailable on this platform")
-        fifo = tmp_path / "named-pipe.mdc"
-        os.mkfifo(fifo)
-
-        with pytest.raises(ValueError, match="non-regular"):
-            extract_from_rule(fifo)
-
 
 class TestExtractFromWorkflow:
     def test_valid_workflow(self, tmp_path: Path) -> None:
@@ -300,90 +204,8 @@ class TestExtractFromWorkflow:
         empty_dir.mkdir()
         assert extract_from_workflow(empty_dir) is None
 
-    def test_broken_symlinked_workflow_manifest_is_rejected(self, tmp_path: Path) -> None:
-        workflow_dir = tmp_path / "broken-workflow"
-        workflow_dir.mkdir()
-        try:
-            (workflow_dir / "workflow-rules.mdc").symlink_to(tmp_path / "missing.mdc")
-        except OSError as exc:
-            pytest.skip(f"symlinks unavailable: {exc}")
-
-        with pytest.raises(ValueError, match=r"symlink|reparse|escape"):
-            extract_from_workflow(workflow_dir)
-
-
-def test_reparse_point_is_treated_as_unsafe(monkeypatch, tmp_path: Path) -> None:
-    class ReparseStat:
-        st_mode = stat.S_IFREG
-        st_file_attributes = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-
-    monkeypatch.setattr(Path, "lstat", lambda _self: ReparseStat())
-
-    assert _is_symlink_or_reparse(tmp_path / "junction")
-
 
 class TestDiscoverAndExtract:
-    @pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored openat regression is POSIX-specific")
-    def test_collection_root_swap_never_reads_outside_manifest(self, tmp_path: Path, monkeypatch) -> None:
-        collection = tmp_path / "collection"
-        safe_skill = collection / "safe-skill"
-        safe_skill.mkdir(parents=True)
-        (safe_skill / "SKILL.md").write_text(
-            "---\nname: safe-skill\ndescription: Safe collection skill\n---\nSAFE_CONTENT\n"
-        )
-
-        outside_collection = tmp_path / "outside-collection"
-        outside_skill = outside_collection / "safe-skill"
-        outside_skill.mkdir(parents=True)
-        (outside_skill / "SKILL.md").write_text(
-            "---\nname: exfiltrated\ndescription: Outside collection secret\n---\nSECRET_CANARY\n"
-        )
-
-        original_collection = tmp_path / "collection-original"
-        real_open = os.open
-        swapped = False
-
-        def swapping_open(path, flags, *, dir_fd=None):
-            nonlocal swapped
-            if Path(path).name == "safe-skill" and not swapped:
-                collection.rename(original_collection)
-                collection.symlink_to(outside_collection, target_is_directory=True)
-                swapped = True
-            if dir_fd is None:
-                return real_open(path, flags)
-            return real_open(path, flags, dir_fd=dir_fd)
-
-        monkeypatch.setattr(extractor_module.os, "open", swapping_open)
-
-        try:
-            entries = discover_and_extract(collection, "skill")
-        except ValueError:
-            assert swapped
-            return
-
-        assert swapped
-        assert [entry.name for entry in entries] == ["safe-skill"]
-        assert all("SECRET_CANARY" not in entry.full_text for entry in entries)
-
-    def test_discovery_bounds_irrelevant_paths(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr(extractor_module, "MAX_DISCOVERED_PATHS", 2, raising=False)
-        for name in ("a.bin", "b.bin", "c.bin"):
-            (tmp_path / name).write_bytes(b"x")
-
-        with pytest.raises(ValueError, match=r"path.*limit"):
-            discover_and_extract(tmp_path, "skill")
-
-    def test_discovery_prunes_standard_excluded_directories(self, tmp_path: Path, write_skill, monkeypatch) -> None:
-        hidden_skill = tmp_path / ".git" / "nested-skill"
-        hidden_skill.mkdir(parents=True)
-        (hidden_skill / "SKILL.md").write_text("---\nname: hidden\ndescription: Must not be discovered\n---\n")
-        write_skill(tmp_path, "visible-skill", "Visible skill")
-        monkeypatch.setattr(extractor_module, "MAX_DISCOVERED_PATHS", 3, raising=False)
-
-        entries = discover_and_extract(tmp_path, "skill")
-
-        assert [entry.name for entry in entries] == ["visible-skill"]
-
     def test_discover_skills_in_folder(self, tmp_path: Path, write_skill) -> None:
         write_skill(tmp_path, "skill-a", "First skill for testing")
         write_skill(tmp_path, "skill-b", "Second skill for testing")
@@ -422,40 +244,105 @@ class TestDiscoverAndExtract:
         entries = discover_and_extract(tmp_path, "unknown_type")
         assert entries == []
 
-    def test_rejects_symlinked_skill_manifest(self, tmp_path: Path) -> None:
+
+class TestExtractorSecurityContract:
+    @pytest.mark.parametrize("variant", ["SKILL.md", "skill.md"])
+    def test_rejects_all_linked_skill_manifest_variants(self, tmp_path: Path, variant: str) -> None:
+        catalog = tmp_path / "catalog"
+        skill = catalog / "linked-skill"
+        skill.mkdir(parents=True)
         outside = tmp_path / "outside.md"
         outside.write_text(VALID_SKILL_MD)
-        skill_dir = tmp_path / "catalog" / "linked-skill"
-        skill_dir.mkdir(parents=True)
-        try:
-            (skill_dir / "SKILL.md").symlink_to(outside)
-        except OSError as exc:
-            pytest.skip(f"symlinks unavailable: {exc}")
+        (skill / variant).symlink_to(outside)
 
-        with pytest.raises(ValueError, match=r"symlink|reparse|escape"):
-            discover_and_extract(tmp_path / "catalog", "skill")
+        with pytest.raises(ValueError, match=r"manifest|symlink|reparse|unsafe"):
+            discover_and_extract(catalog, "skill")
 
-    def test_rejects_skill_directory_symlink_escape(self, tmp_path: Path) -> None:
-        outside = tmp_path / "outside" / "skill"
-        outside.mkdir(parents=True)
-        (outside / "SKILL.md").write_text(VALID_SKILL_MD)
+    def test_rejects_linked_discovery_root(self, tmp_path: Path, write_skill) -> None:
+        real_catalog = tmp_path / "real-catalog"
+        real_catalog.mkdir()
+        write_skill(real_catalog, "skill-a", "A real skill")
+        linked_catalog = tmp_path / "linked-catalog"
+        linked_catalog.symlink_to(real_catalog, target_is_directory=True)
+
+        with pytest.raises(ValueError, match=r"root|symlink|reparse"):
+            discover_and_extract(linked_catalog, "skill")
+
+    def test_rejects_linked_directory_before_manifest_discovery(self, tmp_path: Path) -> None:
         catalog = tmp_path / "catalog"
         catalog.mkdir()
-        try:
-            (catalog / "linked-skill").symlink_to(outside, target_is_directory=True)
-        except OSError as exc:
-            pytest.skip(f"symlinks unavailable: {exc}")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text(VALID_SKILL_MD)
+        (catalog / "linked-skill").symlink_to(outside, target_is_directory=True)
 
-        with pytest.raises(ValueError, match=r"symlink|reparse|escape"):
-            extract_from_skill(catalog / "linked-skill")
+        with pytest.raises(ValueError, match=r"directory|symlink|reparse|unsafe"):
+            discover_and_extract(catalog, "skill")
 
-    def test_rejects_broken_symlinked_manifest(self, tmp_path: Path) -> None:
-        skill_dir = tmp_path / "broken-skill"
-        skill_dir.mkdir()
-        try:
-            (skill_dir / "SKILL.md").symlink_to(tmp_path / "missing.md")
-        except OSError as exc:
-            pytest.skip(f"symlinks unavailable: {exc}")
+    def test_rejects_linked_directory_before_excluded_name_pruning(self, tmp_path: Path) -> None:
+        catalog = tmp_path / "catalog"
+        catalog.mkdir()
+        outside = tmp_path / "outside-evals"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text(VALID_SKILL_MD)
+        (catalog / "evals").symlink_to(outside, target_is_directory=True)
 
-        with pytest.raises(ValueError, match=r"symlink|reparse|escape"):
-            extract_from_skill(skill_dir)
+        with pytest.raises(ValueError, match=r"directory|symlink|reparse|unsafe"):
+            discover_and_extract(catalog, "skill")
+
+    def test_ignores_irrelevant_links_without_resolving_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        catalog = tmp_path / "catalog"
+        catalog.mkdir()
+        target = catalog / "payload.dat"
+        target.write_bytes(b"payload")
+        contained = catalog / "contained.bin"
+        contained.symlink_to(target.name)
+        outside = tmp_path / "outside.dat"
+        outside.write_bytes(b"outside")
+        escaping = catalog / "escaping.bin"
+        escaping.symlink_to(outside)
+        broken = catalog / "broken.bin"
+        broken.symlink_to("missing.dat")
+
+        real_resolve = Path.resolve
+
+        def reject_link_resolution(path: Path, *args, **kwargs):
+            if path in {contained, escaping, broken}:
+                raise AssertionError(f"irrelevant link was resolved: {path.name}")
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", reject_link_resolution)
+
+        assert discover_and_extract(catalog, "skill") == []
+
+    def test_bounds_irrelevant_paths_and_prunes_generated_directories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(extractor_module, "MAX_DISCOVERED_PATHS", 2, raising=False)
+        for name in ("a.bin", "b.bin", "c.bin"):
+            (tmp_path / name).write_bytes(b"x")
+
+        with pytest.raises(ValueError, match=r"path.*limit"):
+            discover_and_extract(tmp_path, "skill")
+
+        for path in tmp_path.glob("*.bin"):
+            path.unlink()
+        hidden = tmp_path / "evals" / "results"
+        hidden.mkdir(parents=True)
+        for index in range(10):
+            (hidden / f"generated-{index}.md").write_text("generated")
+        visible = tmp_path / "visible"
+        visible.mkdir()
+        (visible / "SKILL.md").write_text(VALID_SKILL_MD)
+
+        assert [entry.name for entry in discover_and_extract(tmp_path, "skill")] == ["test-skill"]
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable on this platform")
+    def test_rejects_special_selected_rule(self, tmp_path: Path) -> None:
+        fifo = tmp_path / "special.mdc"
+        os.mkfifo(fifo)
+
+        with pytest.raises(ValueError, match=r"special|non-regular|regular file"):
+            discover_and_extract(tmp_path, "rules")

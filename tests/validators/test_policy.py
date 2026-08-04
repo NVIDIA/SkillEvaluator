@@ -9,10 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.models.result import Severity
+from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.policy import (
     DEFAULT_PROFILE_NAME,
     ValidationPolicy,
+    apply_policy,
     default_policy,
     load_policy_file,
     load_profile,
@@ -56,3 +57,24 @@ def test_policy_validation_and_resolution() -> None:
     )
     with pytest.raises(FileNotFoundError):
         load_profile("missing-profile")
+
+
+def test_policy_does_not_downgrade_advisory_security_failure() -> None:
+    result = ValidationResult()
+    result.add_finding(
+        Finding(
+            category="PLUGIN_SECURITY",
+            severity=Severity.HIGH,
+            check_name="unsafe_plugin_manifest",
+            message="Unsafe manifest refused",
+            file_path="<plugin-manifest>",
+        )
+    )
+    result.metadata.update({"advisory_tier2": True, "security_failure": True})
+    policy = ValidationPolicy(severity_overrides={"PLUGIN_SECURITY.*": Severity.LOW})
+
+    [applied] = apply_policy([result], policy)
+
+    assert not applied.passed
+    assert applied.findings[0].severity == Severity.HIGH
+    assert applied.metadata["execution_status"] == "failed"

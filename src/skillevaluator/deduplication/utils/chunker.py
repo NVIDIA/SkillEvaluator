@@ -12,6 +12,7 @@ Three strategies:
 from __future__ import annotations
 
 import ast
+import bisect
 import logging
 import re
 from dataclasses import dataclass, field
@@ -170,6 +171,7 @@ def chunk_python(
         return []
 
     chunks: list[ContentChunk] = []
+    source_lines = collected.content.splitlines()
 
     module_doc = ast.get_docstring(tree)
     if module_doc and len(module_doc) >= min_chars:
@@ -193,7 +195,7 @@ def chunk_python(
             else:
                 heading = f"{name}()"
 
-            sig_line = collected.content.splitlines()[node.lineno - 1]
+            sig_line = source_lines[node.lineno - 1]
             text = f"{sig_line}\n{doc}" if doc else sig_line
 
             if len(text) >= min_chars:
@@ -246,22 +248,25 @@ def chunk_shell(
             comment_lines = []
 
     full_text = collected.content
+    brace_stack: list[int] = []
+    brace_ends: dict[int, int] = {}
+    newline_positions: list[int] = []
+    for position, char in enumerate(full_text):
+        if char == "\n":
+            newline_positions.append(position)
+        elif char == "{":
+            brace_stack.append(position)
+        elif char == "}" and brace_stack:
+            brace_ends[brace_stack.pop()] = position + 1
+
     for match in SHELL_FUNC_PATTERN.finditer(full_text):
         func_name = match.group(1)
         brace_start = match.end() - 1
-        depth = 1
-        pos = brace_start + 1
-        while pos < len(full_text) and depth > 0:
-            if full_text[pos] == "{":
-                depth += 1
-            elif full_text[pos] == "}":
-                depth -= 1
-            pos += 1
-
-        if depth == 0:
+        pos = brace_ends.get(brace_start)
+        if pos is not None:
             func_text = full_text[match.start() : pos]
-            start_line = full_text[: match.start()].count("\n") + 1
-            end_line = full_text[:pos].count("\n") + 1
+            start_line = bisect.bisect_left(newline_positions, match.start()) + 1
+            end_line = bisect.bisect_left(newline_positions, pos) + 1
             if len(func_text) >= min_chars:
                 chunks.append(
                     ContentChunk(

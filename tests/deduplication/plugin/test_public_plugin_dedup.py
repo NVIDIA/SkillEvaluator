@@ -8,7 +8,7 @@ import pytest
 from skillevaluator.deduplication.plugin.intra_plugin_validator import IntraPluginValidator
 from skillevaluator.deduplication.plugin.ref_utils import find_duplicate_refs, normalize_ref
 from skillevaluator.models.result import Severity
-from skillevaluator.tier2.commands import run_plugin_dedup_scan
+from skillevaluator.tier2.commands import run_plugin_dedup_scan, run_plugin_skill_context_dedup
 
 
 def test_public_selector_and_canonical_forms_normalize_together() -> None:
@@ -45,7 +45,7 @@ def test_invalid_manifest_is_an_optional_skip(tmp_path: Path) -> None:
     assert result.metadata["optional"] is True
 
 
-def test_symlinked_manifest_outside_plugin_is_an_optional_skip(tmp_path: Path) -> None:
+def test_symlinked_manifest_outside_plugin_is_a_security_failure(tmp_path: Path) -> None:
     outside = tmp_path / "outside.yaml"
     outside.write_text(
         "name: outside\nauthor: {email: dev@example.com}\nskills:\n  refs: [github::example/repo::skills::a]\n",
@@ -60,9 +60,15 @@ def test_symlinked_manifest_outside_plugin_is_an_optional_skip(tmp_path: Path) -
 
     result = IntraPluginValidator().validate(plugin)
 
-    assert result.passed
-    assert result.metadata["execution_status"] == "skipped"
-    assert result.metadata["optional"] is True
+    assert not result.passed
+    assert result.metadata["execution_status"] == "failed"
+    assert result.metadata["security_failure"] is True
+    assert result.metadata["optional"] is False
+
+    scan_results = run_plugin_dedup_scan(plugin, run_context=False)
+    assert not scan_results[0].passed
+    assert scan_results[0].findings[0].severity == Severity.HIGH
+    assert scan_results[0].metadata["execution_status"] == "failed"
 
 
 def test_public_plugin_scan_never_requires_remote_catalog(tmp_path: Path) -> None:
@@ -75,3 +81,43 @@ def test_public_plugin_scan_never_requires_remote_catalog(tmp_path: Path) -> Non
     assert all(result.passed for result in results)
     assert all(result.metadata.get("advisory_tier2") for result in results)
     assert results[1].metadata["execution_status"] == "skipped"
+
+
+def test_plugin_context_scan_rejects_linked_skills_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    try:
+        (plugin / "skills").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert not result.passed
+    assert result.metadata["security_failure"] is True
+    assert result.findings[0].severity == Severity.HIGH
+
+    scan_results = run_plugin_dedup_scan(plugin, run_context=False)
+    assert any(result.metadata.get("security_failure") for result in scan_results)
+    assert any(not result.passed for result in scan_results)
+
+
+def test_plugin_context_scan_skips_before_provider_work_above_skill_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.constants import MAX_PLUGIN_DEDUP_SKILLS
+
+    plugin = tmp_path / "plugin"
+    skills = plugin / "skills"
+    skills.mkdir(parents=True)
+    discovered = [skills / f"skill-{index}" for index in range(MAX_PLUGIN_DEDUP_SKILLS + 1)]
+    monkeypatch.setattr("skillevaluator.utils.helpers.find_bundled_plugin_skills", lambda _root: discovered)
+
+    [result] = run_plugin_skill_context_dedup(plugin)
+
+    assert result.passed
+    assert result.metadata["work_limit_exceeded"] is True
+    assert result.metadata["actual_skills"] == MAX_PLUGIN_DEDUP_SKILLS + 1

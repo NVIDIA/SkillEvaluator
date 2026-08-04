@@ -41,20 +41,32 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import yaml
 
 from skillevaluator.constants import (
+    DESCRIPTION_MAX_LENGTH,
+    NAME_MAX_LENGTH,
     PLUGIN_CONTAINED_MANIFEST_DIR,
     PLUGIN_CONTAINED_MANIFEST_FILE,
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
+from skillevaluator.models.result import Severity
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, find_eval_file, load_dataset_entries
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.utils.helpers import find_bundled_plugin_skills, resolve_git_remote_url
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    load_bounded_json,
+    load_bounded_yaml,
+    require_bounded_string,
+)
+
+if TYPE_CHECKING:
+    from skillevaluator.plugin_manifest import PluginManifestLocation
 
 # Shared with Harbor's runtime find_evals_file() and the report loader so a
 # dataset accepted/staged here is resolvable downstream (MR !29 review 59316232).
@@ -79,6 +91,8 @@ _CONTENT_ROOTS: dict[str, tuple[str, ...]] = {
 # task-environment ``mcp_servers.toml`` so the adapter can stage it for the
 # with-plugin arm only (see ``adapter.generate_harbor_tasks``).
 PLUGIN_MCP_SERVERS_FILENAME = "plugin_mcp_servers.toml"
+MAX_PLUGIN_MANIFEST_ITEMS = 256
+MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 
 
 @dataclass(frozen=True)
@@ -144,7 +158,11 @@ class PluginEvalPackage:
 
 
 def _stage_agent_plugin_manifest(
-    dest: Path, manifest_path: Path, manifest: dict[str, Any], *, contained_form: bool
+    dest: Path,
+    manifest_text: str,
+    manifest: dict[str, Any],
+    *,
+    contained_form: bool,
 ) -> None:
     """Write the staged ``agent_plugin.yaml`` for the eval package.
 
@@ -160,7 +178,7 @@ def _stage_agent_plugin_manifest(
     not from a ref list).
     """
     if not contained_form:
-        shutil.copy2(manifest_path, dest)
+        dest.write_text(manifest_text, encoding="utf-8", newline="")
         return
     normalized = {
         key: value for key, value in manifest.items() if key not in {"skills", "rules"} or isinstance(value, list)
@@ -195,18 +213,15 @@ def prepare_plugin_eval_package(
         ValueError: If the manifest is malformed, or local components exist but
             no eval dataset/task source can be found.
     """
-    from skillevaluator.cli_core import resolve_plugin_path
-
-    manifest_path = _manifest_path(plugin_path)
+    location = _manifest_location(plugin_path)
+    manifest_path = location.path
     contained_form = _is_contained_manifest(manifest_path)
-    # Share the CLI's one root-normalization helper (resolve_plugin_path) so a
-    # direct contained manifest (.claude-plugin/plugin.json) anchors at <plugin> --
-    # identical to the write root evaluate-plugin resolves and the root view/compare
-    # read (MR !52 review). A plugin-directory input is returned unchanged.
-    plugin_dir = resolve_plugin_path(plugin_path)
-    plugin_root = plugin_dir.resolve()
-    manifest = _load_manifest(manifest_path)
+    plugin_dir = location.root
+    plugin_root = location.secure_file.root
+    manifest_text = location.read_text()
+    manifest = _load_manifest_text(manifest_text, manifest_path)
     plugin_name = _plugin_name(manifest, plugin_dir)
+    plugin_description = _plugin_description(manifest, plugin_name)
 
     # Layer-1 intra-repo resolver: canonical skill/rule refs whose <repo> is the
     # plugin's own clone are resolved to real dirs/files under the clone root
@@ -290,12 +305,15 @@ def prepare_plugin_eval_package(
 
     package_path = _fresh_package_dir(stage_root, plugin_name)
     _stage_agent_plugin_manifest(
-        package_path / "agent_plugin.yaml", manifest_path, manifest, contained_form=contained_form
+        package_path / "agent_plugin.yaml",
+        manifest_text,
+        manifest,
+        contained_form=contained_form,
     )
     _write_plugin_skill_md(
         package_path / "SKILL.md",
-        manifest=manifest,
         plugin_name=plugin_name,
+        plugin_description=plugin_description,
         include_skills=member_skills,
         staged_rules=staged_rules,
         unresolved_skill_refs=unresolved_skill_refs,
@@ -305,7 +323,7 @@ def prepare_plugin_eval_package(
 
     metadata = {
         "plugin_name": plugin_name,
-        "manifest_path": str(manifest_path.resolve()),
+        "manifest_path": str(location.secure_file.path),
         "member_skills": [str(path) for path in member_skills],
         "rule_refs": list(all_rule_refs),
         "staged_rules": [rule.name for rule in staged_rules],
@@ -383,26 +401,49 @@ def _is_contained_manifest(path: Path) -> bool:
 
 
 def _manifest_path(plugin_path: Path) -> Path:
+    return _manifest_location(plugin_path).path
+
+
+def _manifest_location(plugin_path: Path) -> PluginManifestLocation:
     from skillevaluator.plugin_manifest import locate_plugin_manifest
 
     located = locate_plugin_manifest(plugin_path)
     if located is None:
         raise ValueError(f"No agent_plugin.yaml or .claude-plugin/plugin.json found under {plugin_path}")
-    return located.path
+    return located
 
 
-def _load_manifest(manifest_path: Path) -> dict[str, Any]:
-    data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+def _load_manifest_text(raw_text: str, manifest_path: Path) -> dict[str, Any]:
+    try:
+        data = (
+            load_bounded_json(raw_text.lstrip("\ufeff"))
+            if _is_contained_manifest(manifest_path)
+            else load_bounded_yaml(raw_text)
+        )
+    except StructuredDataError as exc:
+        syntax = "JSON" if _is_contained_manifest(manifest_path) else "YAML"
+        raise ValueError(f"{manifest_path} is not valid bounded {syntax}: {exc}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"{manifest_path} must contain a YAML mapping")
+        raise ValueError(f"{manifest_path} must contain a manifest object")
     return data
 
 
 def _plugin_name(manifest: dict[str, Any], plugin_dir: Path) -> str:
-    name = str(manifest.get("name") or plugin_dir.name).strip()
-    if not name:
-        raise ValueError("Plugin manifest requires a non-empty name")
-    return name
+    raw_name = manifest.get("name")
+    if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
+        raw_name = plugin_dir.name
+    return require_bounded_string(raw_name, "Plugin manifest name", max_chars=NAME_MAX_LENGTH).strip()
+
+
+def _plugin_description(manifest: dict[str, Any], plugin_name: str) -> str:
+    raw_description = manifest.get("description")
+    if raw_description is None or (isinstance(raw_description, str) and not raw_description.strip()):
+        raw_description = f"Plugin evaluation wrapper for {plugin_name}."
+    return require_bounded_string(
+        raw_description,
+        "Plugin manifest description",
+        max_chars=DESCRIPTION_MAX_LENGTH,
+    ).strip()
 
 
 def _find_repo_root(plugin_dir: Path) -> Path:
@@ -595,6 +636,8 @@ def _iter_raw_refs(section: Any) -> list[Any]:
         return []
     if not isinstance(refs, list):
         raise ValueError("Plugin manifest refs must be a list")
+    if len(refs) > MAX_PLUGIN_MANIFEST_ITEMS:
+        raise ValueError(f"Plugin manifest refs exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-item limit")
     return refs
 
 
@@ -604,7 +647,17 @@ def _ref_source(ref: Any) -> str | None:
         segments = ref.split("::")
         return segments[0].strip() if len(segments) >= 2 else None
     if isinstance(ref, dict):
-        return str(ref.get("source") or "").strip() or None
+        source = ref.get("source")
+        if source is None:
+            return None
+        return (
+            require_bounded_string(
+                source,
+                "Plugin reference source",
+                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+            ).strip()
+            or None
+        )
     return None
 
 
@@ -615,7 +668,14 @@ def _ref_name(ref: Any) -> str | None:
         name = tail.strip().split("/")[-1].strip()
         return name or None
     if isinstance(ref, dict):
-        path = str(ref.get("path") or "").strip()
+        raw_path = ref.get("path")
+        if raw_path is None:
+            return None
+        path = require_bounded_string(
+            raw_path,
+            "Plugin reference path",
+            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+        ).strip()
         if path:
             return path.split("/")[-1].strip() or None
     return None
@@ -626,7 +686,10 @@ def _ref_label(ref: Any) -> str:
     canonical = normalize_ref(ref)
     if canonical:
         return canonical
-    return _ref_name(ref) or repr(ref)
+    name = _ref_name(ref)
+    if name:
+        return name
+    raise ValueError("Plugin reference must be a canonical string or scalar selector object")
 
 
 def _unresolved_refs(
@@ -702,9 +765,16 @@ def _resolve_rules(
 def _resolve_contained_file(ref: Any, plugin_dir: Path, plugin_root: Path) -> Path | None:
     """Resolve a path-like ref to a file contained within the plugin root."""
     path_str = ref if isinstance(ref, str) else (ref.get("path") if isinstance(ref, dict) else None)
-    if not path_str or "::" in str(path_str):
+    if path_str is None:
         return None
-    path = Path(str(path_str))
+    path_str = require_bounded_string(
+        path_str,
+        "Contained plugin reference path",
+        max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+    )
+    if not path_str or "::" in path_str:
+        return None
+    path = Path(path_str)
     bases = [plugin_dir]
     repo_root = _find_repo_root(plugin_dir)
     if repo_root != plugin_dir:
@@ -761,16 +831,61 @@ def _reject_unsafe_mcp_declaration(name: Any, config: dict[str, Any]) -> None:
     """
     from skillevaluator.validators.mcp_static import validate_mcp_server_declaration
 
+    safe_name = require_bounded_string(
+        name,
+        "Plugin MCP server name",
+        max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+    ).strip()
+    for field in ("command", "url", "transport", "type", "provider"):
+        if field in config and config[field] is not None:
+            require_bounded_string(
+                config[field],
+                f"Plugin MCP server {field}",
+                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+                allow_empty=True,
+            )
+    args = config.get("args")
+    if args is not None:
+        if not isinstance(args, list):
+            raise ValueError("Plugin MCP server args must be a list of strings")
+        if len(args) > MAX_PLUGIN_MANIFEST_ITEMS:
+            raise ValueError(f"Plugin MCP server args exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-item limit")
+        for index, arg in enumerate(args):
+            require_bounded_string(
+                arg,
+                f"Plugin MCP server args[{index}]",
+                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+                allow_empty=True,
+            )
+    for field in ("env", "headers"):
+        values = config.get(field)
+        if values is None:
+            continue
+        if not isinstance(values, dict) or len(values) > MAX_PLUGIN_MANIFEST_ITEMS:
+            raise ValueError(f"Plugin MCP server {field} must be a bounded object")
+        for key, value in values.items():
+            require_bounded_string(
+                key,
+                f"Plugin MCP server {field} key",
+                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+            )
+            require_bounded_string(
+                value,
+                f"Plugin MCP server {field} value",
+                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+                allow_empty=True,
+            )
+
     blocking = [
         finding
-        for finding in validate_mcp_server_declaration(name, config, "<plugin manifest>")
-        if finding.severity.value in {"critical", "high"}
+        for finding in validate_mcp_server_declaration(safe_name, config, "<plugin manifest>")
+        if finding.severity in (Severity.CRITICAL, Severity.HIGH)
     ]
     if blocking:
-        checks = ", ".join(dict.fromkeys(finding.check_name for finding in blocking))
+        first = blocking[0]
         raise ValueError(
-            f"Plugin manifest MCP server {str(name).strip()!r} failed static safety validation "
-            f"({checks}); refusing to stage or execute it."
+            f"Plugin manifest MCP server '{safe_name}' failed blocking static validation "
+            f"({first.check_name}): {first.message}"
         )
 
 
@@ -789,13 +904,24 @@ def _normalize_mcp_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     if raw_servers:
         if not isinstance(raw_servers, list):
             raise ValueError("Plugin manifest mcp must be a list")
-        return list(raw_servers)
+        if len(raw_servers) > MAX_PLUGIN_MANIFEST_ITEMS:
+            raise ValueError(f"Plugin manifest mcp exceeds the {MAX_PLUGIN_MANIFEST_ITEMS}-item limit")
+        normalized_entries: list[dict[str, Any]] = []
+        for idx, entry in enumerate(raw_servers):
+            if not isinstance(entry, dict):
+                raise ValueError(f"Plugin manifest mcp[{idx}] must be an object")
+            name = entry.get("name")
+            _reject_unsafe_mcp_declaration(name, {key: value for key, value in entry.items() if key != "name"})
+            normalized_entries.append(entry)
+        return normalized_entries
 
     mcp_servers = manifest.get("mcpServers")
     if not mcp_servers:
         return []
     if not isinstance(mcp_servers, dict):
         raise ValueError("Plugin manifest mcpServers must be an object")
+    if len(mcp_servers) > MAX_PLUGIN_MANIFEST_ITEMS:
+        raise ValueError(f"Plugin manifest mcpServers exceeds the {MAX_PLUGIN_MANIFEST_ITEMS}-item limit")
 
     normalized: list[dict[str, Any]] = []
     for name, config in mcp_servers.items():
@@ -804,7 +930,12 @@ def _normalize_mcp_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
         # Fail closed: a raw inline credential must never be flattened into the
         # persisted toml (only ${ENV} references may reach the artifact).
         _reject_unsafe_mcp_declaration(name, config)
-        entry: dict[str, Any] = {"name": str(name).strip()}
+        safe_name = require_bounded_string(
+            name,
+            "Plugin MCP server name",
+            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+        ).strip()
+        entry: dict[str, Any] = {"name": safe_name}
         # env/headers are declared config the eval runtime cannot apply (Harbor's
         # per-server MCPServerConfig has no such field). Record their presence so a
         # server evaluated WITHOUT its declared config marks the run INCOMPLETE
@@ -819,19 +950,19 @@ def _normalize_mcp_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             # spaced arg (e.g. "path with spaces") is one token, not re-split. The
             # runtime (Harbor MCPServerConfig.args: list[str]) and every agent
             # adapter consume a separate args list.
-            entry["command"] = str(config["command"])
+            entry["command"] = config["command"]
             args = config.get("args")
             if args:
-                entry["args"] = [str(arg) for arg in args]
-            entry["transport"] = str(config.get("transport") or config.get("type") or "stdio")
+                entry["args"] = list(args)
+            entry["transport"] = config.get("transport") or config.get("type") or "stdio"
         elif config.get("url"):
-            entry["url"] = str(config["url"])
+            entry["url"] = config["url"]
             transport = config.get("transport") or config.get("type")
             if transport:
-                entry["transport"] = str(transport)
+                entry["transport"] = transport
         else:
             # No command/url -> provider-only, so it is named as unresolved.
-            entry["provider"] = str(config.get("provider") or config.get("type") or "")
+            entry["provider"] = config.get("provider") or config.get("type") or ""
         normalized.append(entry)
     return normalized
 
@@ -852,25 +983,51 @@ def _split_mcp_servers(manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], 
     for idx, raw in enumerate(raw_servers):
         if not isinstance(raw, dict):
             raise ValueError(f"Plugin manifest mcp[{idx}] must be an object")
-        name = str(raw.get("name") or "").strip()
-        if not name:
-            raise ValueError(f"Plugin manifest mcp[{idx}] requires a name")
+        name = require_bounded_string(
+            raw.get("name"),
+            f"Plugin manifest mcp[{idx}].name",
+            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+        ).strip()
         if raw.get("command") or raw.get("url"):
-            declaration = {key: value for key, value in raw.items() if key not in {"name", "_unsupported_fields"}}
-            _reject_unsafe_mcp_declaration(name, declaration)
             server: dict[str, Any] = {"name": name}
             for key in ("url", "command", "transport"):
                 if raw.get(key):
-                    server[key] = str(raw[key])
+                    server[key] = require_bounded_string(
+                        raw[key],
+                        f"Plugin manifest mcp[{idx}].{key}",
+                        max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+                    )
             if raw.get("args"):
-                server["args"] = [str(a) for a in raw["args"]]
+                args = raw["args"]
+                if not isinstance(args, list) or len(args) > MAX_PLUGIN_MANIFEST_ITEMS:
+                    raise ValueError(f"Plugin manifest mcp[{idx}].args must be a bounded list")
+                server["args"] = [
+                    require_bounded_string(
+                        arg,
+                        f"Plugin manifest mcp[{idx}].args[{arg_index}]",
+                        max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+                        allow_empty=True,
+                    )
+                    for arg_index, arg in enumerate(args)
+                ]
             if "command" in server and "transport" not in server:
                 server["transport"] = "stdio"
             runnable.append(server)
             if raw.get("_unsupported_fields"):
                 unsupported_config.append(name)
         else:
-            provider_only.append({"name": name, "provider": str(raw.get("provider") or "")})
+            provider = raw.get("provider") or ""
+            provider_only.append(
+                {
+                    "name": name,
+                    "provider": require_bounded_string(
+                        provider,
+                        f"Plugin manifest mcp[{idx}].provider",
+                        max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+                        allow_empty=True,
+                    ),
+                }
+            )
     return runnable, provider_only, unsupported_config
 
 
@@ -906,15 +1063,14 @@ def _fresh_package_dir(stage_root: Path, plugin_name: str) -> Path:
 def _write_plugin_skill_md(
     path: Path,
     *,
-    manifest: dict[str, Any],
     plugin_name: str,
+    plugin_description: str,
     include_skills: tuple[Path, ...],
     staged_rules: tuple[Path, ...],
     unresolved_skill_refs: tuple[str, ...],
     unresolved_rule_refs: tuple[str, ...],
     provider_mcp_servers: tuple[str, ...],
 ) -> None:
-    description = str(manifest.get("description") or f"Plugin evaluation wrapper for {plugin_name}.").strip()
     member_lines = "\n".join(f"- {skill.name}: staged as a plugin member skill." for skill in include_skills)
     if not member_lines:
         member_lines = "- No member skills were staged; evaluate the plugin wrapper, rules, and tools."
@@ -928,7 +1084,7 @@ def _write_plugin_skill_md(
     frontmatter = yaml.safe_dump(
         {
             "name": plugin_name,
-            "description": description,
+            "description": plugin_description,
             "metadata": {"generated_by": "skillevaluator-plugin-eval"},
         },
         sort_keys=False,

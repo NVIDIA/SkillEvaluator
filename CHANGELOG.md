@@ -25,6 +25,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Security
 
+- Hardened Tier 2 and plugin input handling with descriptor-anchored,
+  no-follow discovery and reads; linked, hard-linked, reparse-point, escaping,
+  and special files are rejected, while YAML/JSON nesting, scalar volume,
+  embedding work, and LLM prompt/response budgets are bounded before provider
+  calls or cache writes.
 - Isolated NVIDIA Build bridge credentials from vendor CLI processes using a
   transient, root-managed, container-only key handoff with cleanup on failure.
 - Removed NVIDIA Build secrets from Harbor and Docker exec arguments using a

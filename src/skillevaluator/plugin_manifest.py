@@ -17,6 +17,7 @@ from skillevaluator.constants import (
     PLUGIN_CONTAINED_MANIFEST_TYPE,
     PLUGIN_MANIFEST_FILES,
     PLUGIN_MANIFEST_TYPE,
+    SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.utils.secure_fs import (
     SecureFile,
@@ -122,6 +123,7 @@ def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
         files = discover_secure_files(
             root,
             selected=lambda relative: relative in selected_paths,
+            excluded_dirs=SCAN_EXCLUDED_DIRS,
             max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             max_depth=2,
         )

@@ -148,37 +148,36 @@ class TestCollectFilesSecurityContract:
         with pytest.raises(ValueError, match=r"guide\.md|symlink|reparse|unsafe"):
             collect_files(skill_root)
 
-    def test_ignores_irrelevant_links_without_resolving_them(
-        self, skill_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("target_kind", ["contained", "escaping", "broken", "cyclic"])
+    def test_rejects_non_scannable_file_redirect(
+        self,
+        skill_root: Path,
+        tmp_path: Path,
+        target_kind: str,
     ) -> None:
-        contained = skill_root / "contained.bin"
-        contained_target = skill_root / "payload.dat"
-        contained_target.write_bytes(b"contained")
-        contained.symlink_to(contained_target.name)
-        escaping = skill_root / "escaping.bin"
-        outside = tmp_path / "outside.dat"
-        outside.write_bytes(b"outside")
-        escaping.symlink_to(outside)
-        broken = skill_root / "broken.bin"
-        broken.symlink_to("missing.dat")
+        linked = skill_root / "irrelevant.bin"
+        if target_kind == "contained":
+            target = skill_root / "payload.dat"
+            target.write_bytes(b"contained")
+        elif target_kind == "escaping":
+            target = tmp_path / "outside.dat"
+            target.write_bytes(b"outside")
+        elif target_kind == "cyclic":
+            target = linked
+        else:
+            target = skill_root / "missing.dat"
+        linked.symlink_to(target)
 
-        real_resolve = Path.resolve
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            collect_files(skill_root)
 
-        def reject_link_resolution(path: Path, *args, **kwargs):
-            if path in {contained, escaping, broken}:
-                raise AssertionError(f"irrelevant link was resolved: {path.name}")
-            return real_resolve(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "resolve", reject_link_resolution)
-
-        assert collect_files(skill_root) == []
-
-    def test_ignores_suffixless_irrelevant_file_alias(self, skill_root: Path) -> None:
+    def test_rejects_suffixless_irrelevant_file_alias(self, skill_root: Path) -> None:
         target = skill_root / "LICENSE.txt"
         target.write_text("license text")
         (skill_root / "LICENSE").symlink_to(target.name)
 
-        assert collect_files(skill_root) == []
+        with pytest.raises(ValueError, match=r"LICENSE|symlink|reparse|unsafe"):
+            collect_files(skill_root)
 
     def test_deduplicates_contained_claude_agents_compatibility_alias(self, skill_root: Path) -> None:
         agents = skill_root / "AGENTS.md"

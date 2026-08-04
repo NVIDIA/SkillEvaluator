@@ -32,7 +32,78 @@ def _write_manifest(dir_path: Path, body: str, name: str = "agent_plugin.yaml") 
     return manifest
 
 
+def _write_valid_skill(skills_root: Path, name: str) -> Path:
+    skill_dir = skills_root / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        "description: A valid bundled skill used for secure discovery tests.\n"
+        "metadata:\n"
+        "  author: Test Author <test@example.com>\n"
+        "---\n\n"
+        f"# {name}\n\n"
+        "## Instructions\nFollow the request.\n\n"
+        "## Examples\nRun the example.\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
 class TestPluginSchemaValidator:
+    def test_bundled_manifest_swap_after_discovery_fails_closed(self, tmp_path: Path, monkeypatch):
+        from skillevaluator.utils import helpers
+
+        _write_manifest(tmp_path, _VALID_MANIFEST)
+        skill_dir = _write_valid_skill(tmp_path / "skills", "safe-skill")
+        manifest = skill_dir / "SKILL.md"
+        outside = tmp_path / "outside.md"
+        outside.write_text(
+            "---\nname: outside-canary\ndescription: Content outside the plugin root.\n---\n\n# Outside\n",
+            encoding="utf-8",
+        )
+        real_discover = helpers.discover_secure_files
+
+        def discover_then_swap(*args, **kwargs):
+            files = real_discover(*args, **kwargs)
+            if Path(args[0]) == tmp_path / "skills":
+                manifest.unlink()
+                manifest.symlink_to(outside)
+            return files
+
+        monkeypatch.setattr(helpers, "discover_secure_files", discover_then_swap)
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert result.metadata["security_failure"] is True
+        assert any(finding.check_name == "bundled_skill_path_unsafe" for finding in result.findings)
+        assert not any("outside-canary" in finding.message for finding in result.findings)
+
+    def test_bundled_directory_swap_after_secure_read_does_not_inspect_outside(self, tmp_path: Path, monkeypatch):
+        from skillevaluator.utils.secure_fs import SecureRoot
+
+        _write_manifest(tmp_path, _VALID_MANIFEST)
+        skill_dir = _write_valid_skill(tmp_path / "skills", "safe-skill")
+        outside = tmp_path / "outside-skill"
+        outside.mkdir()
+        (outside / "OUTSIDE_CANARY").write_text("do not inspect", encoding="utf-8")
+        original = tmp_path / "original-safe-skill"
+        real_read = SecureRoot.read_file_text
+
+        def read_then_swap(self, manifest, max_bytes):
+            content = real_read(self, manifest, max_bytes)
+            if manifest.relative_path.as_posix() == "safe-skill/SKILL.md":
+                skill_dir.rename(original)
+                skill_dir.symlink_to(outside, target_is_directory=True)
+            return content
+
+        monkeypatch.setattr(SecureRoot, "read_file_text", read_then_swap)
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        rendered_findings = "\n".join(f"{finding.message}\n{finding.file_path or ''}" for finding in result.findings)
+        assert "OUTSIDE_CANARY" not in rendered_findings
+
     def test_rejects_manifest_symlink_outside_plugin_root(self, tmp_path: Path):
         outside = tmp_path / "outside"
         outside.mkdir()

@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 # config assignment. Used to recognize repeated config/comment snippets.
 _COMMENT_PREFIXES = ("#", ";", "//", "--", "!")
 _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
+
+
 def _is_comment_or_config_line(line: str) -> bool:
     """Return True for comment lines or simple ``key=value``/``key: value`` config lines."""
     stripped = line.strip()
@@ -195,7 +197,8 @@ class IntraSkillValidator(ValidatorBase):
             client = EmbeddingClient(model=self._embedding_model)
             texts = [c.text for c in all_chunks]
 
-            all_embeddings: list[list[float]] = []
+            pair_count = len(all_chunks) * (len(all_chunks) - 1) // 2
+            vector_dimension: int | None = None
             for i in range(0, len(texts), CONTENT_DEDUP_EMBEDDING_BATCH_SIZE):
                 batch = texts[i : i + CONTENT_DEDUP_EMBEDDING_BATCH_SIZE]
                 logger.info(
@@ -204,44 +207,42 @@ class IntraSkillValidator(ValidatorBase):
                     (len(texts) - 1) // CONTENT_DEDUP_EMBEDDING_BATCH_SIZE + 1,
                     len(batch),
                 )
-                all_embeddings.extend(client.embed(batch))
-
-            if len(all_embeddings) != len(all_chunks):
-                raise SimilarityConfigError(
-                    f"Embedding provider returned {len(all_embeddings)} vectors for {len(all_chunks)} chunks."
-                )
-            vector_dimension: int | None = None
-            for chunk, emb in zip(all_chunks, all_embeddings, strict=True):
-                vector_dimension = validate_embedding_vector(
-                    emb,
-                    vector_dimension,
-                    context="Embedding provider",
-                )
-                chunk.embedding = emb
-
-            pair_count = len(all_chunks) * (len(all_chunks) - 1) // 2
-            scalar_work = pair_count * (vector_dimension or 0)
-            if scalar_work > CONTENT_DEDUP_MAX_SCALAR_COMPARISONS:
-                result.add_finding(
-                    Finding(
-                        category="CONTENT_DEDUP",
-                        severity=Severity.CRITICAL,
-                        check_name="scalar_comparison_limit",
-                        message=(
-                            "Tier 2 scalar comparison work exceeds the configured limit "
-                            f"({CONTENT_DEDUP_MAX_SCALAR_COMPARISONS})."
-                        ),
-                        file_path=report_path,
-                        suggestion="Reduce or split the skill content before running Tier 2.",
-                        metadata={
-                            "pair_count": pair_count,
-                            "vector_dimension": vector_dimension,
-                            "scalar_work": scalar_work,
-                            "limit": CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
-                        },
+                batch_embeddings = client.embed(batch)
+                if len(batch_embeddings) != len(batch):
+                    raise SimilarityConfigError(
+                        f"Embedding provider returned {len(batch_embeddings)} vectors for a batch of "
+                        f"{len(batch)} chunks."
                     )
-                )
-                return result
+                for chunk, emb in zip(all_chunks[i : i + len(batch)], batch_embeddings, strict=True):
+                    vector_dimension = validate_embedding_vector(
+                        emb,
+                        vector_dimension,
+                        context="Embedding provider",
+                    )
+                    chunk.embedding = emb
+
+                scalar_work = pair_count * (vector_dimension or 0)
+                if scalar_work > CONTENT_DEDUP_MAX_SCALAR_COMPARISONS:
+                    result.add_finding(
+                        Finding(
+                            category="CONTENT_DEDUP",
+                            severity=Severity.CRITICAL,
+                            check_name="scalar_comparison_limit",
+                            message=(
+                                "Tier 2 scalar comparison work exceeds the configured limit "
+                                f"({CONTENT_DEDUP_MAX_SCALAR_COMPARISONS})."
+                            ),
+                            file_path=report_path,
+                            suggestion="Reduce or split the skill content before running Tier 2.",
+                            metadata={
+                                "pair_count": pair_count,
+                                "vector_dimension": vector_dimension,
+                                "scalar_work": scalar_work,
+                                "limit": CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
+                            },
+                        )
+                    )
+                    return result
 
             logger.info("Embedding complete")
 

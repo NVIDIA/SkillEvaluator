@@ -1346,33 +1346,45 @@ def validate(
     validated against its public contract. Quality/lint/version checks are
     skill-only and skipped for plugins.
     """
-    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
-
-    try:
-        declared_metadata = target_path.lstat()
-    except OSError as exc:
-        raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
-    if stat_is_link_or_reparse(declared_metadata):
-        raise click.UsageError(
-            f"Validation target root is a symlink or reparse point (including a junction): {target_path.name or '.'}"
-        )
-    if stat.S_ISREG(declared_metadata.st_mode) and getattr(declared_metadata, "st_nlink", 1) != 1:
-        raise click.UsageError(f"Validation target is a hard-linked file: {target_path.name or '.'}")
-    if not (stat.S_ISREG(declared_metadata.st_mode) or stat.S_ISDIR(declared_metadata.st_mode)):
-        raise click.UsageError(f"Validation target is not a regular file or directory: {target_path.name or '.'}")
-    target_path = target_path.resolve()
-
     from skillevaluator.cli_core import detect_content_type, resolve_content_path
     from skillevaluator.constants import (
         CONTENT_TYPE_PLUGIN,
         CONTENT_TYPE_RULES,
         CONTENT_TYPE_SKILL,
+        CONTENT_TYPE_UNKNOWN,
         CONTENT_TYPE_WORKFLOWS,
+        PLUGIN_CONTAINED_MANIFEST_DIR,
+        PLUGIN_CONTAINED_MANIFEST_FILE,
+        PLUGIN_MANIFEST_FILES,
+        RULES_FILE_EXTENSION,
+        SKILL_MANIFEST_VARIANTS,
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
     from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
     from skillevaluator.validators.policy import apply_policy, resolve_policy
+
+    try:
+        declared_metadata = target_path.lstat()
+    except OSError as exc:
+        raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
+    declared_is_redirect = stat_is_link_or_reparse(declared_metadata)
+    declared_is_selected_manifest = (
+        target_path.name in SKILL_MANIFEST_VARIANTS
+        or target_path.name in PLUGIN_MANIFEST_FILES
+        or (
+            target_path.name == PLUGIN_CONTAINED_MANIFEST_FILE
+            and target_path.parent.name == PLUGIN_CONTAINED_MANIFEST_DIR
+        )
+        or target_path.suffix == RULES_FILE_EXTENSION
+    )
+    if stat.S_ISREG(declared_metadata.st_mode) and getattr(declared_metadata, "st_nlink", 1) != 1:
+        raise click.UsageError(f"Validation target is a hard-linked file: {target_path.name or '.'}")
+    if not declared_is_redirect and not (
+        stat.S_ISREG(declared_metadata.st_mode) or stat.S_ISDIR(declared_metadata.st_mode)
+    ):
+        raise click.UsageError(f"Validation target is not a regular file or directory: {target_path.name or '.'}")
 
     if external and profile and profile != "external":
         raise click.ClickException(f"--external conflicts with --profile {profile}; pass one or the other.")
@@ -1405,18 +1417,58 @@ def validate(
         if not agent_eval:
             autopilot = False
 
-    from skillevaluator.constants import CONTENT_TYPE_UNKNOWN
+    run_tier2 = dedup and resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
+    run_tier3 = agent_eval and resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
+    if declared_is_redirect:
+        auto_non_tier1_requested = content_type == "auto" and (dedup or agent_eval)
+        if (
+            declared_is_selected_manifest
+            or run_tier2
+            or run_tier3
+            or auto_non_tier1_requested
+            or not target_path.is_dir()
+        ):
+            raise click.UsageError(
+                f"Validation target root is a symlink or reparse point (including a junction): "
+                f"{target_path.name or '.'}"
+            )
+        try:
+            resolved_target = target_path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise click.ClickException(f"Cannot resolve linked Tier 1 validation root safely: {exc}") from exc
+        if content_type == "auto":
+            resolved_type = detect_content_type(resolved_target)
+            resolved_target = resolve_content_path(resolved_target, resolved_type)
 
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
     # once per skill, serially, each as its own job with its own reports.
     discovered_skill_dirs: list[Path] = []
-    if resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN) and target_path.is_dir():
-        from skillevaluator.utils.helpers import find_skills_in_directory
+    if resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN) and resolved_target.is_dir():
+        root_has_regular_manifest = False
+        for manifest_name in SKILL_MANIFEST_VARIANTS:
+            try:
+                manifest_metadata = (resolved_target / manifest_name).lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise click.ClickException(f"Cannot inspect validation target safely: {exc}") from exc
+            if (
+                not stat_is_link_or_reparse(manifest_metadata)
+                and stat.S_ISREG(manifest_metadata.st_mode)
+                and getattr(manifest_metadata, "st_nlink", 1) == 1
+            ):
+                root_has_regular_manifest = True
+                break
 
-        try:
-            discovered_skill_dirs = find_skills_in_directory(target_path)
-        except ValueError as exc:
-            raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
+        if root_has_regular_manifest:
+            discovered_skill_dirs = [resolved_target]
+        else:
+            from skillevaluator.utils.helpers import find_skills_in_directory
+
+            try:
+                discovered_skill_dirs = find_skills_in_directory(resolved_target)
+            except ValueError as exc:
+                raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
     if (
         discovered_skill_dirs
         and resolved_target not in discovered_skill_dirs
@@ -1432,10 +1484,9 @@ def validate(
     # Quiet (default) drives the compact pipeline view; --verbose keeps the
     # historical full-detail stream, as does DEBUG logging via the group -v.
     quiet = not verbose and not logging.getLogger().isEnabledFor(logging.DEBUG)
-    run_tier3 = agent_eval
     planned_tiers = [(1, "Static & Security", "static & security")]
     tier2_index = tier3_index = None
-    if dedup:
+    if run_tier2:
         tier2_index = len(planned_tiers)
         planned_tiers.append((2, "Deduplication", "deduplication"))
     if run_tier3:
@@ -1489,7 +1540,7 @@ def validate(
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
 
-    if dedup and not (fail_fast and not continue_on_failure and tier1_raw_failed):
+    if run_tier2 and not (fail_fast and not continue_on_failure and tier1_raw_failed):
         if not quiet:
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
@@ -1507,7 +1558,7 @@ def validate(
             view.tier_done(tier2_index, failed=not tier2_ok, rows=tier2_rows)
         else:
             view.tier_skip(tier2_index, tier2_skip)
-    elif dedup:
+    elif run_tier2:
         view.tier_skip(tier2_index, "skipped after Tier 1 failure (fail-fast)")
 
     # Tier 1 (and Tier 2) gate the exit code; Tier 3 is advisory. Snapshot the
@@ -1523,7 +1574,7 @@ def validate(
     # Severities are finalized first so this interim view matches the combined
     # report rendered at the end (apply_policy is idempotent, so emit_reports
     # re-applying it is a no-op).
-    if not quiet and agent_eval and "cli" in report_formats:
+    if not quiet and run_tier3 and "cli" in report_formats:
         apply_policy(tier_gate_results, policy)
         CLIReporter(console=console).print_summary(tier_gate_results)
 
@@ -1532,7 +1583,7 @@ def validate(
     # runs regardless of Tier 1/Tier 2 outcome. It degrades to a non-blocking
     # advisory note when it cannot run.
     tier3_result: ValidationResult | None = None
-    if agent_eval:
+    if run_tier3:
         if not quiet:
             _print_tier_banner(_TIER_BANNERS["tier3"])
         view.tier_start(tier3_index)

@@ -29,7 +29,10 @@ All notable changes to SkillEvaluator are documented in this file.
   no-follow discovery and reads; linked, hard-linked, reparse-point, escaping,
   and special files are rejected, while YAML/JSON nesting, scalar volume,
   embedding work, and LLM prompt/response budgets are bounded before provider
-  calls or cache writes.
+  calls or cache writes. The only redirect exception is the exact, contained
+  `CLAUDE.md -> AGENTS.md` public compatibility alias; Windows reads now use
+  native handle verification with the same fail-closed identity checks as
+  POSIX.
 - Isolated NVIDIA Build bridge credentials from vendor CLI processes using a
   transient, root-managed, container-only key handoff with cleanup on failure.
 - Removed NVIDIA Build secrets from Harbor and Docker exec arguments using a

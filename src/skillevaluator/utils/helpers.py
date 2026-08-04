@@ -15,7 +15,7 @@ from skillevaluator.constants import (
     SCAN_EXCLUDED_DIRS,
     SKILL_MANIFEST_VARIANTS,
 )
-from skillevaluator.utils.secure_fs import discover_secure_files, stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import SecureFile, discover_secure_files, stat_is_link_or_reparse
 
 
 def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
@@ -59,17 +59,30 @@ def find_skills_in_directory(root_path: Path) -> list[Path]:
             raise ValueError(f"Refusing hard-linked selected manifest: {root_path.name}")
         return [root_path.parent]
 
+    manifests = _discover_skill_manifests(root_path)
+    return [(root_path / manifest.relative_path).parent for manifest in manifests]
+
+
+def _discover_skill_manifests(root_path: Path) -> list[SecureFile]:
+    """Return one securely discovered manifest identity per skill directory."""
     manifests = discover_secure_files(
         root_path,
         selected=lambda relative: relative.name in SKILL_MANIFEST_VARIANTS,
         excluded_dirs=SCAN_EXCLUDED_DIRS,
         max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     )
-    return sorted({(root_path / manifest.relative_path).parent for manifest in manifests})
+    priority = {name: index for index, name in enumerate(SKILL_MANIFEST_VARIANTS)}
+    selected: dict[Path, SecureFile] = {}
+    for manifest in manifests:
+        directory = manifest.relative_path.parent
+        current = selected.get(directory)
+        if current is None or priority[manifest.relative_path.name] < priority[current.relative_path.name]:
+            selected[directory] = manifest
+    return [selected[directory] for directory in sorted(selected)]
 
 
-def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
-    """Find live, regular skills under a plugin's ``skills/`` directory."""
+def find_bundled_plugin_skill_manifests(plugin_root: Path) -> list[SecureFile]:
+    """Return retained manifest identities for live ``<plugin_root>/skills`` entries."""
     skills_root = plugin_root / "skills"
     try:
         metadata = skills_root.lstat()
@@ -81,7 +94,15 @@ def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
         raise ValueError("Plugin skills root is a symlink, junction, or reparse point")
     if not stat.S_ISDIR(metadata.st_mode):
         return []
-    return find_skills_in_directory(skills_root)
+    return _discover_skill_manifests(skills_root)
+
+
+def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
+    """Find live, regular skills under a plugin's ``skills/`` directory."""
+    skills_root = plugin_root / "skills"
+    return [
+        skills_root / manifest.relative_path.parent for manifest in find_bundled_plugin_skill_manifests(plugin_root)
+    ]
 
 
 def resolve_git_remote_url(local_path: Path) -> str | None:

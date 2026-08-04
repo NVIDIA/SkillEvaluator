@@ -106,9 +106,9 @@ def collect_files(
     """Collect all selected Tier 2 text through a verified root descriptor.
 
     Generated directories are pruned before the path budget. Other authored
-    paths count even when irrelevant. File links that are irrelevant to the
-    selected extension set are ignored without resolution; selected redirects,
-    hardlinks, special files, or unbounded inputs fail closed.
+    paths count even when irrelevant. Redirects fail closed except for the exact
+    validated compatibility alias; selected hardlinks, special files, and
+    unbounded inputs also fail closed.
     """
     excluded = CONTENT_DEDUP_EXCLUDED_DIRS if excluded_dirs is None else frozenset(excluded_dirs)
     excluded_basenames = (

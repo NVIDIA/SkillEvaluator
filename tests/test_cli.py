@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from pathlib import Path
 
 import click
@@ -226,7 +227,7 @@ def test_validate_rejects_linked_root_before_default_tier2_run(tmp_path: Path, m
     assert str(target) not in result.output
 
 
-def test_validate_rejects_linked_root_when_tier2_is_disabled(tmp_path: Path, monkeypatch) -> None:
+def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "real-skill"
     target.mkdir()
     (target / "SKILL.md").write_text(
@@ -239,19 +240,68 @@ def test_validate_rejects_linked_root_when_tier2_is_disabled(tmp_path: Path, mon
     except OSError as exc:
         pytest.skip(f"Directory symlinks are unavailable: {exc}")
 
-    def must_not_run(*_args, **_kwargs):
-        raise AssertionError("Validation must reject an unsafe root before Tier 1 runs")
+    validated_paths: list[Path] = []
 
-    monkeypatch.setattr("skillevaluator.cli.run_validation", must_not_run)
+    def validate_tier1(path: Path, **_kwargs):
+        validated_paths.append(path)
+        result = ValidationResult()
+        result.add_success("schema", "Tier 1 linked-root compatibility validation ran")
+        return [result]
+
+    monkeypatch.setattr("skillevaluator.cli.run_validation", validate_tier1)
 
     result = CliRunner().invoke(
         cli,
-        ["validate", str(linked_target), "--no-dedup", "--checks", "schema"],
+        [
+            "validate",
+            str(linked_target),
+            "--no-dedup",
+            "--checks",
+            "schema",
+            "--report",
+            "cli",
+            "--output-dir",
+            str(tmp_path / "reports"),
+        ],
     )
 
-    assert result.exit_code == 2, result.output
-    assert "symlink" in result.output or "reparse point" in result.output
-    assert str(target) not in result.output
+    assert result.exit_code == 0, result.output
+    assert validated_paths == [target.resolve()]
+
+
+def test_validate_rejects_direct_symlinked_manifest_in_tier1_only_mode(tmp_path: Path) -> None:
+    skill = tmp_path / "sample"
+    skill.mkdir()
+    source = tmp_path / "source.md"
+    source.write_text("---\nname: sample\ndescription: Linked manifest.\n---\n\n# Sample\n", encoding="utf-8")
+    manifest = skill / "SKILL.md"
+    manifest.symlink_to(source)
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", str(manifest), "--type", "skill", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+
+    assert result.exit_code != 0
+    assert "symlink" in result.output.lower() or "reparse" in result.output.lower()
+
+
+def test_validate_rejects_direct_hardlinked_manifest_in_tier1_only_mode(tmp_path: Path) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("---\nname: sample\ndescription: Hard-linked manifest.\n---\n\n# Sample\n", encoding="utf-8")
+    manifest = tmp_path / "SKILL.md"
+    try:
+        os.link(source, manifest)
+    except OSError as exc:
+        pytest.skip(f"Hard links are unavailable: {exc}")
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", str(manifest), "--type", "skill", "--no-llm", "--no-dedup", "--report", "cli"],
+    )
+
+    assert result.exit_code != 0
+    assert "hard-linked" in result.output.lower()
 
 
 @pytest.mark.parametrize("extension", [".json", ".html", ".md"])

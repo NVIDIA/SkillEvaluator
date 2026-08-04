@@ -290,32 +290,25 @@ class TestExtractorSecurityContract:
         with pytest.raises(ValueError, match=r"directory|symlink|reparse|unsafe"):
             discover_and_extract(catalog, "skill")
 
-    def test_ignores_irrelevant_links_without_resolving_them(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    @pytest.mark.parametrize("target_kind", ["contained", "escaping", "broken", "cyclic"])
+    def test_rejects_non_compatibility_file_redirects(self, tmp_path: Path, target_kind: str) -> None:
         catalog = tmp_path / "catalog"
         catalog.mkdir()
-        target = catalog / "payload.dat"
-        target.write_bytes(b"payload")
-        contained = catalog / "contained.bin"
-        contained.symlink_to(target.name)
-        outside = tmp_path / "outside.dat"
-        outside.write_bytes(b"outside")
-        escaping = catalog / "escaping.bin"
-        escaping.symlink_to(outside)
-        broken = catalog / "broken.bin"
-        broken.symlink_to("missing.dat")
+        linked = catalog / "irrelevant.bin"
+        if target_kind == "contained":
+            target = catalog / "payload.dat"
+            target.write_bytes(b"payload")
+        elif target_kind == "escaping":
+            target = tmp_path / "outside.dat"
+            target.write_bytes(b"outside")
+        elif target_kind == "cyclic":
+            target = linked
+        else:
+            target = catalog / "missing.dat"
+        linked.symlink_to(target)
 
-        real_resolve = Path.resolve
-
-        def reject_link_resolution(path: Path, *args, **kwargs):
-            if path in {contained, escaping, broken}:
-                raise AssertionError(f"irrelevant link was resolved: {path.name}")
-            return real_resolve(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "resolve", reject_link_resolution)
-
-        assert discover_and_extract(catalog, "skill") == []
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            discover_and_extract(catalog, "skill")
 
     def test_bounds_irrelevant_paths_and_prunes_generated_directories(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

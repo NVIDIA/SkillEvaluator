@@ -3,11 +3,9 @@
 
 """Fail-closed filesystem primitives for untrusted Tier 2 inputs.
 
-Discovery is lexical and no-descent: irrelevant links are counted but never
-content-opened, read, or descended. One metadata-only target-type query follows
-an irrelevant redirect just enough to distinguish an existing linked directory
-from an irrelevant file link; the directory redirect is rejected immediately.
-Selected files are read through
+Discovery is lexical and no-descent: redirects are counted and rejected from
+no-follow metadata, except for the exact validated ``CLAUDE.md -> AGENTS.md``
+compatibility alias. Selected files are read through
 directory-file descriptors where the platform supports them, with identity,
 type, link-count, size, and containment checks around the open.
 """
@@ -26,6 +24,42 @@ _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _READLINK_SUPPORTS_DIR_FD = os.readlink in os.supports_dir_fd
 _SCANDIR_SUPPORTS_FD = os.scandir in os.supports_fd
 MAX_SECURE_DIRECTORY_DEPTH = 64
+
+# Native Windows access/share/create values used by both the selected-file
+# reader and the atomic cache writer. Reader handles intentionally omit
+# FILE_SHARE_DELETE (0x4), pinning every opened directory/file identity while
+# it participates in an anchored traversal.
+_WINDOWS_FILE_READ_DATA = 0x1
+_WINDOWS_FILE_TRAVERSE = 0x20
+_WINDOWS_FILE_READ_ATTRIBUTES = 0x80
+_WINDOWS_SYNCHRONIZE = 0x100000
+_WINDOWS_SHARE_READ_WRITE = 0x1 | 0x2
+_WINDOWS_FILE_OPEN = 1
+_WINDOWS_FILE_CREATE = 2
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x80
+_WINDOWS_FILE_DIRECTORY_FILE = 0x1
+_WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT = 0x20
+_WINDOWS_FILE_NON_DIRECTORY_FILE = 0x40
+_WINDOWS_FILE_OPEN_FOR_BACKUP_INTENT = 0x00004000
+_WINDOWS_FILE_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_OBJ_CASE_INSENSITIVE = 0x40
+_WINDOWS_OBJ_DONT_REPARSE = 0x1000
+_WINDOWS_OBJECT_ATTRIBUTES_FLAGS = _WINDOWS_OBJ_CASE_INSENSITIVE | _WINDOWS_OBJ_DONT_REPARSE
+_WINDOWS_DIRECTORY_READ_ACCESS = _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_FILE_TRAVERSE | _WINDOWS_SYNCHRONIZE
+_WINDOWS_FILE_READ_ACCESS = _WINDOWS_FILE_READ_DATA | _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_SYNCHRONIZE
+_WINDOWS_DISCOVERY_ENTRY_ACCESS = _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_SYNCHRONIZE
+_WINDOWS_DIRECTORY_OPEN_OPTIONS = (
+    _WINDOWS_FILE_DIRECTORY_FILE
+    | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT
+    | _WINDOWS_FILE_OPEN_FOR_BACKUP_INTENT
+    | _WINDOWS_FILE_OPEN_REPARSE_POINT
+)
+_WINDOWS_FILE_OPEN_OPTIONS = (
+    _WINDOWS_FILE_NON_DIRECTORY_FILE | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT | _WINDOWS_FILE_OPEN_REPARSE_POINT
+)
+_WINDOWS_DISCOVERY_ENTRY_OPTIONS = (
+    _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT | _WINDOWS_FILE_OPEN_FOR_BACKUP_INTENT | _WINDOWS_FILE_OPEN_REPARSE_POINT
+)
 
 
 class SecurePathError(ValueError):
@@ -69,6 +103,31 @@ class _DirectoryFrame:
     parent_name: str | None = None
     children: list[tuple[str, os.stat_result]] | None = None
     next_child: int = 0
+
+
+@dataclass
+class _WindowsDirectoryFrame:
+    """One pinned directory in the iterative native Windows discovery DFS."""
+
+    handle: int
+    path: Path
+    relative_path: Path
+    expected: _WindowsHandleMetadata
+    owns_handle: bool
+    children: list[tuple[str, _WindowsHandleMetadata]] | None = None
+    next_child: int = 0
+
+
+@dataclass(frozen=True)
+class _WindowsHandleMetadata:
+    """Stable metadata queried from one open native Windows handle."""
+
+    attributes: int
+    volume_serial: int
+    file_id: int
+    size: int
+    link_count: int
+    last_write_time: int = 0
 
 
 def stat_is_link_or_reparse(metadata: os.stat_result) -> bool:
@@ -143,19 +202,15 @@ def discover_secure_files(
     excluded_dirs: Iterable[str] = (),
     max_paths: int,
     max_depth: int | None = None,
-    allow_context_alias: bool = False,
+    allow_context_alias: bool = True,
 ) -> list[SecureFile]:
     """Discover selected files below ``root`` without following redirects.
 
     Excluded directories are pruned before they consume the path budget.
-    Every other authored entry consumes the budget, including irrelevant links.
-    Irrelevant links are never content-opened, read, or descended. A metadata-
-    only target-type query follows them just enough to identify existing
-    directory redirects, which fail before pruning/descent. A selected link
-    never gets that target query and fails closed except for
-    the exact contained ``CLAUDE.md -> AGENTS.md``
-    compatibility alias, whose regular target must be independently discovered;
-    only that target is returned and read.
+    Every other authored entry consumes the budget. File and directory redirects
+    fail closed without target content reads except for the exact contained
+    ``CLAUDE.md -> AGENTS.md`` compatibility alias, whose regular target must be
+    independently discovered; only that target is returned and read.
     """
     if max_paths < 1:
         raise ValueError("max_paths must be positive")
@@ -172,7 +227,7 @@ def discover_secure_files(
 
     excluded = frozenset(excluded_dirs)
     files: list[SecureFile] = []
-    by_relative: dict[Path, SecureFile] = {}
+    regular_by_relative: dict[Path, os.stat_result] = {}
     pending_aliases: list[tuple[Path, Path]] = []
     discovered_paths = 0
 
@@ -196,8 +251,6 @@ def discover_secure_files(
     ) -> None:
         is_selected = selected(relative) if selected_result is None else selected_result
         if stat_is_link_or_reparse(metadata):
-            if not is_selected:
-                return
             target: Path | None = None
             if allow_context_alias and relative.name == "CLAUDE.md":
                 try:
@@ -215,9 +268,11 @@ def discover_secure_files(
                 return
             raise SecurePathError(
                 "unsafe_path",
-                f"Refusing selected symlink or reparse point: {relative.as_posix()}",
+                f"Refusing symlink or reparse point: {relative.as_posix()}",
                 relative_path=relative.as_posix(),
             )
+        if stat.S_ISREG(metadata.st_mode):
+            regular_by_relative[relative] = metadata
         if not is_selected:
             return
         if not stat.S_ISREG(metadata.st_mode):
@@ -226,7 +281,6 @@ def discover_secure_files(
             _raise_unsafe_file(relative, hardlink=True)
         secure_file = SecureFile(root, root / relative, relative, metadata)
         files.append(secure_file)
-        by_relative[relative] = secure_file
 
     if os.name == "posix":
         if not (_OPEN_SUPPORTS_DIR_FD and _READLINK_SUPPORTS_DIR_FD and _SCANDIR_SUPPORTS_FD):
@@ -261,19 +315,9 @@ def discover_secure_files(
                                         relative_path=relative.as_posix(),
                                     ) from exc
                                 entry_selected = selected(relative)
-                                linked_directory = False
                                 linked_or_reparse = stat_is_link_or_reparse(metadata)
-                                selected_link = linked_or_reparse and entry_selected
-                                if linked_or_reparse and not selected_link:
-                                    # This follows target metadata only to distinguish
-                                    # a directory redirect from an irrelevant file
-                                    # link. The redirect is never opened or descended.
-                                    try:
-                                        linked_directory = entry.is_dir(follow_symlinks=True)
-                                    except OSError:
-                                        linked_directory = False
-                                if stat.S_ISDIR(metadata.st_mode) or linked_directory:
-                                    if linked_directory or linked_or_reparse:
+                                if stat.S_ISDIR(metadata.st_mode):
+                                    if linked_or_reparse:
                                         raise SecurePathError(
                                             "unsafe_path",
                                             "Refusing linked directory or reparse point before descent: "
@@ -394,71 +438,166 @@ def discover_secure_files(
             while frames:
                 os.close(frames.pop().descriptor)
     elif os.name == "nt":
-        # Windows fallback: lstat/reparse checks are applied immediately before
-        # each descent. Python does not expose a portable descriptor-relative
-        # scandir/openat traversal on Windows, so concurrent directory swaps
-        # remain a narrower platform limitation and selected reads are checked
-        # again through final file handles.
-        def raise_walk_error(exc: OSError) -> None:
-            raise SecurePathError("path_access_error", f"Cannot safely traverse Tier 2 directory: {exc}") from exc
-
-        for directory, directory_names, file_names in os.walk(
-            root,
-            topdown=True,
-            onerror=raise_walk_error,
-            followlinks=False,
-        ):
-            directory_path = Path(directory)
-            relative_directory = directory_path.relative_to(root)
-            kept_directories: list[str] = []
-            for name in sorted(directory_names):
-                path = directory_path / name
-                relative = relative_directory / name
-                try:
-                    metadata = path.lstat()
-                except OSError as exc:
-                    raise SecurePathError(
-                        "path_access_error",
-                        f"Cannot inspect Tier 2 path {relative.as_posix()}: {exc}",
-                        relative_path=relative.as_posix(),
-                    ) from exc
-                if stat_is_link_or_reparse(metadata):
-                    raise SecurePathError(
-                        "unsafe_path",
-                        f"Refusing linked directory or reparse point before descent: {relative.as_posix()}",
-                        relative_path=relative.as_posix(),
-                    )
-                if name in excluded:
-                    continue
-                if selected(relative):
-                    _raise_unsafe_file(relative)
-                consume_path(relative)
-                directory_depth = len(relative.parts)
-                if directory_depth > MAX_SECURE_DIRECTORY_DEPTH:
-                    _raise_directory_depth_limit(relative)
-                if max_depth is None or directory_depth < max_depth:
-                    kept_directories.append(name)
-            directory_names[:] = kept_directories
-            for name in sorted(file_names):
-                path = directory_path / name
-                relative = relative_directory / name
-                try:
-                    metadata = path.lstat()
-                except OSError as exc:
-                    raise SecurePathError(
-                        "path_access_error",
-                        f"Cannot inspect Tier 2 path {relative.as_posix()}: {exc}",
-                        relative_path=relative.as_posix(),
-                    ) from exc
-                consume_path(relative)
-                record_file(
-                    relative,
-                    metadata,
-                    # Exact raw link text is security-significant for the one
-                    # compatibility alias; Path.readlink() would normalize it.
-                    lambda path=path: os.readlink(path),  # noqa: PTH115
-                    selected_result=selected(relative),
+        root_handles: list[int] = []
+        frames: list[_WindowsDirectoryFrame] = []
+        try:
+            root_handles = _windows_open_anchored_directory_chain(root, expected=root_metadata)
+            root_handle = root_handles[-1]
+            root_snapshot = _windows_handle_metadata(root_handle)
+            _validate_windows_read_directory_handle(root_handle, Path())
+            frames.append(
+                _WindowsDirectoryFrame(
+                    root_handle,
+                    root,
+                    Path(),
+                    root_snapshot,
+                    owns_handle=False,
                 )
+            )
+
+            while frames:
+                frame = frames[-1]
+                if frame.children is None:
+                    names, stable = _windows_enumerate_pinned_directory_names(
+                        frame.path,
+                        frame.handle,
+                        frame.relative_path,
+                        frame.expected,
+                        max_names=max_paths + len(excluded),
+                        path_limit=max_paths,
+                    )
+                    directory_entries: list[tuple[str, _WindowsHandleMetadata]] = []
+                    file_entries: list[tuple[str, os.stat_result, str | None]] = []
+
+                    for name in names:
+                        path = frame.path / name
+                        relative = frame.relative_path / name
+                        entry_handle = -1
+                        try:
+                            try:
+                                entry_handle, handle_metadata = _windows_open_discovery_handle(frame.handle, name)
+                            except OSError as exc:
+                                raise SecurePathError(
+                                    "path_access_error",
+                                    f"Cannot securely inspect Tier 2 Windows path {relative.as_posix()}: {exc}",
+                                    relative_path=relative.as_posix(),
+                                ) from exc
+                            try:
+                                metadata = path.lstat()
+                            except OSError as exc:
+                                raise SecurePathError(
+                                    "path_access_error",
+                                    f"Cannot inspect pinned Tier 2 Windows path {relative.as_posix()}: {exc}",
+                                    relative_path=relative.as_posix(),
+                                ) from exc
+                            _validate_windows_entry_snapshot(metadata, handle_metadata, relative)
+
+                            is_reparse = bool(handle_metadata.attributes & 0x400)
+                            is_directory = bool(handle_metadata.attributes & 0x10)
+                            if is_reparse and is_directory:
+                                raise SecurePathError(
+                                    "unsafe_path",
+                                    f"Refusing linked directory or reparse point before descent: {relative.as_posix()}",
+                                    relative_path=relative.as_posix(),
+                                )
+                            if is_directory:
+                                if name in excluded:
+                                    continue
+                                directory_entries.append((name, handle_metadata))
+                                continue
+
+                            alias_target: str | None = None
+                            if is_reparse and allow_context_alias and relative.name == "CLAUDE.md":
+                                try:
+                                    alias_target = os.readlink(path)  # noqa: PTH115
+                                except OSError as exc:
+                                    raise SecurePathError(
+                                        "unsafe_path",
+                                        f"Cannot inspect selected compatibility alias: {relative.as_posix()}: {exc}",
+                                        relative_path=relative.as_posix(),
+                                    ) from exc
+                            file_entries.append((name, metadata, alias_target))
+                        finally:
+                            if entry_handle >= 0:
+                                _windows_close_handle(entry_handle)
+
+                    kept_directories: list[tuple[str, _WindowsHandleMetadata]] = []
+                    for name, handle_metadata in directory_entries:
+                        relative = frame.relative_path / name
+                        if selected(relative):
+                            _raise_unsafe_file(relative)
+                        consume_path(relative)
+                        directory_depth = len(relative.parts)
+                        if directory_depth > MAX_SECURE_DIRECTORY_DEPTH:
+                            _raise_directory_depth_limit(relative)
+                        if max_depth is None or directory_depth < max_depth:
+                            kept_directories.append((name, handle_metadata))
+
+                    for name, metadata, alias_target in file_entries:
+                        relative = frame.relative_path / name
+                        consume_path(relative)
+                        record_file(
+                            relative,
+                            metadata,
+                            lambda alias_target=alias_target: alias_target or "",
+                            selected_result=selected(relative),
+                        )
+
+                    current = _windows_handle_metadata(frame.handle)
+                    _validate_windows_discovery_directory_snapshot(current, frame.relative_path, stable)
+                    frame.expected = current
+                    frame.children = kept_directories
+                    continue
+
+                if frame.next_child < len(frame.children):
+                    name, discovered = frame.children[frame.next_child]
+                    frame.next_child += 1
+                    relative = frame.relative_path / name
+                    try:
+                        child_handle = _windows_open_relative_handle(
+                            frame.handle,
+                            name,
+                            access=_WINDOWS_DIRECTORY_READ_ACCESS,
+                            share=_WINDOWS_SHARE_READ_WRITE,
+                            disposition=_WINDOWS_FILE_OPEN,
+                            file_attributes=0,
+                            create_options=_WINDOWS_DIRECTORY_OPEN_OPTIONS,
+                        )
+                    except OSError as exc:
+                        raise SecurePathError(
+                            "unsafe_path",
+                            f"Cannot securely open Tier 2 Windows directory {relative.as_posix()}: {exc}",
+                            relative_path=relative.as_posix(),
+                        ) from exc
+                    try:
+                        opened = _windows_handle_metadata(child_handle)
+                        _validate_windows_discovery_directory_snapshot(opened, relative, discovered)
+                    except BaseException:
+                        _windows_close_handle(child_handle)
+                        raise
+                    frames.append(
+                        _WindowsDirectoryFrame(
+                            child_handle,
+                            frame.path / name,
+                            relative,
+                            opened,
+                            owns_handle=True,
+                        )
+                    )
+                    continue
+
+                current = _windows_handle_metadata(frame.handle)
+                _validate_windows_discovery_directory_snapshot(current, frame.relative_path, frame.expected)
+                finished = frames.pop()
+                if finished.owns_handle:
+                    _windows_close_handle(finished.handle)
+        finally:
+            while frames:
+                frame = frames.pop()
+                if frame.owns_handle:
+                    _windows_close_handle(frame.handle)
+            while root_handles:
+                _windows_close_handle(root_handles.pop())
     else:
         raise SecurePathError(
             "secure_open_unavailable",
@@ -466,7 +605,8 @@ def discover_secure_files(
         )
 
     for alias, target in pending_aliases:
-        if target not in by_relative:
+        target_metadata = regular_by_relative.get(target)
+        if target_metadata is None or getattr(target_metadata, "st_nlink", 1) != 1:
             raise SecurePathError(
                 "unsafe_path",
                 f"Compatibility alias target is not an independently enumerated regular file: {alias.as_posix()}",
@@ -482,6 +622,7 @@ class SecureRoot:
     def __init__(self, root: Path) -> None:
         self.root = _absolute_no_resolve(root)
         self._root_fd: int | None = None
+        self._windows_root_handles: list[int] = []
         self._entered = False
 
     def __enter__(self) -> SecureRoot:
@@ -515,7 +656,7 @@ class SecureRoot:
             return self
 
         if os.name == "nt":
-            _validate_windows_parent_components(self.root / "placeholder")
+            self._windows_root_handles = _windows_open_anchored_directory_chain(self.root, expected=metadata)
             self._entered = True
             return self
 
@@ -528,6 +669,8 @@ class SecureRoot:
         if self._root_fd is not None:
             os.close(self._root_fd)
             self._root_fd = None
+        while self._windows_root_handles:
+            _windows_close_handle(self._windows_root_handles.pop())
         self._entered = False
 
     def read_bytes(
@@ -669,37 +812,70 @@ class SecureRoot:
             os.close(directory_fd)
 
     def _open_windows(self, relative_path: Path, expected: os.stat_result | None) -> int:
-        candidate = self.root / relative_path
-        current = self.root
-        for component in relative_path.parts:
-            current /= component
-            try:
-                metadata = current.lstat()
-            except OSError as exc:
-                raise SecurePathError("unsafe_path", f"Cannot inspect Tier 2 path: {exc}") from exc
-            if stat_is_link_or_reparse(metadata):
-                raise SecurePathError(
-                    "unsafe_path",
-                    f"Tier 2 path contains a symlink or Windows reparse point: {component}",
-                    relative_path=relative_path.as_posix(),
+        if not self._windows_root_handles:
+            raise SecurePathError("secure_open_unavailable", "Tier 2 root handle is unavailable.")
+
+        import msvcrt
+
+        directory_handles: list[int] = []
+        parent_handle = self._windows_root_handles[-1]
+        descriptor = -1
+        native_file_handle = -1
+        try:
+            for component in relative_path.parts[:-1]:
+                native_directory_handle = _windows_open_relative_handle(
+                    parent_handle,
+                    component,
+                    access=_WINDOWS_DIRECTORY_READ_ACCESS,
+                    share=_WINDOWS_SHARE_READ_WRITE,
+                    disposition=_WINDOWS_FILE_OPEN,
+                    file_attributes=0,
+                    create_options=_WINDOWS_DIRECTORY_OPEN_OPTIONS,
                 )
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0) | getattr(os, "O_NONBLOCK", 0)
-        try:
-            descriptor = os.open(candidate, flags)
-        except OSError as exc:
-            raise SecurePathError("unsafe_path", f"Cannot securely open Tier 2 file: {exc}") from exc
-        try:
+                try:
+                    _validate_windows_read_directory_handle(native_directory_handle, relative_path)
+                except BaseException:
+                    _windows_close_handle(native_directory_handle)
+                    raise
+                directory_handles.append(native_directory_handle)
+                parent_handle = native_directory_handle
+
+            native_file_handle = _windows_open_relative_handle(
+                parent_handle,
+                relative_path.name,
+                access=_WINDOWS_FILE_READ_ACCESS,
+                share=_WINDOWS_SHARE_READ_WRITE,
+                disposition=_WINDOWS_FILE_OPEN,
+                file_attributes=0,
+                create_options=_WINDOWS_FILE_OPEN_OPTIONS,
+            )
+            _validate_windows_read_file_handle(native_file_handle, relative_path)
+            descriptor = msvcrt.open_osfhandle(
+                native_file_handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+            )
+            native_file_handle = -1  # ownership transferred to the CRT descriptor
             opened = os.fstat(descriptor)
             _validate_opened_file(opened, relative_path, expected)
-            final_path = _windows_final_path(descriptor)
-            try:
-                final_path.relative_to(self.root)
-            except ValueError as exc:
-                raise SecurePathError("unsafe_path", "Opened Tier 2 file escapes its verified root.") from exc
             return descriptor
+        except OSError as exc:
+            if descriptor >= 0:
+                os.close(descriptor)
+                descriptor = -1
+            raise SecurePathError(
+                "unsafe_path",
+                f"Cannot securely open Tier 2 file {relative_path.as_posix()}: {exc}",
+                relative_path=relative_path.as_posix(),
+            ) from exc
         except BaseException:
-            os.close(descriptor)
+            if descriptor >= 0:
+                os.close(descriptor)
             raise
+        finally:
+            if native_file_handle >= 0:
+                _windows_close_handle(native_file_handle)
+            while directory_handles:
+                _windows_close_handle(directory_handles.pop())
 
 
 def _validate_opened_file(
@@ -931,13 +1107,511 @@ def _validate_windows_parent_components(path: Path) -> None:
             )
 
 
-def _inspect_destination_windows(path: Path, *, missing_ok: bool) -> os.stat_result | None:
+def _windows_kernel32():
+    if os.name != "nt":
+        raise OSError("Windows handle operations are unavailable on this platform")
+    import ctypes
+
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def _windows_raise_last_error(message: str) -> OSError:
+    import ctypes
+
+    error = ctypes.get_last_error()
+    return OSError(error, message)
+
+
+def _windows_open_handle(
+    path: Path,
+    *,
+    access: int,
+    share: int,
+    disposition: int,
+    flags: int,
+) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_kernel32()
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(os.fspath(path), access, share, None, disposition, flags, None)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise _windows_raise_last_error(f"Cannot open Windows filesystem handle: {path}")
+    return int(handle)
+
+
+def _windows_open_relative_handle(
+    parent_handle: int,
+    name: str,
+    *,
+    access: int,
+    share: int,
+    disposition: int,
+    file_attributes: int,
+    create_options: int,
+    object_attributes_flags: int = _WINDOWS_OBJECT_ATTRIBUTES_FLAGS,
+) -> int:
+    """Open one path component relative to a held native directory handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    _validate_windows_path_component(name, label="Anchored path component")
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(_UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class _IoStatusValue(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]  # noqa: RUF012
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = [("Value", _IoStatusValue), ("Information", ctypes.c_size_t)]
+
+    encoded_name = name.encode("utf-16-le")
+    name_buffer = ctypes.create_unicode_buffer(name)
+    unicode_name = _UnicodeString(
+        Length=len(encoded_name),
+        MaximumLength=len(encoded_name) + ctypes.sizeof(wintypes.WCHAR),
+        Buffer=ctypes.cast(name_buffer, wintypes.LPWSTR),
+    )
+    object_attributes = _ObjectAttributes(
+        Length=ctypes.sizeof(_ObjectAttributes),
+        RootDirectory=parent_handle,
+        ObjectName=ctypes.pointer(unicode_name),
+        Attributes=object_attributes_flags,
+        SecurityDescriptor=None,
+        SecurityQualityOfService=None,
+    )
+    io_status = _IoStatusBlock()
+    handle = wintypes.HANDLE()
+
+    ntdll = ctypes.WinDLL("ntdll")
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_ObjectAttributes),
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+    ]
+    nt_create_file.restype = wintypes.LONG
+    status = int(
+        nt_create_file(
+            ctypes.byref(handle),
+            access,
+            ctypes.byref(object_attributes),
+            ctypes.byref(io_status),
+            None,
+            file_attributes,
+            share,
+            disposition,
+            create_options,
+            None,
+            0,
+        )
+    )
+    if status < 0:
+        rtl_status_to_error = ntdll.RtlNtStatusToDosError
+        rtl_status_to_error.argtypes = [wintypes.LONG]
+        rtl_status_to_error.restype = wintypes.ULONG
+        error = int(rtl_status_to_error(status))
+        raise OSError(error, f"Cannot open anchored Windows path component: {name}")
+    if not handle.value:
+        raise OSError("NtCreateFile succeeded without returning a file handle")
+    return int(handle.value)
+
+
+def _windows_open_discovery_handle(
+    parent_handle: int,
+    name: str,
+) -> tuple[int, _WindowsHandleMetadata]:
+    """Open one authored entry without following it, including exact alias reparses."""
+    try:
+        handle = _windows_open_relative_handle(
+            parent_handle,
+            name,
+            access=_WINDOWS_DISCOVERY_ENTRY_ACCESS,
+            share=_WINDOWS_SHARE_READ_WRITE,
+            disposition=_WINDOWS_FILE_OPEN,
+            file_attributes=0,
+            create_options=_WINDOWS_DISCOVERY_ENTRY_OPTIONS,
+            object_attributes_flags=_WINDOWS_OBJECT_ATTRIBUTES_FLAGS,
+        )
+    except OSError as no_reparse_error:
+        # OBJ_DONT_REPARSE deliberately reports a reparse encounter instead of
+        # returning a handle. Re-open the same single component with
+        # FILE_OPEN_REPARSE_POINT while its parent remains pinned so we can
+        # inspect (but never follow) the compatibility alias itself.
+        try:
+            handle = _windows_open_relative_handle(
+                parent_handle,
+                name,
+                access=_WINDOWS_DISCOVERY_ENTRY_ACCESS,
+                share=_WINDOWS_SHARE_READ_WRITE,
+                disposition=_WINDOWS_FILE_OPEN,
+                file_attributes=0,
+                create_options=_WINDOWS_DISCOVERY_ENTRY_OPTIONS,
+                object_attributes_flags=_WINDOWS_OBJ_CASE_INSENSITIVE,
+            )
+        except OSError:
+            raise no_reparse_error from None
+        try:
+            metadata = _windows_handle_metadata(handle)
+            if not metadata.attributes & 0x400:
+                raise no_reparse_error from None
+            return handle, metadata
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+
+    try:
+        return handle, _windows_handle_metadata(handle)
+    except BaseException:
+        _windows_close_handle(handle)
+        raise
+
+
+def _validate_windows_discovery_directory_snapshot(
+    metadata: _WindowsHandleMetadata,
+    relative_path: Path,
+    expected: _WindowsHandleMetadata,
+) -> None:
+    directory_attribute = 0x10
+    reparse_attribute = 0x400
+    changed = (
+        metadata.attributes & reparse_attribute
+        or not metadata.attributes & directory_attribute
+        or metadata.volume_serial != expected.volume_serial
+        or metadata.file_id != expected.file_id
+        or metadata.size != expected.size
+        or metadata.last_write_time != expected.last_write_time
+    )
+    if changed:
+        label = relative_path.as_posix()
+        raise SecurePathError(
+            "unsafe_path",
+            f"Tier 2 Windows directory changed during discovery: {label}",
+            relative_path=label,
+        )
+
+
+def _validate_windows_entry_snapshot(
+    metadata: os.stat_result,
+    handle_metadata: _WindowsHandleMetadata,
+    relative_path: Path,
+) -> None:
+    handle_is_reparse = bool(handle_metadata.attributes & 0x400)
+    handle_is_directory = bool(handle_metadata.attributes & 0x10)
+    changed = (
+        stat_is_link_or_reparse(metadata) != handle_is_reparse
+        or stat.S_ISDIR(metadata.st_mode) != handle_is_directory
+        or getattr(metadata, "st_nlink", 1) != handle_metadata.link_count
+    )
+    if not handle_is_reparse and not handle_is_directory and metadata.st_size != handle_metadata.size:
+        changed = True
+    if changed:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Tier 2 Windows entry changed while being inspected: {relative_path.as_posix()}",
+            relative_path=relative_path.as_posix(),
+        )
+
+
+def _windows_enumerate_pinned_directory_names(
+    path: Path,
+    handle: int,
+    relative_path: Path,
+    expected: _WindowsHandleMetadata,
+    *,
+    max_names: int | None = None,
+    path_limit: int | None = None,
+) -> tuple[list[str], _WindowsHandleMetadata]:
+    """Enumerate names by path only while native handles pin every path component."""
+    before = _windows_handle_metadata(handle)
+    _validate_windows_discovery_directory_snapshot(before, relative_path, expected)
+    try:
+        with os.scandir(path) as iterator:
+            names: list[str] = []
+            for entry in iterator:
+                names.append(entry.name)
+                if max_names is not None and len(names) > max_names:
+                    limit = path_limit if path_limit is not None else max_names
+                    raise SecurePathError(
+                        "path_count_limit",
+                        f"Tier 2 tree exceeds the path limit of {limit} entries.",
+                        relative_path=relative_path.as_posix(),
+                        metadata={"actual": len(names), "limit": limit},
+                    )
+            names.sort()
+    except SecurePathError:
+        raise
+    except OSError as exc:
+        raise SecurePathError(
+            "path_access_error",
+            f"Cannot enumerate pinned Tier 2 Windows directory {relative_path.as_posix()}: {exc}",
+            relative_path=relative_path.as_posix(),
+        ) from exc
+    after = _windows_handle_metadata(handle)
+    _validate_windows_discovery_directory_snapshot(after, relative_path, before)
+    return names, after
+
+
+def _windows_create_relative_file(parent_handle: int, name: str, *, access: int) -> int:
+    """Create one exclusive regular file relative to a held Windows directory."""
+    return _windows_open_relative_handle(
+        parent_handle,
+        name,
+        access=access,
+        share=0,  # no sharing while the stage handle is live
+        disposition=_WINDOWS_FILE_CREATE,
+        file_attributes=_WINDOWS_FILE_ATTRIBUTE_NORMAL,
+        create_options=(
+            _WINDOWS_FILE_NON_DIRECTORY_FILE
+            | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT
+            | _WINDOWS_FILE_OPEN_REPARSE_POINT
+            | 0x2  # FILE_WRITE_THROUGH
+        ),
+    )
+
+
+def _windows_close_handle(handle: int) -> None:
+    from ctypes import wintypes
+
+    kernel32 = _windows_kernel32()
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    if not close_handle(handle):
+        raise _windows_raise_last_error("Cannot close Windows filesystem handle")
+
+
+def _windows_handle_metadata(handle: int) -> _WindowsHandleMetadata:
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = _windows_kernel32()
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation)]
+    get_information.restype = wintypes.BOOL
+    information = _ByHandleFileInformation()
+    if not get_information(handle, ctypes.byref(information)):
+        raise _windows_raise_last_error("Cannot inspect open Windows filesystem handle")
+    return _WindowsHandleMetadata(
+        attributes=int(information.dwFileAttributes),
+        volume_serial=int(information.dwVolumeSerialNumber),
+        file_id=(int(information.nFileIndexHigh) << 32) | int(information.nFileIndexLow),
+        size=(int(information.nFileSizeHigh) << 32) | int(information.nFileSizeLow),
+        link_count=int(information.nNumberOfLinks),
+        last_write_time=(int(information.ftLastWriteTime.dwHighDateTime) << 32)
+        | int(information.ftLastWriteTime.dwLowDateTime),
+    )
+
+
+def _windows_final_path_from_handle(handle: int) -> Path:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_kernel32()
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_final_path.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_final_path(handle, buffer, len(buffer), 0)
+    if length == 0 or length >= len(buffer):
+        raise _windows_raise_last_error("Cannot resolve opened Windows filesystem handle")
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value)
+
+
+def _verify_windows_handle_path(handle: int, expected: Path) -> None:
+    expected_text = os.path.normcase(os.path.abspath(os.fspath(expected)))  # noqa: PTH100
+    actual_text = os.path.normcase(os.path.abspath(os.fspath(_windows_final_path_from_handle(handle))))  # noqa: PTH100
+    if actual_text != expected_text:
+        raise SecurePathError(
+            "unsafe_path",
+            "Opened Windows handle resolves through a reparse point or unexpected path.",
+        )
+
+
+def _validate_windows_read_directory_handle(handle: int, relative_path: Path) -> _WindowsHandleMetadata:
+    """Require one opened Windows traversal component to be a plain directory."""
+    metadata = _windows_handle_metadata(handle)
+    directory_attribute = 0x10
+    reparse_attribute = 0x400
+    if metadata.attributes & reparse_attribute or not metadata.attributes & directory_attribute:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Tier 2 path contains a non-directory or reparse component: {relative_path.as_posix()}",
+            relative_path=relative_path.as_posix(),
+        )
+    return metadata
+
+
+def _validate_windows_read_file_handle(handle: int, relative_path: Path) -> _WindowsHandleMetadata:
+    """Require one selected Windows handle to be regular, single-link, and no-follow."""
+    metadata = _windows_handle_metadata(handle)
+    directory_attribute = 0x10
+    reparse_attribute = 0x400
+    if metadata.attributes & (directory_attribute | reparse_attribute):
+        raise SecurePathError(
+            "unsafe_path",
+            f"Refusing selected directory or reparse point: {relative_path.as_posix()}",
+            relative_path=relative_path.as_posix(),
+        )
+    if metadata.link_count != 1:
+        _raise_unsafe_file(relative_path, hardlink=True)
+    return metadata
+
+
+def _windows_open_anchored_directory_chain(
+    path: Path,
+    *,
+    expected: os.stat_result,
+) -> list[int]:
+    """Pin an absolute directory from its volume/share anchor without following reparses."""
+    absolute = _absolute_no_resolve(path)
+    if not absolute.anchor:
+        raise SecurePathError("unsafe_root", "Tier 2 Windows root has no filesystem anchor.")
+
+    anchor = Path(absolute.anchor)
+    handles: list[int] = []
+    try:
+        anchor_handle = _windows_open_handle(
+            anchor,
+            access=_WINDOWS_DIRECTORY_READ_ACCESS,
+            share=_WINDOWS_SHARE_READ_WRITE,
+            disposition=3,  # OPEN_EXISTING for CreateFileW
+            flags=0x02000000 | _WINDOWS_FILE_OPEN_REPARSE_POINT,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+        )
+        handles.append(anchor_handle)
+        _validate_windows_read_directory_handle(anchor_handle, anchor)
+
+        current_path = anchor
+        parent_handle = anchor_handle
+        for component in absolute.parts[1:]:
+            current_path /= component
+            child_handle = _windows_open_relative_handle(
+                parent_handle,
+                component,
+                access=_WINDOWS_DIRECTORY_READ_ACCESS,
+                share=_WINDOWS_SHARE_READ_WRITE,
+                disposition=_WINDOWS_FILE_OPEN,
+                file_attributes=0,
+                create_options=_WINDOWS_DIRECTORY_OPEN_OPTIONS,
+            )
+            handles.append(child_handle)
+            _validate_windows_read_directory_handle(child_handle, current_path)
+            parent_handle = child_handle
+
+        try:
+            declared = absolute.lstat()
+        except OSError as exc:
+            raise SecurePathError("unsafe_root", f"Cannot revalidate declared Tier 2 root: {exc}") from exc
+        if stat_is_link_or_reparse(declared) or not stat.S_ISDIR(declared.st_mode):
+            raise SecurePathError("unsafe_root", "Declared Tier 2 root became a reparse point or non-directory.")
+        if not os.path.samestat(expected, declared):
+            raise SecurePathError("unsafe_root", "Tier 2 root changed identity while native handles were opened.")
+        return handles
+    except BaseException:
+        while handles:
+            _windows_close_handle(handles.pop())
+        raise
+
+
+def _validate_windows_parent_handle(handle: int, expected: Path, original: _WindowsHandleMetadata | None) -> None:
+    metadata = _windows_handle_metadata(handle)
+    directory_attribute = 0x10
+    reparse_attribute = 0x400
+    if metadata.attributes & reparse_attribute or not metadata.attributes & directory_attribute:
+        raise SecurePathError("unsafe_path", "Output parent handle is a reparse point or non-directory.")
+    if original is not None and (
+        metadata.volume_serial != original.volume_serial or metadata.file_id != original.file_id
+    ):
+        raise SecurePathError("unsafe_path", "Output parent changed identity during the atomic write.")
+    _verify_windows_handle_path(handle, expected)
+
+
+def _validate_windows_regular_handle(
+    handle: int,
+    *,
+    expected: _WindowsHandleMetadata | None,
+    expected_size: int,
+) -> _WindowsHandleMetadata:
+    metadata = _windows_handle_metadata(handle)
+    directory_attribute = 0x10
+    reparse_attribute = 0x400
+    if metadata.attributes & (directory_attribute | reparse_attribute):
+        raise SecurePathError("unsafe_path", "Windows output handle is a directory or reparse point.")
+    if metadata.link_count != 1:
+        raise SecurePathError("unsafe_hardlink", "Windows output handle is hard-linked (link count > 1).")
+    if metadata.size != expected_size:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Windows output size changed unexpectedly (expected {expected_size}, got {metadata.size}).",
+        )
+    if expected is not None and (
+        metadata.volume_serial != expected.volume_serial or metadata.file_id != expected.file_id
+    ):
+        raise SecurePathError("unsafe_path", "Windows output changed identity during the atomic write.")
+    return metadata
+
+
+def _inspect_destination_windows(path: Path) -> os.stat_result | None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        if missing_ok:
-            return None
-        raise
+        return None
+    except OSError as exc:
+        raise SecurePathError("path_access_error", f"Cannot inspect output destination: {exc}") from exc
     if stat_is_link_or_reparse(metadata):
         raise SecurePathError("unsafe_path", f"Destination is a symlink or reparse point: {path.name}")
     if not stat.S_ISREG(metadata.st_mode):
@@ -947,65 +1621,177 @@ def _inspect_destination_windows(path: Path, *, missing_ok: bool) -> os.stat_res
     return metadata
 
 
-def _validate_windows_parent_identity(parent: Path, expected: os.stat_result) -> None:
-    _validate_windows_parent_components(parent / "placeholder")
+def _validate_windows_destination_unchanged(
+    before: os.stat_result | None,
+    current: os.stat_result | None,
+) -> None:
+    if (before is None) != (current is None):
+        raise SecurePathError("unsafe_path", "Windows output destination appeared or disappeared during the write.")
+    if before is None or current is None:
+        return
+    changed = not os.path.samestat(before, current)
+    for attribute in ("st_size", "st_mtime_ns", "st_ctime_ns"):
+        if getattr(before, attribute, None) != getattr(current, attribute, None):
+            changed = True
+    if changed:
+        raise SecurePathError("unsafe_path", "Windows output destination changed while output was prepared.")
+
+
+def _validate_windows_path_component(name: str, *, label: str) -> None:
+    """Reject Win32 normalization aliases, device names, ADS, and invalid UTF-16."""
+    invalid_characters = '<>:"/\\|?*'
+    stem = name.split(".", 1)[0].rstrip(" .").casefold()
+    reserved = {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+        *(f"com{index}" for index in "¹²³"),
+        *(f"lpt{index}" for index in "¹²³"),
+    }
     try:
-        current = parent.lstat()
-    except OSError as exc:
-        raise SecurePathError("unsafe_path", f"Cannot revalidate declared output parent: {exc}") from exc
-    if stat_is_link_or_reparse(current) or not stat.S_ISDIR(current.st_mode) or not os.path.samestat(current, expected):
-        raise SecurePathError("unsafe_path", "Declared output parent changed identity during the atomic write.")
+        utf16_units = len(name.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as exc:
+        raise SecurePathError("unsafe_path", f"{label} has an unsafe Windows file name.") from exc
+    if (
+        not name
+        or name in {".", ".."}
+        or utf16_units > 255
+        or any(ord(character) < 32 or character in invalid_characters for character in name)
+        or name.endswith((" ", "."))
+        or stem in reserved
+    ):
+        raise SecurePathError("unsafe_path", f"{label} has an unsafe Windows file name.")
 
 
-def _same_windows_path(first: Path, second: Path) -> bool:
-    return os.path.normcase(os.path.abspath(os.fspath(first))) == os.path.normcase(  # noqa: PTH100
-        os.path.abspath(os.fspath(second))  # noqa: PTH100
+def _validate_windows_output_name(name: str) -> None:
+    _validate_windows_path_component(name, label="Destination")
+
+
+def _rename_windows_handle(
+    descriptor: int,
+    parent_handle: int,
+    destination_name: str,
+    *,
+    replace: bool,
+) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileRenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * 1),
+        ]
+
+    encoded_name = destination_name.encode("utf-16-le")
+    filename_offset = _FileRenameInfo.FileName.offset
+    buffer_size = ctypes.sizeof(_FileRenameInfo) + len(encoded_name)
+    buffer = ctypes.create_string_buffer(buffer_size)
+    information = ctypes.cast(buffer, ctypes.POINTER(_FileRenameInfo)).contents
+    information.Flags = int(replace)
+    information.RootDirectory = parent_handle
+    information.FileNameLength = len(encoded_name)
+    ctypes.memmove(ctypes.addressof(buffer) + filename_offset, encoded_name, len(encoded_name))
+
+    kernel32 = _windows_kernel32()
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    set_information.restype = wintypes.BOOL
+    source_handle = msvcrt.get_osfhandle(descriptor)
+    if not set_information(source_handle, 3, buffer, buffer_size):
+        raise _windows_raise_last_error("Cannot rename Windows output through its parent handle")
+
+
+def _mark_windows_handle_for_deletion(descriptor: int) -> None:
+    """Best-effort handle-only cleanup for an unpublished Windows stage."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    kernel32 = _windows_kernel32()
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    set_information.restype = wintypes.BOOL
+    disposition = _FileDispositionInfo(DeleteFile=1)
+    # Failure is deliberately non-fatal: leaving the held orphan is safer than
+    # falling back to path cleanup that could delete an attacker-swapped name.
+    set_information(
+        msvcrt.get_osfhandle(descriptor),
+        4,  # FileDispositionInfo
+        ctypes.byref(disposition),
+        ctypes.sizeof(disposition),
     )
 
 
 def _atomic_write_windows(path: Path, payload: bytes) -> None:
-    """Best-effort no-follow atomic replacement for native Windows.
+    import msvcrt
 
-    Python does not expose directory-handle-relative replacement on Windows, so
-    this path cannot match the POSIX branch's anchored-parent race guarantee.
-    It still rejects reparse/link parents and destinations, pins the temporary
-    file by handle while writing, verifies its final handle path, and rechecks
-    identities immediately before and after the atomic replacement.
-    """
     absolute = _absolute_no_resolve(path)
-    if not absolute.name or absolute.name in {".", ".."}:
-        raise SecurePathError("unsafe_path", "Destination must name a file.")
-
+    _validate_windows_output_name(absolute.name)
     _validate_windows_parent_components(absolute)
-    try:
-        parent_metadata = absolute.parent.lstat()
-    except OSError as exc:
-        raise SecurePathError("path_access_error", f"Cannot inspect output parent: {exc}") from exc
-    if stat_is_link_or_reparse(parent_metadata) or not stat.S_ISDIR(parent_metadata.st_mode):
-        raise SecurePathError("unsafe_path", "Declared output parent is linked, reparsed, or not a directory.")
+    before = _inspect_destination_windows(absolute)
 
-    before = _inspect_destination_windows(absolute, missing_ok=True)
-    temporary_path: Path | None = None
+    file_read_attributes = 0x80
+    file_traverse = 0x20
+    synchronize = 0x100000
+    delete = 0x10000
+    generic_write = 0x40000000
+    share_read_write = 0x1 | 0x2
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+
+    parent_handle = _windows_open_handle(
+        absolute.parent,
+        access=file_read_attributes | file_traverse | synchronize,
+        # Deliberately omit FILE_SHARE_DELETE so the held parent cannot be
+        # renamed or removed between validation and handle-relative publish.
+        share=share_read_write,
+        disposition=open_existing,
+        flags=file_flag_backup_semantics | file_flag_open_reparse_point,
+    )
     descriptor = -1
-    written_metadata: os.stat_result | None = None
+    temporary_path: Path | None = None
+    publication_attempted = False
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+        parent_metadata = _windows_handle_metadata(parent_handle)
+        _validate_windows_parent_handle(parent_handle, absolute.parent, parent_metadata)
+        native_handle = -1
         for _attempt in range(128):
-            candidate = absolute.parent / f".{absolute.name}.{secrets.token_hex(8)}.tmp"
+            temporary_path = absolute.parent / f".skillevaluator-{secrets.token_hex(8)}.tmp"
             try:
-                descriptor = os.open(candidate, flags, 0o600)
-            except FileExistsError:
-                continue
-            temporary_path = candidate
+                native_handle = _windows_create_relative_file(
+                    parent_handle,
+                    temporary_path.name,
+                    access=generic_write | file_read_attributes | delete | synchronize,
+                )
+            except OSError as exc:
+                if exc.errno in {80, 183}:  # file already exists
+                    continue
+                raise
             break
-        if descriptor < 0 or temporary_path is None:
-            raise SecurePathError("path_access_error", "Cannot allocate a secure temporary output file.")
+        if native_handle < 0 or temporary_path is None:
+            raise SecurePathError("path_access_error", "Cannot allocate a secure Windows temporary output file.")
+        try:
+            descriptor = msvcrt.open_osfhandle(native_handle, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+        except BaseException:
+            _windows_close_handle(native_handle)
+            raise
 
+        raw_descriptor = msvcrt.get_osfhandle(descriptor)
         opened = os.fstat(descriptor)
         _validate_opened_file(opened, Path(temporary_path.name), None)
-        if not _same_windows_path(_windows_final_path(descriptor), temporary_path):
-            raise SecurePathError("unsafe_path", "Temporary output handle escaped its declared parent.")
-
+        opened_handle = _validate_windows_regular_handle(raw_descriptor, expected=None, expected_size=0)
+        _verify_windows_handle_path(raw_descriptor, temporary_path)
         written = 0
         while written < len(payload):
             count = os.write(descriptor, payload[written:])
@@ -1013,81 +1799,49 @@ def _atomic_write_windows(path: Path, payload: bytes) -> None:
                 raise OSError("short write")
             written += count
         os.fsync(descriptor)
-        written_metadata = os.fstat(descriptor)
-        _validate_opened_file(written_metadata, Path(temporary_path.name), None)
-        if written_metadata.st_size != len(payload):
-            raise SecurePathError("unsafe_path", "Temporary output size changed while being written.")
-        temporary_metadata = temporary_path.lstat()
-        _validate_opened_file(temporary_metadata, Path(temporary_path.name), written_metadata)
-        if not _same_windows_path(_windows_final_path(descriptor), temporary_path):
-            raise SecurePathError("unsafe_path", "Temporary output handle changed final path while being written.")
-
-        _validate_windows_parent_identity(absolute.parent, parent_metadata)
-        destination = _inspect_destination_windows(absolute, missing_ok=True)
-        if (before is None) != (destination is None) or (
-            before is not None and destination is not None and not os.path.samestat(before, destination)
-        ):
-            raise SecurePathError("unsafe_path", "Destination changed identity while output was prepared.")
-
-        # Native Windows normally prevents replacement while this process still
-        # holds the temporary file open. Close only after the handle-path and
-        # inode checks above, then revalidate the name once more before publish.
-        os.close(descriptor)
-        descriptor = -1
-        temporary_metadata = temporary_path.lstat()
-        _validate_opened_file(temporary_metadata, Path(temporary_path.name), written_metadata)
-        _validate_windows_parent_identity(absolute.parent, parent_metadata)
-        temporary_path.replace(absolute)
+        prepared = os.fstat(descriptor)
+        _validate_opened_file(prepared, Path(temporary_path.name), None)
+        if prepared.st_size != len(payload):
+            raise SecurePathError("unsafe_path", "Temporary Windows output size changed while being written.")
+        _validate_windows_regular_handle(raw_descriptor, expected=opened_handle, expected_size=len(payload))
+        _validate_windows_parent_components(absolute)
+        _validate_windows_parent_handle(parent_handle, absolute.parent, parent_metadata)
+        destination = _inspect_destination_windows(absolute)
+        _validate_windows_destination_unchanged(before, destination)
+        # From this point an asynchronous exception cannot tell whether the
+        # kernel completed publication. Never disposition-delete the handle
+        # after the replacement attempt begins.
+        publication_attempted = True
+        try:
+            _rename_windows_handle(descriptor, parent_handle, absolute.name, replace=True)
+        except OSError:
+            # A synchronous FALSE return proves the rename did not publish;
+            # handle-only cleanup is safe. BaseException remains ambiguous.
+            publication_attempted = False
+            raise
         temporary_path = None
-
-        published = _inspect_destination_windows(absolute, missing_ok=False)
-        if (
-            published is None
-            or written_metadata is None
-            or not os.path.samestat(published, written_metadata)
-            or published.st_size != len(payload)
-        ):
-            raise SecurePathError("unsafe_path", "Published output changed identity or size during replacement.")
-
-        read_flags = (
-            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0) | getattr(os, "O_NONBLOCK", 0)
-        )
-        descriptor = os.open(absolute, read_flags)
-        opened_published = os.fstat(descriptor)
-        _validate_opened_file(opened_published, Path(absolute.name), published)
-        if not _same_windows_path(_windows_final_path(descriptor), absolute):
-            raise SecurePathError("unsafe_path", "Published output handle escaped its declared parent.")
-        _validate_windows_parent_identity(absolute.parent, parent_metadata)
-    except SecurePathError:
-        raise
+        _verify_windows_handle_path(raw_descriptor, absolute)
+        published = os.fstat(descriptor)
+        _validate_opened_file(published, Path(absolute.name), None)
+        if published.st_size != len(payload):
+            raise SecurePathError("unsafe_path", "Published Windows output size changed during replacement.")
+        _validate_windows_regular_handle(raw_descriptor, expected=opened_handle, expected_size=len(payload))
+        _validate_windows_parent_handle(parent_handle, absolute.parent, parent_metadata)
     except OSError as exc:
-        raise SecurePathError("path_access_error", f"Cannot securely write output on Windows: {exc}") from exc
+        raise SecurePathError("path_access_error", f"Cannot securely write Windows output: {exc}") from exc
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        # As in the POSIX branch, do not unlink a failed temporary name: without
-        # conditional unlink-by-inode, a swap between validation and cleanup
-        # could delete an unrelated file. Successful replacement consumes it.
+        try:
+            if descriptor >= 0:
+                if temporary_path is not None and not publication_attempted:
+                    _mark_windows_handle_for_deletion(descriptor)
+                os.close(descriptor)
+        finally:
+            _windows_close_handle(parent_handle)
 
 
 def _windows_final_path(descriptor: int) -> Path:
     if os.name != "nt":
         raise OSError("Windows handle verification is unavailable on this platform")
-    import ctypes
     import msvcrt
-    from ctypes import wintypes
 
-    get_final_path = ctypes.windll.kernel32.GetFinalPathNameByHandleW
-    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
-    get_final_path.restype = wintypes.DWORD
-    buffer = ctypes.create_unicode_buffer(32768)
-    length = get_final_path(msvcrt.get_osfhandle(descriptor), buffer, len(buffer), 0)
-    if length == 0 or length >= len(buffer):
-        raise OSError(ctypes.get_last_error(), "Cannot resolve opened Windows file handle")
-    value = buffer.value
-    if value.startswith("\\\\?\\UNC\\"):
-        value = "\\\\" + value[8:]
-    elif value.startswith("\\\\?\\"):
-        value = value[4:]
-    return Path(value)
-
+    return _windows_final_path_from_handle(msvcrt.get_osfhandle(descriptor))

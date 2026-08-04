@@ -37,6 +37,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_manifest import PluginManifestLocation, PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.utils.structured_data import (
     StructuredDataLimitError,
     StructuredDataSyntaxError,
@@ -400,11 +401,11 @@ class PluginSchemaValidator(ValidatorBase):
     def _validate_in_plugin_skills(self, root: Path, result: ValidationResult) -> None:
         """Validate skills bundled under ``<root>/skills/``."""
         skills_dir = root / "skills"
-        from skillevaluator.utils.helpers import find_bundled_plugin_skills
+        from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
         from skillevaluator.validators.schema import SchemaValidator
 
         try:
-            skill_dirs = find_bundled_plugin_skills(root)
+            skill_manifests = find_bundled_plugin_skill_manifests(root)
         except ValueError as exc:
             result.metadata["security_failure"] = True
             result.add_finding(
@@ -418,18 +419,32 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
-        if not skill_dirs:
+        if not skill_manifests:
             return
 
-        skill_names = [skill_dir.relative_to(skills_dir).as_posix() for skill_dir in skill_dirs]
+        skill_names = [manifest.relative_path.parent.as_posix() for manifest in skill_manifests]
+        skill_dirs = [skills_dir / manifest.relative_path.parent for manifest in skill_manifests]
         plugin_meta = result.metadata.setdefault("plugin", {})
         plugin_meta["in_plugin_skills"] = len(skill_dirs)
         plugin_meta["bundled_skills"] = skill_names
         validator = SchemaValidator(policy=self.policy)
 
-        for skill_dir, skill_name in zip(skill_dirs, skill_names, strict=True):
+        for skill_dir, skill_name, manifest in zip(skill_dirs, skill_names, skill_manifests, strict=True):
             try:
-                skill_result = validator.validate(skill_dir)
+                skill_result = validator.validate_secure_manifest(skill_dir, manifest)
+            except SecurePathError as exc:
+                result.metadata["security_failure"] = True
+                result.add_finding(
+                    Finding(
+                        category="PLUGIN_SCHEMA",
+                        severity=Severity.HIGH,
+                        check_name="bundled_skill_path_unsafe",
+                        message=f"Bundled skill '{skill_name}' changed or became unsafe after discovery: {exc}",
+                        file_path=f"[{skill_name}] {skill_dir}",
+                        suggestion="Replace linked, hard-linked, or special manifests with regular contained files.",
+                    )
+                )
+                continue
             except Exception as exc:
                 logger.warning("In-plugin skill validation failed for %s: %s", skill_dir, exc)
                 result.add_finding(

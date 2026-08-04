@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 NVIDIA Corporation. All rights reserved.
+#
+# Verify every commit in a pull request carries a Signed-off-by
+# trailer per the project's DCO requirement (see CONTRIBUTING.md).
+
+name: DCO Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch with full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Verify DCO sign-off on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          unsigned=()
+          while read -r sha; do
+            if ! git show --format='%(trailers:key=Signed-off-by,valueonly)' -s "$sha" | grep -q .; then
+              subject=$(git show --format='%s' -s "$sha")
+              unsigned+=("$sha $subject")
+            fi
+          done < <(git log --no-merges --format='%H' "$BASE_SHA..$HEAD_SHA")
+
+          if [ ${#unsigned[@]} -gt 0 ]; then
+            echo "::error::Some commits in this PR are missing a Signed-off-by trailer."
+            echo ""
+            echo "Unsigned commits:"
+            printf '  %s\n' "${unsigned[@]}"
+            echo ""
+            echo "To fix, run on your branch:"
+            echo ""
+            echo "  git rebase --signoff origin/main && git push --force-with-lease"
+            echo ""
+            echo "See CONTRIBUTING.md for the full DCO requirement."
+            exit 1
+          fi
+
+          echo "All commits signed off."

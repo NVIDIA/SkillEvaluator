@@ -59,7 +59,7 @@ If your shell cannot find the command after installation, run
 
 No OpenAI or Anthropic key yet? Create a free API key at
 [build.nvidia.com](https://build.nvidia.com) — NVIDIA Build offers free
-inferencing, and SkillEvaluator defaults to the open-source Nemotron model
+inferencing, and NVIDIA Build defaults to the open-source Nemotron model
 `nvidia/nemotron-3-nano-30b-a3b` for a quick try. Prefer a different model?
 Pick any free model on [build.nvidia.com](https://build.nvidia.com) and set
 `SKILL_EVAL_LLM_MODEL`. Once that key is set, the same provider works

@@ -695,7 +695,11 @@ class SecureRoot:
 
         try:
             opened = os.fstat(descriptor)
-            _validate_opened_file(opened, relative_path, expected)
+            # Windows discovery identity is revalidated with path ``lstat``
+            # inside ``_open_windows``; CRT descriptor identity fields are not
+            # comparable to that path-stat snapshot. POSIX uses one stat
+            # family for both phases and can compare directly here.
+            _validate_opened_file(opened, relative_path, expected if os.name == "posix" else None)
             if opened.st_size > max_bytes:
                 raise SecurePathError(
                     "file_size_limit",
@@ -1358,21 +1362,23 @@ def _validate_windows_entry_snapshot(
 ) -> None:
     handle_is_reparse = bool(handle_metadata.attributes & 0x400)
     handle_is_directory = bool(handle_metadata.attributes & 0x10)
+    # The native no-follow handle is authoritative for reparses. Python's
+    # Windows ``lstat`` can report a junction or symlink with a different mode
+    # and link count; the pinned reparse is rejected or exact-alias validated
+    # immediately by the caller, without descent or target reads.
+    if handle_is_reparse:
+        return
     changed = stat_is_link_or_reparse(metadata) != handle_is_reparse or (
         stat.S_ISDIR(metadata.st_mode) != handle_is_directory
     )
-    # Windows reports reparse-point link counts inconsistently between path
-    # stat and native handle APIs. Type parity is sufficient here because the
-    # redirect is rejected (or exact-alias validated) immediately afterward.
-    if not handle_is_reparse:
-        if getattr(metadata, "st_nlink", 1) != handle_metadata.link_count:
-            changed = True
-        if not handle_is_directory and metadata.st_size != handle_metadata.size:
-            changed = True
+    if getattr(metadata, "st_nlink", 1) != handle_metadata.link_count:
+        changed = True
+    if not handle_is_directory and metadata.st_size != handle_metadata.size:
+        changed = True
     if changed:
         raise SecurePathError(
             "unsafe_path",
-            f"Tier 2 Windows entry changed while being inspected: {relative_path.as_posix()}",
+            f"Unsafe Tier 2 Windows entry changed while being inspected: {relative_path.as_posix()}",
             relative_path=relative_path.as_posix(),
         )
 
@@ -1707,34 +1713,60 @@ def _rename_windows_handle(
     replace: bool,
 ) -> None:
     import ctypes
-    import msvcrt
     from ctypes import wintypes
 
     class _FileRenameInfo(ctypes.Structure):
         _fields_ = [
-            ("Flags", wintypes.DWORD),
+            ("ReplaceIfExists", wintypes.BOOLEAN),
             ("RootDirectory", wintypes.HANDLE),
             ("FileNameLength", wintypes.DWORD),
             ("FileName", wintypes.WCHAR * 1),
         ]
 
+    class _IoStatusValue(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]  # noqa: RUF012
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = [("Value", _IoStatusValue), ("Information", ctypes.c_size_t)]
+
     encoded_name = destination_name.encode("utf-16-le")
     filename_offset = _FileRenameInfo.FileName.offset
-    buffer_size = ctypes.sizeof(_FileRenameInfo) + len(encoded_name)
+    buffer_size = max(ctypes.sizeof(_FileRenameInfo), filename_offset + len(encoded_name))
     buffer = ctypes.create_string_buffer(buffer_size)
     information = ctypes.cast(buffer, ctypes.POINTER(_FileRenameInfo)).contents
-    information.Flags = int(replace)
+    information.ReplaceIfExists = int(replace)
     information.RootDirectory = parent_handle
     information.FileNameLength = len(encoded_name)
     ctypes.memmove(ctypes.addressof(buffer) + filename_offset, encoded_name, len(encoded_name))
 
-    kernel32 = _windows_kernel32()
-    set_information = kernel32.SetFileInformationByHandle
-    set_information.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
-    set_information.restype = wintypes.BOOL
-    source_handle = msvcrt.get_osfhandle(descriptor)
-    if not set_information(source_handle, 3, buffer, buffer_size):
-        raise _windows_raise_last_error("Cannot rename Windows output through its parent handle")
+    import msvcrt
+
+    io_status = _IoStatusBlock()
+    ntdll = ctypes.WinDLL("ntdll")
+    set_information = ntdll.NtSetInformationFile
+    set_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    set_information.restype = wintypes.LONG
+    status = int(
+        set_information(
+            msvcrt.get_osfhandle(descriptor),
+            ctypes.byref(io_status),
+            buffer,
+            buffer_size,
+            10,  # FileRenameInformation
+        )
+    )
+    if status < 0:
+        rtl_status_to_error = ntdll.RtlNtStatusToDosError
+        rtl_status_to_error.argtypes = [wintypes.LONG]
+        rtl_status_to_error.restype = wintypes.ULONG
+        error = int(rtl_status_to_error(status))
+        raise OSError(error, "Cannot rename Windows output through its parent handle")
 
 
 def _mark_windows_handle_for_deletion(descriptor: int) -> None:

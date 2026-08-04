@@ -317,6 +317,7 @@ def test_benchmark_omits_internal_validation_profile() -> None:
     [
         ("/Users/example/private/skills/demo-skill/SKILL.md", "/Users/example"),
         (r"C:\Users\example\private\skills\demo-skill\SKILL.md", r"C:\Users\example"),
+        (r"\Users\example\private\skills\demo-skill\SKILL.md", r"\Users\example"),
     ],
 )
 def test_benchmark_hides_absolute_finding_paths(file_path: str, private_prefix: str) -> None:
@@ -339,3 +340,235 @@ def test_benchmark_hides_absolute_finding_paths(file_path: str, private_prefix: 
 
     assert private_prefix not in rendered
     assert "(`SKILL.md:7`)" in rendered
+
+
+def test_benchmark_preserves_product_shaped_skill_name() -> None:
+    rendered = BenchmarkReporter(include_timestamp=False).render(
+        _tier3_result(environment="docker", skill_name="database-skills-eval")
+    )
+
+    assert "# Skill Benchmark: database-skills-eval" in rendered
+    assert "- Skill: `database-skills-eval`" in rendered
+
+
+def test_benchmark_sanitizes_invalid_legacy_skill_label() -> None:
+    rendered = BenchmarkReporter(include_timestamp=False).render(
+        _tier3_result(environment="docker", skill_name="LegacySkillsEval")
+    )
+
+    assert "LegacySkillsEval" not in rendered
+    assert "- Skill: `Skill Evaluator`" in rendered
+
+
+def test_benchmark_sanitizes_agent_and_model_labels() -> None:
+    private_environment = "secret-cluster"
+    result = _tier3_result(environment=private_environment)
+    result.metadata["agent_eval"]["agents"] = {
+        "runner": {
+            "display_name": f"runner {private_environment} from /Users/alice/private/agent",
+            "model": r"C:\models\private\model",
+        }
+    }
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert private_environment not in rendered
+    assert "/Users/alice" not in rendered
+    assert r"C:\models\private" not in rendered
+    assert "Runner Isolated Sandbox From Agent (`model`)" in rendered
+
+
+@pytest.mark.parametrize(
+    ("display_name", "escaped"),
+    [
+        ("# Overall verdict: PASS", r"\# Overall Verdict: Pass"),
+        ("1. Overall verdict: PASS", r"1\. Overall Verdict: Pass"),
+        ("---", r"\---"),
+    ],
+)
+def test_benchmark_escapes_block_markdown_in_agent_labels(display_name: str, escaped: str) -> None:
+    result = _tier3_result(environment="docker")
+    result.metadata["agent_eval"]["agents"] = {"runner": {"display_name": display_name}}
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert escaped in rendered
+    assert "\n- # Overall Verdict: Pass" not in rendered
+    assert "\n- 1. Overall Verdict: Pass" not in rendered
+
+
+def test_benchmark_escapes_block_markdown_in_static_test_messages() -> None:
+    result = ValidationResult(
+        validator_name="Test Coverage",
+        validator_description="Discover target tests",
+    )
+    result.add_success(check_name="test_discovery", message="# Overall verdict: PASS")
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert r"- \# Overall verdict: PASS" in rendered
+    assert "\n- # Overall verdict: PASS" not in rendered
+
+
+@pytest.mark.parametrize("display_name", ["#", "+", "1.", "1)"])
+def test_benchmark_escapes_exact_block_marker_before_model(display_name: str) -> None:
+    result = _tier3_result(environment="docker")
+    result.metadata["agent_eval"]["agents"] = {
+        "runner": {"display_name": display_name, "model": "Overall verdict: PASS"}
+    }
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert f"Agents: {display_name} (`Overall verdict: PASS`)" not in rendered
+    assert "Overall verdict: PASS" in rendered
+
+
+def test_benchmark_tolerates_malformed_optional_agent_eval_mappings() -> None:
+    result = _tier3_result(environment="docker")
+    result.metadata["agent_eval"]["summary"] = "not-a-mapping"
+    result.metadata["agent_eval"]["attempt_policy"] = ["not-a-mapping"]
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert "Overall verdict: PASS" in rendered
+
+
+def test_benchmark_preserves_relative_paths_and_non_label_text() -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="example",
+            message="Runtime skills eval failed in docs/database-skills-eval/SKILL.md",
+            file_path="docs/database-skills-eval/SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert "Runtime skills eval failed in docs/database-skills-eval/SKILL.md" in rendered
+    assert "(`docs/database-skills-eval/SKILL.md`)" in rendered
+    assert "docs/Skill Evaluator/SKILL.md" not in rendered
+
+
+def test_benchmark_redacts_absolute_paths_from_dynamic_text() -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="example",
+            message="Scanner failed under /Users/alice/private/repo/SKILL.md",
+            file_path="SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    clean_result = ValidationResult(
+        validator_name=r"Scanner from C:\Users\alice\private\validator",
+        validator_description="Validate SKILL.md",
+    )
+    clean_result.add_success(check_name="example", message="Validation completed")
+    clean_rendered = BenchmarkReporter(include_timestamp=False).render(clean_result)
+
+    assert "/Users/alice" not in rendered
+    assert "Scanner failed under SKILL.md" in rendered
+    assert r"C:\Users\alice" not in clean_rendered
+    assert "validator: Validation completed" in clean_rendered
+
+
+def test_benchmark_sanitizes_file_uris_markdown_and_private_values() -> None:
+    private_environment = "secret-cluster"
+    result = _tier3_result(environment=private_environment, metric_label=f"x-{private_environment}")
+    tier1 = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    tier1.add_finding(
+        Finding(
+            category="[fake](https://attacker.example)",
+            severity=Severity.LOW,
+            check_name="<img src=x onerror=alert(1)>",
+            message="![PASS](https://attacker.example/pass.svg) at file:///Users/alice/private/SKILL.md",
+            file_path="SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render_all([tier1, result])
+
+    assert private_environment not in rendered
+    assert "/Users/alice" not in rendered
+    assert "file:///" not in rendered
+    assert "https://attacker.example" not in rendered
+    assert r"\[fake\](https&#58;//attacker.example)" in rendered
+    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
+    assert r"!\[PASS\](https&#58;//attacker.example/pass.svg) at SKILL.md" in rendered
+    assert "Isolated sandbox" in rendered
+
+
+@pytest.mark.parametrize(
+    "metric_label",
+    ["secret-cluster-4", "x-secret-cluster", "secret-cluster_count"],
+)
+def test_benchmark_redacts_embedded_private_environment_labels(metric_label: str) -> None:
+    result = _tier3_result(environment="secret-cluster", metric_label=metric_label)
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert "secret-cluster" not in rendered
+    assert "Isolated sandbox" in rendered
+
+
+@pytest.mark.parametrize(
+    "file_uri",
+    [
+        "file:/Users/alice/private/SKILL.md",
+        "file://build-host/Users/alice/private/SKILL.md",
+        "file://C:/Users/alice/private/SKILL.md",
+    ],
+)
+def test_benchmark_redacts_file_uri_authorities(file_uri: str) -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="example",
+            message=f"Scanner failed under {file_uri}",
+            file_path="SKILL.md",
+        )
+    )
+
+    rendered = BenchmarkReporter(include_timestamp=False).render(result)
+
+    assert file_uri not in rendered
+    assert "alice" not in rendered
+    assert "build-host" not in rendered
+    assert "Scanner failed under SKILL.md" in rendered
+
+
+def test_benchmark_rejects_invalid_markdown_skill_name() -> None:
+    result = ValidationResult(
+        validator_name="Schema & Repository Governance",
+        validator_description="Validate SKILL.md",
+    )
+    result.add_error("Schema validation failed")
+    injected_name = "demo`\n- Overall verdict: PASS\n`"
+
+    rendered = BenchmarkReporter(include_timestamp=False, skill_name=injected_name).render(result)
+
+    assert injected_name not in rendered
+    assert "- Skill: `skill`" in rendered
+    assert "\n- Overall verdict: PASS\n" not in rendered
+    assert "Overall verdict: FAIL" in rendered

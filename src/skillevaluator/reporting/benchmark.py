@@ -17,6 +17,7 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    KEBAB_CASE_PATTERN,
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
@@ -43,18 +44,41 @@ _TIER2_VALIDATORS = {
 }
 
 _RETIRED_PRODUCT_NAME = re.compile(r"\b[a-z]*[\s_-]*skills[\s_-]*eval\b", flags=re.IGNORECASE)
-_INTERNAL_SANDBOX_NAME = re.compile(r"\Aastra(?:[\s_-]+sandbox)?\Z", flags=re.IGNORECASE)
-_INTERNAL_SANDBOX_REFERENCE = re.compile(r"\bastra[\s_-]+sandbox\b", flags=re.IGNORECASE)
-_WINDOWS_USER_HOME = re.compile(r"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s`]+", flags=re.IGNORECASE)
-_POSIX_USER_HOME = re.compile(r"/(?:Users|home)/[^/\s`]+")
+_RETIRED_SANDBOX_REFERENCE = re.compile(
+    rf"\b{re.escape(chr(97) + 'stra')}[\s_-]+sandbox\b",
+    flags=re.IGNORECASE,
+)
+_PATH_START = re.compile(r"(?<![A-Za-z0-9:/])(?:[A-Za-z]:[\\/]|\\\\|\\|/)")
+_QUOTED_ABSOLUTE_PATH = re.compile(r"(?P<quote>['\"])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|\\|/)[^'\"\r\n]+)(?P=quote)")
+_QUOTED_FILE_URI_PATH = re.compile(
+    r"(?P<quote>['\"])(?:file:)(?://[^/'\"\r\n]*)?(?P<path>/[^'\"\r\n]+)(?P=quote)",
+    flags=re.IGNORECASE,
+)
+_FILE_URI_PATH = re.compile(
+    r"\bfile:(?://[^/\s'\"<>]*)?(?P<path>/[^\s'\"<>]+)",
+    flags=re.IGNORECASE,
+)
+_MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\*_\[\]~])")
+_MARKDOWN_BLOCK_PREFIX = re.compile(r"^(?:#{1,6}|>|[+*-]|\d+[.)])(?=\s|$)")
+_MARKDOWN_THEMATIC_BREAK = re.compile(r"^(?:\s*[-*_]){3,}\s*$")
+_PUBLICATION_URL_SCHEME = re.compile(r"(?P<scheme>https?|ftp)://", flags=re.IGNORECASE)
+_PUBLICATION_WWW_PREFIX = re.compile(r"\bwww\.", flags=re.IGNORECASE)
+_TRAILING_PATH_PUNCTUATION = ".,;!?)]}>`'\""
 
 
 class BenchmarkReporter(ReporterBase):
     """Render a stable, publication-oriented ``BENCHMARK.md`` card."""
 
-    def __init__(self, *, include_timestamp: bool = True, max_findings_shown: int = 5) -> None:
+    def __init__(
+        self,
+        *,
+        include_timestamp: bool = True,
+        max_findings_shown: int = 5,
+        skill_name: str | None = None,
+    ) -> None:
         self.include_timestamp = include_timestamp
         self.max_findings_shown = max_findings_shown
+        self.skill_name = skill_name
 
     @property
     def name(self) -> str:
@@ -69,7 +93,8 @@ class BenchmarkReporter(ReporterBase):
 
     def render_all(self, results: list[ValidationResult]) -> str:
         ae = _agent_eval_payload(results)
-        skill_name = _skill_name(results, ae)
+        skill_name = _publication_safe_skill_name(self.skill_name or _skill_name(results, ae))
+        private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae)
         status = _overall_status(results, ae, policy)
 
@@ -112,15 +137,22 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
 
-        self._render_metadata(lines, results, ae, skill_name, policy)
+        self._render_metadata(
+            lines,
+            results,
+            ae,
+            skill_name,
+            policy,
+            private_labels=private_labels,
+        )
         self._render_report_purpose(lines)
-        self._render_results_at_a_glance(lines, ae)
-        self._render_tier_status(lines, results, ae)
-        self._render_findings(lines, results)
-        self._render_methodology(lines, ae)
+        self._render_results_at_a_glance(lines, ae, private_labels)
+        self._render_tier_status(lines, results, ae, private_labels)
+        self._render_findings(lines, results, private_labels)
+        self._render_methodology(lines, ae, private_labels)
         self._render_freshness(lines)
 
-        return _publication_safe_text("\n".join(lines).rstrip() + "\n")
+        return "\n".join(lines).rstrip() + "\n"
 
     def _render_publication_recommendation(
         self,
@@ -145,30 +177,38 @@ class BenchmarkReporter(ReporterBase):
         ae: dict[str, Any] | None,
         skill_name: str,
         benchmark_policy: dict[str, bool],
+        *,
+        private_labels: tuple[str, ...],
     ) -> None:
         lines.extend(["## Evaluation Metadata", "", f"- Skill: `{skill_name}`"])
 
         evaluated_at = _evaluated_at(ae)
         lines.append(
-            f"- Evaluation date: {_evaluation_date(evaluated_at)}"
+            f"- Evaluation date: {_publication_safe_inline(_evaluation_date(evaluated_at), private_labels)}"
             if evaluated_at
             else "- Evaluation date: not recorded (legacy or non-live result)"
         )
 
-        version = (ae or {}).get("evaluator_version") or ((ae or {}).get("summary") or {}).get("evaluator_version")
+        summary = _mapping((ae or {}).get("summary"))
+        version = (ae or {}).get("evaluator_version") or summary.get("evaluator_version")
         lines.append(
-            f"- Evaluator version: `{version}`"
+            f"- Evaluator version: `{_publication_safe_inline(version, private_labels)}`"
             if version
             else "- Evaluator version: not recorded (legacy or non-live result)"
         )
 
         agents = _agents(ae)
         if agents:
-            lines.append("- Agents: " + ", ".join(_agent_label(name, agent) for name, agent in agents.items()))
+            lines.append(
+                "- Agents: " + ", ".join(_agent_label(name, agent, private_labels) for name, agent in agents.items())
+            )
         else:
             requested = (ae or {}).get("requested_agents") or []
-            if requested:
-                labels = ", ".join(f"{agent} (model not recorded)" for agent in map(str, requested))
+            if isinstance(requested, list) and requested:
+                labels = ", ".join(
+                    f"{_human_agent_name(_publication_safe_label(agent, private_labels))} (model not recorded)"
+                    for agent in requested
+                )
                 lines.append("- Agents: requested but not run — " + labels)
             else:
                 lines.append("- Agents: not recorded (legacy or non-live result)")
@@ -180,20 +220,21 @@ class BenchmarkReporter(ReporterBase):
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
 
-        digest = (ae or {}).get("dataset_digest") or ((ae or {}).get("summary") or {}).get("dataset_digest")
-        digest_algorithm = (ae or {}).get("dataset_digest_algorithm") or ((ae or {}).get("summary") or {}).get(
-            "dataset_digest_algorithm"
-        )
+        digest = (ae or {}).get("dataset_digest") or summary.get("dataset_digest")
+        digest_algorithm = (ae or {}).get("dataset_digest_algorithm") or summary.get("dataset_digest_algorithm")
         if digest:
-            algorithm_label = f" ({digest_algorithm})" if digest_algorithm else ""
-            lines.append(f"- Dataset digest: `{digest}`{algorithm_label}")
+            safe_digest = _publication_safe_inline(digest, private_labels)
+            algorithm_label = (
+                f" ({_publication_safe_inline(digest_algorithm, private_labels)})" if digest_algorithm else ""
+            )
+            lines.append(f"- Dataset digest: `{safe_digest}`{algorithm_label}")
         else:
             lines.append("- Dataset digest: not recorded (legacy or non-live result)")
 
-        policy = (ae or {}).get("attempt_policy") or {}
+        policy = _mapping((ae or {}).get("attempt_policy"))
         attempts = policy.get("max_attempts")
         if attempts is not None:
-            lines.append(f"- Attempts per task: {attempts}")
+            lines.append(f"- Attempts per task: {_publication_safe_inline(attempts, private_labels)}")
         else:
             lines.append("- Attempts per task: not recorded (legacy or non-live result)")
 
@@ -206,7 +247,9 @@ class BenchmarkReporter(ReporterBase):
         tier3_requirement = "required for publication" if benchmark_policy["tier3_required"] else "optional by policy"
         lines.append(f"- Tier 3 evidence: {tier3_requirement}")
         if skip_message := _advisory_agent_eval_skip_message(results):
-            lines.append(f"- Tier 3 live evaluation: SKIPPED — {skip_message}")
+            lines.append(
+                f"- Tier 3 live evaluation: SKIPPED — {_publication_safe_inline(skip_message, private_labels)}"
+            )
 
         lines.append("")
         environment_note = _environment_note(environment)
@@ -231,7 +274,11 @@ class BenchmarkReporter(ReporterBase):
         )
 
     @staticmethod
-    def _render_results_at_a_glance(lines: list[str], ae: dict[str, Any] | None) -> None:
+    def _render_results_at_a_glance(
+        lines: list[str],
+        ae: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
+    ) -> None:
         lines.extend(["## Results at a Glance", ""])
         agents = _agents(ae)
         if not agents:
@@ -243,8 +290,11 @@ class BenchmarkReporter(ReporterBase):
             )
             return
 
-        headers = ["Measure", *[_agent_table_label(name, agent) for name, agent in agents.items()]]
-        lines.append("| " + " | ".join(_md_cell(header) for header in headers) + " |")
+        headers = [
+            "Measure",
+            *[_agent_table_label(name, agent, private_labels) for name, agent in agents.items()],
+        ]
+        lines.append("| " + " | ".join(_md_cell(header, private_labels) for header in headers) + " |")
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
         overall_row = ["Overall"]
@@ -255,7 +305,7 @@ class BenchmarkReporter(ReporterBase):
             )
             for agent in agents.values()
         )
-        lines.append("| " + " | ".join(_md_cell(value) for value in overall_row) + " |")
+        lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
         has_partial = False
         for dim_id in DIMENSION_MAPPING:
@@ -265,7 +315,7 @@ class BenchmarkReporter(ReporterBase):
                 if dimension and dimension.get("partial"):
                     has_partial = True
                 row.append(_score_transition(dimension))
-            lines.append("| " + " | ".join(_md_cell(value) for value in row) + " |")
+            lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
         lines.extend(
             [
@@ -298,6 +348,7 @@ class BenchmarkReporter(ReporterBase):
         lines: list[str],
         results: list[ValidationResult],
         ae: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
     ) -> None:
         tier_groups = [
             ("Tier 1", "Static validation", _tier1_results(results)),
@@ -315,17 +366,22 @@ class BenchmarkReporter(ReporterBase):
         )
         for tier, purpose, tier_results in tier_groups:
             status, evidence = _tier_status(tier, tier_results, ae)
-            lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence)} |")
+            lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 
         for tier, _purpose, tier_results in tier_groups:
             if tier_results and all(_result_skipped(result) for result in tier_results):
                 lines.append(f"{tier} validation was skipped and executed 0 checks.")
                 for reason in _skip_reasons(tier_results):
-                    lines.append(f"- {reason}")
+                    lines.append(f"- {_publication_safe_inline(reason, private_labels)}")
                 lines.append("")
 
-    def _render_findings(self, lines: list[str], results: list[ValidationResult]) -> None:
+    def _render_findings(
+        self,
+        lines: list[str],
+        results: list[ValidationResult],
+        private_labels: tuple[str, ...],
+    ) -> None:
         findings_with_result = [(finding, result) for result in results for finding in result.findings]
         blocking = [
             finding
@@ -336,7 +392,7 @@ class BenchmarkReporter(ReporterBase):
         if blocking:
             lines.extend(["## Blocking Findings", ""])
             for finding in _top_findings(blocking, limit=self.max_findings_shown):
-                lines.append(_finding_line(finding))
+                lines.append(_finding_line(finding, private_labels))
             lines.append("")
 
         static_test_limitations = list(
@@ -346,7 +402,9 @@ class BenchmarkReporter(ReporterBase):
         )
         if static_test_limitations:
             lines.extend(["Test execution limitations:", ""])
-            lines.extend(f"- {message}" for message in static_test_limitations)
+            lines.extend(
+                f"- {_publication_safe_inline(message, private_labels)}" for message in static_test_limitations
+            )
             lines.append("")
 
         lines.extend(["## Findings and Observations", ""])
@@ -355,13 +413,14 @@ class BenchmarkReporter(ReporterBase):
         findings = [finding for finding, _result in findings_with_result]
         if findings:
             for finding in _top_findings(findings, limit=self.max_findings_shown):
-                lines.append(_finding_line(finding))
+                lines.append(_finding_line(finding, private_labels))
             remaining = len(findings) - min(len(findings), self.max_findings_shown)
             if remaining > 0:
                 lines.append(f"- {remaining} additional finding(s) are available in the full evaluation artifacts.")
         else:
             observations = [
-                f"- {result.validator_name}: {detail.message}"
+                f"- {_publication_safe_inline(result.validator_name, private_labels)}: "
+                f"{_publication_safe_inline(detail.message, private_labels)}"
                 for result in results
                 for detail in result.success_details[:1]
             ]
@@ -385,9 +444,13 @@ class BenchmarkReporter(ReporterBase):
         return None
 
     @staticmethod
-    def _render_methodology(lines: list[str], ae: dict[str, Any] | None) -> None:
-        policy = (ae or {}).get("verdict_policy") or {}
-        attempt_policy = (ae or {}).get("attempt_policy") or {}
+    def _render_methodology(
+        lines: list[str],
+        ae: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
+    ) -> None:
+        policy = _mapping((ae or {}).get("verdict_policy"))
+        attempt_policy = _mapping((ae or {}).get("attempt_policy"))
         attempt_threshold = _number(policy.get("attempt_pass_threshold", attempt_policy.get("pass_threshold")))
         dimension_pass = _number(policy.get("dimension_pass_threshold")) or DIMENSION_VERDICT_PASS_THRESHOLD
         dimension_neutral = (
@@ -416,7 +479,7 @@ class BenchmarkReporter(ReporterBase):
         for dim_id, config in DIMENSION_MAPPING.items():
             signals = _weighted_signals(config)
             question = config.get("question") or DIMENSION_HINTS.get(dim_id, "")
-            lines.append(f"| {dim_id.title()} | {_md_cell(question)} | {_md_cell(signals)} |")
+            lines.append(f"| {dim_id.title()} | {_trusted_md_cell(question)} | {_trusted_md_cell(signals)} |")
 
         lines.extend(
             [
@@ -461,9 +524,13 @@ class BenchmarkReporter(ReporterBase):
             lines.append("Signals present in this run:")
             lines.append("")
             for signal in signals:
-                label = labels.get(signal, signal.replace("_", " ").title())
+                safe_signal = _publication_safe_inline(signal, private_labels)
+                label = _publication_safe_label(
+                    labels.get(signal, signal.replace("_", " ").title()),
+                    private_labels,
+                )
                 description = _SIGNAL_DESCRIPTIONS.get(signal, "additional evaluator signal")
-                lines.append(f"- `{signal}` ({label}): {description}.")
+                lines.append(f"- `{safe_signal}` ({label}): {description}.")
             lines.append("")
 
         lines.extend(["</details>", ""])
@@ -494,6 +561,10 @@ def _agent_eval_payload(results: list[ValidationResult]) -> dict[str, Any] | Non
     return None
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _benchmark_policy(
     results: list[ValidationResult],
     ae: dict[str, Any] | None,
@@ -501,7 +572,7 @@ def _benchmark_policy(
     """Resolve the persisted publication policy, defaulting Tier 3 to required."""
     candidates: list[object] = [
         (ae or {}).get("benchmark_policy"),
-        ((ae or {}).get("summary") or {}).get("benchmark_policy"),
+        _mapping((ae or {}).get("summary")).get("benchmark_policy"),
     ]
     candidates.extend(
         result.metadata.get("benchmark_policy") for result in results if isinstance(result.metadata, dict)
@@ -519,12 +590,11 @@ def _tier3_evidence_complete(ae: dict[str, Any] | None) -> bool:
     """Require an actual supported-agent verdict, with legacy compatibility."""
     if not isinstance(ae, dict) or not _agents(ae):
         return False
-    verdict = str(ae.get("verdict") or (ae.get("summary") or {}).get("verdict") or "").lower()
+    summary = _mapping(ae.get("summary"))
+    verdict = str(ae.get("verdict") or summary.get("verdict") or "").lower()
     if verdict not in {"pass", "neutral", "fail"}:
         return False
-    execution_status = str(
-        ae.get("execution_status") or (ae.get("summary") or {}).get("execution_status") or ""
-    ).lower()
+    execution_status = str(ae.get("execution_status") or summary.get("execution_status") or "").lower()
     # Historical payloads predate execution_status. Their recorded agents and
     # verdict are the strongest available evidence and remain renderable.
     return execution_status in {"", "succeeded"}
@@ -563,7 +633,8 @@ def _overall_status(
         return "INCOMPLETE"
 
     has_failures = not all(passes_required_gate(result) for result in results)
-    verdict = str((ae or {}).get("verdict") or ((ae or {}).get("summary") or {}).get("verdict") or "").lower()
+    summary = _mapping((ae or {}).get("summary"))
+    verdict = str((ae or {}).get("verdict") or summary.get("verdict") or "").lower()
     if has_failures or verdict == "fail":
         return "FAIL"
 
@@ -574,9 +645,7 @@ def _overall_status(
     ):
         return "INCOMPLETE"
 
-    execution_status = str(
-        (ae or {}).get("execution_status") or ((ae or {}).get("summary") or {}).get("execution_status") or ""
-    ).lower()
+    execution_status = str((ae or {}).get("execution_status") or summary.get("execution_status") or "").lower()
     if verdict == "neutral" and execution_status in {"succeeded", ""}:
         return "NEUTRAL"
     return "PASS"
@@ -594,7 +663,7 @@ def _verdict_callout(status: str) -> str:
 
 def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str:
     if ae:
-        summary = ae.get("summary") or {}
+        summary = _mapping(ae.get("summary"))
         candidate = ae.get("skill_name") or summary.get("skill_name")
         if candidate:
             return str(candidate)
@@ -612,25 +681,41 @@ def _agents(ae: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     return {str(name): agent for name, agent in agents.items() if isinstance(agent, dict)}
 
 
-def _agent_label(name: str, agent: dict[str, Any]) -> str:
-    display = _human_agent_name(str(agent.get("display_name") or agent.get("label") or name))
+def _agent_label(
+    name: str,
+    agent: dict[str, Any],
+    private_labels: tuple[str, ...] = (),
+) -> str:
+    display = _human_agent_name(
+        _publication_safe_label(agent.get("display_name") or agent.get("label") or name, private_labels)
+    )
     model = agent.get("model") or agent.get("model_name") or agent.get("llm_model")
-    return f"{display} (`{model}`)" if model else f"{display} (model not recorded)"
+    if model:
+        return f"{display} (`{_publication_safe_label(model, private_labels)}`)"
+    return f"{display} (model not recorded)"
 
 
-def _agent_table_label(name: str, agent: dict[str, Any]) -> str:
-    display = _human_agent_name(str(agent.get("display_name") or agent.get("label") or name))
+def _agent_table_label(
+    name: str,
+    agent: dict[str, Any],
+    private_labels: tuple[str, ...] = (),
+) -> str:
+    display = _human_agent_name(
+        _publication_safe_label(agent.get("display_name") or agent.get("label") or name, private_labels)
+    )
     return f"{display} (Baseline → Skill Uplift)"
 
 
 def _human_agent_name(name: str) -> str:
     if name == "claude-code":
         return "Claude Code"
-    return name.replace("_", " ").replace("-", " ").title()
+    if re.fullmatch(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", name):
+        return name.replace("_", " ").replace("-", " ").title()
+    return name.title()
 
 
 def _evaluated_at(ae: dict[str, Any] | None) -> str | None:
-    value = (ae or {}).get("evaluated_at") or ((ae or {}).get("summary") or {}).get("evaluated_at")
+    value = (ae or {}).get("evaluated_at") or _mapping((ae or {}).get("summary")).get("evaluated_at")
     return str(value).strip() if value else None
 
 
@@ -643,7 +728,7 @@ def _evaluation_date(value: str) -> str:
 
 
 def _environment(ae: dict[str, Any] | None) -> str | None:
-    summary = (ae or {}).get("summary") or {}
+    summary = _mapping((ae or {}).get("summary"))
     value = summary.get("environment") or (ae or {}).get("environment") or (ae or {}).get("requested_environment")
     return str(value) if value else None
 
@@ -651,8 +736,9 @@ def _environment(ae: dict[str, Any] | None) -> str | None:
 def _environment_note(environment: str | None) -> str | None:
     if not environment:
         return None
-    lowered = environment.lower().replace("_", "-")
-    if _INTERNAL_SANDBOX_NAME.fullmatch(environment):
+    public_environment = _publication_safe_environment(environment)
+    lowered = public_environment.lower().replace("_", "-")
+    if public_environment == "Isolated sandbox":
         return "Each task attempt ran in its own isolated sandbox."
     if "k8s" in lowered or "sandbox" in lowered:
         return "Each task attempt ran in its own isolated sandbox pod."
@@ -803,8 +889,9 @@ def _tier_status(
         return "FAILED", f"{len(results)} validator(s); {len(findings)} finding(s)"
 
     if tier == "Tier 3" and ae:
-        execution = str(ae.get("execution_status") or (ae.get("summary") or {}).get("execution_status") or "")
-        verdict = str(ae.get("verdict") or (ae.get("summary") or {}).get("verdict") or "").upper()
+        summary = _mapping(ae.get("summary"))
+        execution = str(ae.get("execution_status") or summary.get("execution_status") or "")
+        verdict = str(ae.get("verdict") or summary.get("verdict") or "").upper()
         if execution and execution != "succeeded":
             return "INCOMPLETE", f"Execution status: {execution}"
         if verdict in {"PASS", "NEUTRAL", "FAIL"}:
@@ -885,22 +972,126 @@ def _top_findings(findings: list[Finding], *, limit: int) -> list[Finding]:
     return sorted(findings, key=lambda finding: (order.get(finding.severity.value, 99), finding.category))[:limit]
 
 
-def _finding_line(finding: Finding) -> str:
+def _finding_line(finding: Finding, private_labels: tuple[str, ...] = ()) -> str:
     location = f" (`{_publication_safe_location(finding)}`)" if finding.file_path else ""
-    return (
-        f"- **{finding.severity.value.upper()}** {finding.category}/{finding.check_name}: {finding.message}{location}"
-    )
+    category = _publication_safe_inline(finding.category, private_labels)
+    check_name = _publication_safe_inline(finding.check_name, private_labels)
+    message = _publication_safe_inline(finding.message, private_labels)
+    return f"- **{finding.severity.value.upper()}** {category}/{check_name}: {message}{location}"
 
 
-def _md_cell(value: object) -> str:
+def _md_cell(value: object, private_labels: tuple[str, ...] = ()) -> str:
+    return _publication_safe_inline(value, private_labels).replace("|", "\\|")
+
+
+def _trusted_md_cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
-def _publication_safe_text(value: object) -> str:
-    branded = _RETIRED_PRODUCT_NAME.sub("Skill Evaluator", str(value))
-    isolated = _INTERNAL_SANDBOX_REFERENCE.sub("isolated sandbox", branded)
-    windows_safe = _WINDOWS_USER_HOME.sub("~", isolated)
-    return _POSIX_USER_HOME.sub("~", windows_safe)
+def _publication_safe_skill_name(value: object) -> str:
+    """Return a canonical target identity or a non-injectable public fallback."""
+    candidate = " ".join(str(value).split())
+    if re.fullmatch(KEBAB_CASE_PATTERN, candidate) is not None:
+        return candidate
+    if _RETIRED_PRODUCT_NAME.fullmatch(candidate):
+        return "Skill Evaluator"
+    return "skill"
+
+
+def _private_environment_labels(ae: dict[str, Any] | None) -> tuple[str, ...]:
+    """Return imported non-public environment labels that must not escape in free text."""
+    if not ae:
+        return ()
+    summary = _mapping(ae.get("summary"))
+    candidates = [summary.get("environment"), ae.get("environment")]
+    labels: list[str] = []
+    for value in candidates:
+        label = " ".join(str(value or "").split())
+        if label and label.casefold() not in HARBOR_ENV_MODES and label not in labels:
+            labels.append(label)
+    return tuple(labels)
+
+
+def _publication_safe_label(value: object, private_labels: tuple[str, ...] = ()) -> str:
+    """Sanitize a classified display label and normalize only an exact retired product name."""
+    label = _publication_safe_inline(value, private_labels)
+    if _RETIRED_PRODUCT_NAME.fullmatch(label):
+        return "Skill Evaluator"
+    return label
+
+
+def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()) -> str:
+    """Render untrusted metadata as one publication-safe Markdown line."""
+    text = " ".join(str(value).split())
+    text = _redact_absolute_paths(text)
+    text = _RETIRED_SANDBOX_REFERENCE.sub("isolated sandbox", text)
+    for label in sorted(private_labels, key=len, reverse=True):
+        text = re.sub(
+            re.escape(label),
+            "Isolated sandbox",
+            text,
+            flags=re.IGNORECASE,
+        )
+    text = text.replace("`", "'").replace("<", "&lt;").replace(">", "&gt;")
+    text = _PUBLICATION_URL_SCHEME.sub(lambda match: f"{match.group('scheme')}&#58;//", text)
+    text = _PUBLICATION_WWW_PREFIX.sub(lambda match: f"{match.group(0)[:-1]}&#46;", text)
+    text = text.replace("@", "&#64;")
+    text = _MARKDOWN_INLINE_SPECIAL.sub(r"\\\1", text)
+    if _MARKDOWN_BLOCK_PREFIX.match(text) or _MARKDOWN_THEMATIC_BREAK.fullmatch(text):
+        marker_end = text.find(" ")
+        marker_end = len(text) if marker_end < 0 else marker_end
+        if text[:marker_end].rstrip(".)").isdigit():
+            punctuation_index = marker_end - 1
+            return f"{text[:punctuation_index]}\\{text[punctuation_index:]}"
+        return f"\\{text}"
+    return text
+
+
+def _redact_absolute_paths(value: str) -> str:
+    """Reduce absolute POSIX and Windows paths embedded in free text to basenames."""
+
+    def redact_quoted_file_uri(match: re.Match[str]) -> str:
+        basename = _absolute_path_basename(match.group("path"))
+        return f"{match.group('quote')}{basename}{match.group('quote')}" if basename else match.group(0)
+
+    def redact_file_uri(match: re.Match[str]) -> str:
+        candidate = match.group("path")
+        core = candidate.rstrip(_TRAILING_PATH_PUNCTUATION)
+        suffix = candidate[len(core) :]
+        basename = _absolute_path_basename(core)
+        return f"{basename}{suffix}" if basename else match.group(0)
+
+    def redact_quoted(match: re.Match[str]) -> str:
+        path = match.group("path")
+        basename = _absolute_path_basename(path)
+        return f"{match.group('quote')}{basename}{match.group('quote')}" if basename else match.group(0)
+
+    text = _QUOTED_FILE_URI_PATH.sub(redact_quoted_file_uri, value)
+    text = _FILE_URI_PATH.sub(redact_file_uri, text)
+    text = _QUOTED_ABSOLUTE_PATH.sub(redact_quoted, text)
+    tokens: list[str] = []
+    for token in text.split(" "):
+        match = _PATH_START.search(token)
+        if not match:
+            tokens.append(token)
+            continue
+        prefix = token[: match.start()]
+        candidate = token[match.start() :]
+        core = candidate.rstrip(_TRAILING_PATH_PUNCTUATION)
+        suffix = candidate[len(core) :]
+        basename = _absolute_path_basename(core)
+        tokens.append(f"{prefix}{basename}{suffix}" if basename else token)
+    return " ".join(tokens)
+
+
+def _absolute_path_basename(value: str) -> str | None:
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if posix_path.is_absolute() and not value.startswith("//"):
+        return posix_path.name or "redacted-path"
+    if windows_path.is_absolute() or windows_path.root:
+        return windows_path.name or "redacted-path"
+    return None
 
 
 def _publication_safe_environment(value: object) -> str:
@@ -914,8 +1105,8 @@ def _publication_safe_location(finding: Finding) -> str:
     windows_path = PureWindowsPath(file_path)
     if posix_path.is_absolute():
         file_path = posix_path.name
-    elif windows_path.is_absolute():
+    elif windows_path.is_absolute() or windows_path.root:
         file_path = windows_path.name
     if finding.line_number:
         file_path += f":{finding.line_number}"
-    return file_path
+    return _publication_safe_inline(file_path)

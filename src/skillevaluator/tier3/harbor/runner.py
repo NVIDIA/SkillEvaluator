@@ -29,7 +29,6 @@ from typing import Any
 from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
-from skillevaluator.telemetry import record_agent_eval_summary
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
     build_eval_base_image,
@@ -768,7 +767,6 @@ def _harbor_subprocess_environment(
                     continue
                 environment.setdefault(name, value)
         environment = local_subprocess_env(runtime_agents=[agent] if agent else None, base_env=environment)
-    environment["SKILLEVALUATOR_TELEMETRY_DISABLED"] = "true"
     return environment
 
 
@@ -2163,19 +2161,6 @@ def _run_harbor_eval_impl(
         latest.symlink_to(run_id)
     except OSError:
         pass
-    try:
-        record_agent_eval_summary(
-            runner="harbor",
-            skill_name=skill_path.name,
-            agents=agents,
-            env_mode=env_mode,
-            results=results,
-            agent_models=model_resolution,
-            duration_ms=0.0,
-        )
-    except Exception:
-        logger.debug("Telemetry summary skipped", exc_info=True)
-
     return results
 
 

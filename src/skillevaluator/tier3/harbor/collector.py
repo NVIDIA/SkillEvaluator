@@ -16,7 +16,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.telemetry import record_agent_trial, redact_sensitive_data, redact_sensitive_text
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
@@ -28,6 +27,7 @@ from skillevaluator.tier3.harbor.metrics import (
     overall_score,
     score_definition,
 )
+from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -1417,13 +1417,10 @@ def _save_trials(
     trials_dir: Path,
     job_dir: Path | None,
     *,
-    skill_name: str,
     agent: str,
     variant: str,
-    env_mode: str | None = None,
     agent_model: str | None = None,
     agent_model_source: str | None = None,
-    emit_telemetry: bool = True,
 ) -> None:
     """Save per-trial reward.json and trajectory.json into the results directory."""
     trials_dir.mkdir(parents=True, exist_ok=True)
@@ -1453,18 +1450,6 @@ def _save_trials(
         if agent_model_source:
             clean_reward["model_source"] = agent_model_source
         (trial_out / "reward.json").write_text(json.dumps(clean_reward, indent=2), encoding="utf-8")
-        if emit_telemetry:
-            record_agent_trial(
-                skill_name=skill_name,
-                agent=agent,
-                runner="harbor",
-                variant=variant,
-                reward=reward,
-                trial_dir=trial_out,
-                env_mode=env_mode,
-                agent_model=agent_model,
-                agent_model_source=agent_model_source,
-            )
 
         if trial_src:
             _copy_trial_artifacts(trial_src, trial_out)
@@ -1788,10 +1773,8 @@ def collect_harbor_results(
                 with_rewards,
                 agent_dir / "with-skill" / "trials",
                 with_job_dir,
-                skill_name=skill_name,
                 agent=agent,
                 variant="with_skill",
-                env_mode=env_mode,
                 agent_model=agent_model,
                 agent_model_source=agent_model_source,
             )
@@ -1931,10 +1914,8 @@ def collect_harbor_results(
                     without_rewards,
                     agent_dir / "without-skill" / "trials",
                     without_job_dir,
-                    skill_name=skill_name,
                     agent=agent,
                     variant="without_skill",
-                    env_mode=env_mode,
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
                 )
@@ -2075,13 +2056,10 @@ def collect_harbor_results(
                     with_rewards,
                     agent_dir / "with-skill" / "trials",
                     with_job_dir,
-                    skill_name=skill_name,
                     agent=agent,
                     variant="with_skill",
-                    env_mode=env_mode,
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
-                    emit_telemetry=False,
                 )
 
         agent_execution = _aggregate_execution([with_execution, without_execution])

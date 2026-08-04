@@ -58,7 +58,7 @@ Example: `47% → 92% (+45 points)` means the skill-assisted run scored 92%, 45 
 <details>
 <summary>Show detailed findings and successful checks</summary>
 
-- **LOW** INTER_SKILL/partial_overlap: Partial overlap with another skill (`SKILL.md`)
+- **LOW** INTER\_SKILL/partial\_overlap: Partial overlap with another skill (`SKILL.md`)
 
 </details>
 

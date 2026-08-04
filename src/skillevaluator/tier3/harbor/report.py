@@ -15,7 +15,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.telemetry import record_agent_eval_findings, redact_sensitive_data
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     METRIC_DESCRIPTIONS,
@@ -23,6 +22,7 @@ from skillevaluator.tier3.harbor.metrics import (
     METRIC_QUESTIONS,
     extract_custom_metrics,
 )
+from skillevaluator.utils.redaction import redact_sensitive_data
 
 logger = logging.getLogger(__name__)
 
@@ -713,26 +713,6 @@ def add_evidence_links_to_suggestions(
     return linked
 
 
-def _agent_model_info(agent_data: dict[str, Any]) -> tuple[str | None, str | None]:
-    model = agent_data.get("model")
-    source = agent_data.get("model_source")
-    resolution = agent_data.get("model_resolution")
-    if isinstance(resolution, dict):
-        model = model or resolution.get("model")
-        source = source or resolution.get("source") or resolution.get("model_source")
-    return (str(model) if model else None, str(source) if source else None)
-
-
-def _findings_env_mode(harbor_result: dict[str, Any]) -> str | None:
-    observability = harbor_result.get("observability")
-    if isinstance(observability, dict):
-        env_mode = observability.get("env_mode")
-        if env_mode:
-            return str(env_mode)
-    env_mode = harbor_result.get("env_mode")
-    return str(env_mode) if env_mode else None
-
-
 def _write_findings_artifact(
     *,
     results_dir: Path,
@@ -842,13 +822,12 @@ def display_findings_report(
             body.append(f"    {i}. {suggestion}\n", style="white")
     rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
 
-    env_mode = _findings_env_mode(harbor_result)
     for agent, (agent_findings, _agent_rewards) in agent_reports.items():
         is_best_agent = agent == best_agent
         agent_suggestions = suggestions if is_best_agent else []
         agent_suggestion_mode = suggestion_mode if is_best_agent else "not_generated"
         agent_suggestions_v2 = structured if is_best_agent else []
-        artifact_path = _write_findings_artifact(
+        _write_findings_artifact(
             results_dir=results_dir,
             skill_name=skill_name,
             agent=agent,
@@ -856,20 +835,6 @@ def display_findings_report(
             suggestions=agent_suggestions,
             suggestion_mode=agent_suggestion_mode,
             suggestions_v2=agent_suggestions_v2,
-        )
-        agent_data = agents_data.get(agent, {})
-        model, model_source = _agent_model_info(agent_data if isinstance(agent_data, dict) else {})
-        record_agent_eval_findings(
-            skill_name=skill_name,
-            agent=agent,
-            runner="harbor",
-            env_mode=env_mode,
-            findings=agent_findings,
-            suggestions=agent_suggestions,
-            suggestion_mode=agent_suggestion_mode,
-            agent_model=model,
-            agent_model_source=model_source,
-            artifact_path=artifact_path,
         )
 
     panel_agent_label = _agent_model_label(best_agent, harbor_result, agents_data)

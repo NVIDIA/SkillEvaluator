@@ -43,7 +43,7 @@ Tier 3 live-agent scores were not available. See the tier status table for what 
 <details>
 <summary>Show detailed findings and successful checks</summary>
 
-- **LOW** INTER_SKILL/partial_overlap: Partial overlap with another skill (`SKILL.md`)
+- **LOW** INTER\_SKILL/partial\_overlap: Partial overlap with another skill (`SKILL.md`)
 
 </details>
 

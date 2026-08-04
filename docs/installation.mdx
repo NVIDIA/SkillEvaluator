@@ -34,9 +34,8 @@ binary:
 | `llm` | Shared LLM and embedding clients |
 | `tier2` | Intra-skill deduplication and local-catalog inter-skill similarity; includes `llm` |
 | `tier3` | Docker and cloud live-agent evaluation; includes `llm` |
-| `telemetry` | Optional OpenTelemetry export |
 | `security` | Bandit and pip-audit |
-| `all` | `tier2`, `tier3`, `telemetry`, and `security` |
+| `all` | `tier2`, `tier3`, and `security` |
 | `dev` | Build, test, coverage, and formatting tools |
 
 Swap the extras in the install one-liner:
@@ -61,8 +60,8 @@ The external executables must be on `PATH`, or their absolute paths can be set
 with `SKILLEVALUATOR_SEMGREP_PATH` and
 `SKILLEVALUATOR_SKILLSPECTOR_PATH`. RHEL 8 and compatible enterprise Linux
 systems can provide compatible executables independently of the Skill
-Evaluator Python environment. Use `all` only when Tier 2/Tier 3, telemetry,
-and the bundled Python security tools are also needed.
+Evaluator Python environment. Use `all` only when Tier 2/Tier 3 and the
+bundled Python security tools are also needed.
 
 ## Install from source
 

@@ -68,7 +68,7 @@
     {
       "path": "tests/test_provider_config.py",
       "rule": "internal-nvidia-credential",
-      "line": 95,
+      "line": 79,
       "reason": "Negative provider credential assertion",
       "expires": "2027-07-08",
       "review_owner": "oss-release-reviewers"

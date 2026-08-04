@@ -563,6 +563,57 @@ class TestQualityScoreKeywordBoundaries:
 
         assert "MCP skill lacks connection/error guidance" not in messages
 
+    def test_other_cli_mcp_comparison_does_not_classify_current_skill(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                name="authenticating-entra-device-code",
+                extra_body=(
+                    "\nNote: sharepoint-cli, gdrive-cli, and glean-cli use MaaS MCP auth "
+                    "(via nv-discovery-cli), not Entra device code.\n"
+                ),
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
+    def test_current_cli_mcp_comparison_remains_mcp_usage(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                name="sharepoint-cli",
+                extra_body="\nsharepoint-cli uses MaaS MCP auth, not Entra device code.\n",
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" in messages
+
+    def test_mcp_mention_in_html_comment_does_not_classify_skill(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                extra_body=(
+                    "\n<!-- Related skills:\n- managing-sharepoint: SharePoint sites and lists (MaaS MCP)\n-->\n"
+                ),
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
+    def test_mcp_guidance_in_html_comment_does_not_satisfy_active_usage(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                extra_body=(
+                    "\nUse the MCP server to enumerate tools.\n\n"
+                    "<!--\n## MCP Troubleshooting\n\n"
+                    "Reconnect the server and retry after a timeout.\n-->\n"
+                ),
+            )
+        )
+
+        assert "MCP skill lacks connection/error guidance" in messages
+
     def test_interconnect_does_not_satisfy_mcp_connection_guidance(self, tmp_path: Path):
         messages = _finding_messages(
             _write_issue_skill(tmp_path, extra_body="\nUse the MCP server for GPU interconnect analysis.\n")
@@ -910,3 +961,14 @@ class TestQualityScoreKeywordBoundaries:
         )
 
         assert "Instructions lack clear action verbs" in messages
+
+    @pytest.mark.parametrize("action", ["Add", "Mark", "Update", "Keep"])
+    def test_task_list_imperatives_are_clear_action_verbs(self, tmp_path: Path, action: str):
+        messages = _finding_messages(
+            _write_issue_skill(
+                tmp_path,
+                instructions=f"- {action} task status as each step completes.",
+            )
+        )
+
+        assert "Instructions lack clear action verbs" not in messages

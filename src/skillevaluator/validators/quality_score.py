@@ -164,6 +164,26 @@ def _without_fenced_code(content: str) -> str:
     return "".join(visible)
 
 
+def _without_html_comments(content: str) -> str:
+    """Mask HTML comments while preserving line boundaries."""
+    if "<!--" not in content:
+        return content
+
+    visible = []
+    cursor = 0
+    while True:
+        comment_start = content.find("<!--", cursor)
+        if comment_start == -1:
+            visible.append(content[cursor:])
+            break
+        visible.append(content[cursor:comment_start])
+        closing_marker = content.find("-->", comment_start + 4)
+        comment_end = len(content) if closing_marker == -1 else closing_marker + 3
+        visible.append("".join(char if char in "\r\n" else " " for char in content[comment_start:comment_end]))
+        cursor = comment_end
+    return "".join(visible)
+
+
 def _markdown_link_targets(content: str) -> list[str]:
     """Extract inline Markdown link targets, including balanced parentheses."""
     content = _without_fenced_code(content)
@@ -214,9 +234,35 @@ def _markdown_link_targets(content: str) -> list[str]:
     return targets
 
 
-def _mcp_usage_contexts(content: str) -> list[str]:
+def _is_other_cli_mcp_comparison(sentence: str, mcp_end: int, skill_name: str | None) -> bool:
+    """Return whether a sentence contrasts other CLIs' MCP use with this skill."""
+    if not skill_name:
+        return False
+
+    before_mcp = sentence[:mcp_end]
+    if not re.search(
+        r"\b[a-z0-9]+(?:-[a-z0-9]+)*-cli\b[^.!?]{0,80}\buses?\b[^.!?]{0,80}\bmcp\b",
+        before_mcp,
+        re.IGNORECASE,
+    ):
+        return False
+
+    after_mcp = sentence[mcp_end:]
+    if re.search(r"\bnot\s+(?:this|the\s+current)\s+skill\b", after_mcp, re.IGNORECASE):
+        return True
+
+    name_parts = [part for part in re.split(r"[-_\s]+", skill_name) if part]
+    aliases = (" ".join(name_parts[index:]) for index in range(max(1, len(name_parts) - 1)))
+    return any(
+        re.search(rf"\bnot\s+{re.escape(alias)}\b", after_mcp, re.IGNORECASE)
+        for alias in aliases
+        if len(alias.split()) >= 2
+    )
+
+
+def _mcp_usage_contexts(content: str, skill_name: str | None = None) -> list[str]:
     """Return paragraphs where MCP is used as a capability rather than negated."""
-    content = _without_fenced_code(content)
+    content = _without_html_comments(_without_fenced_code(content))
     contexts = []
     for paragraph in re.split(r"\n\s*\n", content):
         for match in _MCP_RE.finditer(paragraph):
@@ -230,7 +276,12 @@ def _mcp_usage_contexts(content: str) -> list[str]:
                 for pattern in _NEGATED_MCP_RES
                 for negated in pattern.finditer(sentence)
             )
-            if not is_negated:
+            is_other_cli_comparison = _is_other_cli_mcp_comparison(
+                sentence,
+                match.end() - sentence_start,
+                skill_name,
+            )
+            if not is_negated and not is_other_cli_comparison:
                 contexts.append(paragraph)
                 break
     return contexts
@@ -238,7 +289,7 @@ def _mcp_usage_contexts(content: str) -> list[str]:
 
 def _markdown_h2_sections(content: str) -> Iterable[tuple[str, str]]:
     """Yield H2 headings and bodies without a backtracking multi-line pattern."""
-    content = _without_fenced_code(content)
+    content = _without_html_comments(_without_fenced_code(content))
     matches = list(_MARKDOWN_H2_RE.finditer(content))
     for index, match in enumerate(matches):
         body_start = match.end()
@@ -911,7 +962,7 @@ class QualityScoreValidator(ValidatorBase):
             )
 
         # MCP connection guidance (M2)
-        mcp_contexts = _mcp_usage_contexts(content)
+        mcp_contexts = _mcp_usage_contexts(content, qs.skill_name)
         if mcp_contexts and not _has_mcp_guidance(content, mcp_contexts):
             dim.deduct(
                 10,
@@ -1035,7 +1086,7 @@ class QualityScoreValidator(ValidatorBase):
         else:
             section = ""
         if section:
-            action_words = ["use", "call", "run", "execute", "pass", "set"]
+            action_words = ["use", "call", "run", "execute", "pass", "set", "add", "mark", "update", "keep"]
             if not _contains_any_term(section, action_words):
                 dim.deduct(
                     15,

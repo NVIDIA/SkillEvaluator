@@ -12,11 +12,21 @@ from dataclasses import dataclass
 PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
-_CHAT_DEFAULT_MODELS = {
-    "openai": "gpt-5.4-mini",
-    "anthropic": "claude-sonnet-4-5",
+# Pinned frontier chat defaults (not floating aliases like ``gpt-5`` / ``claude-opus-latest``).
+# Harbor ``templates/eval.py`` cannot import this module — keep its local
+# ``DEFAULT_JUDGE_MODEL`` in sync via the drift test in
+# ``tests/tier3/test_judge_parse_robustness.py``.
+CHAT_DEFAULT_OPENAI = "gpt-5.5"
+CHAT_DEFAULT_ANTHROPIC = "claude-opus-4-8"
+CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-4-8"
+# Lower-cost OpenAI alternative for ``SKILL_EVAL_LLM_MODEL`` overrides.
+CHAT_CHEAP_OPENAI = "gpt-5.4-mini"
+
+CHAT_DEFAULT_MODELS = {
+    "openai": CHAT_DEFAULT_OPENAI,
+    "anthropic": CHAT_DEFAULT_ANTHROPIC,
     "nv_build": "nvidia/nemotron-3-nano-30b-a3b",
-    "bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "bedrock": CHAT_DEFAULT_BEDROCK,
 }
 _EMBEDDING_DEFAULT_MODELS = {
     "openai": "text-embedding-3-small",
@@ -238,6 +248,6 @@ def _validate_provider(provider: str, *, variable: str) -> None:
 
 def _default_chat_model(provider: str) -> str:
     try:
-        return _CHAT_DEFAULT_MODELS[provider]
+        return CHAT_DEFAULT_MODELS[provider]
     except KeyError as exc:
         raise ProviderConfigurationError("SKILL_EVAL_LLM_MODEL is required for openai-compatible providers.") from exc

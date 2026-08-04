@@ -6,6 +6,8 @@
 Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+
 # =============================================================================
 # SKILLS CONSTANTS
 # =============================================================================
@@ -563,8 +565,8 @@ TOKEN_EFFICIENCY_EVALUATOR_NAME: str = "token_efficiency"
 # LLM-AS-JUDGE: TIER 3 DIMENSION + INSIGHTS
 # =============================================================================
 
-DIMENSION_JUDGE_MODEL = "gpt-5.4-mini"
-DIMENSION_JUDGE_MAX_TOKENS = 2048
+DIMENSION_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
+DIMENSION_JUDGE_MAX_TOKENS = 4096
 DIMENSION_JUDGE_TEMPERATURE: float | None = 0.0
 DIMENSION_VERDICT_PASS_THRESHOLD = 0.7
 DIMENSION_VERDICT_NEUTRAL_THRESHOLD = 0.4
@@ -572,7 +574,7 @@ DIMENSION_VERDICT_NEUTRAL_THRESHOLD = 0.4
 # LLM-as-Judge for the Insights tab (additional Conclusions and Recommendations
 # on top of the deterministic ones produced by tier3_normalizer).
 INSIGHTS_JUDGE_MODEL = DIMENSION_JUDGE_MODEL
-INSIGHTS_JUDGE_MAX_TOKENS = 2048
+INSIGHTS_JUDGE_MAX_TOKENS = 4096
 INSIGHTS_JUDGE_TEMPERATURE: float | None = None
 INSIGHTS_JUDGE_MAX_CONCLUSIONS = 5
 INSIGHTS_JUDGE_MAX_RECOMMENDATIONS = 5

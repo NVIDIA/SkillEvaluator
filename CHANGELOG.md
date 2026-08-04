@@ -41,6 +41,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Updated public OpenAI / Anthropic / Bedrock chat defaults to pinned frontier
+  models (`gpt-5.5`, `claude-opus-4-8`, `us.anthropic.claude-opus-4-8`),
+  centralized in `provider_config`, and documented `gpt-5.4-mini` as the
+  lower-cost OpenAI `SKILL_EVAL_LLM_MODEL` alternative. Raised
+  dimension/insights judge token budgets to 4096 and widened the gpt-5\*
+  temperature guard to bare model IDs.
 - Simplified the repository README into a concise documentation landing page,
   retained a compact keyless `validate` quickstart, LLM-provider setup, and a
   one-command `validate --full` path through all three tiers, broadened the

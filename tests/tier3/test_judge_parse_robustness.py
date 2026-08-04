@@ -344,6 +344,19 @@ def test_template_behavior_judge_max_tokens_matches_eval_core_constant():
     assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS >= 4096
 
 
+def test_template_default_judge_model_matches_central_constant():
+    from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+
+    assert eval_template.DEFAULT_JUDGE_MODEL == llm_judge.DEFAULT_JUDGE_MODEL
+    assert llm_judge.DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
+    assert CHAT_DEFAULT_OPENAI == "gpt-5.5"
+
+
+def test_template_gpt5_temperature_guard_matches_eval_core():
+    for model in ("gpt-5.5", "openai/gpt-5.5", "openai/openai/gpt-5.5", "gpt-5.4-mini", "gpt-4.1-mini"):
+        assert eval_template._supports_custom_temperature(model) == llm_judge._supports_custom_temperature(model)
+
+
 def test_template_salvage_score_matches_eval_core_on_partial_recovery(monkeypatch):
     # Drift guard for the salvage denominator fix: 3 salvaged of 7 expected
     # must score 3/7 in BOTH the shared judge and the in-sandbox template.

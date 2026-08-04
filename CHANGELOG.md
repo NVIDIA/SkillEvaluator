@@ -74,6 +74,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Quality scoring now uses boundary-aware and context-aware matching for XML
+  tags, reserved names, MCP guidance, README references, time references,
+  exclusivity language, and nested Markdown links, avoiding incidental-word
+  score changes.
 - Public benchmark cards now omit policy profiles, redact absolute host paths,
   and normalize imported internal or retired metadata before publication.
 - Previous-version validation now rejects catalog-wide scalar reuse and removal

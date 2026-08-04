@@ -18,6 +18,7 @@ gap analysis (H1-H4, M1-M5, L1, L4), OpenAI Skill Evals.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -33,13 +34,14 @@ from skillevaluator.constants import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.validators.base import ValidatorBase
 
 logger = get_logger(__name__)
 
 _WORD_CHAR = r"A-Za-z0-9_"
-_XML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:\s[^<>]*)?>|</?[A-Za-z][A-Za-z0-9_-]*\s[^<>]*$")
-_MARKDOWN_LINK_TARGET_RE = re.compile(r"\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+[^)]*)?\)", re.IGNORECASE)
+_MARKDOWN_LINK_START_RE = re.compile(r"\[[^\]\n]*\]\(\s*")
+_MARKDOWN_LINK_CLOSER_RE = re.compile(r"^\s*(?:(?:\"[^\"\n]*\"|'[^'\n]*'|\([^\)\n]*\))\s*)?\)")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
     r"validat(?:e|es|ed|ing|ion|ions))\b",
@@ -51,6 +53,11 @@ _NEGATED_MCP_RES = (
     re.compile(r"\b(?:doesn't|don't|didn't|never)\s+(?:\w+\s+){0,3}mcp\b", re.IGNORECASE),
     re.compile(r"\bwithout\s+(?:an?\s+)?mcp\b", re.IGNORECASE),
     re.compile(r"\b(?:no|not\s+(?:an?\s+)?)mcp\b", re.IGNORECASE),
+    re.compile(
+        r"\bmcp\b\s+(?:(?:is|are|was|were)\s+not|(?:isn't|aren't|wasn't|weren't))\s+"
+        r"(?:used|required|needed|enabled|supported|involved)\b",
+        re.IGNORECASE,
+    ),
 )
 _MCP_GUIDANCE_RES = (
     re.compile(r"\bconnect(?:s|ed|ing|ion|ions)?\b", re.IGNORECASE),
@@ -60,10 +67,25 @@ _MCP_GUIDANCE_RES = (
     re.compile(r"\bserver\b[^\n.!?]{0,80}\brunning\b", re.IGNORECASE),
     re.compile(r"\bapi\b[^\n.!?]{0,40}\bkeys?\b", re.IGNORECASE),
 )
-_TIME_REFERENCE_RE = re.compile(r"\b(?:before|after|as of|until)\s+(?:the\s+year\s+)?(?:19|20)\d{2}\b", re.IGNORECASE)
+_MCP_SUPPORT_SECTION_RE = re.compile(
+    r"^##\s+(?:Troubleshooting|Common Issues|FAQ)\s*$\n?(.*?)(?=^##\s+|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_MCP_SUPPORT_SUBJECT_RE = re.compile(
+    r"\b(?:mcp|connections?|servers?|sessions?|api\s+keys?)\b",
+    re.IGNORECASE,
+)
+_TIME_REFERENCE_RE = re.compile(
+    r"\b(?:before|after|as of|until)\s+(?:the\s+year\s+)?(?:19\d{2}|2\d{3})\b",
+    re.IGNORECASE,
+)
 _NON_TEMPORAL_COUNT_RE = re.compile(
     r"^\s+(?:iterations?|tokens?|bytes?|kilobytes?|megabytes?|gigabytes?|"
     r"milliseconds?|seconds?|minutes?|hours?|rows?|items?|attempts?|samples?|steps?|calls?)\b",
+    re.IGNORECASE,
+)
+_EXCLUSIVITY_RE = re.compile(
+    r"\breplaces\s+all(?:\s+\w+){0,3}\s+(?:tools?|skills?|alternatives?|solutions?|approaches?)\b",
     re.IGNORECASE,
 )
 
@@ -98,20 +120,76 @@ def _has_api_documentation(content: str) -> bool:
     return any(re.search(pattern, content, re.IGNORECASE) for pattern in api_patterns)
 
 
+def _markdown_link_targets(content: str) -> list[str]:
+    """Extract inline Markdown link targets, including balanced parentheses."""
+    targets = []
+    for match in _MARKDOWN_LINK_START_RE.finditer(content):
+        cursor = match.end()
+        if cursor >= len(content):
+            continue
+        if content[cursor] == "<":
+            end = content.find(">", cursor + 1)
+            if end != -1 and _MARKDOWN_LINK_CLOSER_RE.match(content[end + 1 :]):
+                targets.append(content[cursor + 1 : end])
+            continue
+
+        chars = []
+        depth = 0
+        closed = False
+        while cursor < len(content):
+            char = content[cursor]
+            if char == "\\" and cursor + 1 < len(content):
+                chars.append(content[cursor + 1])
+                cursor += 2
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    closed = True
+                    break
+                depth -= 1
+            elif char.isspace():
+                if depth == 0:
+                    closed = _MARKDOWN_LINK_CLOSER_RE.match(content[cursor:]) is not None
+                break
+            chars.append(char)
+            cursor += 1
+        if chars and depth == 0 and closed:
+            targets.append("".join(chars))
+    return targets
+
+
 def _mcp_usage_contexts(content: str) -> list[str]:
     """Return paragraphs where MCP is used as a capability rather than negated."""
     contexts = []
     for paragraph in re.split(r"\n\s*\n", content):
         for match in _MCP_RE.finditer(paragraph):
             sentence_start = max(paragraph.rfind(mark, 0, match.start()) for mark in ".!?") + 1
-            prefix = paragraph[sentence_start : match.end()]
+            sentence_ends = [paragraph.find(mark, match.end()) for mark in ".!?"]
+            sentence_end = min((end for end in sentence_ends if end != -1), default=len(paragraph))
+            sentence = paragraph[sentence_start:sentence_end]
+            relative_mcp_start = match.start() - sentence_start
             is_negated = any(
-                negated.end() == len(prefix) for pattern in _NEGATED_MCP_RES for negated in pattern.finditer(prefix)
+                negated.start() <= relative_mcp_start < negated.end()
+                for pattern in _NEGATED_MCP_RES
+                for negated in pattern.finditer(sentence)
             )
             if not is_negated:
                 contexts.append(paragraph)
                 break
     return contexts
+
+
+def _has_mcp_guidance(content: str, usage_contexts: list[str]) -> bool:
+    """Return whether usage or a clearly MCP-related support section has guidance."""
+    if any(pattern.search(context) for context in usage_contexts for pattern in _MCP_GUIDANCE_RES):
+        return True
+    for match in _MCP_SUPPORT_SECTION_RE.finditer(content):
+        section = match.group(1)
+        if _MCP_SUPPORT_SUBJECT_RE.search(section) and any(pattern.search(section) for pattern in _MCP_GUIDANCE_RES):
+            return True
+    return False
 
 
 def _has_time_reference(content: str) -> bool:
@@ -123,15 +201,14 @@ def _has_time_reference(content: str) -> bool:
 
 def _has_nested_markdown_reference(content: str) -> bool:
     """Return whether a reference document links to another local Markdown document."""
-    for match in _MARKDOWN_LINK_TARGET_RE.finditer(content):
-        target = match.group(1)
+    for target in _markdown_link_targets(content):
         path = re.split(r"[?#]", target, maxsplit=1)[0].replace("\\", "/")
         lowered = path.lower()
         if not lowered.endswith(".md"):
             continue
-        if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE) or path.startswith(("//", "/", "../")):
+        if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE) or path.startswith(("//", "/")):
             continue
-        if lowered == "skill.md" or lowered.endswith("/skill.md"):
+        if posixpath.normpath(path).lower() == "../skill.md":
             continue
         return True
     return False
@@ -410,8 +487,8 @@ class QualityScoreValidator(ValidatorBase):
         Merely naming README.md, including negative guidance not to load it, does
         not pull the file into agent context.
         """
-        for match in _MARKDOWN_LINK_TARGET_RE.finditer(content):
-            target = re.split(r"[?#]", match.group(1), maxsplit=1)[0].replace("\\", "/")
+        for link_target in _markdown_link_targets(content):
+            target = re.split(r"[?#]", link_target, maxsplit=1)[0].replace("\\", "/")
             if target.lower().endswith("readme.md"):
                 return True
 
@@ -426,10 +503,17 @@ class QualityScoreValidator(ValidatorBase):
             r"[^\n.!?]{0,40}\breadme\.md\b",
             re.IGNORECASE,
         )
-        for sentence in re.split(r"(?<=[.!?])\s+|\n+", content):
+        passive_action_re = re.compile(
+            r"\breadme\.md\b[^\n.!?]{0,40}"
+            r"\b(?:should|must|needs?\s+to|is\s+required\s+to)\s+be\s+"
+            r"(?:read|opened|loaded|consulted|reviewed|followed|used)\b",
+            re.IGNORECASE,
+        )
+        normalized_content = re.sub(r"\s+", " ", content)
+        for sentence in re.split(r"(?<=[.!?])\s+", normalized_content):
             if negated_action_re.search(sentence):
                 continue
-            if action_re.search(sentence):
+            if action_re.search(sentence) or passive_action_re.search(sentence):
                 return True
         return False
 
@@ -444,7 +528,7 @@ class QualityScoreValidator(ValidatorBase):
         for key, val in fm.items():
             if key in ("name", "description"):
                 continue
-            if _XML_TAG_RE.search(str(val)):
+            if XML_TAG_RE.search(str(val)):
                 dim.deduct(
                     15,
                     "error",
@@ -471,10 +555,10 @@ class QualityScoreValidator(ValidatorBase):
                     "Name contains reserved word (anthropic, claude)",
                     "Remove reserved words from skill name",
                 )
-            if _XML_TAG_RE.search(name):
+            if XML_TAG_RE.search(name):
                 dim.deduct(15, "error", "Name contains XML tags", "Remove XML tags from skill name")
 
-        if desc and _XML_TAG_RE.search(desc):
+        if desc and XML_TAG_RE.search(desc):
             dim.deduct(15, "error", "Description contains XML tags", "Remove XML tags from description")
 
     def _check_type_specific(
@@ -653,7 +737,7 @@ class QualityScoreValidator(ValidatorBase):
             "this skill handles everything",
             "replaces all other",
         ]
-        if _contains_any_term(content, exclusivity):
+        if _contains_any_term(content, exclusivity) or _EXCLUSIVITY_RE.search(content):
             dim.deduct(
                 5,
                 "info",
@@ -733,9 +817,7 @@ class QualityScoreValidator(ValidatorBase):
 
         # MCP connection guidance (M2)
         mcp_contexts = _mcp_usage_contexts(content)
-        if mcp_contexts and not any(
-            pattern.search(context) for context in mcp_contexts for pattern in _MCP_GUIDANCE_RES
-        ):
+        if mcp_contexts and not _has_mcp_guidance(content, mcp_contexts):
             dim.deduct(
                 10,
                 "warning",

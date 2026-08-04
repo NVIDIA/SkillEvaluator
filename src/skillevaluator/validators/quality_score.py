@@ -66,6 +66,19 @@ _NEGATED_MCP_RES = (
         r"(?:used|required|needed|enabled|supported|involved)\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\b(?:avoid(?:s|ed|ing)?|disabl(?:e|es|ed|ing)|exclud(?:e|es|ed|ing))\s+"
+        r"(?:(?:using|relying\s+on|depending\s+on)\s+)?(?:an?\s+|the\s+)?mcp\b"
+        r"(?!\s+(?:errors?|failures?|timeouts?|issues?|problems?|disconnects?|outages?))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bmcp\b(?:\s+(?:support|integration|access|capability|server))?\s+"
+        r"(?:is|are|was|were|remains?|stays?)\s+"
+        r"(?:disabled|excluded|unavailable|unsupported)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bmcp[-\s]+free\b", re.IGNORECASE),
 )
 _MCP_GUIDANCE_RES = (
     re.compile(r"\bconnect(?:s|ed|ing|ion|ions)?\b", re.IGNORECASE),
@@ -629,7 +642,7 @@ class QualityScoreValidator(ValidatorBase):
         Merely naming README.md, including negative guidance not to load it, does
         not pull the file into agent context.
         """
-        content = _without_fenced_code(content)
+        content = _without_html_comments(_without_fenced_code(content))
         for link_target in _markdown_link_targets(content):
             target = re.split(r"[?#]", link_target, maxsplit=1)[0].replace("\\", "/")
             if posixpath.basename(posixpath.normpath(target)).lower() == "readme.md":

@@ -558,6 +558,29 @@ class TestQualityScoreKeywordBoundaries:
 
         assert "MCP skill lacks connection/error guidance" not in messages
 
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "This skill avoids MCP.",
+            "This skill avoids using MCP.",
+            "This workflow excludes the MCP integration.",
+            "MCP is disabled for this skill.",
+            "MCP support remains unavailable.",
+            "This workflow is MCP-free.",
+        ],
+    )
+    def test_negative_mcp_capability_does_not_classify_mcp_skill(self, tmp_path: Path, statement: str):
+        messages = _finding_messages(_write_issue_skill(tmp_path, extra_body=f"\n{statement}\n"))
+
+        assert "MCP skill lacks connection/error guidance" not in messages
+
+    def test_avoiding_mcp_failures_remains_mcp_usage(self, tmp_path: Path):
+        messages = _finding_messages(
+            _write_issue_skill(tmp_path, extra_body="\nAvoid MCP failures during validation.\n")
+        )
+
+        assert "MCP skill lacks connection/error guidance" in messages
+
     def test_fenced_mcp_example_does_not_classify_mcp_skill(self, tmp_path: Path):
         messages = _finding_messages(_write_issue_skill(tmp_path, extra_body="\n```text\nMCP example output\n```\n"))
 
@@ -858,6 +881,17 @@ class TestQualityScoreKeywordBoundaries:
         skill_dir = _write_issue_skill(
             tmp_path,
             extra_body="\n```markdown\nSee [human documentation](README.md).\n```\n",
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("SKILL.md references README.md" not in message for message in messages)
+
+    def test_commented_readme_link_is_not_a_readme_reference(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body="\n<!-- See [human documentation](README.md). -->\n",
         )
         (skill_dir / "README.md").write_text("# Human documentation\n")
 

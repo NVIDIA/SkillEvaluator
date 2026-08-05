@@ -245,4 +245,3 @@ def require_bounded_string(
     if len(value) > max_chars:
         raise ValueError(f"{field} exceeds the {max_chars}-character limit")
     return value
-

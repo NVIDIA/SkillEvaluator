@@ -59,4 +59,3 @@ def test_require_bounded_string_enforces_length_and_nonempty() -> None:
     with pytest.raises(ValueError, match=r"field.*non-empty"):
         require_bounded_string("   ", "field", max_chars=32)
     assert require_bounded_string(" safe ", "field", max_chars=32) == " safe "
-

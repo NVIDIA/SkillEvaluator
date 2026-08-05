@@ -614,4 +614,3 @@ def test_atomic_write_failure_never_unlinks_swapped_temporary_canary(
     assert temporary_name.read_text() == "INNOCENT_CANARY"
     assert saved_payload.read_text() == "PAYLOAD"
     assert not destination.exists()
-

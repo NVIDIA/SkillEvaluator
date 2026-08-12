@@ -100,3 +100,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 2 content collection now prunes configured evaluation and version
   artifact directories before enforcing the discovered-path limit, so excluded
   generated results cannot cause false path-count failures.
+- Tier 2 scans now validate but do not follow the exact contained
+  `CLAUDE.md -> AGENTS.md` compatibility alias, scanning the exactly named,
+  independently discovered, single-link regular target once while continuing
+  to reject hard-linked selected files, linked manifests, directories, and all
+  other file redirects.

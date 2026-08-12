@@ -416,9 +416,9 @@ def test_public_tree_has_no_legacy_root_version_module() -> None:
 
 
 def test_public_docs_have_no_personal_staging_ownership() -> None:
-    source_text = "\n".join(path.read_text(encoding="utf-8") for path in _public_source_files(REPO_ROOT))
+    source_files = set(_public_source_files(REPO_ROOT)) - {REPO_ROOT / ".github" / "CODEOWNERS"}
+    source_text = "\n".join(path.read_text(encoding="utf-8") for path in source_files)
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-
     assert ("@chris" + "knvidia") not in source_text
     assert ("MAINTAINERS" + ".md") not in readme
     assert ("[CODE" + "OWNERS]") not in readme

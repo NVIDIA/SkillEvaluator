@@ -118,6 +118,100 @@ class TestCollectFiles:
         assert len(result) == 1
         assert result[0].extension == ".mdc"
 
+    def test_openclaw_compatibility_alias_is_skipped_and_regular_target_is_collected_once(
+        self,
+        skill_root: Path,
+    ) -> None:
+        agents = skill_root / "AGENTS.md"
+        agents.write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / "CLAUDE.md").symlink_to(agents.name)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = collect_files(skill_root)
+
+        assert [item.rel_path for item in result] == ["AGENTS.md"]
+
+    def test_rejects_openclaw_alias_when_regular_target_is_hard_linked(self, skill_root: Path) -> None:
+        outside_target = skill_root.parent / "outside-agents.md"
+        outside_target.write_text("# Outside agent instructions\n")
+        try:
+            os.link(outside_target, skill_root / "AGENTS.md")
+            (skill_root / "CLAUDE.md").symlink_to("AGENTS.md")
+        except OSError as exc:
+            pytest.skip(f"hard links or symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == "CLAUDE.md"
+
+    def test_rejects_hard_linked_selected_file(self, skill_root: Path) -> None:
+        outside_target = skill_root.parent / "outside-notes.md"
+        outside_target.write_text("# Outside notes\n")
+        try:
+            os.link(outside_target, skill_root / "notes.md")
+        except OSError as exc:
+            pytest.skip(f"hard links unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == "notes.md"
+
+    def test_rejects_openclaw_alias_when_target_entry_case_does_not_match(self, skill_root: Path) -> None:
+        (skill_root / "agents.md").write_text("# Lowercase agent instructions\n")
+        try:
+            (skill_root / "CLAUDE.md").symlink_to("AGENTS.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == "CLAUDE.md"
+
+    def test_rejects_alias_target_created_after_discovery_snapshot(self, skill_root: Path, monkeypatch) -> None:
+        try:
+            (skill_root / "CLAUDE.md").symlink_to("AGENTS.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        real_walk = os.walk
+
+        def walk_with_late_target(*args, **kwargs):
+            for dirpath, dirnames, filenames in real_walk(*args, **kwargs):
+                if Path(dirpath) == skill_root:
+                    assert "AGENTS.md" not in filenames
+                    (skill_root / "AGENTS.md").write_text("# Late agent instructions\n")
+                yield dirpath, dirnames, filenames
+
+        monkeypatch.setattr(skill_collector.os, "walk", walk_with_late_target)
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == "CLAUDE.md"
+
+    @pytest.mark.parametrize("target", ["./AGENTS.md", "../AGENTS.md", "missing.md"])
+    def test_rejects_non_exact_openclaw_compatibility_alias(self, skill_root: Path, target: str) -> None:
+        (skill_root / "AGENTS.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / "CLAUDE.md").symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == "CLAUDE.md"
+
 
 class TestCollectFilesSafety:
     @pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored availability is a POSIX-specific contract")

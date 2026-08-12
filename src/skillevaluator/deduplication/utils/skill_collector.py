@@ -28,6 +28,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_DEDUP_SCANNABLE_EXTENSIONS,
 )
+from skillevaluator.utils.tier2_paths import is_contained_compatibility_alias
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,8 @@ class _SecureRoot:
             opened_info = os.fstat(fd)
             if not stat.S_ISREG(opened_info.st_mode):
                 raise _SecureReadError("unsafe_path", f"Refusing non-regular file: {relative_path.as_posix()}")
+            if getattr(opened_info, "st_nlink", 1) != 1:
+                raise _SecureReadError("unsafe_path", f"Refusing hard-linked file: {relative_path.as_posix()}")
             if opened_info.st_size > max_bytes:
                 raise _SecureReadError(
                     "file_size_limit",
@@ -493,6 +496,9 @@ def _collect_files_anchored(
             },
         )
     discovered_paths.sort()
+    discovered_names_by_parent: dict[Path, set[str]] = {}
+    for discovered_path in discovered_paths:
+        discovered_names_by_parent.setdefault(discovered_path.parent, set()).add(discovered_path.name)
 
     for file_path in discovered_paths:
         try:
@@ -512,6 +518,12 @@ def _collect_files_anchored(
             continue
 
         if _is_link_or_reparse(file_path, rel_path):
+            if is_contained_compatibility_alias(
+                file_path,
+                sibling_names=discovered_names_by_parent.get(file_path.parent, frozenset()),
+            ):
+                logger.debug("Skipping compatibility alias in favor of regular target: %s", rel_path)
+                continue
             raise SkillCollectionError(
                 "unsafe_path",
                 f"Refusing symbolic link or reparse point: {rel_path}",

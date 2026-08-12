@@ -218,8 +218,12 @@ behavior is identical in every output mode, so these commands work as CI gates
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
-provider call, it rejects linked roots, linked or escaping files, non-regular
-files, and paths outside the verified scan root. Explicit limits bound
+provider call, it rejects linked roots, linked directories and manifests,
+hard-linked selected files, non-regular files, paths outside the verified scan
+root, and all file redirects except the exact contained
+`CLAUDE.md -> AGENTS.md` compatibility alias. That alias is validated but never
+followed; its exactly named, independently discovered, single-link regular
+sibling target is scanned once. Explicit limits bound
 discovered paths, file counts, per-file and total input bytes, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
 matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
@@ -255,6 +259,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Markdown has no headings | Treats the body as a preamble and attempts paragraph splitting when oversized; retains the original section if no eligible split is produced |
     | Unsupported extension | Skips the file |
     | Duplicate sections occur in one file | Reports the relevant headings and line ranges |
+    | Skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the alias, then scans `AGENTS.md` once |
     | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit — a well-used skill with large evals or results snapshots no longer trips it, as it could in earlier releases |
     | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
@@ -266,6 +271,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Catalog source collection is empty | Refuses to save an empty catalog |
     | Catalog path is missing | Returns an error and does not rebuild it silently |
     | Candidate lacks a root `SKILL.md` | Rejects the catalog query |
+    | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |
     | Provider, endpoint, model, mode, or vector length differs | Rejects the catalog; query with matching settings or rebuild it |
     | Catalog is malformed, non-finite, or oversized | Rejects it before comparison |

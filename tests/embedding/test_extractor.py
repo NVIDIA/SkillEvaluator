@@ -394,6 +394,106 @@ class TestDiscoverAndExtract:
         names = {e.name for e in entries}
         assert names == {"skill-a", "skill-b"}
 
+    def test_openclaw_compatibility_alias_does_not_abort_skill_discovery(self, tmp_path: Path, write_skill) -> None:
+        skill_dir = write_skill(tmp_path, "autoreview", "Review changes with multiple agents")
+        (skill_dir / "AGENTS.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_dir / "CLAUDE.md").symlink_to("AGENTS.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        entries = discover_and_extract(tmp_path, "skill")
+
+        assert [entry.name for entry in entries] == ["autoreview"]
+
+    def test_rejects_openclaw_alias_when_regular_target_is_hard_linked(
+        self,
+        tmp_path: Path,
+        write_skill,
+    ) -> None:
+        collection = tmp_path / "skills"
+        skill_dir = write_skill(collection, "autoreview", "Review changes with multiple agents")
+        outside_target = tmp_path / "outside-agents.md"
+        outside_target.write_text("# Outside agent instructions\n")
+        try:
+            os.link(outside_target, skill_dir / "AGENTS.md")
+            (skill_dir / "CLAUDE.md").symlink_to("AGENTS.md")
+        except OSError as exc:
+            pytest.skip(f"hard links or symlinks unavailable: {exc}")
+
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            discover_and_extract(collection, "skill")
+
+    def test_rejects_hard_linked_skill_manifest(self, tmp_path: Path) -> None:
+        collection = tmp_path / "skills"
+        skill_dir = collection / "hard-linked-skill"
+        skill_dir.mkdir(parents=True)
+        outside_manifest = tmp_path / "outside-SKILL.md"
+        outside_manifest.write_text(VALID_SKILL_MD)
+        try:
+            os.link(outside_manifest, skill_dir / "SKILL.md")
+        except OSError as exc:
+            pytest.skip(f"hard links unavailable: {exc}")
+
+        with pytest.raises(ValueError, match=r"hard-linked|unsafe"):
+            discover_and_extract(collection, "skill")
+
+    def test_rejects_openclaw_alias_when_target_entry_case_does_not_match(
+        self,
+        tmp_path: Path,
+        write_skill,
+    ) -> None:
+        collection = tmp_path / "skills"
+        skill_dir = write_skill(collection, "autoreview", "Review changes with multiple agents")
+        (skill_dir / "agents.md").write_text("# Lowercase agent instructions\n")
+        try:
+            (skill_dir / "CLAUDE.md").symlink_to("AGENTS.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            discover_and_extract(collection, "skill")
+
+    def test_rejects_alias_target_created_after_discovery_snapshot(self, tmp_path: Path, monkeypatch) -> None:
+        collection = tmp_path / "skills"
+        skill_dir = collection / "autoreview"
+        skill_dir.mkdir(parents=True)
+        try:
+            (skill_dir / "CLAUDE.md").symlink_to("AGENTS.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        real_walk = os.walk
+
+        def walk_with_late_target(*args, **kwargs):
+            for dirpath, dirnames, filenames in real_walk(*args, **kwargs):
+                if Path(dirpath) == skill_dir:
+                    assert "AGENTS.md" not in filenames
+                    (skill_dir / "AGENTS.md").write_text("# Late agent instructions\n")
+                yield dirpath, dirnames, filenames
+
+        monkeypatch.setattr(extractor_module.os, "walk", walk_with_late_target)
+
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            discover_and_extract(collection, "skill")
+
+    @pytest.mark.parametrize("target", ["./AGENTS.md", "../AGENTS.md", "missing.md"])
+    def test_rejects_non_exact_openclaw_alias_during_skill_discovery(
+        self,
+        tmp_path: Path,
+        write_skill,
+        target: str,
+    ) -> None:
+        skill_dir = write_skill(tmp_path, "autoreview", "Review changes with multiple agents")
+        (skill_dir / "AGENTS.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_dir / "CLAUDE.md").symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            discover_and_extract(tmp_path, "skill")
+
     def test_discover_rules_in_folder(self, tmp_path: Path) -> None:
         rules_dir = tmp_path / "team-rules"
         rules_dir.mkdir()

@@ -134,6 +134,41 @@ def test_similarity_cli_rejects_catalog_build_and_query_together(tmp_path: Path)
     assert "cannot be used together" in result.output
 
 
+def test_similarity_cli_handles_pinned_openclaw_compatibility_layout(tmp_path: Path, monkeypatch) -> None:
+    collection = tmp_path / "skills"
+    autoreview = collection / "autoreview"
+    autoreview.mkdir(parents=True)
+    (autoreview / "SKILL.md").write_text(
+        "---\nname: autoreview\ndescription: Review changes with multiple agents\n---\n"
+    )
+    (autoreview / "AGENTS.md").write_text("# Shared agent instructions\n")
+    try:
+        (autoreview / "CLAUDE.md").symlink_to("AGENTS.md")
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    second = collection / "second-skill"
+    second.mkdir()
+    (second / "SKILL.md").write_text("---\nname: second-skill\ndescription: Exercise an unrelated workflow\n---\n")
+
+    embedded_texts: list[str] = []
+
+    def embed_without_network(_self, texts: list[str]) -> list[list[float]]:
+        embedded_texts.extend(texts)
+        return [[1.0, float(index)] for index, _text in enumerate(texts)]
+
+    monkeypatch.setattr("skillevaluator.embedding.client.EmbeddingClient.embed", embed_without_network)
+
+    result = CliRunner().invoke(cli, ["similarity-check", str(collection), "--type", "skill"])
+
+    assert result.exit_code == 0, result.output
+    assert "All validations passed" in result.output
+    assert sorted(embedded_texts) == [
+        "autoreview: Review changes with multiple agents",
+        "second-skill: Exercise an unrelated workflow",
+    ]
+
+
 @pytest.mark.parametrize(
     ("command", "runner_path"),
     [

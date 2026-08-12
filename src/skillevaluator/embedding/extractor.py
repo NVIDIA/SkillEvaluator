@@ -32,7 +32,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.deduplication.utils.skill_collector import _SecureReadError, _SecureRoot
 from skillevaluator.logging_config import get_logger
-from skillevaluator.utils.tier2_paths import safe_path_label
+from skillevaluator.utils.tier2_paths import is_contained_compatibility_alias, safe_path_label
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 logger = get_logger(__name__)
@@ -343,12 +343,19 @@ def _iter_discovery_files(root: Path):
             kept_dirs.append(dirname)
         dirnames[:] = kept_dirs
 
+        sibling_names = frozenset(filenames)
         for filename in filenames:
             discovered_paths += 1
             if discovered_paths > MAX_DISCOVERED_PATHS:
                 raise ValueError(f"Collection path limit exceeded ({MAX_DISCOVERED_PATHS}) before embedding")
             file_path = Path(dirpath) / filename
             if _is_symlink_or_reparse(file_path):
+                if is_contained_compatibility_alias(file_path, sibling_names=sibling_names):
+                    logger.debug(
+                        "Skipping compatibility alias in favor of regular target: %s",
+                        file_path.relative_to(root).as_posix(),
+                    )
+                    continue
                 raise ValueError(f"Discovery path contains a symlink or reparse point: {filename}")
             yield file_path
 

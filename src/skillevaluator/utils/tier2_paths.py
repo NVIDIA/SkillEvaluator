@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Collection
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -32,6 +33,34 @@ def is_link_or_reparse(path: Path) -> bool:
     is_junction = getattr(path, "is_junction", None)
     return bool(
         stat.S_ISLNK(metadata.st_mode) or file_attributes & reparse_flag or (callable(is_junction) and is_junction())
+    )
+
+
+def is_contained_compatibility_alias(path: Path, *, sibling_names: Collection[str]) -> bool:
+    """Recognize only ``CLAUDE.md -> AGENTS.md`` with a regular sibling target.
+
+    The alias is validated but never followed. Callers can skip it and process
+    the independently discovered ``AGENTS.md`` target once. ``sibling_names``
+    must come from the same traversal snapshot that produced ``path``.
+    """
+    if path.name != "CLAUDE.md" or "AGENTS.md" not in sibling_names:
+        return False
+    try:
+        metadata = path.lstat()
+        target_text = os.readlink(path)  # noqa: PTH115 - the raw target must match exactly
+        target_metadata = path.with_name("AGENTS.md").lstat()
+    except OSError:
+        return False
+
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    target_attributes = getattr(target_metadata, "st_file_attributes", 0)
+    return bool(
+        stat.S_ISLNK(metadata.st_mode)
+        and getattr(metadata, "st_nlink", 1) == 1
+        and target_text == "AGENTS.md"
+        and stat.S_ISREG(target_metadata.st_mode)
+        and getattr(target_metadata, "st_nlink", 1) == 1
+        and not target_attributes & reparse_flag
     )
 
 
@@ -114,6 +143,7 @@ def sanitize_tier2_results(results: list[ValidationResult], *paths: Path | None)
 
 
 __all__ = [
+    "is_contained_compatibility_alias",
     "is_link_or_reparse",
     "paths_refer_to_same_location",
     "safe_path_label",

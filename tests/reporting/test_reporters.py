@@ -684,7 +684,9 @@ class TestTier3HarborCanonicalPayload:
     def test_failed_run_produces_false_agent_eval_result(self, tmp_path: Path) -> None:
         skill = tmp_path / "demo"
         skill.mkdir()
-        run_dir = tmp_path / "results" / "demo" / "latest"
+        results_root = tmp_path / "results" / "demo"
+        run_id = "20260709_120000"
+        run_dir = results_root / run_id
         summary = run_dir / "codex" / "with-skill" / "summary.json"
         summary.parent.mkdir(parents=True)
         summary.write_text(
@@ -700,6 +702,9 @@ class TestTier3HarborCanonicalPayload:
             ),
             encoding="utf-8",
         )
+        (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+        (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+        (results_root / "latest").symlink_to(run_id)
 
         result = agent_eval_result_from_run(
             skill,

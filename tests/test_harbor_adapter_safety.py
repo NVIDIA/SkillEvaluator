@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import subprocess
@@ -147,6 +148,79 @@ def test_copy_repo_excludes_sensitive_files_without_git(tmp_path: Path) -> None:
     _assert_sensitive_repo_files_are_excluded(repo, skill, tmp_path / "plain-task" / "environment")
 
 
+@pytest.mark.parametrize("tracked", [False, True], ids=["plain", "git"])
+def test_copy_repo_prunes_excluded_output_before_any_file_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracked: bool,
+) -> None:
+    repo = tmp_path / "repo"
+    skill = repo / "skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Test skill\n", encoding="utf-8")
+    (repo / "README.md").write_text("safe\n", encoding="utf-8")
+    excluded = repo / "custom-results"
+    excluded.mkdir()
+    (excluded / "secret.json").write_text('{"ground_truth": "private"}', encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "canary.txt").write_text("host canary", encoding="utf-8")
+    _symlink_or_skip(excluded / "latest", outside, target_is_directory=True)
+    _symlink_or_skip(excluded / "dangling", tmp_path / "missing")
+
+    if tracked:
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "-f", "--", "."], check=True)
+
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(excluded / "blocked.fifo")
+    unreadable = excluded / "unreadable"
+    unreadable.mkdir()
+    (unreadable / "private.txt").write_text("private", encoding="utf-8")
+    unreadable.chmod(0)
+
+    original_is_file = Path.is_file
+
+    def guarded_is_file(path: Path) -> bool:
+        try:
+            path.absolute().relative_to(excluded.absolute())
+        except ValueError:
+            return original_is_file(path)
+        raise AssertionError(f"excluded output was inspected: {path}")
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+    env_dir = tmp_path / "task" / "environment"
+    env_dir.mkdir(parents=True)
+    try:
+        metadata = _stage_repo_context(
+            env_dir,
+            source_skill_path=skill,
+            mode="full",
+            excluded_roots=(excluded,),
+        )
+    finally:
+        unreadable.chmod(0o700)
+
+    assert (env_dir / "repo" / "README.md").read_text(encoding="utf-8") == "safe\n"
+    assert not (env_dir / "repo" / excluded.relative_to(repo)).exists()
+    assert all(not Path(item["source"]).is_relative_to(excluded) for item in metadata["files"])
+
+
+def test_copy_repo_still_rejects_nonexcluded_file_symlink(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    skill = repo / "skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Test skill\n", encoding="utf-8")
+    source = repo / "source.txt"
+    source.write_text("canary", encoding="utf-8")
+    _symlink_or_skip(repo / "linked-source.txt", source)
+    env_dir = tmp_path / "task" / "environment"
+    env_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match=r"symlink|reparse"):
+        _stage_repo_context(env_dir, source_skill_path=skill, mode="full")
+
+
 def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
     try:
         link.symlink_to(target, target_is_directory=target_is_directory)
@@ -227,10 +301,10 @@ def test_generated_task_rebases_custom_dockerfile_content(tmp_path: Path) -> Non
     )[0]
 
     dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
-    assert dockerfile.startswith(
-        "FROM registry.example/eval-base:verified\n# SkillEvaluator: original base was FROM python:3.11-slim\n"
+    assert dockerfile.startswith("FROM registry.example/eval-base:verified\n")
+    assert dockerfile.index("RUN echo generated-custom-layer\n") < dockerfile.index(
+        "# SkillEvaluator: original base was FROM python:3.11-slim\n"
     )
-    assert "RUN echo generated-custom-layer\n" in dockerfile
 
 
 def test_native_task_rebases_custom_dockerfile_content(tmp_path: Path) -> None:
@@ -254,24 +328,22 @@ def test_native_task_rebases_custom_dockerfile_content(tmp_path: Path) -> None:
     )[0]
 
     dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
-    assert dockerfile.startswith(
-        "FROM registry.example/eval-base:verified\n# SkillEvaluator: original base was FROM ubuntu:24.04\n"
+    assert dockerfile.startswith("FROM registry.example/eval-base:verified\n")
+    assert dockerfile.index("RUN echo native-custom-layer\n") < dockerfile.index(
+        "# SkillEvaluator: original base was FROM ubuntu:24.04\n"
     )
-    assert "RUN echo native-custom-layer\n" in dockerfile
 
 
-def test_rebase_custom_dockerfile_content_without_from_is_unchanged() -> None:
+def test_rebase_custom_dockerfile_content_without_from_fails_closed() -> None:
     content = "# comment only\nRUN echo unchanged\n"
 
-    assert (
+    with pytest.raises(ValueError, match="exactly one FROM instruction"):
         _rebase_custom_dockerfile_content(
             content,
             "registry.example/eval-base:verified",
             agent_config_lines=[],
             include_input=False,
         )
-        is None
-    )
 
 
 @pytest.mark.parametrize("candidate", _GRADER_CANDIDATES, ids=str)
@@ -284,7 +356,7 @@ def test_custom_grader_candidates_reject_external_symlinks(tmp_path: Path, candi
     _symlink_or_skip(grader, outside)
     task_dir = tmp_path / "task"
 
-    with pytest.raises(ValueError, match="non-symlinked regular file contained under evals/"):
+    with pytest.raises(ValueError, match=r"non-symlinked regular file contained under evals/|symlink|reparse"):
         _copy_custom_grader(task_dir, skill, "custom_only")
 
     assert not (task_dir / "tests" / candidate.name).exists()
@@ -330,6 +402,53 @@ def test_custom_grader_rejects_non_regular_candidate(tmp_path: Path) -> None:
         _copy_custom_grader(tmp_path / "task", skill, "custom_only")
 
 
+def test_custom_grader_rejects_hardlinked_candidate(tmp_path: Path) -> None:
+    skill = tmp_path / "skill"
+    grader = skill / "evals" / "grader.py"
+    grader.parent.mkdir(parents=True)
+    grader.write_text("safe grader", encoding="utf-8")
+    outside_alias = tmp_path / "grader-alias.py"
+    try:
+        outside_alias.hardlink_to(grader)
+    except OSError as exc:  # pragma: no cover - filesystem policy
+        pytest.skip(f"hardlinks unavailable on this host: {exc}")
+    task_dir = tmp_path / "task"
+
+    with pytest.raises(ValueError, match=r"hard.?link|multiple links"):
+        _copy_custom_grader(task_dir, skill, "custom_only")
+
+    assert grader.read_text(encoding="utf-8") == "safe grader"
+    assert not (task_dir / "tests" / "grader.py").exists()
+
+
+def test_custom_grader_rejects_source_replacement_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secure_copy = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    skill = tmp_path / "skill"
+    grader = skill / "evals" / "grader.py"
+    grader.parent.mkdir(parents=True)
+    grader.write_text("validated grader", encoding="utf-8")
+    task_dir = tmp_path / "task"
+    original = secure_copy._build_file_manifest
+
+    def validate_then_replace(source: Path, allowed_root: Path):
+        manifest = original(source, allowed_root)
+        if Path(source) == grader.resolve():
+            grader.unlink()
+            grader.write_text("replacement grader", encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(secure_copy, "_build_file_manifest", validate_then_replace)
+
+    with pytest.raises(ValueError, match="source changed after validation"):
+        _copy_custom_grader(task_dir, skill, "custom_only")
+
+    assert grader.read_text(encoding="utf-8") == "replacement grader"
+    assert not (task_dir / "tests" / "grader.py").exists()
+
+
 @pytest.mark.parametrize("candidate", _GRADER_CANDIDATES, ids=str)
 def test_custom_grader_candidates_copy_regular_files(tmp_path: Path, candidate: Path) -> None:
     skill = tmp_path / "skill"
@@ -357,7 +476,7 @@ def test_task_modes_reject_custom_grader_symlink_before_copy(tmp_path: Path, tas
     _symlink_or_skip(skill / "evals" / "grader.py", outside)
     output_dir = tmp_path / "tasks"
 
-    with pytest.raises(ValueError, match="non-symlinked regular file contained under evals/"):
+    with pytest.raises(ValueError, match=r"non-symlinked regular file contained under evals/|symlink|reparse"):
         if task_source == "generated":
             generate_harbor_tasks(skill, output_dir, with_skill=False, grading_mode="custom_only")
         else:

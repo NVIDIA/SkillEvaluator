@@ -21,10 +21,16 @@ def test_discover_trajectories_uses_env_results_root(tmp_path, monkeypatch):
     skill = tmp_path / "my-skill"
     skill.mkdir()
     results_root = tmp_path / "external-results"
-    trial = results_root / "my-skill" / "latest" / "claude-code" / "with-skill" / "trials" / "case-001"
+    skill_results = results_root / "my-skill"
+    run_id = "20260709_120000"
+    run_dir = skill_results / run_id
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / "case-001"
     trial.mkdir(parents=True)
     trajectory = {"steps": [{"type": "assistant", "content": "done"}]}
     trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (skill_results / "latest").symlink_to(run_id)
 
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
 
@@ -36,10 +42,16 @@ def test_discover_trajectories_results_dir_overrides_env(tmp_path, monkeypatch):
     skill.mkdir()
     env_root = tmp_path / "env-results"
     cli_root = tmp_path / "cli-results"
-    trial = cli_root / "my-skill" / "latest" / "claude-code" / "with-skill" / "trials" / "case-001"
+    skill_results = cli_root / "my-skill"
+    run_id = "20260709_120000"
+    run_dir = skill_results / run_id
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / "case-001"
     trial.mkdir(parents=True)
     trajectory = {"steps": [{"type": "assistant", "content": "done"}]}
     trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (skill_results / "latest").symlink_to(run_id)
 
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(env_root))
 

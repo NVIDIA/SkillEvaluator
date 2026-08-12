@@ -98,9 +98,6 @@ All notable changes to SkillEvaluator are documented in this file.
   when initialization or background refresh fails.
 - Made the `evaluate` workflow visible in top-level CLI help while retaining
   the documented `skillevaluator tier3 evaluate` spelling.
-- Tier 3 now stages only an eval case's declared `files` into its trial input;
-  cases that omit `files` retain the legacy shared-corpus behavior, while an
-  explicit empty or `null` value stages no fixtures.
 - Tier 3 preserves completed rewards from partially errored jobs only when each
   aggregate error maps to a concrete failed trial; explicit failed statuses and
   non-zero aggregate exit codes still suppress ambiguous scores.
@@ -108,6 +105,35 @@ All notable changes to SkillEvaluator are documented in this file.
   tags, reserved names, MCP guidance, README references, time references,
   exclusivity language, instruction action verbs, and nested Markdown links,
   avoiding incidental-word score changes.
+- Tier 3 generated tasks now stage only an entry's declared `files`, preventing
+  undeclared fixtures from the shared `evals/files/` directory from appearing
+  in that task's `/workspace/input/`, while preserving copy-all behavior for
+  legacy entries that omit the field. Agent-visible target, reference, and
+  workspace skill projections now omit evaluator-owned `evals/` directories
+  from every staged skill package, including sanitized `--copy-repo` contexts,
+  while graders, native tasks, custom
+  environments, and declared inputs continue to load from the source dataset.
+  Authenticated historical result trees are also excluded after output rotation,
+  invalid markers fail closed, and late Codex, Cline, Goose, and Qwen
+  skill-discovery roots are reset before agent execution. Pre-upgrade custom
+  result roots outside `evals/` have no authenticity marker and cannot be
+  distinguished safely from authored runtime content. Move or delete that old
+  content before `--copy-repo` or other full-context evaluation, then rerun with
+  this version if replacement evidence is needed. Explicit task inputs cannot
+  select evaluator-owned datasets, configuration, graders, tests, native tasks,
+  environments, or results. Every agent and baseline arm now reads from one
+  private, selective evaluator snapshot containing the active control files,
+  task-source data, consumed fixtures and grader, and the complete authored
+  custom environment. Legacy omitted-file entries retain the full shared files
+  corpus. Unrelated evaluator subtrees and generated results stay outside the
+  snapshot. MCP configuration and completed-run artifacts are
+  read through bounded descriptor-anchored roots; on Windows, selected file
+  handles deny concurrent writes and deletes while live. Historical unmarked
+  runs created before canonical run-level `result.json` remain discoverable only
+  when their stable configuration and summaries satisfy the complete historical
+  schema. Pre-status scored summaries remain consumable, coherent status-era
+  failures remain visible without contributing scores, and marked current
+  partial runs continue to fail closed.
 - Public benchmark cards now omit policy profiles, redact absolute host paths,
   and normalize imported internal or retired metadata before publication.
 - Previous-version validation now rejects catalog-wide scalar reuse and removal

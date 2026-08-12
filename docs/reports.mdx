@@ -104,14 +104,16 @@ With an external root (the first two options), each skill gets its own
 subdirectory — runs land under `<dir>/<skill-name>/`, not directly under
 `<dir>`.
 
-Each run creates a directory named by its run ID (`YYYYMMDD_HHMMSS`), and a
-`latest` symlink points at the newest run:
+Each run creates a collision-safe directory named by its run ID
+(`YYYYMMDD_HHMMSS_<pid>_<12-hex-nonce>`). Where symlinks are supported, a
+`latest` symlink points at the newest run; otherwise readers select the newest
+completed run directly:
 
 <FileTree>
 - evals/
   - results/
     - latest/
-    - 20260709_141530/
+    - 20260709_141530_12345_a1b2c3d4e5f6/
       - result.json
       - run_config.json
       - attempt_policy.json
@@ -147,8 +149,17 @@ Each run creates a directory named by its run ID (`YYYYMMDD_HHMMSS`), and a
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
   same precedence, then fall back to the legacy `<skill>/evals/results/`
   location — so old runs stay visible after you configure
-  `SKILLEVALUATOR_RESULTS_DIR`. The results tree is generated output: don't
-  commit it.
+  `SKILLEVALUATOR_RESULTS_DIR`. Current timestamped runs are selected only when
+  stable regular `run_config.json` and matching atomic `result.json` artifacts
+  are present. Unmarked runs created before run-level `result.json` remain
+  readable only when `run_config.json` has a recognized historical task source
+  and complete agent metadata, and every configured agent has one stable,
+  identity-matched summary satisfying the full historical score, dimension,
+  pass-at-k, and completion schema. Authenticated summaries from before status
+  fields are consumed as successful; coherent status-era failed summaries stay
+  visible without contributing scores. Any marker presence prevents an
+  incomplete current run from being interpreted as legacy output. The results
+  tree is generated output: don't commit it.
 </Note>
 
 ## Reading a live-eval report
@@ -251,7 +262,7 @@ Retained jobs live under `_harbor-jobs/` inside the run directory.
 
 ```bash title="Browse retained trajectories"
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker --harbor-keep-jobs
-skillevaluator harbor-view ./my-skill/evals/results/20260709_141530/_harbor-jobs
+skillevaluator harbor-view ./my-skill/evals/results/20260709_141530_12345_a1b2c3d4e5f6/_harbor-jobs
 ```
 
 (`skillevaluator tier3 harbor-view` is the same command under its expert

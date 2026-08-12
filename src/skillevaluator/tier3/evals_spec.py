@@ -200,9 +200,12 @@ grading:
         kind="dir",
         requirement=Requirement.OPTIONAL,
         scope=Scope.HARBOR,
-        description="Input files staged into /workspace/input/ inside containers. "
-        "Test data, configs, sample documents the skill needs during evaluation.",
-        validation_notes=["Any file types. Entire directory is copied into the agent workspace."],
+        description="Shared pool of test data, configs, and sample documents that eval entries can stage "
+        "into /workspace/input/ inside containers.",
+        validation_notes=[
+            "Any file types. An entry with files stages only its declared paths; "
+            "omitting files copies this entire directory for backward compatibility."
+        ],
     ),
     # -- Custom environment --
     EntrySpec(

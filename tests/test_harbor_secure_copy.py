@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import importlib
 import os
 import socket
@@ -17,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +35,15 @@ def _copytree_secure(source: Path, destination: Path, **kwargs: object) -> None:
 def _copy_file_secure(source: Path, destination: Path, **kwargs: object) -> None:
     module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
     module.copy_file_secure(source, destination, **kwargs)
+
+
+def _assert_mode_preserved(source: Path, destination: Path) -> None:
+    source_mode = stat.S_IMODE(source.stat().st_mode)
+    destination_mode = stat.S_IMODE(destination.stat().st_mode)
+    if os.name == "nt":
+        assert bool(destination_mode & stat.S_IWRITE) == bool(source_mode & stat.S_IWRITE)
+    else:
+        assert destination_mode == source_mode
 
 
 def test_public_secure_copy_api_documents_same_uid_boundary() -> None:
@@ -595,7 +606,7 @@ def test_regular_copy_preserves_modes_and_merges_transactionally(tmp_path: Path)
 
     assert (destination / "unrelated.txt").read_text(encoding="utf-8") == "keep"
     assert (destination / "nested" / "run.sh").read_text(encoding="utf-8") == "#!/bin/sh\n"
-    assert stat.S_IMODE((destination / "nested" / "run.sh").stat().st_mode) == 0o751
+    _assert_mode_preserved(script, destination / "nested" / "run.sh")
 
 
 def test_private_stage_injection_is_rejected_before_publish(
@@ -651,7 +662,230 @@ def test_checked_non_posix_fallback_copies_tree_and_file(
     file_destination.write_text("old", encoding="utf-8")
     module.copy_file_secure(file_source, file_destination, allowed_root=tmp_path)
     assert file_destination.read_text(encoding="utf-8") == "new"
-    assert stat.S_IMODE(file_destination.stat().st_mode) == 0o640
+    _assert_mode_preserved(file_source, file_destination)
+
+
+def test_checked_windows_fallback_accepts_crt_descriptor_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    original_fstat = module.os.fstat
+
+    def windows_crt_fstat(descriptor: int) -> object:
+        opened = original_fstat(descriptor)
+        return SimpleNamespace(
+            st_dev=opened.st_dev + 10_000,
+            st_ino=opened.st_ino + 10_000,
+            st_mode=opened.st_mode,
+            st_nlink=opened.st_nlink,
+            st_size=opened.st_size,
+            st_mtime_ns=opened.st_mtime_ns,
+            st_ctime_ns=opened.st_ctime_ns,
+        )
+
+    monkeypatch.setattr(module, "_DESCRIPTOR_BACKEND", False)
+    monkeypatch.setattr(module, "_ATOMIC_RENAME", None)
+    monkeypatch.setattr(module, "_PATH_DESCRIPTOR_IDENTITIES_COMPARABLE", False, raising=False)
+    monkeypatch.setattr(module.os, "fstat", windows_crt_fstat)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "safe.txt").write_text("tree", encoding="utf-8")
+    tree_destination = tmp_path / "tree-destination"
+    file_source = tmp_path / "file-source.txt"
+    file_source.write_text("file", encoding="utf-8")
+    file_destination = tmp_path / "file-destination.txt"
+
+    module.copytree_secure(source, tree_destination, allowed_root=tmp_path)
+    module.copy_file_secure(file_source, file_destination, allowed_root=tmp_path)
+
+    assert (tree_destination / "safe.txt").read_text(encoding="utf-8") == "tree"
+    assert file_destination.read_text(encoding="utf-8") == "file"
+
+
+@pytest.mark.parametrize("copy_kind", ["tree", "file"])
+def test_checked_windows_fallback_preserves_lf_bytes_in_binary_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    copy_kind: str,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    fake_binary_flag = 1 << 29
+    original_open = module.os.open
+    original_write = module.os.write
+    original_close = module.os.close
+    text_write_descriptors: set[int] = set()
+
+    def windows_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = original_open(path, flags & ~fake_binary_flag, mode, dir_fd=dir_fd)
+        if not flags & fake_binary_flag and flags & (os.O_WRONLY | os.O_RDWR):
+            text_write_descriptors.add(descriptor)
+        return descriptor
+
+    def windows_text_write(descriptor: int, payload: bytes | bytearray | memoryview) -> int:
+        raw = bytes(payload)
+        if descriptor in text_write_descriptors:
+            raw = raw.replace(b"\n", b"\r\n")
+        return original_write(descriptor, raw)
+
+    def tracked_close(descriptor: int) -> None:
+        text_write_descriptors.discard(descriptor)
+        original_close(descriptor)
+
+    source = tmp_path / "source"
+    source.mkdir()
+    marker = source / ".skillevaluator-generated-output"
+    payload = b"SkillEvaluator generated output v2\nsignature-with-lf-only\n"
+    marker.write_bytes(payload)
+
+    monkeypatch.setattr(module, "_DESCRIPTOR_BACKEND", False)
+    monkeypatch.setattr(module, "_ATOMIC_RENAME", None)
+    monkeypatch.setattr(module, "_BINARY_FLAG", fake_binary_flag, raising=False)
+    monkeypatch.setattr(module.os, "open", windows_open)
+    monkeypatch.setattr(module.os, "write", windows_text_write)
+    monkeypatch.setattr(module.os, "close", tracked_close)
+    destination = tmp_path / "destination"
+    if copy_kind == "tree":
+        module.copytree_secure(source, destination, allowed_root=tmp_path)
+        copied = destination / marker.name
+    else:
+        module.copy_file_secure(marker, destination, allowed_root=tmp_path)
+        copied = destination
+
+    assert copied.read_bytes() == payload
+    assert copied.stat().st_size == len(payload)
+    assert hashlib.sha256(copied.read_bytes()).digest() == hashlib.sha256(payload).digest()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows filesystem semantics")
+def test_native_windows_fallback_copies_tree_and_file(tmp_path: Path) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "writable.txt"
+    source_file.write_text("tree", encoding="utf-8")
+    source_file.chmod(0o666)
+    tree_destination = tmp_path / "tree-destination"
+    file_source = tmp_path / "read-only.txt"
+    file_source.write_text("file", encoding="utf-8")
+    file_source.chmod(0o444)
+    file_destination = tmp_path / "file-destination.txt"
+
+    try:
+        module.copytree_secure(source, tree_destination, allowed_root=tmp_path)
+        module.copy_file_secure(file_source, file_destination, allowed_root=tmp_path)
+
+        assert (tree_destination / "writable.txt").read_text(encoding="utf-8") == "tree"
+        assert (tree_destination / "writable.txt").stat().st_mode & stat.S_IWRITE
+        assert file_destination.read_text(encoding="utf-8") == "file"
+        assert not file_destination.stat().st_mode & stat.S_IWRITE
+    finally:
+        file_source.chmod(0o666)
+        if file_destination.exists():
+            file_destination.chmod(0o666)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows chmod semantics")
+def test_native_windows_tree_fingerprint_binds_writable_mode(tmp_path: Path) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    source = tmp_path / "source"
+    source.mkdir()
+    script = source / "run.cmd"
+    script.write_text("@echo off\r\n", encoding="utf-8")
+    script.chmod(0o666)
+
+    try:
+        writable = module.tree_content_fingerprint_secure(source, allowed_root=tmp_path)
+        script.chmod(0o444)
+        read_only = module.tree_content_fingerprint_secure(source, allowed_root=tmp_path)
+    finally:
+        script.chmod(0o666)
+
+    assert writable != read_only
+
+
+def test_checked_non_posix_tree_fallback_without_fchmod_preserves_file_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    monkeypatch.setattr(module, "_DESCRIPTOR_BACKEND", False)
+    monkeypatch.setattr(module, "_ATOMIC_RENAME", None)
+    monkeypatch.delattr(module.os, "fchmod", raising=False)
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "safe.txt"
+    source_file.write_text("safe", encoding="utf-8")
+    source_file.chmod(0o640)
+    destination = tmp_path / "destination"
+
+    module.copytree_secure(source, destination, allowed_root=tmp_path)
+
+    staged_file = destination / "safe.txt"
+    assert staged_file.read_text(encoding="utf-8") == "safe"
+    _assert_mode_preserved(source_file, staged_file)
+
+
+def test_checked_non_posix_file_fallback_without_fchmod_preserves_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    monkeypatch.setattr(module, "_DESCRIPTOR_BACKEND", False)
+    monkeypatch.setattr(module, "_ATOMIC_RENAME", None)
+    monkeypatch.delattr(module.os, "fchmod", raising=False)
+    source = tmp_path / "source.txt"
+    source.write_text("safe", encoding="utf-8")
+    source.chmod(0o640)
+    destination = tmp_path / "destination.txt"
+
+    module.copy_file_secure(source, destination, allowed_root=tmp_path)
+
+    assert destination.read_text(encoding="utf-8") == "safe"
+    _assert_mode_preserved(source, destination)
+
+
+def test_checked_windows_fallback_verifies_portable_chmod_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "writable.txt"
+    source_file.write_text("tree", encoding="utf-8")
+    source_file.chmod(0o640)
+    file_source = tmp_path / "read-only.txt"
+    file_source.write_text("file", encoding="utf-8")
+    file_source.chmod(0o440)
+    original_chmod = Path.chmod
+
+    def windows_chmod(path: Path, mode: int, *args: object, **kwargs: object) -> None:
+        executable = 0o111 if path.is_dir() else 0
+        portable_mode = (0o666 | executable) if mode & stat.S_IWRITE else (0o444 | executable)
+        original_chmod(path, portable_mode, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_DESCRIPTOR_BACKEND", False)
+    monkeypatch.setattr(module, "_ATOMIC_RENAME", None)
+    monkeypatch.setattr(module, "_WINDOWS_CHMOD_SEMANTICS", True)
+    monkeypatch.delattr(module.os, "fchmod", raising=False)
+    monkeypatch.setattr(module.Path, "chmod", windows_chmod)
+    tree_destination = tmp_path / "tree-destination"
+    file_destination = tmp_path / "file-destination.txt"
+
+    module.copytree_secure(source, tree_destination, allowed_root=tmp_path)
+    module.copy_file_secure(file_source, file_destination, allowed_root=tmp_path)
+
+    assert (tree_destination / "writable.txt").read_text(encoding="utf-8") == "tree"
+    assert (tree_destination / "writable.txt").stat().st_mode & stat.S_IWRITE
+    assert file_destination.read_text(encoding="utf-8") == "file"
+    assert not (file_destination.stat().st_mode & stat.S_IWRITE)
 
 
 def test_checked_non_posix_fallback_still_rejects_symlinks(

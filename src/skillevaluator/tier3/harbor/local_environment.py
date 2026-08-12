@@ -33,6 +33,7 @@ from skillevaluator.tier3.harbor.local_runtime import (
 )
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
+from skillevaluator.tier3.output_provenance import output_provenance_key_path
 
 _SAFE_HOST_ENV = frozenset(
     {
@@ -534,6 +535,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             allow_net=self._allow_net,
             extra_ro=self._runtime_ro_binds(),
             strict_reads=self._strict_reads,
+            deny_reads=(output_provenance_key_path(),),
         )
         creation = asyncio.create_task(
             asyncio.create_subprocess_exec(

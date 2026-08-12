@@ -39,8 +39,6 @@ def validate_case_id(value: object) -> str:
         raise ValueError("case id must not be an absolute path")
     if "/" in case_id or "\\" in case_id:
         raise ValueError("case id must be one path component and must not contain '/' or '\\'")
-    if ".." in case_id:
-        raise ValueError("case id must not contain '..'")
     if not _CASE_ID_PATTERN.fullmatch(case_id):
         raise ValueError(
             "case id must start with an ASCII letter or digit and contain only ASCII letters, digits, '.', '_', or '-'"
@@ -133,6 +131,11 @@ def _validate_directory_components(path: Path, *, case_id: str) -> None:
             )
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError(f"refusing case id {case_id!r}: output directory component is not a directory")
+
+
+def validate_output_directory_path(path: Path) -> None:
+    """Reject link/reparse components before creating an evaluator output tree."""
+    _validate_directory_components(path, case_id="<output>")
 
 
 def safe_child(base: Path, component: object) -> Path:

@@ -33,7 +33,8 @@ _WINDOWS_FILE_READ_DATA = 0x1
 _WINDOWS_FILE_TRAVERSE = 0x20
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x80
 _WINDOWS_SYNCHRONIZE = 0x100000
-_WINDOWS_SHARE_READ_WRITE = 0x1 | 0x2
+_WINDOWS_SHARE_READ = 0x1
+_WINDOWS_SHARE_READ_WRITE = _WINDOWS_SHARE_READ | 0x2
 _WINDOWS_FILE_OPEN = 1
 _WINDOWS_FILE_CREATE = 2
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x80
@@ -622,8 +623,9 @@ def discover_secure_files(
 class SecureRoot:
     """Descriptor-anchored reads beneath one verified regular root."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, expected: os.stat_result | None = None) -> None:
         self.root = _absolute_no_resolve(root)
+        self._expected = expected
         self._root_fd: int | None = None
         self._windows_root_handles: list[int] = []
         self._entered = False
@@ -639,6 +641,8 @@ class SecureRoot:
             raise SecurePathError("unsafe_root", f"Tier 2 root is a symlink or reparse point: {self.root.name}")
         if not stat.S_ISDIR(metadata.st_mode):
             raise SecurePathError("invalid_root", f"Tier 2 root is not a regular directory: {self.root}")
+        if self._expected is not None:
+            _validate_directory_snapshot(metadata, Path(), self._expected)
 
         if os.name == "posix":
             if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW") and _OPEN_SUPPORTS_DIR_FD):
@@ -867,7 +871,7 @@ class SecureRoot:
                 parent_handle,
                 relative_path.name,
                 access=_WINDOWS_FILE_READ_ACCESS,
-                share=_WINDOWS_SHARE_READ_WRITE,
+                share=_WINDOWS_SHARE_READ,
                 disposition=_WINDOWS_FILE_OPEN,
                 file_attributes=0,
                 create_options=_WINDOWS_FILE_OPEN_OPTIONS,

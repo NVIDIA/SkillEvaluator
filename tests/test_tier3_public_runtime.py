@@ -18,7 +18,7 @@ from skillevaluator.cli import cli
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3 import commands as tier3_commands
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
-from skillevaluator.tier3.harbor.adapter import _write_task_toml
+from skillevaluator.tier3.harbor.adapter import _EVALUATOR_MANAGED_RUNTIME_ENV, _write_task_toml
 from skillevaluator.tier3.harbor.runner import (
     _model_for_agent,
     _nvidia_build_agent_import_path,
@@ -366,7 +366,10 @@ def test_generated_task_keeps_evaluator_provider_variables_out_of_agent_environm
         "NVIDIA_API_KEY": "${NVIDIA_API_KEY}",
         "SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}",
     }
-    assert task["environment"]["env"] == {"SERVICE_API_TOKEN": "${SERVICE_API_TOKEN}"}
+    assert task["environment"]["env"] == {
+        **_EVALUATOR_MANAGED_RUNTIME_ENV,
+        "SERVICE_API_TOKEN": "${SERVICE_API_TOKEN}",
+    }
 
 
 def test_nvidia_build_provider_mapping_does_not_supply_an_openai_agent_credential() -> None:

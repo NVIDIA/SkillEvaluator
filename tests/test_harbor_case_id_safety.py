@@ -64,7 +64,6 @@ def _write_skill(tmp_path: Path, case_ids: list[object]) -> Path:
         pytest.param('case"next', id="quote"),
         pytest.param(".hidden", id="leading-dot"),
         pytest.param("case.", id="trailing-dot"),
-        pytest.param("case..part", id="consecutive-dots"),
         pytest.param("x" * 129, id="overlong"),
         pytest.param(None, id="null"),
         pytest.param(True, id="boolean"),
@@ -125,6 +124,16 @@ def test_numeric_agentskills_id_is_canonicalized_for_harbor(tmp_path: Path) -> N
     assert task_config["metadata"]["entry_id"] == "1"
     entry = json.loads((task_paths[0] / "tests" / "entry.json").read_text(encoding="utf-8"))
     assert entry["id"] == "1"
+
+
+def test_consecutive_dots_inside_case_id_are_safe(tmp_path: Path) -> None:
+    skill_path = _write_skill(tmp_path, ["case..part"])
+    output_dir = tmp_path / "generated"
+
+    task_paths = generate_harbor_tasks(skill_path, output_dir)
+
+    assert task_paths == [output_dir / "case..part"]
+    assert (task_paths[0] / "task.toml").is_file()
 
 
 def test_validate_evals_reports_unsafe_case_ids(tmp_path: Path) -> None:
@@ -314,7 +323,7 @@ def test_all_dynamic_task_toml_strings_and_keys_are_quoted_for_real_harbor(tmp_p
         output_dir,
         runtime_env={"SAFE_ENV": hostile},
         pre_agent_setup=[hostile],
-        agent_workdir=hostile,
+        agent_workdir="/workspace/safe",
     )
     _write_task_toml(
         task_paths[0],

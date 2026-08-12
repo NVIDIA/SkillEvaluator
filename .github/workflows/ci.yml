@@ -271,7 +271,18 @@ jobs:
           tests/validators/test_similarity.py
           tests/reporting
           tests/test_cli.py
+          tests/test_harbor_output_provenance.py
+          tests/test_harbor_runtime_skill_isolation.py
+          tests/test_harbor_secure_copy.py::test_checked_windows_fallback_accepts_crt_descriptor_identity
+          tests/test_harbor_secure_copy.py::test_checked_windows_fallback_verifies_portable_chmod_semantics
+          tests/test_harbor_secure_copy.py::test_native_windows_fallback_copies_tree_and_file
+          tests/test_harbor_secure_copy.py::test_native_windows_tree_fingerprint_binds_writable_mode
+          tests/test_results_location.py
+          tests/test_results_location_legacy_compatibility.py
+          tests/test_tier3_compare.py
+          tests/test_tier3_progress.py
           tests/utils/test_secure_fs_platform.py
+          tests/utils/test_secure_fs_selected_reads.py
           tests/test_oss_packaging.py
 
   native-windows-local-mode:

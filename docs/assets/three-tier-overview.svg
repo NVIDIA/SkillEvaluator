@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1040 300" width="1040" height="300" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="tiers-title tiers-desc">
+  <title id="tiers-title">SkillEvaluator three-tier evaluation pipeline</title>
+  <desc id="tiers-desc">A skill flows through Tier 1 validation, Tier 2 deduplication, and Tier 3 live agent evaluation, producing reports and skill lift.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="50%" stop-color="#101812"/>
+      <stop offset="100%" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a261c"/>
+      <stop offset="100%" stop-color="#121a14"/>
+    </linearGradient>
+    <linearGradient id="accent1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#76b900"/>
+      <stop offset="100%" stop-color="#76b900" stop-opacity="0.15"/>
+    </linearGradient>
+    <linearGradient id="accent2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#9bdb34"/>
+      <stop offset="100%" stop-color="#9bdb34" stop-opacity="0.15"/>
+    </linearGradient>
+    <linearGradient id="accent3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#76b900"/>
+      <stop offset="100%" stop-color="#b6ef4a" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="outCard" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#243528"/>
+      <stop offset="100%" stop-color="#162016"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1.2 1.2 L8.5 5 L1.2 8.8" fill="none" stroke="#6f9264" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1040" height="300" rx="24" fill="url(#bg)" stroke="#273129" stroke-width="1"/>
+  <circle cx="220" cy="160" r="100" fill="#76b900" fill-opacity="0.045"/>
+  <circle cx="520" cy="130" r="120" fill="#76b900" fill-opacity="0.05"/>
+  <circle cx="820" cy="170" r="110" fill="#9bdb34" fill-opacity="0.04"/>
+
+  <text x="36" y="38" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" letter-spacing="2.6" fill="#6f9264">THREE-TIER PIPELINE</text>
+  <text x="36" y="62" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="700" letter-spacing="-0.3" fill="#f0f4ee">From static gates to measured agent lift</text>
+
+  <!-- Skill -->
+  <g transform="translate(36 88)">
+    <rect width="100" height="168" rx="16" fill="#152117" stroke="#304631" stroke-width="1"/>
+    <circle cx="50" cy="44" r="17" fill="none" stroke="#39523a" stroke-width="3"/>
+    <circle cx="50" cy="44" r="10.5" fill="none" stroke="#6f9264" stroke-width="2.4"/>
+    <circle cx="50" cy="44" r="4.5" fill="#76b900"/>
+    <text x="50" y="84" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="15" font-weight="700" fill="#ffffff">Skill</text>
+    <text x="50" y="106" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#9bb08f">SKILL.md</text>
+    <text x="50" y="128" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="10" fill="#6f7f68">+ scripts</text>
+  </g>
+
+  <line x1="144" y1="172" x2="170" y2="172" stroke="#6f9264" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Tier 1 -->
+  <g transform="translate(178 88)">
+    <rect width="210" height="168" rx="16" fill="url(#card)" stroke="#304631" stroke-width="1"/>
+    <rect x="0" y="0" width="210" height="3" rx="1.5" fill="url(#accent1)"/>
+    <rect x="16" y="18" width="48" height="22" rx="11" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.45" stroke-width="1"/>
+    <text x="40" y="33" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" font-weight="700" letter-spacing="0.8" fill="#9bdb34">TIER 1</text>
+    <text x="16" y="64" font-family="Inter, ui-sans-serif, sans-serif" font-size="17" font-weight="700" fill="#f3f7f0">Validation</text>
+    <text x="16" y="88" font-family="Inter, ui-sans-serif, sans-serif" font-size="12.5" font-weight="600" fill="#dbe8d6">Safe &amp; well-formed?</text>
+    <text x="16" y="110" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#8fa088">Schema &#183; security &#183; PII</text>
+    <text x="16" y="126" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#8fa088">quality &#183; offline gates</text>
+    <line x1="16" y1="136" x2="194" y2="136" stroke="#304631" stroke-width="1"/>
+    <text x="16" y="155" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#6f9264">validate &#183; quality-check</text>
+  </g>
+
+  <line x1="396" y1="172" x2="422" y2="172" stroke="#6f9264" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Tier 2 -->
+  <g transform="translate(430 88)">
+    <rect width="210" height="168" rx="16" fill="url(#card)" stroke="#304631" stroke-width="1"/>
+    <rect x="0" y="0" width="210" height="3" rx="1.5" fill="url(#accent2)"/>
+    <rect x="16" y="18" width="48" height="22" rx="11" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.45" stroke-width="1"/>
+    <text x="40" y="33" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" font-weight="700" letter-spacing="0.8" fill="#9bdb34">TIER 2</text>
+    <text x="16" y="64" font-family="Inter, ui-sans-serif, sans-serif" font-size="17" font-weight="700" fill="#f3f7f0">Deduplication</text>
+    <text x="16" y="88" font-family="Inter, ui-sans-serif, sans-serif" font-size="12.5" font-weight="600" fill="#dbe8d6">Already covered?</text>
+    <text x="16" y="110" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#8fa088">Embedding overlap</text>
+    <text x="16" y="126" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#8fa088">within &amp; across skills</text>
+    <line x1="16" y1="136" x2="194" y2="136" stroke="#304631" stroke-width="1"/>
+    <text x="16" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="#6f9264">context-optimization-check</text>
+    <text x="16" y="163" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="#6f9264">similarity-check</text>
+  </g>
+
+  <line x1="648" y1="172" x2="674" y2="172" stroke="#6f9264" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Tier 3 -->
+  <g transform="translate(682 88)">
+    <rect width="210" height="168" rx="16" fill="url(#card)" stroke="#39523a" stroke-width="1"/>
+    <rect x="0" y="0" width="210" height="3" rx="1.5" fill="url(#accent3)"/>
+    <rect x="16" y="18" width="48" height="22" rx="11" fill="#76b900" fill-opacity="0.22" stroke="#76b900" stroke-opacity="0.65" stroke-width="1"/>
+    <text x="40" y="33" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" font-weight="700" letter-spacing="0.8" fill="#b6ef4a">TIER 3</text>
+    <text x="16" y="64" font-family="Inter, ui-sans-serif, sans-serif" font-size="17" font-weight="700" fill="#f3f7f0">Live Evaluation</text>
+    <text x="16" y="88" font-family="Inter, ui-sans-serif, sans-serif" font-size="12.5" font-weight="600" fill="#dbe8d6">Does it help?</text>
+    <text x="16" y="110" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#8fa088">Sandboxed A/B runs</text>
+    <text x="16" y="126" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#8fa088">with skill vs without</text>
+    <line x1="16" y1="136" x2="194" y2="136" stroke="#304631" stroke-width="1"/>
+    <text x="16" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="#6f9264">create-eval-dataset</text>
+    <text x="16" y="163" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="#6f9264">tier3 evaluate &#183; compare</text>
+  </g>
+
+  <line x1="900" y1="172" x2="922" y2="172" stroke="#6f9264" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Reports -->
+  <g transform="translate(930 121)">
+    <rect width="78" height="102" rx="14" fill="url(#outCard)" stroke="#76b900" stroke-opacity="0.5" stroke-width="1"/>
+    <text x="39" y="40" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="12" font-weight="700" fill="#9bdb34">Reports</text>
+    <text x="39" y="62" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#9bb08f">verdict</text>
+    <text x="39" y="80" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="11" fill="#9bb08f">+ lift</text>
+  </g>
+
+  <text x="520" y="282" text-anchor="middle" font-family="Inter, ui-sans-serif, sans-serif" font-size="12" fill="#6f7f68">Each tier is an independent entry point &#8212; run any command directly</text>
+</svg>

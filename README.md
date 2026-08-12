@@ -4,6 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13-blue.svg)](https://www.python.org/)
+[![Documentation](https://img.shields.io/badge/Documentation-docs.nvidia.com-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/)
 
 SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent
 artifacts, starting with agent skills: deterministic quality gates, semantic
@@ -12,11 +13,26 @@ overlap detection, synthetic eval dataset generation, and live agent evaluation.
 Agent skills are folders of instructions and supporting files that extend AI
 agents, as defined by the [Agent Skills specification](https://agentskills.io/).
 SkillEvaluator is part of the
-[NVIDIA Verified Skills pipeline](https://docs.nvidia.com/skills/), with
-[SkillSpector](https://github.com/NVIDIA/SkillSpector) providing the specialized
-security-scanning capability used by Tier 1 and
+[NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
+
+## Three-tier overview
+
+![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](docs/assets/three-tier-overview.svg)
+
+Tiers are independent entry points; nothing requires running earlier ones first.
+
+| Tier | Purpose | Representative commands | Requires |
+| --- | --- | --- | --- |
+| Tier 1: Validation | Safe & well-formed? | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra plus external Semgrep, SkillSpector, and Gitleaks for full scanner coverage; a provider key for LLM checks |
+| Tier 2: Deduplication | Overlap with what exists? | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
+| Tier 3: Live Evaluation | Does it help the agent? | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
+
+[SkillSpector](https://github.com/NVIDIA/SkillSpector) provides specialized
+security scanning for Tier 1 validation.
 [Harbor](https://github.com/harbor-framework/harbor), the open-source agent
-evaluation framework, powering Tier 3 sandboxed agent evaluation.
+evaluation framework, powers the sandboxed agent runs in Tier 3 live
+evaluation. Full tier guides live in the
+[documentation](https://docs.nvidia.com/skills/skillevaluator/).
 
 ## Quickstart
 
@@ -41,9 +57,14 @@ If your shell cannot find the command after installation, run
 
 ## LLM provider setup
 
-LLM-backed security analysis, rubric judging, Tier 2 deduplication, dataset
-generation, and Tier 3 grading need a configured provider. For NVIDIA Build,
-one API Catalog key covers both chat and embeddings:
+No OpenAI or Anthropic key yet? Create a free API key at
+[build.nvidia.com](https://build.nvidia.com) — NVIDIA Build offers free
+inferencing, and NVIDIA Build defaults to the open-source Nemotron model
+`nvidia/nemotron-3-nano-30b-a3b` for a quick try. Prefer a different model?
+Pick any free model on [build.nvidia.com](https://build.nvidia.com) and set
+`SKILL_EVAL_LLM_MODEL`. Once that key is set, the same provider works
+seamlessly across Tier 1 LLM checks, Tier 2, and Tier 3 (chat plus embeddings
+with one credential):
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build

@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- CI DCO check that fails pull requests whose commits lack a `Signed-off-by`
+  trailer, matching the sign-off requirement in `CONTRIBUTING.md`.
 - Initial public release candidate.
 - Enabled optional semantic-version validation in the default Tier 1 pipeline,
   including a public `--previous-version` monotonic-bump bound.
@@ -122,3 +124,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 2 content collection now prunes configured evaluation and version
   artifact directories before enforcing the discovered-path limit, so excluded
   generated results cannot cause false path-count failures.
+- Tier 2 scans now validate but do not follow the exact contained
+  `CLAUDE.md -> AGENTS.md` compatibility alias, scanning the exactly named,
+  independently discovered, single-link regular target once while continuing
+  to reject hard-linked selected files, linked manifests, directories, and all
+  other file redirects.

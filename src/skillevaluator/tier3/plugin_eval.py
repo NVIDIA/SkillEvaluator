@@ -47,6 +47,9 @@ from urllib.parse import urlparse
 import yaml
 
 from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
+    CONTENT_DEDUP_MAX_FILE_BYTES,
+    CONTENT_DEDUP_MAX_TOTAL_BYTES,
     DESCRIPTION_MAX_LENGTH,
     NAME_MAX_LENGTH,
     PLUGIN_CONTAINED_MANIFEST_DIR,
@@ -58,6 +61,12 @@ from skillevaluator.models.result import Severity
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, find_eval_file, load_dataset_entries
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.utils.helpers import find_bundled_plugin_skills, resolve_git_remote_url
+from skillevaluator.utils.secure_fs import (
+    SecurePathError,
+    SecureRoot,
+    discover_secure_files,
+    secure_read_path_text,
+)
 from skillevaluator.utils.structured_data import (
     StructuredDataError,
     load_bounded_json,
@@ -125,8 +134,7 @@ class PluginEvalPackage:
         unresolvable remote refs / provider-only MCP that contribute nothing to
         the run) from a full one. Persisted into the agent_eval payload and a
         run-dir sidecar so it survives the temp package cleanup, instead of only
-        living in the deleted ``plugin-eval-metadata.json`` (MR !29 review
-        59316231).
+        living only in temporary generated-package state (MR !29 review 59316231).
         """
         unresolved_skill = list(self.unresolved_skill_refs)
         unresolved_rule = list(self.unresolved_rule_refs)
@@ -155,6 +163,14 @@ class PluginEvalPackage:
             "Integration evaluation requires at least one dataset case with "
             "cross_component=true and two or more expected_skills"
         )
+
+
+@dataclass(frozen=True)
+class _StagedRule:
+    """One bounded rule snapshot safe to embed in the generated wrapper."""
+
+    name: str
+    content: str
 
 
 def _stage_agent_plugin_manifest(
@@ -320,19 +336,6 @@ def prepare_plugin_eval_package(
         unresolved_rule_refs=unresolved_rule_refs,
         provider_mcp_servers=tuple(server["name"] for server in provider_mcp),
     )
-
-    metadata = {
-        "plugin_name": plugin_name,
-        "manifest_path": str(location.secure_file.path),
-        "member_skills": [str(path) for path in member_skills],
-        "rule_refs": list(all_rule_refs),
-        "staged_rules": [rule.name for rule in staged_rules],
-        "unresolved_skill_refs": list(unresolved_skill_refs),
-        "unresolved_rule_refs": list(unresolved_rule_refs),
-        "runnable_mcp_servers": runnable_mcp,
-        "provider_mcp_servers": provider_mcp,
-    }
-    (package_path / "plugin-eval-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     evals_dir = package_path / "evals"
     resolved_source = _resolve_evals_source(plugin_dir, evals_source)
@@ -728,7 +731,7 @@ def _unresolved_refs(
 
 def _resolve_rules(
     section: Any, plugin_dir: Path, plugin_root: Path, resolver: _IntraRepoResolver
-) -> tuple[tuple[Path, ...], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[_StagedRule, ...], tuple[str, ...], tuple[str, ...]]:
     """Resolve rule refs to contained files; report remote/unresolved ones.
 
     Returns ``(staged_rule_files, unresolved_labels, all_labels)``. A rule file is
@@ -736,7 +739,7 @@ def _resolve_rules(
     contained, mirroring :func:`find_bundled_plugin_skills`) OR when a canonical
     remote ref names *this* clone and resolves intra-repo under the clone root.
     """
-    staged: list[Path] = []
+    staged: list[_StagedRule] = []
     unresolved: list[str] = []
     all_labels: list[str] = []
     seen: set[Path] = set()
@@ -750,12 +753,12 @@ def _resolve_rules(
             if intra is None:
                 unresolved.append(label)
             elif intra not in seen:
-                staged.append(intra)
+                staged.append(_load_rule_path(intra))
                 seen.add(intra)
             continue
         resolved = _resolve_contained_file(ref, plugin_dir, plugin_root)
         if resolved is not None and resolved not in seen:
-            staged.append(resolved)
+            staged.append(_load_rule_path(resolved))
             seen.add(resolved)
         elif resolved is None:
             unresolved.append(label)
@@ -797,7 +800,16 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _discover_contained_rule_files(plugin_root: Path) -> list[Path]:
+def _load_rule_path(path: Path) -> _StagedRule:
+    """Read one resolved rule through its parent anchor with a hard byte limit."""
+    try:
+        content = secure_read_path_text(path, CONTENT_DEDUP_MAX_FILE_BYTES).strip()
+    except SecurePathError as exc:
+        raise ValueError(f"Refusing unsafe or unbounded plugin rule '{path.name}': {exc}") from exc
+    return _StagedRule(name=path.name, content=content)
+
+
+def _discover_contained_rule_files(plugin_root: Path) -> list[_StagedRule]:
     """Discover rule files bundled under ``<plugin_root>/rules`` for a contained
     plugin whose manifest expresses ``rules`` as a directory pointer ("./rules/").
 
@@ -806,19 +818,36 @@ def _discover_contained_rule_files(plugin_root: Path) -> list[Path]:
     symlink cannot capture a host file. Sorted for deterministic staging.
     """
     rules_root = plugin_root / "rules"
-    if not rules_root.is_dir():
+    try:
+        rules_root.lstat()
+    except FileNotFoundError:
         return []
-    discovered: list[Path] = []
-    for entry in sorted(rules_root.rglob("*")):
-        if any(part in SCAN_EXCLUDED_DIRS for part in entry.relative_to(rules_root).parts):
-            continue
-        try:
-            resolved = entry.resolve()
-        except OSError:
-            continue
-        if resolved.is_file() and _is_within(resolved, plugin_root):
-            discovered.append(resolved)
-    return discovered
+    except OSError as exc:
+        raise ValueError(f"Cannot inspect contained plugin rules safely: {exc}") from exc
+
+    try:
+        files = discover_secure_files(
+            rules_root,
+            selected=lambda _relative: True,
+            excluded_dirs=SCAN_EXCLUDED_DIRS,
+            max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
+            allow_context_alias=False,
+        )
+        if len(files) > MAX_PLUGIN_MANIFEST_ITEMS:
+            raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
+        total_bytes = sum(file.metadata.st_size for file in files)
+        if total_bytes > CONTENT_DEDUP_MAX_TOTAL_BYTES:
+            raise ValueError(f"Plugin rules exceed the {CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit")
+        with SecureRoot(rules_root) as secure_root:
+            return [
+                _StagedRule(
+                    name=file.relative_path.as_posix(),
+                    content=secure_root.read_file_text(file, CONTENT_DEDUP_MAX_FILE_BYTES).strip(),
+                )
+                for file in files
+            ]
+    except SecurePathError as exc:
+        raise ValueError(f"Refusing unsafe or unbounded contained plugin rules: {exc}") from exc
 
 
 def _reject_unsafe_mcp_declaration(name: Any, config: dict[str, Any]) -> None:
@@ -1066,7 +1095,7 @@ def _write_plugin_skill_md(
     plugin_name: str,
     plugin_description: str,
     include_skills: tuple[Path, ...],
-    staged_rules: tuple[Path, ...],
+    staged_rules: tuple[_StagedRule, ...],
     unresolved_skill_refs: tuple[str, ...],
     unresolved_rule_refs: tuple[str, ...],
     provider_mcp_servers: tuple[str, ...],
@@ -1114,12 +1143,8 @@ to the most relevant member skill and follow that member skill's `SKILL.md`.
     path.write_text(content, encoding="utf-8")
 
 
-def _render_rule_block(rule: Path) -> str:
-    try:
-        body = rule.read_text(encoding="utf-8").strip()
-    except OSError:
-        body = "(rule file could not be read)"
-    return f"### {rule.name}\n\n{body}"
+def _render_rule_block(rule: _StagedRule) -> str:
+    return f"### {rule.name}\n\n{rule.content}"
 
 
 def _render_unresolved(

@@ -9,8 +9,10 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.cli import _plugin_lift_mode_for_evidence
+from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES
 from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.tier3.plugin_eval import PluginEvalPackage, prepare_plugin_eval_package
+from skillevaluator.utils.secure_fs import SecureRoot
 
 
 def _skill(root: Path, name: str = "demo") -> Path:
@@ -42,6 +44,8 @@ def test_contained_plugin_stages_member_skill_and_combined_dataset(tmp_path: Pat
     assert package.include_skills == (member.resolve(),)
     assert package.package_path is not None
     assert (package.package_path / "SKILL.md").is_file()
+    assert not (package.package_path / "plugin-eval-metadata.json").exists()
+    assert str(tmp_path) not in (package.package_path / "SKILL.md").read_text(encoding="utf-8")
     entries = json.loads((package.package_path / "evals" / "evals.json").read_text(encoding="utf-8"))
     assert entries[0]["id"] == "demo-case-1"
     assert entries[0]["plugin_eval_source_skill"] == "demo"
@@ -276,4 +280,44 @@ def test_symlinked_member_skill_outside_plugin_is_rejected(tmp_path: Path) -> No
     except OSError:
         pytest.skip("symlinks are unavailable")
     with pytest.raises(ValueError, match=r"linked directory|reparse"):
+        prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+
+def test_contained_rule_replacement_after_discovery_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "p", "rules": "./rules"}), encoding="utf-8")
+    rules = plugin / "rules"
+    rules.mkdir()
+    rule = rules / "policy.md"
+    rule.write_text("Keep data local.\n", encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("host-only content\n", encoding="utf-8")
+    original_read = SecureRoot.read_file_text
+
+    def replace_before_read(self: SecureRoot, file, max_bytes: int) -> str:
+        rule.unlink()
+        rule.symlink_to(outside)
+        return original_read(self, file, max_bytes)
+
+    monkeypatch.setattr(SecureRoot, "read_file_text", replace_before_read)
+
+    with pytest.raises(ValueError, match=r"unsafe|changed|symlink"):
+        prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")
+
+
+def test_oversized_contained_rule_is_rejected(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "p", "rules": "./rules"}), encoding="utf-8")
+    rules = plugin / "rules"
+    rules.mkdir()
+    (rules / "policy.md").write_bytes(b"x" * (CONTENT_DEDUP_MAX_FILE_BYTES + 1))
+
+    with pytest.raises(ValueError, match=r"limit|unbounded|exceed"):
         prepare_plugin_eval_package(plugin, stage_root=tmp_path / "stage")

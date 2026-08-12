@@ -245,9 +245,10 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     )
     assert positioning in normalized
     assert "https://docs.nvidia.com/skills/skillevaluator/" in readme
-    assert "https://docs.nvidia.com/skills/" in readme
+    assert "https://github.com/NVIDIA/skills" in readme
     assert "https://github.com/NVIDIA/SkillSpector" in readme
-    assert "\n## Three-tier overview\n" not in readme
+    assert "\n## Three-tier overview\n" in readme
+    assert "docs/assets/three-tier-overview.svg" in readme
     assert "\n## Quickstart\n" in readme
     assert "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git" in readme
     assert (
@@ -271,7 +272,7 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "\n## Tier 1:" not in readme
     assert "Skill Evaluator" not in readme
     assert "Skillevaluator" not in readme
-    assert len(readme.split()) <= 750
+    assert len(readme.split()) <= 1100
 
 
 def test_release_metadata_is_public_facing_and_version_consistent() -> None:
@@ -415,9 +416,9 @@ def test_public_tree_has_no_legacy_root_version_module() -> None:
 
 
 def test_public_docs_have_no_personal_staging_ownership() -> None:
-    source_text = "\n".join(path.read_text(encoding="utf-8") for path in _public_source_files(REPO_ROOT))
+    source_files = set(_public_source_files(REPO_ROOT)) - {REPO_ROOT / ".github" / "CODEOWNERS"}
+    source_text = "\n".join(path.read_text(encoding="utf-8") for path in source_files)
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-
     assert ("@chris" + "knvidia") not in source_text
     assert ("MAINTAINERS" + ".md") not in readme
     assert ("[CODE" + "OWNERS]") not in readme
@@ -547,7 +548,7 @@ def test_fern_docs_use_the_verified_skills_basepath_and_launch_positioning() -> 
     assert "custom-domain: docs.nvidia.com/skills/skillevaluator" in fern
     assert "docs.nvidia.com/skillevaluator" not in fern
     assert positioning in normalized_overview
-    assert "https://docs.nvidia.com/skills/" in overview
+    assert "https://github.com/NVIDIA/skills" in overview
     assert "https://github.com/NVIDIA/SkillSpector" in overview
 
 

@@ -25,7 +25,8 @@ you confirm that you have the right to contribute it under the
   under the same license, or a compatible license.
 
   - Any contribution which contains commits that are not Signed-Off will not be
-    accepted.
+    accepted. Pull requests are checked in CI by the **DCO** workflow; unsigned
+    commits fail the check.
 
 - To sign off on a commit you simply use the `--signoff` (or `-s`) option when
   committing your changes:

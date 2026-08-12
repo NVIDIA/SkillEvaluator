@@ -12,9 +12,40 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 # Private/internal repositories can opt in after GitHub Advanced Security is
 # enabled by setting ENABLE_GITHUB_ADVANCED_SECURITY=true.
 jobs:
+  classify-changes:
+    name: Classify changes
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify pull-request paths
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          classifier="$RUNNER_TEMP/classify_ci_changes.py"
+          if ! git show "$BASE_SHA:scripts/classify_ci_changes.py" > "$classifier"; then
+            echo "::notice::Trusted classifier is not present on the base branch; running full CI."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 "$classifier" --base "$BASE_SHA" --head "$HEAD_SHA"
+
   gitleaks:
     name: Gitleaks
     runs-on: ubuntu-latest
@@ -22,6 +53,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Verify full Git checkout
         run: |
           test -d .git
@@ -35,17 +67,26 @@ jobs:
 
   dependency-review:
     name: Dependency review
+    needs: classify-changes
     if: >-
-      ${{ github.event_name == 'pull_request' &&
+      ${{ !cancelled() &&
+          needs.classify-changes.outputs.docs_only != 'true' &&
+          github.event_name == 'pull_request' &&
           (github.event.repository.private == false || vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
 
   codeql:
     name: CodeQL
-    if: ${{ github.event.repository.private == false || vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true' }}
+    needs: classify-changes
+    if: >-
+      ${{ !cancelled() &&
+          needs.classify-changes.outputs.docs_only != 'true' &&
+          (github.event.repository.private == false || vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -54,6 +95,8 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
         with:
           languages: python

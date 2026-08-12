@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import json
 import re
 import shlex
+import stat
 import string
 import subprocess
 import sys
 import tarfile
+import tokenize
 import warnings
 import zipfile
 from collections.abc import Iterable, Iterator
@@ -62,6 +65,8 @@ _BINARY_ROOT_FILES = frozenset({".coverage", ".DS_Store", "Thumbs.db"})
 _PYTHON_SUFFIXES = frozenset({".py", ".pyi", ".pyw"})
 _BASH_ANSI_C_PREFIX = chr(36) + chr(39)
 _BASH_LOCALE_QUOTE_RE = re.compile(r'(?<!\\)\$(?=")')
+_BOUNDARY_ANCHOR_ID_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
+_BOUNDARY_ANCHOR_COMMENT_RE = re.compile(r"# oss-boundary-anchor: ([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\Z")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _OCTAL_DIGITS = frozenset("01234567")
 _BASH_COMMON_ESCAPES = {
@@ -92,11 +97,11 @@ class BoundaryFinding(NamedTuple):
 
 
 class BoundaryAllowance(NamedTuple):
-    """One line-specific, justified exception."""
+    """One stable, explicitly anchored, justified exception."""
 
     path: str
     rule: str
-    line: int
+    anchor: str
     reason: str
     expires: date
     review_owner: str
@@ -209,11 +214,13 @@ _AUTHORIZATION_RE = re.compile(
     r"(?i)((?:\"?authorization\"?|auth[_-]?header)\s*[:=]\s*[\"']?(?:bearer|basic)\s+)[^\"'\s,;}]+"
 )
 _MAX_EXCERPT_CHARS = 180
+_SourceSpan = tuple[int, int, int, int]
 
 
 class _ReconstructedCandidate(NamedTuple):
     value: str
     active_token_exempt: bool = False
+    source_span: _SourceSpan | None = None
 
 
 class _StaticReconstructionLimit(ValueError):
@@ -337,6 +344,23 @@ def _character_column(line: str, byte_column: int) -> int:
     return len(line.encode("utf-8")[:byte_column].decode("utf-8"))
 
 
+def _node_source_span(node: ast.AST, lines: list[str]) -> _SourceSpan | None:
+    if (
+        not hasattr(node, "lineno")
+        or node.end_lineno is None
+        or node.end_col_offset is None
+        or node.lineno > len(lines)
+        or node.end_lineno > len(lines)
+    ):
+        return None
+    return (
+        node.lineno,
+        _character_column(lines[node.lineno - 1], node.col_offset),
+        node.end_lineno,
+        _character_column(lines[node.end_lineno - 1], node.end_col_offset),
+    )
+
+
 def _source_ranges_by_line(node: ast.AST, lines: list[str]) -> dict[int, list[tuple[int, int]]]:
     if not hasattr(node, "lineno") or node.end_lineno is None or node.end_col_offset is None:
         return {}
@@ -351,7 +375,7 @@ def _source_ranges_by_line(node: ast.AST, lines: list[str]) -> dict[int, list[tu
 
 def _python_reconstructions(
     text: str,
-) -> tuple[dict[int, set[_ReconstructedCandidate]], dict[int, list[tuple[int, int]]], set[int]]:
+) -> tuple[dict[int, list[_ReconstructedCandidate]], dict[int, list[tuple[int, int]]], set[int]]:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
@@ -378,7 +402,7 @@ def _python_reconstructions(
         for line_number, ranges in _source_ranges_by_line(pattern, lines).items():
             defensive_ranges.setdefault(line_number, []).extend(ranges)
 
-    reconstructed: dict[int, set[_ReconstructedCandidate]] = {}
+    reconstructed: dict[int, list[_ReconstructedCandidate]] = {}
     for node in ast.walk(tree):
         try:
             value = _static_string(node)
@@ -387,8 +411,12 @@ def _python_reconstructions(
                 limit_lines.add(node.lineno)
             continue
         if value is not None and hasattr(node, "lineno"):
-            reconstructed.setdefault(node.lineno, set()).add(
-                _ReconstructedCandidate(value, active_token_exempt=id(node) in defensive_node_ids)
+            reconstructed.setdefault(node.lineno, []).append(
+                _ReconstructedCandidate(
+                    value,
+                    active_token_exempt=id(node) in defensive_node_ids,
+                    source_span=_node_source_span(node, lines),
+                )
             )
     return reconstructed, defensive_ranges, limit_lines
 
@@ -498,6 +526,57 @@ def _match_is_inside_ranges(match: re.Match[str], ranges: Iterable[tuple[int, in
     return any(range_start <= start and end <= range_end for range_start, range_end in ranges)
 
 
+def _span_strictly_contains(outer: _SourceSpan, inner: _SourceSpan) -> bool:
+    return outer != inner and outer[:2] <= inner[:2] and inner[2:] <= outer[2:]
+
+
+def _selected_rule_matches(
+    rule: BoundaryRule,
+    candidates: list[_ReconstructedCandidate],
+    *,
+    line_number: int,
+    defensive_ranges: Iterable[tuple[int, int]],
+) -> tuple[re.Match[str], ...]:
+    spanned_matches: dict[_SourceSpan, tuple[re.Match[str], ...]] = {}
+    best_unspanned: tuple[re.Match[str], ...] = ()
+    for index, candidate in enumerate(candidates):
+        if rule.rule_id == "active-internal-token" and candidate.active_token_exempt:
+            continue
+        matches = tuple(
+            match
+            for match in rule.pattern.finditer(candidate.value)
+            if not (
+                rule.rule_id == "active-internal-token"
+                and index == 0
+                and _match_is_inside_ranges(match, defensive_ranges)
+            )
+        )
+        if not matches:
+            continue
+        if index == 0:
+            for match in matches:
+                spanned_matches[(line_number, match.start(), line_number, match.end())] = (match,)
+        elif candidate.source_span is not None:
+            prior = spanned_matches.get(candidate.source_span, ())
+            if len(matches) > len(prior):
+                spanned_matches[candidate.source_span] = matches
+        elif len(matches) > len(best_unspanned):
+            best_unspanned = matches
+
+    if not spanned_matches:
+        return best_unspanned
+
+    precise_matches = tuple(
+        match
+        for span, matches in sorted(spanned_matches.items())
+        if not any(_span_strictly_contains(span, other) for other in spanned_matches)
+        for match in matches
+    )
+    most_matches_in_one_span = max(spanned_matches.values(), key=len)
+    selected = precise_matches if len(precise_matches) >= len(most_matches_in_one_span) else most_matches_in_one_span
+    return best_unspanned if len(best_unspanned) > len(selected) else selected
+
+
 def _shell_failure_finding(path: str, line_number: int, error: _ShellDecodeError) -> BoundaryFinding:
     if isinstance(error, _ShellDecodeLimit):
         return BoundaryFinding(
@@ -542,7 +621,9 @@ def scan_text(path: str, text: str) -> list[BoundaryFinding]:
                 shell_failures.setdefault(failure.rule, failure)
                 continue
             if shell_value is not None and shell_value != candidate.value:
-                candidates.append(_ReconstructedCandidate(shell_value, candidate.active_token_exempt))
+                candidates.append(
+                    _ReconstructedCandidate(shell_value, candidate.active_token_exempt, candidate.source_span)
+                )
         try:
             shell_value = _shell_reconstruction(path, line)
         except _ShellDecodeError as exc:
@@ -553,22 +634,13 @@ def scan_text(path: str, text: str) -> list[BoundaryFinding]:
         if shell_value is not None:
             candidates.append(_ReconstructedCandidate(shell_value))
         for rule in DENY_RULES:
-            selected_match: re.Match[str] | None = None
-            for index, candidate in enumerate(candidates):
-                if rule.rule_id == "active-internal-token" and candidate.active_token_exempt:
-                    continue
-                for match in rule.pattern.finditer(candidate.value):
-                    if (
-                        rule.rule_id == "active-internal-token"
-                        and index == 0
-                        and _match_is_inside_ranges(match, defensive_ranges.get(line_number, ()))
-                    ):
-                        continue
-                    selected_match = match
-                    break
-                if selected_match is not None:
-                    break
-            if selected_match is not None:
+            selected_matches = _selected_rule_matches(
+                rule,
+                candidates,
+                line_number=line_number,
+                defensive_ranges=defensive_ranges.get(line_number, ()),
+            )
+            for selected_match in selected_matches:
                 findings.append(
                     BoundaryFinding(
                         path,
@@ -582,7 +654,7 @@ def scan_text(path: str, text: str) -> list[BoundaryFinding]:
 
 
 def load_allowlist(path: Path | None) -> tuple[BoundaryAllowance, ...]:
-    """Load a strict line-specific allowlist; unknown metadata fails closed."""
+    """Load a strict anchor-specific allowlist; unknown metadata fails closed."""
     if path is None:
         return ()
     try:
@@ -590,28 +662,28 @@ def load_allowlist(path: Path | None) -> tuple[BoundaryAllowance, ...]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not load OSS boundary allowlist {path}: {exc}") from exc
 
-    if not isinstance(payload, dict) or set(payload) != {"version", "allowlist"} or payload.get("version") != 1:
-        raise ValueError("OSS boundary allowlist must contain only version=1 and allowlist")
+    if not isinstance(payload, dict) or set(payload) != {"version", "allowlist"} or payload.get("version") != 2:
+        raise ValueError("OSS boundary allowlist must contain only version=2 and allowlist")
     entries = payload.get("allowlist")
     if not isinstance(entries, list):
         raise ValueError("OSS boundary allowlist must be a list")
 
     allowances: list[BoundaryAllowance] = []
-    required = {"path", "rule", "line", "reason", "expires", "review_owner"}
+    required = {"path", "rule", "anchor", "reason", "expires", "review_owner"}
     known_rules = {rule.rule_id for rule in DENY_RULES}
+    seen_anchors: set[str] = set()
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or set(entry) != required:
             raise ValueError(
-                f"allowlist entry {index} must contain exactly path, rule, line, reason, expires, and review_owner"
+                f"allowlist entry {index} must contain exactly path, rule, anchor, reason, expires, and review_owner"
             )
         if (
             not isinstance(entry["path"], str)
             or not entry["path"].strip()
             or not isinstance(entry["rule"], str)
             or entry["rule"] not in known_rules
-            or not isinstance(entry["line"], int)
-            or isinstance(entry["line"], bool)
-            or entry["line"] < 1
+            or not isinstance(entry["anchor"], str)
+            or _BOUNDARY_ANCHOR_ID_RE.fullmatch(entry["anchor"]) is None
             or not isinstance(entry["reason"], str)
             or not entry["reason"].strip()
             or not isinstance(entry["expires"], str)
@@ -620,7 +692,7 @@ def load_allowlist(path: Path | None) -> tuple[BoundaryAllowance, ...]:
             or not entry["review_owner"].strip()
         ):
             raise ValueError(
-                f"allowlist entry {index} must contain valid path, rule, line, reason, expires, and review_owner values"
+                f"allowlist entry {index} must contain valid path, rule, anchor, reason, expires, and review_owner values"
             )
         allow_path = PurePosixPath(entry["path"])
         if (
@@ -628,8 +700,19 @@ def load_allowlist(path: Path | None) -> tuple[BoundaryAllowance, ...]:
             or ".." in allow_path.parts
             or not allow_path.parts
             or allow_path.parts[0] != "tests"
+            or allow_path.as_posix() != entry["path"]
+            or allow_path.suffix.lower() not in _PYTHON_SUFFIXES
+            or not allow_path.name.startswith("test_")
         ):
-            raise ValueError(f"allowlist entry {index} is restricted to exact negative test paths")
+            raise ValueError(f"allowlist entry {index} is restricted to exact Python negative test paths")
+        if entry["anchor"] in seen_anchors:
+            raise ValueError(f"allowlist entry {index} duplicates anchor {entry['anchor']!r} for {allow_path}")
+        for rule in DENY_RULES:
+            if rule.pattern.search(entry["anchor"]):
+                raise ValueError(
+                    f"allowlist entry {index} anchor ID matches denied OSS boundary rule {rule.rule_id}"
+                )
+        seen_anchors.add(entry["anchor"])
         try:
             expires = date.fromisoformat(entry["expires"])
         except ValueError as exc:
@@ -640,13 +723,50 @@ def load_allowlist(path: Path | None) -> tuple[BoundaryAllowance, ...]:
             BoundaryAllowance(
                 path=allow_path.as_posix(),
                 rule=entry["rule"],
-                line=entry["line"],
+                anchor=entry["anchor"],
                 reason=entry["reason"].strip(),
                 expires=expires,
                 review_owner=entry["review_owner"].strip(),
             )
         )
     return tuple(allowances)
+
+
+def _boundary_anchors(path: str, text: str) -> dict[int, str]:
+    """Return exact Python comment anchors keyed by their physical line."""
+    archive_member = path.split("!", 1)[1] if "!" in path else path
+    if PurePosixPath(archive_member).suffix.lower() not in _PYTHON_SUFFIXES:
+        return {}
+
+    anchors: dict[int, str] = {}
+    anchor_lines: dict[str, int] = {}
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        for token in tokens:
+            if token.type != tokenize.COMMENT or "oss-boundary-anchor" not in token.string:
+                continue
+            match = _BOUNDARY_ANCHOR_COMMENT_RE.fullmatch(token.string)
+            if match is None:
+                raise ValueError(f"malformed OSS boundary anchor in {path}:{token.start[0]}")
+            if not token.line[: token.start[1]].strip():
+                raise ValueError(f"OSS boundary anchor must follow code in {path}:{token.start[0]}")
+            anchor = match.group(1)
+            if anchor in anchor_lines:
+                raise ValueError(
+                    f"duplicate OSS boundary anchor {anchor!r} in {path}:{anchor_lines[anchor]} and {token.start[0]}"
+                )
+            anchor_lines[anchor] = token.start[0]
+            anchors[token.start[0]] = anchor
+    except (IndentationError, tokenize.TokenError) as exc:
+        raise ValueError(f"could not tokenize Python source {path}: {exc}") from exc
+    if anchors:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError) as exc:
+            raise ValueError(f"could not parse anchored Python source {path}: {exc}") from exc
+    return anchors
 
 
 def _is_scanned_path(relative_path: str) -> bool:
@@ -702,20 +822,76 @@ def _without_allowances(
     findings: Iterable[BoundaryFinding],
     allowances: Iterable[BoundaryAllowance],
     *,
+    anchors_by_location: dict[tuple[str, int], str] | None = None,
     archive_source_paths: dict[str, str] | None = None,
+    validate_all_allowances: bool = False,
+    validate_all_anchors: bool = False,
+    validate_allowance_paths: set[str] | None = None,
 ) -> list[BoundaryFinding]:
+    findings = tuple(findings)
     entries = tuple(allowances)
+    entries_by_anchor = {(entry.path, entry.anchor): entry for entry in entries}
+    anchors = anchors_by_location or {}
     source_paths = archive_source_paths or {}
 
-    def is_allowed(finding: BoundaryFinding) -> bool:
-        finding_path = finding.path
-        source_path = source_paths.get(finding_path)
+    logical_anchor_lines: dict[tuple[str, str], int] = {}
+    logical_anchor_owners: dict[str, tuple[str, int]] = {}
+    for (actual_path, line), anchor in anchors.items():
+        logical_path = source_paths.get(actual_path, actual_path)
+        anchor_key = (logical_path, anchor)
+        if anchor_key in logical_anchor_lines:
+            raise ValueError(f"duplicate OSS boundary anchor {anchor!r} for {logical_path}")
+        if anchor in logical_anchor_owners:
+            owner_path, owner_line = logical_anchor_owners[anchor]
+            raise ValueError(
+                f"duplicate OSS boundary anchor {anchor!r} in {owner_path}:{owner_line} and {logical_path}:{line}"
+            )
+        logical_anchor_lines[anchor_key] = line
+        logical_anchor_owners[anchor] = (logical_path, line)
+
+    findings_by_anchor: dict[tuple[str, str], list[BoundaryFinding]] = {}
+    for finding in findings:
+        anchor = anchors.get((finding.path, finding.line))
+        if anchor is None:
+            continue
+        logical_path = source_paths.get(finding.path, finding.path)
+        findings_by_anchor.setdefault((logical_path, anchor), []).append(finding)
+
+    paths_to_validate = validate_allowance_paths or set()
+    if validate_all_allowances or validate_all_anchors or validate_allowance_paths is not None:
+        for anchor_key in logical_anchor_lines:
+            if (
+                validate_all_allowances or validate_all_anchors or anchor_key[0] in paths_to_validate
+            ) and anchor_key not in entries_by_anchor:
+                raise ValueError(f"unregistered OSS boundary anchor {anchor_key[1]!r} in {anchor_key[0]}")
         for entry in entries:
-            if finding.rule != entry.rule or finding.line != entry.line:
+            if not validate_all_allowances and entry.path not in paths_to_validate:
                 continue
-            if entry.path in (finding_path, source_path):
-                return True
-        return False
+            anchor_key = (entry.path, entry.anchor)
+            if anchor_key not in logical_anchor_lines:
+                raise ValueError(f"allowlist anchor {entry.anchor!r} is missing from {entry.path}")
+            anchored_findings = findings_by_anchor.get(anchor_key, [])
+            matching_count = sum(finding.rule == entry.rule for finding in anchored_findings)
+            if len(anchored_findings) != 1 or matching_count != 1:
+                raise ValueError(
+                    f"allowlist anchor {entry.anchor!r} in {entry.path} must identify exactly one "
+                    f"{entry.rule} finding and no other findings; found {matching_count} matching and "
+                    f"{len(anchored_findings)} total"
+                )
+
+    def is_allowed(finding: BoundaryFinding) -> bool:
+        anchor = anchors.get((finding.path, finding.line))
+        if anchor is None:
+            return False
+        logical_path = source_paths.get(finding.path, finding.path)
+        entry = entries_by_anchor.get((logical_path, anchor))
+        anchored_findings = findings_by_anchor.get((logical_path, anchor), [])
+        return (
+            entry is not None
+            and entry.rule == finding.rule
+            and len(anchored_findings) == 1
+            and anchored_findings[0] == finding
+        )
 
     return [finding for finding in findings if not is_allowed(finding)]
 
@@ -726,13 +902,22 @@ def scan_repository(root: Path, *, allowlist_path: Path | None = None) -> list[B
     if not root.is_dir():
         raise ValueError(f"repository root is not a directory: {root}")
     findings: list[BoundaryFinding] = []
+    anchors_by_location: dict[tuple[str, int], str] = {}
     for relative, path in _repository_paths(root):
         try:
             text = _decode_text(path.read_bytes(), path=relative)
         except OSError as exc:
             raise ValueError(f"could not read release file {relative}: {exc}") from exc
+        anchors_by_location.update(
+            ((relative, line), anchor) for line, anchor in _boundary_anchors(relative, text).items()
+        )
         findings.extend(scan_text(relative, text))
-    return _without_allowances(findings, load_allowlist(allowlist_path))
+    return _without_allowances(
+        findings,
+        load_allowlist(allowlist_path),
+        anchors_by_location=anchors_by_location,
+        validate_all_allowances=True,
+    )
 
 
 def _validated_archive_member_path(member_name: str, *, expected_root: str | None = None) -> str:
@@ -779,10 +964,18 @@ def _zip_members(path: Path) -> Iterator[tuple[str, str, bytes]]:
         optional_zstandard = getattr(zipfile, "ZIP_ZSTANDARD", None)
         if optional_zstandard is not None:
             supported_compression.add(optional_zstandard)
+        seen_source_paths: set[str] = set()
         for info in infos:
             source_path = _validated_archive_member_path(info.filename)
+            if source_path in seen_source_paths:
+                raise ValueError(f"duplicate archive member path {source_path}")
+            seen_source_paths.add(source_path)
             if info.flag_bits & 0x1:
                 raise ValueError(f"archive contains encrypted ZIP member {info.filename}")
+            if info.create_system == 3:
+                file_type = stat.S_IFMT(info.external_attr >> 16)
+                if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                    raise ValueError(f"archive contains unsupported ZIP member {info.filename}")
             if not info.is_dir() and info.compress_type not in supported_compression:
                 raise ValueError(f"archive contains unsupported ZIP member {info.filename}")
             if info.is_dir() or not _is_archive_text(info.filename):
@@ -801,8 +994,12 @@ def _tar_members(path: Path) -> Iterator[tuple[str, str, bytes]]:
     with tarfile.open(path, "r:*") as archive:
         member_count = 0
         total_size = 0
+        seen_source_paths: set[str] = set()
         for info in archive:
             source_path = _validated_archive_member_path(info.name, expected_root=expected_root)
+            if source_path in seen_source_paths:
+                raise ValueError(f"duplicate archive member path {source_path or info.name}")
+            seen_source_paths.add(source_path)
             member_count += 1
             if member_count > _MAX_ARCHIVE_MEMBERS:
                 raise ValueError(f"archive exceeds the member count limit of {_MAX_ARCHIVE_MEMBERS}")
@@ -812,7 +1009,11 @@ def _tar_members(path: Path) -> Iterator[tuple[str, str, bytes]]:
                     raise ValueError(
                         f"archive exceeds the aggregate decompressed size limit of {_MAX_ARCHIVE_BYTES} bytes"
                     )
-            if not info.isfile() or not _is_archive_text(info.name):
+            if info.isdir():
+                continue
+            if not info.isfile():
+                raise ValueError(f"archive contains unsupported TAR member {info.name}")
+            if not _is_archive_text(info.name):
                 continue
             if info.size > _MAX_MEMBER_BYTES:
                 raise ValueError(f"archive member {info.name} exceeds the scan limit")
@@ -824,21 +1025,31 @@ def _tar_members(path: Path) -> Iterator[tuple[str, str, bytes]]:
 def scan_archive(path: Path, *, allowlist_path: Path | None = None) -> list[BoundaryFinding]:
     """Scan a wheel or source distribution in memory without extracting it."""
     path = path.resolve()
+    allowances = load_allowlist(allowlist_path)
     try:
         members = _zip_members(path) if zipfile.is_zipfile(path) else _tar_members(path)
         findings: list[BoundaryFinding] = []
+        anchors_by_location: dict[tuple[str, int], str] = {}
         archive_source_paths: dict[str, str] = {}
         for member_name, source_path, data in members:
             finding_path = f"{path}!{member_name}"
             archive_source_paths[finding_path] = source_path
             text = _decode_text(data, path=finding_path)
+            anchors_by_location.update(
+                ((finding_path, line), anchor) for line, anchor in _boundary_anchors(finding_path, text).items()
+            )
             findings.extend(scan_text(finding_path, text))
     except (OSError, tarfile.TarError, zipfile.BadZipFile) as exc:
         raise ValueError(f"could not scan distribution {path}: {exc}") from exc
+    present_source_paths = set(archive_source_paths.values())
+    configured_present_paths = {entry.path for entry in allowances if entry.path in present_source_paths}
     return _without_allowances(
         findings,
-        load_allowlist(allowlist_path),
+        allowances,
+        anchors_by_location=anchors_by_location,
         archive_source_paths=archive_source_paths,
+        validate_all_anchors=True,
+        validate_allowance_paths=configured_present_paths,
     )
 
 

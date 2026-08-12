@@ -76,7 +76,7 @@ def test_public_provider_matches_shared_contract_fixture() -> None:
 
 
 def test_nvidia_build_ignores_unrelated_credential_names() -> None:
-    legacy_name = "NVI" + "DIA" + "_INFERENCE_KEY"
+    legacy_name = "NVI" + "DIA" + "_INFERENCE_KEY"  # oss-boundary-anchor: provider-retired-credential
 
     with pytest.raises(ProviderConfigurationError, match="NVIDIA_API_KEY"):
         resolve_llm_provider(

@@ -354,10 +354,10 @@ def is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
 
 def passes_required_gate(result: ValidationResult) -> bool:
     """Return whether *result* permits the required validation gate to pass."""
-    if result.passed or is_advisory_agent_eval_skip(result):
-        return True
     gating = result.metadata.get("gating") if isinstance(result.metadata, dict) else None
-    return bool(isinstance(gating, dict) and not gating.get("blocking", True))
+    if isinstance(gating, dict):
+        return bool(result.passed or not gating.get("blocking", True))
+    return bool(result.passed or is_advisory_agent_eval_skip(result))
 
 
 class ReporterBase(ABC):

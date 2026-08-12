@@ -137,3 +137,21 @@ def test_explicit_blocking_gating_promotes_tier3_failure() -> None:
     assert payload["gating"]["tiers"]["3"]["blocking"] is True
     assert html_data["summary"]["status"] == "failed"
     assert html_data["gating"]["would_block"] is True
+
+
+def test_explicit_blocking_gating_overrides_legacy_advisory_skip_shape() -> None:
+    result = advisory_skip_result("Harbor runtime unavailable", skill_name="demo")
+    result.metadata["gating"] = {"tier": 3, "blocking": True}
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
+
+    assert payload["overall_status"] == "failed"
+    assert payload["overall_passed"] is False
+    assert payload["gating"]["tiers"]["3"]["blocking"] is True
+    assert html_data["summary"]["status"] == "failed"
+    assert html_data["gating"]["would_block"] is True
+    assert "**Status:** ❌ FAILED" in markdown
+    assert "Overall verdict: FAIL" in benchmark

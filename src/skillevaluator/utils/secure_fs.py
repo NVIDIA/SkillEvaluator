@@ -227,7 +227,10 @@ def discover_secure_files(
 
     excluded = frozenset(excluded_dirs)
     files: list[SecureFile] = []
-    regular_by_relative: dict[Path, os.stat_result] = {}
+    # Keep exact authored spelling. ``WindowsPath`` keys compare
+    # case-insensitively, which would otherwise let ``agents.md`` satisfy the
+    # required exact ``CLAUDE.md -> AGENTS.md`` compatibility target.
+    regular_by_relative: dict[str, os.stat_result] = {}
     pending_aliases: list[tuple[Path, Path]] = []
     discovered_paths = 0
 
@@ -272,7 +275,7 @@ def discover_secure_files(
                 relative_path=relative.as_posix(),
             )
         if stat.S_ISREG(metadata.st_mode):
-            regular_by_relative[relative] = metadata
+            regular_by_relative[relative.as_posix()] = metadata
         if not is_selected:
             return
         if not stat.S_ISREG(metadata.st_mode):
@@ -605,7 +608,7 @@ def discover_secure_files(
         )
 
     for alias, target in pending_aliases:
-        target_metadata = regular_by_relative.get(target)
+        target_metadata = regular_by_relative.get(target.as_posix())
         if target_metadata is None or getattr(target_metadata, "st_nlink", 1) != 1:
             raise SecurePathError(
                 "unsafe_path",

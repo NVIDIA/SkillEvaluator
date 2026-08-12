@@ -88,6 +88,69 @@ receive, an `expected_output`, and optional `assertions` the grader checks.
 Edit freely — the generated cases are a starting point, and the run is only as
 good as its dataset.
 
+Each eval entry can declare task inputs with a `files` string or list. Paths are
+relative to `evals/` (for example, `"files/case-001/input.txt"`) and only those
+declared paths are staged into that task's `/workspace/input/`. An explicit
+empty list or `null` stages no task input. For backward compatibility, omitting
+the `files` field stages the entire shared `evals/files/` directory.
+
+An `evals/` directory directly owned by a skill package is evaluator-only. Tier
+3 resolves the selected task source once and copies only the evaluator inputs it
+can consume into one private temporary snapshot. That projection includes the
+active dataset and configuration, selected fixtures, the first consumed grader,
+the complete authored custom environment, and native tasks when selected.
+Legacy entries that omit `files` retain the complete shared `evals/files/`
+corpus. Unrelated evaluator subtrees and generated results are not copied. Every
+agent and baseline arm reads the same snapshot, preventing a concurrent source
+replacement from mixing dataset, fixture, grader, custom-environment, or
+native-task identities. The snapshot is removed when the run returns and
+requires temporary space only for the selected compatibility scope.
+
+Tier 3 does not install evaluator-owned directories from the target or any
+nested, reference, or workspace skill into agent-visible copies. `--copy-repo`
+uses the same filtering and excludes generated result roots. Authenticated
+historical result roots remain excluded after the configured output location is
+changed; a present marker that is copied, stale, or cannot be authenticated
+fails staging closed instead of copying that tree. Custom result roots created
+outside `evals/` by a pre-marker version cannot be identified safely after the
+configured location changes. Move or delete that old content before
+`--copy-repo` or another full-context evaluation, then rerun with the current
+version if replacement evidence is needed. Runtime assets that the agent needs
+as part of the installed skill should live outside skill-owned `evals/`. Task
+fixtures should live under `evals/files/` (preferred) or another non-control
+subtree such as `evals/data/`, and should be declared as task inputs with
+`files`. A `files` declaration cannot select evaluator control material:
+dataset/configuration files, graders, developer eval guidance, benchmark
+conversion reports, native Harbor tasks, custom environments, evaluator tests,
+or generated results.
+
+MCP declarations are read only from a bounded, stable, single-link regular
+`evals/environment/mcp_servers.toml` through a descriptor-anchored evaluator
+root. Linked configuration files or parents, hardlinks, reparse points, and
+files replaced during the read fail task generation before output mutation. On
+Windows, the selected-file handle also denies concurrent writes and deletion
+for the read.
+
+`evals/environment/input/` is reserved and is not copied into generated tasks.
+Directory-level custom Docker `COPY input/` remains buildable for an empty entry
+using an empty context directory. Missing, dynamic, linked, hardlinked, aliased,
+or escaping input sources fail closed. Native Harbor tasks and Compose input
+contexts use the same omitted-versus-explicit selection rules.
+
+The final evaluator layer replaces `/workspace/input`, `/workspace/repo`, and
+supported agent skill-discovery roots. Custom Docker `preserve` mode also
+requires a statically known final `USER` so the projection can be installed and
+the original user restored. Custom Dockerfiles and base images remain trusted
+executable environment inputs: these controls isolate evaluation fixtures and
+supported discovery roots; they are not a security boundary against an image
+that intentionally changes system binaries or startup behavior.
+
+Evaluator-owned in-skill output uses a path-bound authenticity marker backed by
+a local key. A copied, forged, or stale marker cannot authorize replacement at
+another path. A custom key path set through
+`SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` must remain outside every evaluated
+skill source.
+
 ### Run the comparison
 
 ```bash title="With-skill vs. without-skill in Docker"
@@ -111,7 +174,7 @@ directory:
 <FileTree>
 - evals/
   - results/
-    - 20260709_141530/
+    - 20260709_141530_12345_a1b2c3d4e5f6/
       - result.json
       - run_config.json
       - report.html

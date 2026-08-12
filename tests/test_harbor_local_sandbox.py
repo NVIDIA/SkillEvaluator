@@ -1505,3 +1505,87 @@ else:
         finally:
             runtime_write_probe.unlink(missing_ok=True)
             shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+def test_bwrap_masks_explicit_denied_key_inside_broad_read_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broad = tmp_path / "broad"
+    key = broad / "state" / "output-provenance.key"
+    key.parent.mkdir(parents=True)
+    key.write_text("secret", encoding="utf-8")
+    run_root = tmp_path / "run"
+    home = run_root / "home"
+    sandbox_tmp = run_root / "tmp"
+    home.mkdir(parents=True)
+    sandbox_tmp.mkdir()
+    monkeypatch.setattr(local_sandbox, "_SYSTEM_RO_PATHS", (str(broad),))
+
+    argv = local_sandbox._bwrap_argv(
+        ["/usr/bin/true"],
+        workdir=run_root,
+        write_roots=[run_root],
+        home=home,
+        tmp=sandbox_tmp,
+        allow_net=False,
+        extra_ro=[],
+        deny_reads=[key],
+    )
+
+    ro_binds = [argv[index : index + 3] for index, value in enumerate(argv) if value == "--ro-bind"]
+    assert ["--ro-bind", "/dev/null", str(key.resolve())] in ro_binds
+
+
+def test_seatbelt_profile_explicitly_denies_provenance_key(tmp_path: Path) -> None:
+    key = tmp_path / "private" / "output-provenance.key"
+    key.parent.mkdir()
+    key.write_text("secret", encoding="utf-8")
+    run_root = tmp_path / "run"
+    home = run_root / "home"
+    sandbox_tmp = run_root / "tmp"
+    home.mkdir(parents=True)
+    sandbox_tmp.mkdir()
+
+    argv = local_sandbox._seatbelt_argv(
+        ["/usr/bin/true"],
+        write_roots=[run_root],
+        tmp=sandbox_tmp,
+        home=home,
+        extra_ro=[key.parent],
+        allow_net=False,
+        deny_reads=[key],
+    )
+
+    profile = argv[2]
+    assert f'(deny file-read* (literal "{local_sandbox._sbpl_quote(key.absolute())}"))' in profile
+    assert f'(deny file-read* (literal "{local_sandbox._sbpl_quote(key.resolve())}"))' in profile
+
+
+@pytest.mark.skipif(
+    platform.system() != "Darwin" or not Path("/usr/bin/sandbox-exec").exists(),
+    reason="requires macOS sandbox-exec",
+)
+def test_actual_seatbelt_blocks_provenance_key_read(tmp_path: Path) -> None:
+    key = tmp_path / "private" / "output-provenance.key"
+    key.parent.mkdir()
+    key.write_text("secret", encoding="utf-8")
+    run_root = tmp_path / "run"
+    home = run_root / "home"
+    sandbox_tmp = run_root / "tmp"
+    home.mkdir(parents=True)
+    sandbox_tmp.mkdir()
+    argv = local_sandbox._seatbelt_argv(
+        ["/bin/cat", str(key)],
+        write_roots=[run_root],
+        tmp=sandbox_tmp,
+        home=home,
+        extra_ro=[key.parent],
+        allow_net=False,
+        deny_reads=[key],
+    )
+
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+
+    assert result.returncode != 0
+    assert "secret" not in result.stdout

@@ -1406,7 +1406,7 @@ Call us at 555-123-4567 or +1-555-987-6543
     ) -> None:
         """The public key reaches SkillSpector without creating a second NVIDIA credential."""
         public_key = "unit-test-nvidia-build-key"
-        retired_name = "NVI" + "DIA" + "_INFERENCE_KEY"
+        retired_name = "NVI" + "DIA" + "_INFERENCE_KEY"  # oss-boundary-anchor: security-retired-credential
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
         monkeypatch.setenv("NVIDIA_API_KEY", public_key)
         monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")

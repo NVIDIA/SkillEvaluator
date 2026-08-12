@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 import threading
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.harbor import runner
+from skillevaluator.tier3.harbor import collector, runner
 
 
 @pytest.mark.parametrize("configured_concurrency", [1, 3, 4])
@@ -168,6 +169,224 @@ def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
 _UNSAFE_LINK = r"symlink|reparse"
 
 
+@pytest.mark.parametrize("link_kind", ["directory", "dangling"])
+def test_merge_attempt_jobs_rejects_linked_whole_job_root(tmp_path: Path, link_kind: str) -> None:
+    target = tmp_path / "real-job"
+    if link_kind == "directory":
+        target.mkdir()
+    job_link = tmp_path / "attempt-001"
+    job_link.symlink_to(target, target_is_directory=True)
+    aggregate_dir = tmp_path / "aggregate"
+
+    with pytest.raises(ValueError, match=r"non-linked|symlink|reparse"):
+        runner._merge_attempt_jobs([job_link], aggregate_dir)
+
+    assert not aggregate_dir.exists()
+
+
+def test_merge_attempt_jobs_rejects_mocked_reparse_whole_job_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "attempt-001"
+    job_dir.mkdir()
+    detect_link = runner._job_path_is_link_or_reparse
+
+    def mocked_reparse(path: Path, metadata: object) -> bool:
+        return path == job_dir or detect_link(path, metadata)
+
+    monkeypatch.setattr(runner, "_job_path_is_link_or_reparse", mocked_reparse)
+
+    with pytest.raises(ValueError, match="non-linked"):
+        runner._merge_attempt_jobs([job_dir], tmp_path / "aggregate")
+
+
+def test_merge_attempt_jobs_rejects_non_directory_whole_job_root(tmp_path: Path) -> None:
+    job_file = tmp_path / "attempt-001"
+    job_file.write_text("not a job", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-linked directory"):
+        runner._merge_attempt_jobs([job_file], tmp_path / "aggregate")
+
+
+@pytest.mark.parametrize("artifact_kind", ["symlink", "hardlink"])
+def test_merge_attempt_jobs_rejects_forged_root_result(tmp_path: Path, artifact_kind: str) -> None:
+    job_dir = tmp_path / "attempt-001"
+    job_dir.mkdir()
+    forged = tmp_path / "forged-result.json"
+    forged.write_text('{"n_total_trials": 999, "stats": {}}', encoding="utf-8")
+    result = job_dir / "result.json"
+    try:
+        if artifact_kind == "symlink":
+            result.symlink_to(forged)
+        else:
+            result.hardlink_to(forged)
+    except OSError as exc:  # pragma: no cover - filesystem policy
+        pytest.skip(f"{artifact_kind} creation unavailable: {exc}")
+
+    with pytest.raises(ValueError, match=r"symlink|reparse|hard.?link|multiple links"):
+        runner._merge_attempt_jobs([job_dir], tmp_path / "aggregate")
+
+
+def test_merge_attempt_jobs_rejects_root_result_source_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secure_copy = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    job_dir = tmp_path / "attempt-001"
+    job_dir.mkdir()
+    result = job_dir / "result.json"
+    result.write_text('{"n_total_trials": 1, "stats": {}}', encoding="utf-8")
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    marker = aggregate_dir / "keep.txt"
+    marker.write_text("old aggregate", encoding="utf-8")
+    original = secure_copy._build_tree_manifest
+
+    def validate_then_replace(source: Path, *args: object, **kwargs: object):
+        manifest = original(source, *args, **kwargs)
+        if Path(source).resolve() == job_dir.resolve():
+            result.unlink()
+            result.write_text('{"n_total_trials": 999, "stats": {}}', encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(secure_copy, "_build_tree_manifest", validate_then_replace)
+
+    with pytest.raises(ValueError, match="source changed after validation"):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert marker.read_text(encoding="utf-8") == "old aggregate"
+
+
+def test_merge_attempt_jobs_rejects_regular_root_directory_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "attempt-001"
+    job_dir.mkdir()
+    (job_dir / "result.json").write_text('{"n_total_trials": 1, "stats": {}}', encoding="utf-8")
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    marker = aggregate_dir / "keep.txt"
+    marker.write_text("old aggregate", encoding="utf-8")
+    original_copy = runner.copytree_secure
+    replaced = False
+
+    def replace_root_then_copy(source: Path, destination: Path, **kwargs: object) -> None:
+        nonlocal replaced
+        if not replaced and Path(source) == job_dir:
+            replaced = True
+            job_dir.rename(tmp_path / "original-job")
+            job_dir.mkdir()
+            (job_dir / "result.json").write_text('{"n_total_trials": 999, "stats": {}}', encoding="utf-8")
+        original_copy(source, destination, **kwargs)
+
+    monkeypatch.setattr(runner, "copytree_secure", replace_root_then_copy)
+
+    with pytest.raises(ValueError, match="root changed during snapshot"):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert marker.read_text(encoding="utf-8") == "old aggregate"
+
+
+def _write_multistep_attempt_job(
+    job_dir: Path,
+    *,
+    root_score: float,
+    step_scores: tuple[float, ...],
+    failed: bool = False,
+) -> Path:
+    trial = job_dir / "case-001_attempt001"
+    for index, score in enumerate(step_scores, start=1):
+        verifier = trial / "steps" / f"step-{index}" / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.json").write_text(json.dumps({"overall": score}), encoding="utf-8")
+    result: dict[str, object] = {
+        "trial_name": trial.name,
+        "task_name": "case-001",
+        "verifier_result": {"rewards": {"overall": root_score}},
+        "step_results": [
+            {"step_name": f"step-{index}", "verifier_result": {"rewards": {"overall": score}}}
+            for index, score in enumerate(step_scores, start=1)
+        ],
+    }
+    if failed:
+        result["exception_info"] = {
+            "exception_type": "TaskFailure",
+            "exception_message": "attempt crashed",
+        }
+    (trial / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    _write_successful_job_result(job_dir, trial.name)
+    return trial
+
+
+def _write_successful_job_result(job_dir: Path, trial_name: str) -> None:
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": 1,
+                "stats": {
+                    "n_trials": 1,
+                    "n_errors": 0,
+                    "evals": {
+                        "demo": {
+                            "n_trials": 1,
+                            "n_errors": 0,
+                            "reward_stats": {"overall": {"1.0": [trial_name]}},
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_job_passed_uses_authoritative_multistep_root_reward(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    _write_multistep_attempt_job(job_dir, root_score=0.5, step_scores=(1.0, 0.0))
+
+    assert runner._job_passed(job_dir, 0.75) is False
+    rewards = collector._extract_rewards(job_dir)
+    assert len(rewards) == 1
+    assert collector._average_overall(rewards) == 0.5
+
+
+def test_job_passed_accepts_passing_authoritative_multistep_root_reward(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    _write_multistep_attempt_job(job_dir, root_score=0.8, step_scores=(0.0, 0.0))
+
+    assert runner._job_passed(job_dir, 0.75) is True
+
+
+def test_job_passed_rejects_failed_trial_even_with_passing_rewards(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    _write_multistep_attempt_job(job_dir, root_score=1.0, step_scores=(1.0,), failed=True)
+
+    assert runner._job_passed(job_dir, 0.75) is False
+
+
+def test_job_passed_rejects_failed_job_result_even_with_passing_reward(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    _write_multistep_attempt_job(job_dir, root_score=1.0, step_scores=(1.0,))
+    job_result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+    job_result["stats"]["n_errors"] = 1
+    (job_dir / "result.json").write_text(json.dumps(job_result), encoding="utf-8")
+
+    assert runner._job_passed(job_dir, 0.75) is False
+
+
+def test_job_passed_preserves_legacy_single_step_reward(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    trial_name = "case-001_attempt001"
+    verifier = job_dir / trial_name / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(json.dumps({"overall": 0.9}), encoding="utf-8")
+    _write_successful_job_result(job_dir, trial_name)
+
+    assert runner._job_passed(job_dir, 0.75) is True
+
+
 def test_merge_attempt_jobs_rejects_symlinked_trial_directory(tmp_path: Path) -> None:
     outside = tmp_path / "outside-trial"
     outside.mkdir()
@@ -253,6 +472,89 @@ def test_merge_attempt_jobs_preserves_regular_trial_artifacts(tmp_path: Path) ->
     assert (merged_trial / "artifacts" / "output.txt").read_text(encoding="utf-8") == "expected"
     merged_result = json.loads((aggregate_dir / "result.json").read_text(encoding="utf-8"))
     assert merged_result["stats"]["evals"]["demo"]["reward_stats"]["reward"]["1.0"] == [merged_trial.name]
+
+
+def test_merge_attempt_jobs_ignores_tmpdir_inside_attempt_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "attempt-001"
+    trial_dir = job_dir / "case-001__trial"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "artifact.txt").write_text("expected", encoding="utf-8")
+    monkeypatch.setattr(runner.tempfile, "tempdir", str(job_dir))
+    aggregate_dir = tmp_path / "aggregate"
+
+    runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert (aggregate_dir / f"{job_dir.name}__{trial_dir.name}" / "artifact.txt").read_text() == "expected"
+    assert not list(tmp_path.glob(".aggregate-merge-*"))
+
+
+def test_merge_attempt_jobs_preserves_existing_aggregate_on_unsafe_source(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    safe_job = tmp_path / "attempt-001"
+    safe_trial = safe_job / "case-001__trial"
+    safe_trial.mkdir(parents=True)
+    (safe_trial / "safe.txt").write_text("staged first", encoding="utf-8")
+    unsafe_job = tmp_path / "attempt-002"
+    unsafe_trial = unsafe_job / "case-001__trial"
+    unsafe_trial.mkdir(parents=True)
+    (unsafe_trial / "unsafe").symlink_to(outside, target_is_directory=True)
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    marker = aggregate_dir / "keep.txt"
+    marker.write_text("old aggregate", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=_UNSAFE_LINK):
+        runner._merge_attempt_jobs([safe_job, unsafe_job], aggregate_dir)
+
+    assert marker.read_text(encoding="utf-8") == "old aggregate"
+    assert not (aggregate_dir / f"{safe_job.name}__{safe_trial.name}").exists()
+    assert not (aggregate_dir / f"{unsafe_job.name}__{unsafe_trial.name}").exists()
+    assert not list(tmp_path.glob(".aggregate-merge-*"))
+
+
+def test_merge_attempt_jobs_preserves_existing_aggregate_when_private_staging_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "attempt-001"
+    job_dir.mkdir()
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    marker = aggregate_dir / "keep.txt"
+    marker.write_text("old aggregate", encoding="utf-8")
+
+    def fail_private_staging(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected temp failure")
+
+    monkeypatch.setattr(runner.tempfile, "TemporaryDirectory", fail_private_staging)
+
+    with pytest.raises(OSError, match="injected temp failure"):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert marker.read_text(encoding="utf-8") == "old aggregate"
+
+
+@pytest.mark.parametrize("relationship", ["aggregate-in-job", "job-in-aggregate"])
+def test_merge_attempt_jobs_rejects_source_destination_overlap(tmp_path: Path, relationship: str) -> None:
+    if relationship == "aggregate-in-job":
+        job_dir = tmp_path / "attempt-001"
+        job_dir.mkdir()
+        aggregate_dir = job_dir / "aggregate"
+    else:
+        aggregate_dir = tmp_path / "aggregate"
+        job_dir = aggregate_dir / "attempt-001"
+        job_dir.mkdir(parents=True)
+    marker = job_dir / "keep.txt"
+    marker.write_text("source", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert marker.read_text(encoding="utf-8") == "source"
 
 
 def _run(

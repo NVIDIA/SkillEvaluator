@@ -11,13 +11,14 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
 import tomllib
 from collections.abc import Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import wraps
@@ -25,19 +26,28 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 from types import MappingProxyType
 from typing import Any
+from uuid import uuid4
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
+    _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
     find_evals_file,
     generate_harbor_tasks,
+    private_evaluator_skill_snapshot,
     stage_native_harbor_tasks,
+    validate_output_provenance_key_location,
+    validate_results_root_location,
 )
 from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle, RetentionOutcome
-from skillevaluator.tier3.harbor.collector import collect_harbor_results, validate_harbor_job_result
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, overall_score, score_definition
+from skillevaluator.tier3.harbor.collector import (
+    collect_harbor_results,
+    harbor_job_passed,
+    validate_harbor_job_result,
+)
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
     ProgressEvent,
@@ -49,6 +59,13 @@ from skillevaluator.tier3.harbor.progress import (
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
+from skillevaluator.tier3.output_provenance import (
+    mark_generated_output_root,
+    remove_generated_output_root_if_owned,
+    remove_output_reservation_if_identity_matches,
+    write_output_file_atomically,
+)
+from skillevaluator.tier3.results_location import publish_latest_results
 from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
 
 logger = logging.getLogger(__name__)
@@ -56,6 +73,29 @@ logger = logging.getLogger(__name__)
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _NVIDIA_BUILD_BRIDGED_AGENT_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+
+
+def _reserve_run_dir(results_root: Path, timestamp: str) -> Path:
+    """Atomically reserve and authenticate a unique run directory."""
+    results_root.mkdir(parents=True, exist_ok=True)
+    for _ in range(100):
+        run_id = f"{timestamp}_{os.getpid()}_{uuid4().hex[:12]}"
+        run_dir = results_root / run_id
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            continue
+        reservation_metadata = run_dir.lstat()
+        reservation_identity = reservation_metadata.st_dev, reservation_metadata.st_ino
+        try:
+            mark_generated_output_root(run_dir)
+        except Exception:
+            if not remove_generated_output_root_if_owned(run_dir, expected_identity=reservation_identity):
+                remove_output_reservation_if_identity_matches(run_dir, reservation_identity)
+            raise
+        return run_dir
+    raise RuntimeError("Could not reserve a unique Tier 3 run directory")
+
 
 _HARBOR_BASE_ENV_VARS = frozenset(
     {
@@ -145,10 +185,14 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
             "BASHOPTS",
             "BASH_ENV",
             "CDPATH",
+            "CLAUDE_CODE_DISABLE_POLICY_SKILLS",
+            "CLAUDE_CONFIG_DIR",
             "CLASSPATH",
             "COMSPEC",
+            "CODEX_HOME",
             "ENV",
             "GCONV_PATH",
+            "GEMINI_CLI_HOME",
             "HOME",
             "HOSTALIASES",
             "HTTPS_PROXY",
@@ -156,8 +200,12 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
             "IFS",
             "JAVA_TOOL_OPTIONS",
             "LOCPATH",
+            "LUA_CPATH",
+            "LUA_INIT",
+            "LUA_PATH",
             "NLSPATH",
             "NO_PROXY",
+            "OPENCODE_CONFIG_DIR",
             "PATHEXT",
             "PATH",
             "PERL5LIB",
@@ -165,6 +213,7 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
             "REQUESTS_CA_BUNDLE",
             "RES_OPTIONS",
             "RUBYOPT",
+            "RUBYLIB",
             "SHELLOPTS",
             "SSLKEYLOGFILE",
             "SSL_CERT_DIR",
@@ -176,7 +225,9 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
             "TMPDIR",
             "USERPROFILE",
             "WINDIR",
+            "XDG_CONFIG_HOME",
             "XDG_RUNTIME_DIR",
+            "ZDOTDIR",
             "_JAVA_OPTIONS",
         }
     )
@@ -184,6 +235,7 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
     | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
 )
 _RUNTIME_ENV_HOST_CONTROL_PREFIXES = (
+    "BASH_FUNC_",
     "COMPOSE_",
     "DOCKER_",
     "DYLD_",
@@ -1125,20 +1177,8 @@ def _validate_harbor_job_result(
 
 
 def _job_passed(job_dir: Path, pass_threshold: float) -> bool:
-    """Return True when any reward in a one-task Harbor job reaches threshold."""
-    for reward_file in sorted(job_dir.rglob("reward.json")):
-        if reward_file.parent.name != "verifier":
-            continue
-        try:
-            reward = json.loads(reward_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(reward, dict):
-            continue
-        score = overall_score(reward)
-        if score is not None and score >= pass_threshold:
-            return True
-    return False
+    """Use collector-authoritative logical-attempt semantics for early stop."""
+    return harbor_job_passed(job_dir, pass_threshold)
 
 
 def _attempt_job_stats(
@@ -1191,6 +1231,31 @@ def _attempt_job_stats(
     return total, completed, errored, evals_out
 
 
+def _job_path_is_link_or_reparse(path: Path, metadata: os.stat_result) -> bool:
+    """Return whether an attempt-job root is a symlink, junction, or reparse point."""
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag):
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if not callable(is_junction):
+        return False
+    try:
+        return bool(is_junction())
+    except (OSError, RuntimeError):
+        return True
+
+
+def _job_root_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
     """Merge per-attempt Harbor jobs into the job directory shape collection expects.
 
@@ -1198,61 +1263,115 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
     per-attempt Harbor ``result.json`` statistics are combined so the merged
     job still satisfies :func:`validate_harbor_job_result`.
     """
-    if aggregate_dir.exists():
-        shutil.rmtree(aggregate_dir)
-    aggregate_dir.mkdir(parents=True, exist_ok=True)
-
-    total_trials = 0
-    completed_trials = 0
-    errored_trials = 0
-    merged_evals: dict[str, dict[str, Any]] = {}
+    aggregate_path = Path(os.path.abspath(aggregate_dir))  # noqa: PTH100 -- compare lexical publication roots
+    source_paths: list[tuple[str, Path, Path, tuple[int, int, int, int, int, int]]] = []
     for job_dir in job_dirs:
-        if not job_dir.is_dir():
+        job_path = Path(os.path.abspath(job_dir))  # noqa: PTH100 -- reject overlap before temp creation
+        if not os.path.lexists(job_path):
             continue
-        renamed: dict[str, str] = {}
-        for child in sorted(job_dir.iterdir()):
-            if not child.is_dir():
+        try:
+            metadata = job_path.lstat()
+        except OSError as exc:
+            raise ValueError(f"cannot inspect attempt Harbor job root: {job_path}") from exc
+        if _job_path_is_link_or_reparse(job_path, metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"attempt Harbor job root must be a non-linked directory: {job_path}")
+        try:
+            job_resolved = job_path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"cannot resolve attempt Harbor job root: {job_path}") from exc
+        aggregate_resolved = aggregate_path.resolve(strict=False)
+        if (
+            aggregate_resolved == job_resolved
+            or aggregate_resolved.is_relative_to(job_resolved)
+            or job_resolved.is_relative_to(aggregate_resolved)
+        ):
+            raise ValueError("aggregate Harbor job directory must not overlap an attempt job directory")
+        source_paths.append((job_path.name, job_path, job_resolved, _job_root_fingerprint(metadata)))
+
+    aggregate_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{aggregate_path.name}-merge-",
+        dir=aggregate_path.parent,
+    ) as private_root_raw:
+        private_root = Path(private_root_raw)
+        snapshot_root = private_root / "attempt-jobs"
+        snapshot_root.mkdir()
+        staged_aggregate = private_root / "aggregate"
+        staged_aggregate.mkdir()
+
+        snapshots: list[tuple[str, Path]] = []
+        for index, (job_name, job_path, job_resolved, expected_fingerprint) in enumerate(source_paths):
+            snapshot = snapshot_root / f"{index:04d}-{job_name}"
+            try:
+                before = job_path.lstat()
+            except OSError as exc:
+                raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}") from exc
+            if _job_path_is_link_or_reparse(job_path, before) or _job_root_fingerprint(before) != expected_fingerprint:
+                raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}")
+            copytree_secure(job_path, snapshot, allowed_root=job_resolved)
+            try:
+                after = job_path.lstat()
+            except OSError as exc:
+                raise ValueError(f"attempt Harbor job root changed during snapshot: {job_path}") from exc
+            if _job_path_is_link_or_reparse(job_path, after) or _job_root_fingerprint(after) != expected_fingerprint:
+                raise ValueError(f"attempt Harbor job root changed during snapshot: {job_path}")
+            snapshots.append((job_name, snapshot))
+
+        total_trials = 0
+        completed_trials = 0
+        errored_trials = 0
+        merged_evals: dict[str, dict[str, Any]] = {}
+        for job_name, job_dir in snapshots:
+            renamed: dict[str, str] = {}
+            for child in sorted(job_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                dest = staged_aggregate / f"{job_name}__{child.name}"
+                suffix = 2
+                while dest.exists():
+                    dest = staged_aggregate / f"{job_name}__{child.name}-{suffix}"
+                    suffix += 1
+                copytree_secure(child, dest, allowed_root=job_dir)
+                renamed[child.name] = dest.name
+
+            stats = _attempt_job_stats(job_dir)
+            if stats is None:
                 continue
-            dest = aggregate_dir / f"{job_dir.name}__{child.name}"
-            suffix = 2
-            while dest.exists():
-                dest = aggregate_dir / f"{job_dir.name}__{child.name}-{suffix}"
-                suffix += 1
-            copytree_secure(child, dest, allowed_root=job_dir)
-            renamed[child.name] = dest.name
+            job_total, job_completed, job_errored, job_evals = stats
+            total_trials += job_total
+            completed_trials += job_completed
+            errored_trials += job_errored
+            for eval_name, (eval_trials, eval_errors, reward_stats) in job_evals.items():
+                merged = merged_evals.setdefault(eval_name, {"n_trials": 0, "n_errors": 0, "reward_stats": {}})
+                merged["n_trials"] += eval_trials
+                merged["n_errors"] += eval_errors
+                for metric, buckets in reward_stats.items():
+                    merged_buckets = merged["reward_stats"].setdefault(metric, {})
+                    for bucket, trial_names in buckets.items():
+                        merged_buckets.setdefault(bucket, []).extend(
+                            renamed.get(name, f"{job_name}__{name}") for name in trial_names
+                        )
 
-        stats = _attempt_job_stats(job_dir)
-        if stats is None:
-            continue
-        job_total, job_completed, job_errored, job_evals = stats
-        total_trials += job_total
-        completed_trials += job_completed
-        errored_trials += job_errored
-        for eval_name, (eval_trials, eval_errors, reward_stats) in job_evals.items():
-            merged = merged_evals.setdefault(eval_name, {"n_trials": 0, "n_errors": 0, "reward_stats": {}})
-            merged["n_trials"] += eval_trials
-            merged["n_errors"] += eval_errors
-            for metric, buckets in reward_stats.items():
-                merged_buckets = merged["reward_stats"].setdefault(metric, {})
-                for bucket, trial_names in buckets.items():
-                    merged_buckets.setdefault(bucket, []).extend(
-                        renamed.get(name, f"{job_dir.name}__{name}") for name in trial_names
-                    )
-
-    (aggregate_dir / "result.json").write_text(
-        json.dumps(
-            {
-                "n_total_trials": total_trials,
-                "stats": {
-                    "n_trials": completed_trials,
-                    "n_errors": errored_trials,
-                    "evals": merged_evals,
+        (staged_aggregate / "result.json").write_text(
+            json.dumps(
+                {
+                    "n_total_trials": total_trials,
+                    "stats": {
+                        "n_trials": completed_trials,
+                        "n_errors": errored_trials,
+                        "evals": merged_evals,
+                    },
                 },
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        copytree_secure(
+            staged_aggregate,
+            aggregate_path,
+            replace_existing=aggregate_path.exists(),
+            allowed_root=private_root,
+        )
 
 
 def _run_stop_on_pass_variant(
@@ -1548,9 +1667,12 @@ def _run_harbor_eval_impl(
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
     progress_reporter: ProgressReporter | None = None,
+    _evaluator_skill_path: Path | None = None,
+    _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
-    started_at = time.monotonic()
+    forwarded = dict(locals()) if _evaluator_skill_path is None else None
+    started_at = _monotonic_start if _monotonic_start is not None else time.monotonic()
     reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
     if env_mode not in HARBOR_ENV_MODES:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unsupported environment"))
@@ -1567,9 +1689,25 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
             return {"error": [str(exc)]}
 
+    if _evaluator_skill_path is None:
+        assert forwarded is not None
+        forwarded.pop("skill_path")
+        forwarded.pop("agents")
+        with ExitStack() as snapshot_stack:
+            try:
+                evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
+            except (OSError, ValueError) as exc:
+                reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
+                return {"error": [str(exc)]}
+            forwarded["_evaluator_skill_path"] = evaluator_skill_path
+            forwarded["_monotonic_start"] = started_at
+            return _run_harbor_eval_impl(skill_path, agents, **forwarded)
+
+    evaluator_skill_path = _evaluator_skill_path
+
     try:
         provider = resolve_llm_provider()
-        config, config_path = load_evals_config(skill_path)
+        config, config_path = load_evals_config(evaluator_skill_path)
     except (ProviderConfigurationError, EvalsConfigError) as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
@@ -1702,8 +1840,8 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
 
-    evals_exists = find_evals_file(skill_path) is not None
-    native_exists = (skill_path / "evals" / "harbor").exists()
+    evals_exists = find_evals_file(evaluator_skill_path) is not None
+    native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
     if task_source == "auto":
         task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
     if task_source == "evals_json" and not evals_exists:
@@ -1716,26 +1854,62 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
         return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
 
-    root = output_dir or (skill_path / "evals" / "results")
-    run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    run_dir = root / run_id
+    root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
+    try:
+        validate_output_provenance_key_location(
+            skill_path,
+            root,
+            reference_skills_dir=reference_skills_dir,
+            workspace_skill_paths=workspace_skills,
+        )
+        validate_results_root_location(
+            skill_path,
+            root,
+            reference_skills_dir=reference_skills_dir,
+            workspace_skill_paths=workspace_skills,
+        )
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
+        return {"error": [str(exc)]}
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    try:
+        run_dir = _reserve_run_dir(root, timestamp)
+    except (OSError, RuntimeError, ValueError) as exc:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
+        return {"error": [str(exc)]}
+    run_id = run_dir.name
     jobs_dir = run_dir / "_harbor-jobs"
     tasks_dir = run_dir / "_harbor-tasks"
     result_path = run_dir / "result.json"
     report_path: Path | None = None
-    jobs_dir.mkdir(parents=True, exist_ok=True)
 
-    def _emit_run_finished(state: str, detail: str) -> None:
+    def _emit_run_finished(state: str, detail: str, *, include_artifacts: bool = True) -> None:
         reporter.emit(
             ProgressEvent(
                 stage="run-finished",
                 state=state,
                 detail=detail,
-                output_dir=str(run_dir),
-                result_path=str(result_path) if result_path.is_file() else None,
-                report_path=str(report_path) if report_path is not None and report_path.is_file() else None,
+                output_dir=str(run_dir) if include_artifacts else None,
+                result_path=str(result_path) if include_artifacts and result_path.is_file() else None,
+                report_path=(
+                    str(report_path)
+                    if include_artifacts and report_path is not None and report_path.is_file()
+                    else None
+                ),
             )
         )
+
+    reservation_identity: tuple[int, int] | None = None
+    try:
+        reservation_metadata = run_dir.lstat()
+        reservation_identity = reservation_metadata.st_dev, reservation_metadata.st_ino
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
+        if reservation_identity is not None:
+            remove_generated_output_root_if_owned(run_dir, expected_identity=reservation_identity)
+        _emit_run_finished("failed", "Harbor jobs directory could not be created", include_artifacts=False)
+        return {"error": [str(exc)]}
 
     emitter = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
     resource_config = harbor_config.get("resources", {})
@@ -1753,6 +1927,8 @@ def _run_harbor_eval_impl(
             skill_path.resolve(),
             reference_skills_dir,
             workspace_skill_paths=workspace_skills,
+            evaluator_skill_path=evaluator_skill_path,
+            excluded_roots=(root,),
             force_rebuild=base_image_mode == "rebuild",
         )
         if base_image:
@@ -1777,6 +1953,7 @@ def _run_harbor_eval_impl(
             result_path=str(result_path),
         )
     )
+    staging_failure_stage = "with-skill-tasks"
     try:
         for agent in agents:
             with_dir = tasks_dir / agent / "with"
@@ -1792,11 +1969,13 @@ def _run_harbor_eval_impl(
                 base_image=base_image,
                 custom_dockerfile_mode=dockerfile_mode,
                 copy_repo=copy_repo,
+                repo_context_exclude_paths=(root,),
                 runtime_env=dict(runtime_plans[agent].staged_env),
                 verifier_env=staged_verifier_env,
                 pre_agent_setup=harbor_config.get("pre_agent_setup", []),
                 task_resources=resource_config,
                 agent_workdir=harbor_config.get("agent_workdir"),
+                evaluator_skill_path=evaluator_skill_path,
             )
             task_names = [task.name for task in task_paths]
             if expected_task_names is None:
@@ -1807,6 +1986,15 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="running"))
+            staging_failure_stage = "baseline-tasks"
+            baseline_alias_validation = _prevalidate_baseline_skill_candidates(
+                skill_path,
+                reference_skills_dir,
+                workspace_skills,
+                excluded_roots=(root,),
+            )
+        else:
+            baseline_alias_validation = None
         for agent in agents:
             without_dir = agent_task_dirs[agent][1]
             if without_dir is not None:
@@ -1821,18 +2009,21 @@ def _run_harbor_eval_impl(
                     base_image=base_image,
                     custom_dockerfile_mode=dockerfile_mode,
                     copy_repo=copy_repo,
+                    repo_context_exclude_paths=(root,),
                     runtime_env=dict(runtime_plans[agent].staged_env),
                     verifier_env=staged_verifier_env,
                     pre_agent_setup=harbor_config.get("pre_agent_setup", []),
                     task_resources=resource_config,
                     agent_workdir=harbor_config.get("agent_workdir"),
+                    evaluator_skill_path=evaluator_skill_path,
+                    _baseline_alias_validation=baseline_alias_validation,
                 )
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))
         else:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="skipped", detail="baseline disabled"))
-    except (FileNotFoundError, ValueError) as exc:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
+    except (OSError, ValueError) as exc:
+        reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return {"error": [str(exc)], "run_dir": str(run_dir)}
 
     task_names = expected_task_names or []
@@ -1914,7 +2105,7 @@ def _run_harbor_eval_impl(
                 "result_path": str(result_path),
                 "agents": {},
             }
-            result_path.write_text(json.dumps(failed_result, indent=2), encoding="utf-8")
+            write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
             _emit_run_finished("failed", "agent runtime preflight failed")
             return failed_result
         reporter.emit(
@@ -2032,7 +2223,7 @@ def _run_harbor_eval_impl(
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
     run_config = {
-        "config_file": str(config_path.relative_to(skill_path)) if config_path else "none",
+        "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
         "harbor": {
             "environment": {"value": env_mode, "source": env_mode_source},
             "n_attempts": n_attempts,
@@ -2107,7 +2298,7 @@ def _run_harbor_eval_impl(
     results["duration_seconds"] = round(time.monotonic() - started_at, 3)
 
     try:
-        result_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        write_output_file_atomically(result_path, json.dumps(results, indent=2).encode("utf-8"))
     except Exception:
         reporter.emit(ProgressEvent(stage="report", state="failed", detail="result write failed"))
         _emit_run_finished("failed", "report artifacts could not be written")
@@ -2117,13 +2308,7 @@ def _run_harbor_eval_impl(
     else:
         reporter.emit(ProgressEvent(stage="report", state="complete", detail="result and HTML reports written"))
 
-    latest = root / "latest"
-    try:
-        if latest.is_symlink() or latest.exists():
-            latest.unlink()
-        latest.symlink_to(run_id)
-    except OSError:
-        pass
+    publish_latest_results(root, run_id)
     return results
 
 
@@ -2173,7 +2358,7 @@ def _finalize_harbor_artifacts(
     result_path_value = result.get("result_path")
     result_path = Path(str(result_path_value)) if result_path_value else run_dir / "result.json"
     if result_path.is_file():
-        result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        write_output_file_atomically(result_path, json.dumps(result, indent=2).encode("utf-8"))
     run_config = result.get("run_config")
     run_config_path = run_dir / "run_config.json"
     if isinstance(run_config, dict) and run_config_path.is_file():

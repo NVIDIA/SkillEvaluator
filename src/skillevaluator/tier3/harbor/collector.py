@@ -870,12 +870,46 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
     """Extract reward.json from all trials in a job directory."""
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
+    authoritative_trial_roots: set[Path] = set()
+
+    # Native multi-step Harbor tasks can persist an authoritative aggregate at
+    # the trial root in addition to one reward file per step. Materialize that
+    # single logical row first so both averages and pass@k use the same score.
+    for result_file in sorted(job_dir.glob("*/result.json")):
+        trial_dir = result_file.parent
+        if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
+            continue
+        result = _read_json(result_file)
+        if not isinstance(result, dict) or not isinstance(result.get("step_results"), list):
+            continue
+        verifier_result = result.get("verifier_result")
+        if not isinstance(verifier_result, dict) or not isinstance(verifier_result.get("rewards"), dict):
+            continue
+        data = _reward_from_harbor_result(result)
+        if not data:
+            continue
+        trial_name = str(result.get("trial_name") or trial_dir.name)
+        data["_trial_name"] = trial_name
+        data["_trial_root_name"] = trial_dir.name
+        data["_started_at"] = result.get("started_at")
+        if not data.get("entry_id"):
+            entry_id = _entry_id_from_harbor_result(result)
+            if entry_id:
+                data["entry_id"] = entry_id
+        traj_file = _reward_trajectory_path(trial_dir, None)
+        if traj_file.exists():
+            data["_has_trajectory"] = True
+        rewards.append(data)
+        authoritative_trial_roots.add(trial_dir)
+
     for reward_file in sorted(job_dir.rglob("reward.json")):
         if reward_file.parent.name == "verifier":
             try:
+                trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
+                if trial_dir in authoritative_trial_roots:
+                    continue
                 data = json.loads(reward_file.read_text(encoding="utf-8"))
                 _merge_reward_sidecars(data, reward_file.parent)
-                trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
                 if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
                     logger.debug(
                         "Skipping reward for failed Harbor trial: %s",
@@ -908,7 +942,8 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
     for result_file in sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
         if (
-            trial_dir in scored_trial_roots
+            trial_dir in authoritative_trial_roots
+            or trial_dir in scored_trial_roots
             or _trial_failure_reason(trial_dir)
             or _is_agent_runtime_failure_trial(trial_dir)
         ):
@@ -1124,6 +1159,24 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             }
         )
     return logical
+
+
+def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
+    """Return whether a complete logical attempt meets the pass threshold.
+
+    This deliberately shares collection's failure filtering and multi-step
+    reward precedence. A root Harbor ``result.json`` reward is authoritative;
+    step rewards are averaged only when Harbor did not persist one.
+    """
+    job_ok, _ = validate_harbor_job_result(job_dir / "result.json")
+    trial_failures = _extract_trial_failures(job_dir)
+    if not job_ok and not _can_preserve_partial_rewards(job_dir, trial_failures):
+        return False
+    rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir))
+    return any(
+        (score := _overall_score(reward)) is not None and score >= pass_threshold
+        for reward in _logical_attempt_rewards(rewards)
+    )
 
 
 def _pass_summary(

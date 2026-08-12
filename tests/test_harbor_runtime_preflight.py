@@ -675,7 +675,8 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
     from skillevaluator.tier3.harbor import runner
 
     skill = tmp_path / "demo"
-    skill.mkdir()
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "evals.json").write_text("[]\n", encoding="utf-8")
     provider = ProviderConfig(
         provider="nv_build",
         model="meta/llama-3.1-8b-instruct",

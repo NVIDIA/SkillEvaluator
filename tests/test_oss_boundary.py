@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import stat
 import struct
 import subprocess
 import tarfile
@@ -110,11 +111,12 @@ def test_generic_public_and_defensive_text_is_not_flagged(public_text: str) -> N
     assert _scanner().scan_text("src/public.py", public_text) == []
 
 
-def test_repository_scan_uses_tracked_release_scopes_and_exact_allowlist(tmp_path: Path) -> None:
+def test_repository_scan_uses_tracked_scopes_and_stable_allowlist_anchor(tmp_path: Path) -> None:
     scanner = _scanner()
-    source = tmp_path / "tests" / "negative_fixture.py"
+    source = tmp_path / "tests" / "test_negative_fixture.py"
     source.parent.mkdir()
-    source.write_text(_joined("NVI", "DIA_INFERENCE_KEY=negative-fixture\n"), encoding="utf-8")
+    denied_line = _joined("NVI", "DIA_INFERENCE_KEY=negative-fixture")
+    source.write_text(f"{denied_line}  # oss-boundary-anchor: fixture-credential\n", encoding="utf-8")
     ignored = tmp_path / "scratch" / "ignored.txt"
     ignored.parent.mkdir()
     ignored.write_text(_joined("NVI", "DIA_INFERENCE_KEY=out-of-scope\n"), encoding="utf-8")
@@ -122,12 +124,12 @@ def test_repository_scan_uses_tracked_release_scopes_and_exact_allowlist(tmp_pat
     allowlist.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "allowlist": [
                     {
-                        "path": "tests/negative_fixture.py",
+                        "path": "tests/test_negative_fixture.py",
                         "rule": "internal-nvidia-credential",
-                        "line": 1,
+                        "anchor": "fixture-credential",
                         "reason": "mutation fixture proves the deny rule fires",
                         "expires": "2099-12-31",
                         "review_owner": "oss-release-reviewers",
@@ -138,21 +140,244 @@ def test_repository_scan_uses_tracked_release_scopes_and_exact_allowlist(tmp_pat
         encoding="utf-8",
     )
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", "tests/negative_fixture.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative_fixture.py"], cwd=tmp_path, check=True)
 
     assert scanner.scan_repository(tmp_path, allowlist_path=allowlist) == []
 
-    payload = json.loads(allowlist.read_text(encoding="utf-8"))
-    payload["allowlist"][0]["line"] = 2
-    allowlist.write_text(json.dumps(payload), encoding="utf-8")
-    findings = scanner.scan_repository(tmp_path, allowlist_path=allowlist)
+    source.write_text(
+        f"unrelated_public_line = True\n{denied_line}  # oss-boundary-anchor: fixture-credential\n",
+        encoding="utf-8",
+    )
 
-    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [
-        ("tests/negative_fixture.py", "internal-nvidia-credential", 1)
-    ]
+    assert scanner.scan_repository(tmp_path, allowlist_path=allowlist) == []
 
 
-def test_allowlist_rejects_missing_reason_and_unknown_metadata(tmp_path: Path) -> None:
+def _write_anchor_allowlist(
+    path: Path,
+    *,
+    allow_path: str = "tests/test_negative.py",
+    rule: str = "internal-nvidia-credential",
+    anchor: str = "fixture-credential",
+) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "allowlist": [
+                    {
+                        "path": allow_path,
+                        "rule": rule,
+                        "anchor": anchor,
+                        "reason": "negative fixture proves the deny rule fires",
+                        "expires": "2099-12-31",
+                        "review_owner": "oss-release-reviewers",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_repository_allowlist_requires_a_real_python_comment_anchor(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        'marker = "# oss-boundary-anchor: fixture-credential"\n'
+        + _joined("NVI", "DIA_INFERENCE_KEY=negative-fixture\n"),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match=r"allowlist anchor .* is missing"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_allowlist_rejects_duplicate_comment_anchors(tmp_path: Path) -> None:
+    scanner = _scanner()
+    denied_line = _joined("NVI", "DIA_INFERENCE_KEY=negative-fixture")
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        f"{denied_line}  # oss-boundary-anchor: fixture-credential\n"
+        f"{denied_line}  # oss-boundary-anchor: fixture-credential\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match="duplicate OSS boundary anchor"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_allowlist_anchor_must_match_exactly_one_configured_rule(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        _joined("NVI", "DIA_INFERENCE_KEY=negative-fixture") + "  # oss-boundary-anchor: fixture-credential\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match=r"exactly one internal-product-name finding.*found 0 matching"):
+        scanner.scan_repository(
+            tmp_path,
+            allowlist_path=_write_anchor_allowlist(
+                tmp_path / "allowlist.json",
+                rule="internal-product-name",
+            ),
+        )
+
+
+def test_repository_allowlist_rejects_two_same_rule_matches_on_the_anchor_line(tmp_path: Path) -> None:
+    scanner = _scanner()
+    credential = _joined("NVI", "DIA_INFERENCE_KEY")
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        f"first = '{credential}'; second = '{credential}'  # oss-boundary-anchor: fixture-credential\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match=r"exactly one internal-nvidia-credential finding.*found 2"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_allowlist_counts_separately_reconstructed_matches_on_one_line(tmp_path: Path) -> None:
+    scanner = _scanner()
+    credential_expression = _joined("'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        f"first = {credential_expression}; second = {credential_expression}  "
+        "# oss-boundary-anchor: fixture-credential\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match=r"exactly one internal-nvidia-credential finding.*found 2"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_allowlist_rejects_other_rule_matches_on_the_anchor_line(tmp_path: Path) -> None:
+    scanner = _scanner()
+    credential = _joined("NVI", "DIA_INFERENCE_KEY")
+    dependency = _joined("py", "mil", "vus")
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        f"first = '{credential}'; second = '{dependency}'  # oss-boundary-anchor: fixture-credential\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match=r"exactly one internal-nvidia-credential finding.*2 total"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_allowlist_anchor_must_share_the_finding_line(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        "public_value = True  # oss-boundary-anchor: fixture-credential\n"
+        + _joined("NVI", "DIA_INFERENCE_KEY=negative-fixture\n"),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match=r"exactly one internal-nvidia-credential finding.*found 0 matching"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_allowlist_anchor_must_follow_code_on_the_same_line(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text("# oss-boundary-anchor: fixture-credential\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match="must follow code"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_scan_rejects_a_malformed_anchor_comment(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        _joined("NVI", "DIA_INFERENCE_KEY=negative-fixture") + "  # oss-boundary-anchor: Fixture_Credential\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match="malformed OSS boundary anchor"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_scan_fails_closed_when_anchor_tokenization_fails(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+        + "unterminated = '''\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match="could not tokenize Python source"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_scan_fails_closed_when_anchored_python_cannot_be_parsed(tmp_path: Path) -> None:
+    scanner = _scanner()
+    credential = _joined("NVI", "DIA_INFERENCE_KEY")
+    source = tmp_path / "tests" / "test_negative.py"
+    source.parent.mkdir()
+    source.write_text(
+        f"first = '{credential}'; second = 'NVI' + 'DIA' + '_INFERENCE_KEY'  "
+        "# oss-boundary-anchor: fixture-credential\n"
+        "broken =\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match="could not parse anchored Python source"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_repository_scan_rejects_duplicate_anchor_ids_across_files(tmp_path: Path) -> None:
+    scanner = _scanner()
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    denied_line = _joined("NVI", "DIA_INFERENCE_KEY=negative-fixture")
+    anchored_line = f"{denied_line}  # oss-boundary-anchor: fixture-credential\n"
+    (tests / "test_negative.py").write_text(anchored_line, encoding="utf-8")
+    (tests / "test_other.py").write_text(anchored_line, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tests/test_negative.py", "tests/test_other.py"], cwd=tmp_path, check=True)
+
+    with pytest.raises(ValueError, match="duplicate OSS boundary anchor"):
+        scanner.scan_repository(tmp_path, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_allowlist_rejects_legacy_line_number_schema(tmp_path: Path) -> None:
     scanner = _scanner()
     allowlist = tmp_path / "allowlist.json"
     allowlist.write_text(
@@ -161,9 +386,44 @@ def test_allowlist_rejects_missing_reason_and_unknown_metadata(tmp_path: Path) -
                 "version": 1,
                 "allowlist": [
                     {
-                        "path": "tests/negative.py",
+                        "path": "tests/test_negative.py",
                         "rule": "internal-nvidia-credential",
                         "line": 1,
+                        "reason": "legacy line-number exception",
+                        "expires": "2099-12-31",
+                        "review_owner": "oss-release-reviewers",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="version=2"):
+        scanner.load_allowlist(allowlist)
+
+
+def test_allowlist_rejects_anchor_ids_that_match_a_denied_rule(tmp_path: Path) -> None:
+    scanner = _scanner()
+    denied_anchor = _joined("py", "mil", "vus")
+    allowlist = _write_anchor_allowlist(tmp_path / "allowlist.json", anchor=denied_anchor)
+
+    with pytest.raises(ValueError, match="anchor ID matches denied OSS boundary rule"):
+        scanner.load_allowlist(allowlist)
+
+
+def test_allowlist_rejects_missing_reason_and_unknown_metadata(tmp_path: Path) -> None:
+    scanner = _scanner()
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "allowlist": [
+                    {
+                        "path": "tests/test_negative.py",
+                        "rule": "internal-nvidia-credential",
+                        "anchor": "fixture-credential",
                         "ticket": "not-an-approved-field",
                         "expires": "2099-12-31",
                         "review_owner": "oss-release-reviewers",
@@ -174,7 +434,59 @@ def test_allowlist_rejects_missing_reason_and_unknown_metadata(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="path, rule, line, reason, expires, and review_owner"):
+    with pytest.raises(ValueError, match="path, rule, anchor, reason, expires, and review_owner"):
+        scanner.load_allowlist(allowlist)
+
+
+def test_allowlist_rejects_duplicate_anchor_ids_across_paths(tmp_path: Path) -> None:
+    scanner = _scanner()
+    allowlist = tmp_path / "allowlist.json"
+    common = {
+        "rule": "internal-nvidia-credential",
+        "anchor": "fixture-credential",
+        "reason": "negative fixture proves the deny rule fires",
+        "expires": "2099-12-31",
+        "review_owner": "oss-release-reviewers",
+    }
+    allowlist.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "allowlist": [
+                    {"path": "tests/test_first.py", **common},
+                    {"path": "tests/test_second.py", **common},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicates anchor"):
+        scanner.load_allowlist(allowlist)
+
+
+@pytest.mark.parametrize(
+    ("allow_path", "anchor"),
+    (
+        ("tests/negative.py", "fixture-credential"),
+        ("tests/./test_negative.py", "fixture-credential"),
+        ("tests/test_negative.py", "Fixture_Credential"),
+        ("tests/test_negative.py", "fixture.credential"),
+    ),
+)
+def test_allowlist_rejects_noncanonical_test_paths_and_anchor_ids(
+    tmp_path: Path,
+    allow_path: str,
+    anchor: str,
+) -> None:
+    scanner = _scanner()
+    allowlist = _write_anchor_allowlist(
+        tmp_path / "allowlist.json",
+        allow_path=allow_path,
+        anchor=anchor,
+    )
+
+    with pytest.raises(ValueError, match=r"valid path|negative test paths|anchor"):
         scanner.load_allowlist(allowlist)
 
 
@@ -184,12 +496,12 @@ def test_allowlist_rejects_exceptions_outside_negative_tests(tmp_path: Path) -> 
     allowlist.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "allowlist": [
                     {
                         "path": "src/runtime.py",
                         "rule": "internal-nvidia-credential",
-                        "line": 1,
+                        "anchor": "fixture-credential",
                         "reason": "runtime exceptions must never be allowed",
                         "expires": "2099-12-31",
                         "review_owner": "oss-release-reviewers",
@@ -210,12 +522,12 @@ def test_allowlist_rejects_expired_negative_test_exception(tmp_path: Path) -> No
     allowlist.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "allowlist": [
                     {
-                        "path": "tests/negative.py",
+                        "path": "tests/test_negative.py",
                         "rule": "internal-nvidia-credential",
-                        "line": 1,
+                        "anchor": "fixture-credential",
                         "reason": "expired mutation fixture",
                         "expires": "2026-07-07",
                         "review_owner": "oss-release-reviewers",
@@ -686,9 +998,12 @@ def test_archive_scan_fails_closed_for_undecodable_unknown_member(tmp_path: Path
 
 def test_sdist_negative_test_uses_exact_source_allowlist_path(tmp_path: Path) -> None:
     scanner = _scanner()
-    source = _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'\n").encode()
+    source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+    ).encode()
     sdist = tmp_path / "package-1.0.tar.gz"
-    info = tarfile.TarInfo("package-1.0/tests/negative.py")
+    info = tarfile.TarInfo("package-1.0/tests/test_negative.py")
     info.size = len(source)
     with tarfile.open(sdist, "w:gz") as archive:
         archive.addfile(info, BytesIO(source))
@@ -696,12 +1011,12 @@ def test_sdist_negative_test_uses_exact_source_allowlist_path(tmp_path: Path) ->
     allowlist.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "allowlist": [
                     {
-                        "path": "tests/negative.py",
+                        "path": "tests/test_negative.py",
                         "rule": "internal-nvidia-credential",
-                        "line": 1,
+                        "anchor": "fixture-credential",
                         "reason": "negative archive fixture",
                         "expires": "2099-12-31",
                         "review_owner": "oss-release-reviewers",
@@ -715,17 +1030,148 @@ def test_sdist_negative_test_uses_exact_source_allowlist_path(tmp_path: Path) ->
     assert scanner.scan_archive(sdist, allowlist_path=allowlist) == []
 
 
+def test_sdist_validates_anchor_when_allowlisted_source_path_is_present(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = b"public fixture without the configured anchor\n"
+    sdist = tmp_path / "package-1.0.tar.gz"
+    info = tarfile.TarInfo("package-1.0/tests/test_negative.py")
+    info.size = len(source)
+    with tarfile.open(sdist, "w:gz") as archive:
+        archive.addfile(info, BytesIO(source))
+
+    with pytest.raises(ValueError, match=r"allowlist anchor .* is missing"):
+        scanner.scan_archive(sdist, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_wheel_does_not_require_allowance_for_an_absent_source_path(tmp_path: Path) -> None:
+    scanner = _scanner()
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("package/module.py", "public_value = True\n")
+
+    assert scanner.scan_archive(wheel, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json")) == []
+
+
+def test_wheel_uses_the_exact_allowlisted_source_path_and_anchor(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+    )
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("tests/test_negative.py", source)
+
+    assert scanner.scan_archive(wheel, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json")) == []
+
+
+def test_wheel_requires_only_allowances_for_source_paths_present_in_the_artifact(tmp_path: Path) -> None:
+    scanner = _scanner()
+    allowlist = tmp_path / "allowlist.json"
+    common = {
+        "rule": "internal-nvidia-credential",
+        "reason": "negative fixture proves the deny rule fires",
+        "expires": "2099-12-31",
+        "review_owner": "oss-release-reviewers",
+    }
+    allowlist.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "allowlist": [
+                    {"path": "tests/test_negative.py", "anchor": "fixture-credential", **common},
+                    {"path": "tests/test_absent.py", "anchor": "absent-credential", **common},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+    )
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("tests/test_negative.py", source)
+
+    assert scanner.scan_archive(wheel, allowlist_path=allowlist) == []
+
+
+def test_wheel_allowlist_rejects_two_same_rule_matches_on_the_anchor_line(tmp_path: Path) -> None:
+    scanner = _scanner()
+    credential = _joined("NVI", "DIA_INFERENCE_KEY")
+    source = f"first = '{credential}'; second = '{credential}'  # oss-boundary-anchor: fixture-credential\n"
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("tests/test_negative.py", source)
+
+    with pytest.raises(ValueError, match=r"exactly one internal-nvidia-credential finding.*found 2"):
+        scanner.scan_archive(wheel, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_wheel_allowlist_counts_separately_reconstructed_matches_on_one_line(tmp_path: Path) -> None:
+    scanner = _scanner()
+    credential_expression = _joined("'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+    source = (
+        f"first = {credential_expression}; second = {credential_expression}  "
+        "# oss-boundary-anchor: fixture-credential\n"
+    )
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("tests/test_negative.py", source)
+
+    with pytest.raises(ValueError, match=r"exactly one internal-nvidia-credential finding.*found 2"):
+        scanner.scan_archive(wheel, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_wheel_rejects_the_wrong_anchor_at_an_allowlisted_source_path(tmp_path: Path) -> None:
+    scanner = _scanner()
+    source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: wrong-credential\n"
+    )
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("tests/test_negative.py", source)
+
+    with pytest.raises(ValueError, match="unregistered OSS boundary anchor 'wrong-credential'"):
+        scanner.scan_archive(wheel, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_wheel_rejects_an_unregistered_anchor_on_an_unconfigured_path(tmp_path: Path) -> None:
+    scanner = _scanner()
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("package/module.py", "public_value = True  # oss-boundary-anchor: rogue-marker\n")
+
+    with pytest.raises(ValueError, match="unregistered OSS boundary anchor"):
+        scanner.scan_archive(wheel, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
+def test_archive_scan_fails_closed_when_anchor_tokenization_fails(tmp_path: Path) -> None:
+    scanner = _scanner()
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "tests/test_negative.py",
+            "public_value = True  # oss-boundary-anchor: fixture-credential\nunterminated = '''\n",
+        )
+
+    with pytest.raises(ValueError, match="could not tokenize Python source"):
+        scanner.scan_archive(wheel, allowlist_path=_write_anchor_allowlist(tmp_path / "allowlist.json"))
+
+
 def _negative_test_allowlist(path: Path) -> Path:
     allowlist = path / "allowlist.json"
     allowlist.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "allowlist": [
                     {
-                        "path": "tests/negative.py",
+                        "path": "tests/test_negative.py",
                         "rule": "internal-nvidia-credential",
-                        "line": 1,
+                        "anchor": "fixture-credential",
                         "reason": "negative archive fixture",
                         "expires": "2099-12-31",
                         "review_owner": "oss-release-reviewers",
@@ -740,24 +1186,92 @@ def _negative_test_allowlist(path: Path) -> Path:
 
 def test_wheel_allowlist_does_not_strip_an_arbitrary_member_prefix(tmp_path: Path) -> None:
     scanner = _scanner()
-    source = _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'\n")
+    source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+    )
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("evil/tests/negative.py", source)
+        archive.writestr("evil/tests/test_negative.py", source)
 
-    findings = scanner.scan_archive(wheel, allowlist_path=_negative_test_allowlist(tmp_path))
+    with pytest.raises(ValueError, match=r"unregistered OSS boundary anchor.*evil/tests/test_negative.py"):
+        scanner.scan_archive(wheel, allowlist_path=_negative_test_allowlist(tmp_path))
 
-    assert [(finding.path, finding.rule, finding.line) for finding in findings] == [
-        (f"{wheel}!evil/tests/negative.py", "internal-nvidia-credential", 1)
-    ]
+
+def test_wheel_rejects_duplicate_members_before_associating_anchors(tmp_path: Path) -> None:
+    scanner = _scanner()
+    wheel = tmp_path / "package.whl"
+    denied = _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'\n")
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("tests/test_negative.py", denied)
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            archive.writestr(
+                "tests/test_negative.py",
+                "public_value = True  # oss-boundary-anchor: fixture-credential\n",
+            )
+
+    with pytest.raises(ValueError, match="duplicate archive member path"):
+        scanner.scan_archive(wheel, allowlist_path=_negative_test_allowlist(tmp_path))
+
+
+def test_sdist_rejects_duplicate_members_before_associating_anchors(tmp_path: Path) -> None:
+    scanner = _scanner()
+    sdist = tmp_path / "package-1.0.tar.gz"
+    denied = _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'\n").encode()
+    anchored_public = b"public_value = True  # oss-boundary-anchor: fixture-credential\n"
+    with tarfile.open(sdist, "w:gz") as archive:
+        for source in (denied, anchored_public):
+            info = tarfile.TarInfo("package-1.0/tests/test_negative.py")
+            info.size = len(source)
+            archive.addfile(info, BytesIO(source))
+
+    with pytest.raises(ValueError, match="duplicate archive member path"):
+        scanner.scan_archive(sdist, allowlist_path=_negative_test_allowlist(tmp_path))
+
+
+@pytest.mark.parametrize("member_type", (tarfile.SYMTYPE, tarfile.LNKTYPE))
+def test_sdist_rejects_links_before_allowlisting(tmp_path: Path, member_type: bytes) -> None:
+    scanner = _scanner()
+    sdist = tmp_path / "package-1.0.tar.gz"
+    allowed_source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+    ).encode()
+    with tarfile.open(sdist, "w:gz") as archive:
+        allowed = tarfile.TarInfo("package-1.0/tests/test_negative.py")
+        allowed.size = len(allowed_source)
+        archive.addfile(allowed, BytesIO(allowed_source))
+        link = tarfile.TarInfo("package-1.0/src/runtime.py")
+        link.type = member_type
+        link.linkname = "../tests/test_negative.py"
+        archive.addfile(link)
+
+    with pytest.raises(ValueError, match="unsupported TAR member"):
+        scanner.scan_archive(sdist, allowlist_path=_negative_test_allowlist(tmp_path))
+
+
+def test_wheel_rejects_a_unix_symlink_entry(tmp_path: Path) -> None:
+    scanner = _scanner()
+    wheel = tmp_path / "package.whl"
+    symlink = zipfile.ZipInfo("src/runtime.py")
+    symlink.create_system = 3
+    symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(symlink, "../tests/test_negative.py")
+
+    with pytest.raises(ValueError, match="unsupported ZIP member"):
+        scanner.scan_archive(wheel)
 
 
 def test_wheel_scan_rejects_member_path_traversal_before_allowlisting(tmp_path: Path) -> None:
     scanner = _scanner()
-    source = _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'\n")
+    source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+    )
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("../tests/negative.py", source)
+        archive.writestr("../tests/test_negative.py", source)
 
     with pytest.raises(ValueError, match="unsafe archive member path"):
         scanner.scan_archive(wheel, allowlist_path=_negative_test_allowlist(tmp_path))
@@ -765,9 +1279,12 @@ def test_wheel_scan_rejects_member_path_traversal_before_allowlisting(tmp_path: 
 
 def test_sdist_allowlist_only_normalizes_the_expected_distribution_root(tmp_path: Path) -> None:
     scanner = _scanner()
-    source = _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'\n").encode()
+    source = (
+        _joined("credential = 'NVI'", " + 'DIA'", " + '_INFERENCE_KEY'")
+        + "  # oss-boundary-anchor: fixture-credential\n"
+    ).encode()
     sdist = tmp_path / "package-1.0.tar.gz"
-    info = tarfile.TarInfo("evil/tests/negative.py")
+    info = tarfile.TarInfo("evil/tests/test_negative.py")
     info.size = len(source)
     with tarfile.open(sdist, "w:gz") as archive:
         archive.addfile(info, BytesIO(source))

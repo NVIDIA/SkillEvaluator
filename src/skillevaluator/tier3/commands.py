@@ -49,7 +49,10 @@ from skillevaluator.tier3.harbor.runner import (
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.results_location import (
+    _run_timestamp,
+    is_legacy_completed_run_dir,
     iter_candidate_results_roots,
+    ordered_run_directories,
     resolve_latest_results,
     resolve_results_root,
 )
@@ -927,8 +930,7 @@ def harbor_view(jobs_dir: Path) -> int:
 def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int:
     """Compare latest Harbor result scores across agents."""
     candidate_roots = iter_candidate_results_roots(skill_path, results_dir)
-    resolved_results_dir = next((root for root in candidate_roots if root.exists()), candidate_roots[0])
-    if not resolved_results_dir.exists():
+    if not any(root.exists() for root in candidate_roots):
         searched = ", ".join(str(p) for p in candidate_roots)
         console.print(f"[red]Error: No results found. Searched: {searched}[/red]")
         return 1
@@ -937,40 +939,55 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     agent_without: dict[str, dict[str, float]] = {}
     agent_meta: dict[str, dict[str, Any]] = {}
 
-    for ts_dir in sorted(resolved_results_dir.iterdir(), reverse=True):
-        if not ts_dir.is_dir() or ts_dir.name.startswith("_") or ts_dir.name == "latest":
+    for candidate_root in candidate_roots:
+        if not candidate_root.exists():
             continue
-        for agent_dir in sorted(ts_dir.iterdir()):
-            if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
-                continue
-            agent_name = agent_dir.name
-            if agent_name in agent_with:
-                continue
-            summary = agent_dir / "with-skill" / "summary.json"
-            if not summary.exists():
-                summary = agent_dir / "summary.json"
-            if not summary.exists():
-                continue
+        root_with: dict[str, dict[str, float]] = {}
+        root_without: dict[str, dict[str, float]] = {}
+        root_meta: dict[str, dict[str, Any]] = {}
+        for ts_dir in ordered_run_directories(candidate_root):
+            allow_missing_status = _run_timestamp(ts_dir.name) is None or is_legacy_completed_run_dir(ts_dir)
             try:
-                data = json.loads(summary.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
+                agent_dirs = sorted(ts_dir.iterdir())
+            except OSError:
                 continue
-            scores = _summary_scores(data)
-            if scores:
-                agent_with[agent_name] = scores
-                agent_meta[agent_name] = {
-                    "timestamp": ts_dir.name,
-                    "path": str(agent_dir),
-                    "num_trials": data.get("num_trials", "?"),
-                }
-                wo_summary = agent_dir / "without-skill" / "summary.json"
-                if wo_summary.exists():
-                    try:
-                        wo_scores = _summary_scores(json.loads(wo_summary.read_text(encoding="utf-8")))
-                        if wo_scores:
-                            agent_without[agent_name] = wo_scores
-                    except (ValueError, OSError):
-                        pass
+            for agent_dir in agent_dirs:
+                if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
+                    continue
+                agent_name = agent_dir.name
+                if agent_name in root_with:
+                    continue
+                summary = agent_dir / "with-skill" / "summary.json"
+                if not summary.exists():
+                    summary = agent_dir / "summary.json"
+                if not summary.exists():
+                    continue
+                try:
+                    data = json.loads(summary.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    continue
+                scores = _summary_scores(data, allow_missing_status=allow_missing_status)
+                if scores:
+                    root_with[agent_name] = scores
+                    root_meta[agent_name] = {
+                        "timestamp": ts_dir.name,
+                        "path": str(agent_dir),
+                        "num_trials": data.get("num_trials", "?"),
+                    }
+                    wo_summary = agent_dir / "without-skill" / "summary.json"
+                    if wo_summary.exists():
+                        try:
+                            wo_scores = _summary_scores(
+                                json.loads(wo_summary.read_text(encoding="utf-8")),
+                                allow_missing_status=allow_missing_status,
+                            )
+                            if wo_scores:
+                                root_without[agent_name] = wo_scores
+                        except (ValueError, OSError):
+                            pass
+        if root_with:
+            agent_with, agent_without, agent_meta = root_with, root_without, root_meta
+            break
 
     if not agent_with:
         console.print("[red]No agent results found. Run skillevaluator evaluate first.[/red]")
@@ -1029,8 +1046,11 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     return 0
 
 
-def _summary_scores(data: dict[str, Any]) -> dict[str, float]:
-    if data.get("execution_status") != "succeeded":
+def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False) -> dict[str, float]:
+    if not isinstance(data, dict):
+        return {}
+    status = data.get("execution_status")
+    if status != "succeeded" and not (allow_missing_status and status is None):
         return {}
     scores: dict[str, float] = {}
     raw_scores = data.get("scores", data)

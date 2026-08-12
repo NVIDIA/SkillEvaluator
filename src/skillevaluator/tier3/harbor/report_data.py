@@ -338,7 +338,11 @@ def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
     return str(data.get("execution_status") or "unknown") if isinstance(data, dict) else "unknown"
 
 
-def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
+def load_agent_data(
+    results_dir: Path,
+    *,
+    allow_legacy_missing_status: bool = False,
+) -> dict[str, dict[str, Any]]:
     """Load per-agent summaries, rewards, lift, and execution coverage."""
     agents: dict[str, dict[str, Any]] = {}
     selection_diagnostics: list[dict[str, Any]] = []
@@ -391,6 +395,8 @@ def load_agent_data(results_dir: Path) -> dict[str, dict[str, Any]]:
                     if "pass_at_k" in data:
                         agent_info[pass_key] = data["pass_at_k"]
                     status = data.get("execution_status")
+                    if status is None and allow_legacy_missing_status:
+                        status = "succeeded"
                     if status not in {"succeeded", "failed", "skipped"}:
                         status = "unknown"
                     errors = data.get("execution_errors")

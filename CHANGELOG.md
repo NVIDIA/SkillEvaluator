@@ -47,6 +47,13 @@ All notable changes to SkillEvaluator are documented in this file.
   lower-cost OpenAI `SKILL_EVAL_LLM_MODEL` alternative. Raised
   dimension/insights judge token budgets to 4096 and widened the gpt-5\*
   temperature guard to bare model IDs.
+- Reduced pull-request runner use for changes confined to `docs/**` and
+  `fern/**`: DCO, Gitleaks, and pinned Fern validation still run, while mixed
+  and non-docs changes retain the complete Linux, macOS, Windows, packaging,
+  and security matrix. Superseded pull-request CI and security runs are
+  cancelled so they do not consume runners after a newer commit is pushed.
+  Path classification executes from the pull request base revision so a
+   change cannot weaken its own CI routing.
 - Simplified the repository README into a concise documentation landing page,
   retained a compact keyless `validate` quickstart, LLM-provider setup, and a
   one-command `validate --full` path through all three tiers, broadened the
@@ -80,6 +87,35 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 generated tasks now stage only an entry's declared `files`, preventing
+  undeclared fixtures from the shared `evals/files/` directory from appearing
+  in that task's `/workspace/input/`, while preserving copy-all behavior for
+  legacy entries that omit the field. Agent-visible target, reference, and
+  workspace skill projections now omit evaluator-owned `evals/` directories
+  from every staged skill package, including sanitized `--copy-repo` contexts,
+  while graders, native tasks, custom
+  environments, and declared inputs continue to load from the source dataset.
+  Authenticated historical result trees are also excluded after output rotation,
+  invalid markers fail closed, and late Codex, Cline, Goose, and Qwen
+  skill-discovery roots are reset before agent execution. Pre-upgrade custom
+  result roots outside `evals/` have no authenticity marker and cannot be
+  distinguished safely from authored runtime content. Move or delete that old
+  content before `--copy-repo` or other full-context evaluation, then rerun with
+  this version if replacement evidence is needed. Explicit task inputs cannot
+  select evaluator-owned datasets, configuration, graders, tests, native tasks,
+  environments, or results. Every agent and baseline arm now reads from one
+  private, selective evaluator snapshot containing the active control files,
+  task-source data, consumed fixtures and grader, and the complete authored
+  custom environment. Legacy omitted-file entries retain the full shared files
+  corpus. Unrelated evaluator subtrees and generated results stay outside the
+  snapshot. MCP configuration and completed-run artifacts are
+  read through bounded descriptor-anchored roots; on Windows, selected file
+  handles deny concurrent writes and deletes while live. Historical unmarked
+  runs created before canonical run-level `result.json` remain discoverable only
+  when their stable configuration and summaries satisfy the complete historical
+  schema. Pre-status scored summaries remain consumable, coherent status-era
+  failures remain visible without contributing scores, and marked current
+  partial runs continue to fail closed.
 - Public benchmark cards now omit policy profiles, redact absolute host paths,
   and normalize imported internal or retired metadata before publication.
 - Previous-version validation now rejects catalog-wide scalar reuse and removal

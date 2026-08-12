@@ -664,7 +664,9 @@ def test_report_discovery_handles_timestamped_results(tmp_path: Path) -> None:
     run_dir = results_root / "myskill" / "2026-06-18_120000"
     run_dir.mkdir(parents=True)
     (run_dir / "report.html").write_text("<html></html>", encoding="utf-8")
-    (results_root / "myskill" / "latest").symlink_to(run_dir)
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_dir.name}), encoding="utf-8")
+    (results_root / "myskill" / "latest").symlink_to(run_dir.name)
 
     service = EvaluationService()
     latest = service.discover_latest_results(skill, results_dir=results_root)

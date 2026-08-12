@@ -2627,6 +2627,7 @@ def test_strict_exec_filters_broad_prefixes_and_publishes_selected_npm_runtime(
         @staticmethod
         def wrap(argv: list[str], **kwargs: object) -> list[str]:
             captured["extra_ro"] = kwargs["extra_ro"]
+            captured["deny_reads"] = kwargs["deny_reads"]
             captured["wrapped"] = real_sandbox.wrap(argv, **kwargs)  # type: ignore[arg-type]
             return argv
 
@@ -2640,6 +2641,7 @@ def test_strict_exec_filters_broad_prefixes_and_publishes_selected_npm_runtime(
     extra_ro = captured["extra_ro"]
     assert isinstance(wrapped, list)
     assert isinstance(extra_ro, list)
+    assert captured["deny_reads"] == (Path(os.environ["SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE"]),)
     ro_binds = {tuple(wrapped[index + 1 : index + 3]) for index, value in enumerate(wrapped) if value == "--ro-bind"}
     symlinks = {tuple(wrapped[index + 1 : index + 3]) for index, value in enumerate(wrapped) if value == "--symlink"}
     broad_roots = {"/", "/usr", "/usr/local", "/opt", "/tmp", "/private/tmp", "/var/tmp", str(Path.home())}

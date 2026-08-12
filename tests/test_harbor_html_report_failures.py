@@ -523,7 +523,8 @@ def test_html_generation_failure_is_persisted_identically_to_returned_result(
 ) -> None:
     """A report warning is part of the final result contract on disk and in memory."""
     skill_path = tmp_path / "demo"
-    skill_path.mkdir()
+    (skill_path / "evals").mkdir(parents=True)
+    (skill_path / "evals" / "evals.json").write_text("[]\n", encoding="utf-8")
     cli_results_dir = tmp_path / "results"
     output_dir = external_results_root(cli_results_dir, skill_path)
     provider = ProviderConfig(

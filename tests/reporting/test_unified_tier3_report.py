@@ -53,6 +53,75 @@ def _write_summary(
     )
 
 
+def _write_authenticated_pre_status_summary(run_dir: Path, *, score: float = 0.8) -> None:
+    summary = run_dir / "opencode" / "with-skill" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    (run_dir / "run_config.json").write_text(
+        json.dumps(
+            {
+                "harbor": {"n_attempts": {"value": 1, "source": "ACES default"}},
+                "task_source": "evals_json",
+                "agents": {
+                    "opencode": {
+                        "agent": "opencode",
+                        "model": "test-model",
+                        "source": "test default",
+                        "occurrence": "1",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary.write_text(
+        json.dumps(
+            {
+                "agent": "opencode",
+                "model": "test-model",
+                "model_source": "test default",
+                "scores": {"security": score},
+                "custom_scores": {},
+                "metric_set": "aces-default-v2",
+                "metrics": ["security"],
+                "dimensions": {"safety": {"score": score, "sources": {"security": 1.0}}},
+                "num_trials": 1,
+                "pass_at_k": {
+                    "k": 1,
+                    "pass_threshold": 0.5,
+                    "stop_on_pass": False,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "total_cases": 1,
+                    "rate": 1.0,
+                    "attempts_used": 1,
+                    "max_attempts_possible": 1,
+                    "avg_attempts_used": 1.0,
+                    "extra_cases": [],
+                    "cases": {
+                        "case": {
+                            "passed": True,
+                            "first_pass_attempt": 1,
+                            "attempts_used": 1,
+                            "attempts_skipped": 0,
+                            "attempts_missing": 0,
+                            "best_score": score,
+                            "attempts": [
+                                {
+                                    "attempt": 1,
+                                    "trial": "case__attempt1",
+                                    "score": score,
+                                    "passed": True,
+                                }
+                            ],
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _render_agent_payload(payload: dict) -> str:
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
     result.metadata["agent_eval"] = payload
@@ -123,6 +192,21 @@ def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None
     assert 'data-tier3-tab="trials"' in html
     assert "Diagnostics" in html
     assert "SkillEvaluator" in html
+
+
+def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260709_120008"
+    _write_authenticated_pre_status_summary(run_dir)
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["execution_status"] == "succeeded"
+    assert payload["overall_score"] is not None
+    assert payload["agents"]["opencode"]["evaluators"]["security"]["with_skill"] == 0.8
 
 
 def test_canonical_report_prefers_agentskills_dataset_fields() -> None:
@@ -866,6 +950,7 @@ def test_view_regenerates_missing_report_with_canonical_renderer(monkeypatch, tm
     results_root = tmp_path / "results"
     run_dir = results_root / skill.name / "20260709_120002"
     run_dir.mkdir(parents=True)
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
     (run_dir / "result.json").write_text(
         json.dumps({"run_id": run_dir.name}),
         encoding="utf-8",

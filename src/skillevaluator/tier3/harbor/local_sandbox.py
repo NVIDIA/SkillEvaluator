@@ -189,6 +189,7 @@ class Sandbox:
         allow_net: bool,
         extra_ro: list[Path],
         strict_reads: bool = False,
+        deny_reads: Iterable[Path] = (),
     ) -> list[str]:
         if self.plan.backend == "bubblewrap":
             return _bwrap_argv(
@@ -200,6 +201,7 @@ class Sandbox:
                 allow_net=allow_net,
                 extra_ro=extra_ro,
                 strict_reads=strict_reads,
+                deny_reads=deny_reads,
             )
         if self.plan.backend == "seatbelt":
             return _seatbelt_argv(
@@ -210,6 +212,7 @@ class Sandbox:
                 extra_ro=extra_ro,
                 allow_net=allow_net,
                 strict_reads=strict_reads,
+                deny_reads=deny_reads,
             )
         return list(argv)
 
@@ -484,6 +487,7 @@ def _bwrap_argv(
     allow_net: bool,
     extra_ro: list[Path],
     strict_reads: bool = False,
+    deny_reads: Iterable[Path] = (),
 ) -> list[str]:
     """Build the bubblewrap launcher argv.
 
@@ -543,6 +547,7 @@ def _bwrap_argv(
         wrapper += ["--bind", str(root), str(root)]
 
     read_roots = _validated_strict_read_roots(extra_ro) if strict_reads else extra_ro
+    published_read_roots: list[Path] = []
     for ro_path in read_roots:
         raw = Path(ro_path).expanduser().absolute()
         try:
@@ -563,6 +568,7 @@ def _bwrap_argv(
         # --ro-bind would re-mount that subtree read-only inside the writable
         # tree, so a skill writing there would get EROFS.
         if resolved.exists() and not any(_is_within(resolved, root) for root in resolved_write_roots):
+            published_read_roots.extend((visible, resolved))
             ensure_bind_parents(visible)
             if visible.is_symlink():
                 # Intermediate aliases are not published, so point the final
@@ -570,6 +576,19 @@ def _bwrap_argv(
                 wrapper += ["--symlink", str(resolved), str(visible)]
             else:
                 wrapper += ["--ro-bind", str(resolved), str(visible)]
+
+    published_roots = (*system_mount_roots, *resolved_write_roots, *published_read_roots)
+    for denied_path in deny_reads:
+        try:
+            raw_denied = Path(denied_path).expanduser().absolute()
+            denied_variants = {raw_denied, raw_denied.resolve(strict=True)}
+        except (OSError, RuntimeError):
+            continue
+        for denied in denied_variants:
+            if not any(_is_within(denied, root) for root in published_roots):
+                continue
+            ensure_bind_parents(denied)
+            wrapper += ["--ro-bind", "/dev/null", str(denied)]
 
     wrapper += [
         "--setenv",
@@ -749,6 +768,7 @@ def _seatbelt_argv(
     extra_ro: list[Path],
     allow_net: bool,
     strict_reads: bool = False,
+    deny_reads: Iterable[Path] = (),
 ) -> list[str]:
     """Build the macOS Seatbelt launcher argv.
 
@@ -829,6 +849,14 @@ def _seatbelt_argv(
             f'(deny file-read* (literal "{_sbpl_quote(path)}"))' for path in _SEATBELT_ABSOLUTE_LITERAL_DENY
         )
         read_policy = f"{home_read_rule}{absolute_read_denies}\n"
+
+    explicit_read_denies = "\n".join(
+        f'(deny file-read* (literal "{_sbpl_quote(path)}"))'
+        for candidate in deny_reads
+        for path in {Path(candidate).expanduser().absolute(), Path(candidate).expanduser().resolve(strict=False)}
+    )
+    if explicit_read_denies:
+        read_policy = f"{read_policy}{explicit_read_denies}\n"
 
     if allow_net:
         # Keep the host IPC boundary while permitting model-serving traffic.

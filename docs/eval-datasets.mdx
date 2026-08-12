@@ -266,8 +266,10 @@ grading:
 Two optional directories shape the world the agent works in.
 
 **`evals/files/`** holds input fixtures — test data, configs, sample
-documents. The entire directory is copied into `/workspace/input/` inside the
-container, so prompts can reference those paths directly.
+documents. An eval entry's `files` string or list selects only those paths
+(relative to `evals/`) for its `/workspace/input/`. An explicit empty list or
+`null` stages no fixture. For backward compatibility, an entry that omits
+`files` receives the entire shared `evals/files/` directory.
 
 **`evals/environment/`** customizes the container itself:
 

@@ -10,6 +10,16 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolate_output_provenance_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep every test away from the developer's persistent provenance key."""
+    monkeypatch.setenv(
+        "SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE",
+        str(tmp_path / ".skillevaluator-state" / "output-provenance.key"),
+    )
+
+
 # =============================================================================
 # SKILLS FIXTURES
 # =============================================================================

@@ -123,18 +123,18 @@ def test_public_extras_exclude_internal_runtime_dependencies() -> None:
     extras = project["project"]["optional-dependencies"]
     dependency_text = "\n".join(requirement.lower() for requirements in extras.values() for requirement in requirements)
 
-    assert "py" + "mil" + "vus" not in dependency_text
-    assert "sandbox" + "-k8s" not in dependency_text
-    assert "ipp" + "bot" not in dependency_text
+    assert "py" + "mil" + "vus" not in dependency_text  # oss-boundary-anchor: public-extra-vector-db
+    assert "sandbox" + "-k8s" not in dependency_text  # oss-boundary-anchor: public-extra-cluster-runtime
+    assert "ipp" + "bot" not in dependency_text  # oss-boundary-anchor: public-extra-retired-product
 
 
 def test_public_sources_exclude_retired_internal_runtime_paths() -> None:
     source_text = "\n".join(path.read_text(encoding="utf-8") for path in (REPO_ROOT / "src").rglob("*.py"))
     retired_terms = (
-        "NVI" + "DIA" + "_INFERENCE_KEY",
-        "as" + "tra_sandbox",
+        "NVI" + "DIA" + "_INFERENCE_KEY",  # oss-boundary-anchor: source-retired-credential
+        "as" + "tra_sandbox",  # oss-boundary-anchor: source-retired-executor
         "inter" + "_skill",
-        "py" + "mil" + "vus",
+        "py" + "mil" + "vus",  # oss-boundary-anchor: source-retired-vector-store
     )
 
     for term in retired_terms:
@@ -453,7 +453,7 @@ def test_ci_scans_source_and_built_distributions_for_oss_boundary_violations() -
 
 def test_retired_private_upload_artifact_is_not_part_of_public_gitignore() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
-    retired_artifact = "." + "harbor" + "-viewer-upload/"
+    retired_artifact = "." + "harbor" + "-viewer-upload/"  # oss-boundary-anchor: gitignore-retired-upload-artifact
 
     assert retired_artifact not in gitignore
 
@@ -494,7 +494,7 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert "sends each discovered `SKILL.md` in full" in public_docs
     assert "Only candidate clusters found by the embedding stage are" in public_docs
     assert "sent to the configured chat LLM for classification" in public_docs
-    assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs
+    assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs  # oss-boundary-anchor: docs-retired-credential
 
 
 def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:

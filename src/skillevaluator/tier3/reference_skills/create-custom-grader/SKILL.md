@@ -74,9 +74,13 @@ grader to replace the default evaluator metrics.
 
 2. Map benchmark fields into evaluator inputs.
    Use benchmark prompts or prompt variants as `question` entries. Use the
-   target skill as `expected_skill`. Put required starter files under
-   `evals/files/`. Preserve benchmark-specific rubric text in the entry only
-   when the grader needs to read it.
+   target skill as `expected_skill`. Put each case's required starter files
+   under `evals/files/<case-id>/`, and declare
+   `files: ["evals/files/<case-id>"]` on every corresponding eval entry. Do not
+   omit `files` in a multi-case dataset, because omission intentionally stages
+   the entire shared directory for legacy compatibility. Preserve
+   benchmark-specific rubric text in the entry only when the grader needs to
+   read it.
 
 3. Scaffold the evaluator contract.
    For generated tasks:
@@ -114,7 +118,8 @@ Python and shell graders run inside the Harbor verifier context. They may read:
 
 - `/logs/agent/trajectory.json` for agent actions and final answer evidence
 - `/tests/entry.json` for the eval case metadata
-- `/workspace/input/` for committed fixture files from `evals/files/`
+- `/workspace/input/` for the entry's declared committed fixtures from
+  `evals/files/`
 - `/solution/` or other task outputs only when the task environment produces
   them
 
@@ -171,7 +176,8 @@ For a benchmark task with `task.yaml`, `code/`, prompt variants, coverage, and a
 rubric:
 
 1. Copy `code/` into `evals/files/<case-id>/`.
-2. Create one or more `evals/evals.json` entries from the prompt variants.
+2. Create one or more `evals/evals.json` entries from the prompt variants, and
+   set `files: ["evals/files/<case-id>"]` on each corresponding entry.
 3. Set `expected_skill` to the benchmark's target skill.
 4. Implement `evals/grader.py` to inspect the agent trajectory and changed
    workspace files.

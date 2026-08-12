@@ -307,7 +307,12 @@ def agent_eval_result_from_directory(
     )
 
     run_dir = run_dir.expanduser().resolve()
-    agents = load_agent_data(run_dir)
+    from skillevaluator.tier3.results_location import is_legacy_completed_run_dir
+
+    agents = load_agent_data(
+        run_dir,
+        allow_legacy_missing_status=is_legacy_completed_run_dir(run_dir),
+    )
     if not agents:
         return None
 

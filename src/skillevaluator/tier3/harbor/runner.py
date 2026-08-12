@@ -2022,6 +2022,8 @@ def _run_harbor_eval_impl(
                     pre_agent_setup=harbor_config.get("pre_agent_setup", []),
                     task_resources=resource_config,
                     agent_workdir=harbor_config.get("agent_workdir"),
+                    evaluator_skill_path=evaluator_skill_path,
+                    _baseline_alias_validation=baseline_alias_validation,
                 )
             sumofparts_dir = agent_task_dirs[agent][2]
             if sumofparts_dir is not None:

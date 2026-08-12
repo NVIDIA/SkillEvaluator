@@ -42,7 +42,7 @@ Tier 1 is exposed through one umbrella command and five standalone commands:
 
 | Command | Purpose |
 | --- | --- |
-| `validate` | Run the selected Tier 1 checks, Tier 2 deduplication by default, and optional advisory Tier 3 evaluation |
+| `validate` | Run blocking Tier 1 and Tier 2 checks by default, with optional Tier 3 evaluation |
 | `quality-check` | Score skill quality across four weighted categories |
 | `rubric-eval` | Run the nine-criterion LLM-as-judge rubric |
 | `security-scan` | Run SkillSpector static scanning and optional LLM analysis |
@@ -63,9 +63,10 @@ skillevaluator validate ./my-skill --llm      # + LLM security analysis
 ```
 
 `validate` is the umbrella command: Tier 1 checks gate the exit code (non-zero
-on failure or incomplete required scanner evidence), Tier 2 dedup runs by
-default and degrades gracefully without embedding access, and Tier 3 can be
-attached with `--agent-eval` as an advisory pass.
+on failure or incomplete required scanner evidence), Tier 2 dedup runs and
+gates by default, and Tier 3 can be attached with `--agent-eval` as an advisory
+pass. Use `--no-block-on-dedup` to make Tier 2 advisory, or
+`--block-on-agent-eval` to make Tier 3 gate.
 
 ## Skill Detection and Selection
 
@@ -412,7 +413,8 @@ skillevaluator validate ./my-skill -r cli,json,html -o reports/
 
 ## Using validate in CI
 
-`validate` returns a non-zero exit code when a Tier 1 gate fails, and the
+`validate` returns a non-zero exit code when a Tier 1 or default Tier 2 gate
+fails. Tier 3 remains advisory unless `--block-on-agent-eval` is supplied. The
 Markdown report can be posted directly as a PR comment:
 
 ```yaml

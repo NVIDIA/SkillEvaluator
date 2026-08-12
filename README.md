@@ -96,11 +96,13 @@ flowchart LR
 Deterministic checks run offline after their scanner binaries are installed —
 this is the everyday command and a ready-made CI gate (`validate` exits
 non-zero when a check fails or required scanner evidence is incomplete). Plain
-`validate` also runs the Tier 2 dedup pass by default, skipping it
-gracefully when no key is configured:
+`validate` also runs the blocking Tier 2 dedup pass by default, skipping it
+gracefully when no key is configured. Use `--no-block-on-dedup` to keep Tier 2
+findings advisory without disabling the scan:
 
 ```bash
 skillevaluator validate ./my-skill --no-dedup   # all offline checks
+skillevaluator validate ./my-skill --no-block-on-dedup
 skillevaluator security-scan ./my-skill         # one category at a time
 skillevaluator rubric-eval ./my-skill           # LLM-as-judge scoring — the one Tier 1 command that needs a provider key
 ```
@@ -201,6 +203,11 @@ instead. Set `SKILLEVALUATOR_LOCAL_STRICT_READS=1` for deny-all reads with only
 selected runtime/system exceptions. On Linux/macOS, unsandboxed local execution
 requires explicitly opting into trusted mode. Cloud backends are available
 through the same `--env-mode` flag.
+
+When attached to the combined pipeline with `validate --tier3`, Tier 3 is
+advisory by default. Add `--block-on-agent-eval` to make Tier 3 findings or an
+invalid task source fail the validation exit code. Reports record the effective
+gating choice for each tier.
 
 `claude` is accepted as a convenience alias in agent lists, model overrides,
 and `evals/config.yml`. Skill Evaluator canonicalizes it to `claude-code`, so

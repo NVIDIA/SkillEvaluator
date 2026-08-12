@@ -103,6 +103,19 @@ class MarkdownReporter(ReporterBase):
         status = "⚠️ INCOMPLETE" if has_incomplete else "✅ PASSED" if all_passed else "❌ FAILED"
         lines.append(f"**Status:** {status}")
 
+        policy = next(
+            (
+                result.metadata.get("policy")
+                for result in results
+                if isinstance(result.metadata.get("policy"), dict)
+            ),
+            None,
+        )
+        if policy is not None:
+            lines.append(f"**Profile:** {policy.get('profile', 'external')}")
+            if policy.get("digest"):
+                lines.append(f"**Policy digest:** `{policy['digest']}`")
+
         if self.include_timestamp:
             timestamp = datetime.now(tz=UTC).strftime("%B %d, %Y at %I:%M %p UTC")
             lines.append(f"**Generated:** {timestamp}")

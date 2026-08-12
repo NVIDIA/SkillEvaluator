@@ -158,12 +158,16 @@ def _should_try_fallback(error: str) -> bool:
     )
 
 
+def _model_leaf(model: str) -> str:
+    """Return a normalized model ID without provider routing prefixes."""
+    return str(model or "").strip().casefold().rsplit("/", 1)[-1]
+
+
 def _supports_custom_temperature(model: str) -> bool:
     """Return false for chat models that only accept their default temperature."""
     # Bare ``gpt-5*`` and provider-prefixed forms (``openai/gpt-5*``,
     # ``openai/openai/gpt-5*``) reject custom temperature on the Chat Completions API.
-    leaf = str(model or "").lower().rsplit("/", 1)[-1]
-    return not leaf.startswith("gpt-5")
+    return not _model_leaf(model).startswith("gpt-5")
 
 
 def _chat_completion_payload(
@@ -179,7 +183,7 @@ def _chat_completion_payload(
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
         "max_completion_tokens"
-        if str(model or "").casefold().startswith("gpt-5")
+        if _model_leaf(model).startswith("gpt-5")
         and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
         else "max_tokens"
     )

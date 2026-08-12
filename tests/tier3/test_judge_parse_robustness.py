@@ -349,12 +349,39 @@ def test_template_default_judge_model_matches_central_constant():
 
     assert eval_template.DEFAULT_JUDGE_MODEL == llm_judge.DEFAULT_JUDGE_MODEL
     assert llm_judge.DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
-    assert CHAT_DEFAULT_OPENAI == "gpt-5.5"
+    assert CHAT_DEFAULT_OPENAI == "gpt-5.6-sol"
 
 
 def test_template_gpt5_temperature_guard_matches_eval_core():
-    for model in ("gpt-5.5", "openai/gpt-5.5", "openai/openai/gpt-5.5", "gpt-5.4-mini", "gpt-4.1-mini"):
+    for model in (
+        "gpt-5.6-sol",
+        "openai/gpt-5.6-sol",
+        "openai/openai/gpt-5.6-sol",
+        "gpt-5.4-mini",
+        "gpt-4.1-mini",
+    ):
+        assert eval_template._model_leaf(model) == llm_judge._model_leaf(model)
         assert eval_template._supports_custom_temperature(model) == llm_judge._supports_custom_temperature(model)
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-5.6-sol", "openai/gpt-5.6-sol", "openai/openai/gpt-5.6-sol"],
+)
+def test_template_native_openai_gpt5_payload_matches_eval_core(model):
+    kwargs = {
+        "model": model,
+        "prompt": "Judge this response",
+        "max_tokens": 321,
+        "temperature": 0.25,
+        "provider": "openai",
+        "request_url": llm_judge.OPENAI_CHAT_URL,
+    }
+
+    template_payload = eval_template._chat_completion_payload(**kwargs)
+    assert template_payload == llm_judge._chat_completion_payload(**kwargs)
+    assert "max_completion_tokens" in template_payload
+    assert "max_tokens" not in template_payload
 
 
 def test_template_salvage_score_matches_eval_core_on_partial_recovery(monkeypatch):

@@ -11,9 +11,17 @@ from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENA
 from skillevaluator.tier3.eval_core import llm_judge
 
 
-def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature() -> None:
+@pytest.mark.parametrize(
+    "model",
+    [
+        CHAT_DEFAULT_OPENAI,
+        f"openai/{CHAT_DEFAULT_OPENAI}",
+        f"openai/openai/{CHAT_DEFAULT_OPENAI}",
+    ],
+)
+def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model: str) -> None:
     payload = llm_judge._chat_completion_payload(
-        model=CHAT_DEFAULT_OPENAI,
+        model=model,
         prompt="Judge this response",
         max_tokens=321,
         temperature=0.25,
@@ -22,7 +30,7 @@ def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature() -> 
     )
 
     assert payload == {
-        "model": CHAT_DEFAULT_OPENAI,
+        "model": model,
         "max_completion_tokens": 321,
         "messages": [{"role": "user", "content": "Judge this response"}],
     }
@@ -36,7 +44,7 @@ def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature() -> 
         CHAT_DEFAULT_OPENAI,
         CHAT_CHEAP_OPENAI,
         f"openai/{CHAT_DEFAULT_OPENAI}",
-        "openai/openai/gpt-5.5",
+        f"openai/openai/{CHAT_DEFAULT_OPENAI}",
     ],
 )
 def test_gpt5_family_rejects_custom_temperature(model: str) -> None:

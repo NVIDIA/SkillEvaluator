@@ -1498,7 +1498,7 @@ Call us at 555-123-4567 or +1-555-987-6543
     @pytest.mark.parametrize(
         ("provider", "credential", "model"),
         (
-            ("openai", "OPENAI_API_KEY", "gpt-5.5"),
+            ("openai", "OPENAI_API_KEY", "gpt-5.6-sol"),
             ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-4-8"),
         ),
     )

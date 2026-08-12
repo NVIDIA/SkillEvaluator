@@ -79,7 +79,7 @@ OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # Keep in sync with skillevaluator.provider_config.CHAT_DEFAULT_OPENAI
 # (sandbox template cannot import the package — see drift test).
-DEFAULT_JUDGE_MODEL = "gpt-5.5"
+DEFAULT_JUDGE_MODEL = "gpt-5.6-sol"
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 # Shorter placeholders are not credible provider credentials and can corrupt report schema keys.
@@ -1108,12 +1108,16 @@ def _should_try_fallback(error):
     )
 
 
+def _model_leaf(model):
+    # Keep in sync with skillevaluator.tier3.eval_core.llm_judge (drift test).
+    return str(model or "").strip().casefold().rsplit("/", 1)[-1]
+
+
 def _supports_custom_temperature(model):
     # Bare ``gpt-5*`` and provider-prefixed forms (``openai/gpt-5*``,
     # ``openai/openai/gpt-5*``) reject custom temperature on the Chat Completions API.
     # Keep in sync with skillevaluator.tier3.eval_core.llm_judge (drift test).
-    leaf = str(model or "").lower().rsplit("/", 1)[-1]
-    return not leaf.startswith("gpt-5")
+    return not _model_leaf(model).startswith("gpt-5")
 
 
 def _is_native_openai_chat_url(provider, request_url):
@@ -1152,7 +1156,7 @@ def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=No
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
         "max_completion_tokens"
-        if str(model or "").casefold().startswith("gpt-5")
+        if _model_leaf(model).startswith("gpt-5")
         and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
         else "max_tokens"
     )

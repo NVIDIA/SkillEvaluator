@@ -35,6 +35,9 @@ SECURE_DOCKER_ENV_IMPORT_PATH = (
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+# Match llm_judge / local_environment: short env values like "1" must not
+# become substring secrets or loopback origins such as 127.0.0.1 break.
+_MIN_EXACT_SECRET_LENGTH = 8
 _COMPOSE_TERMINATE_SECONDS = 5.0
 _COMPOSE_KILL_SECONDS = 5.0
 _COMPOSE_CANCEL_SECONDS = 0.1
@@ -89,7 +92,11 @@ def _redact(text: str | None, secret_values: set[str]) -> str | None:
     if text is None:
         return None
     redacted = text
-    for value in sorted((value for value in secret_values if value), key=len, reverse=True):
+    for value in sorted(
+        (value for value in secret_values if value and len(value) >= _MIN_EXACT_SECRET_LENGTH),
+        key=len,
+        reverse=True,
+    ):
         redacted = redacted.replace(value, "[REDACTED]")
     return redacted
 
@@ -282,7 +289,11 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
 
         process_environment = self._compose_env_vars(include_os_env=True)
         process_environment.update(env_overrides or {})
-        secret_values = {value for value in (env_overrides or {}).values() if value}
+        secret_values = {
+            value
+            for value in (env_overrides or {}).values()
+            if value and len(value) >= _MIN_EXACT_SECRET_LENGTH
+        }
         creation = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *full_command,
@@ -456,7 +467,9 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
                 cwd=cwd,
                 timeout_sec=timeout_sec,
                 user=user,
-                secret_values={value for value in merged.values() if value},
+                secret_values={
+                    value for value in merged.values() if value and len(value) >= _MIN_EXACT_SECRET_LENGTH
+                },
             )
         except BaseException as exc:
             primary_error = exc

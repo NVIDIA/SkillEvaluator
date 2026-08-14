@@ -25,6 +25,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Security
 
+- Secure Docker exec redaction now ignores environment values shorter than eight
+  characters, matching the exact secret length floor used elsewhere. Short
+  flags such as `CLAUDE_CODE_DISABLE_POLICY_SKILLS=1` no longer rewrite digits
+  in `docker exec` output, which had broken NVIDIA Build bridge loopback
+  origins during Tier 3 preflight.
 - Isolated NVIDIA Build bridge credentials from vendor CLI processes using a
   transient, root-managed, container-only key handoff with cleanup on failure.
 - Removed NVIDIA Build secrets from Harbor and Docker exec arguments using a

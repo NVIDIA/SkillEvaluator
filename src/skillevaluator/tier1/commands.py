@@ -60,9 +60,8 @@ DEFAULT_CHECKS = (
     "lint",
 )
 # Opt-in checks: recognized by ``--checks`` but excluded from the default run.
-# Mirrors SkillEvaluator, where the semantic-version bump check and the pip-audit /
-# Safety dependency CVE audit (shipped as the standalone ``dependency-audit``
-# command) were opt-in rather than part of the default validate pipeline.
+# The dependency CVE audit is also available through the standalone
+# ``dependency-audit`` command; the version check above runs by default.
 OPTIONAL_CHECKS = ("dependency",)
 # Every canonical check name ``run_validation`` understands after alias
 # resolution (the default run plus the opt-in checks).

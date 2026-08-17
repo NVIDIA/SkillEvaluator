@@ -1528,6 +1528,18 @@
               "type": "boolean"
             },
             {
+              "is_flag": true,
+              "name": "block_on_dedup",
+              "opts": [
+                "--block-on-dedup"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-block-on-dedup"
+              ],
+              "type": "boolean"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "agent_eval",
@@ -1536,6 +1548,18 @@
                 "--tier3"
               ],
               "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "is_flag": true,
+              "name": "block_on_agent_eval",
+              "opts": [
+                "--block-on-agent-eval"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-block-on-agent-eval"
+              ],
               "type": "boolean"
             },
             {
@@ -2788,6 +2812,18 @@
           "type": "boolean"
         },
         {
+          "is_flag": true,
+          "name": "block_on_dedup",
+          "opts": [
+            "--block-on-dedup"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-block-on-dedup"
+          ],
+          "type": "boolean"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "agent_eval",
@@ -2796,6 +2832,18 @@
             "--tier3"
           ],
           "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "block_on_agent_eval",
+          "opts": [
+            "--block-on-agent-eval"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-block-on-agent-eval"
+          ],
           "type": "boolean"
         },
         {

@@ -32,7 +32,7 @@ from skillevaluator.constants import (
     DIMENSION_HINTS,
     DIMENSION_MAPPING,
 )
-from skillevaluator.models.result import ValidationResult
+from skillevaluator.models.result import Finding, Severity, ValidationResult
 
 # Verdict labels mirror SkillEvaluator's AGENT_EVAL_VERDICT_* values so the ported
 # reporters classify the overall outcome identically.
@@ -259,6 +259,96 @@ def advisory_skip_result(message: str, *, skill_name: str | None = None) -> Vali
     # The caller keeps Tier 3 outside the CLI exit gate.  The result itself must
     # still tell reporters that no live evaluation succeeded.
     result.passed = False
+    return result
+
+
+def dataset_required_result(
+    dataset_path: Path,
+    checks: list[Any],
+    *,
+    blocking: bool,
+    skill_name: str,
+    source_kind: str,
+) -> ValidationResult:
+    """Return a policy-aware outcome for an unusable Tier 3 task source."""
+    suggestion = f"Create or fix the Tier 3 source under {dataset_path.parent} and rerun validation."
+    if blocking:
+        message = "Tier 3 is configured as blocking, but no valid Tier 3 task source was found."
+        severity = Severity.HIGH
+        verdict = VERDICT_FAIL
+        applicability = "required"
+        execution_status = "failed"
+    else:
+        message = (
+            "Tier 3 was requested but no valid task source was found. "
+            "Tier 3 is advisory unless --block-on-agent-eval is enabled."
+        )
+        severity = Severity.LOW
+        verdict = VERDICT_NEUTRAL
+        applicability = "not_required"
+        execution_status = "not_applicable"
+
+    serialized_checks = [
+        {
+            "path": str(getattr(check, "path", "")),
+            "status": str(getattr(check, "status", "error")),
+            "message": str(getattr(check, "message", check)),
+        }
+        for check in checks
+    ]
+    result = ValidationResult(
+        validator_name=_AGENT_EVAL_VALIDATOR,
+        validator_description=_AGENT_EVAL_DESCRIPTION,
+    )
+    result.add_finding(
+        Finding(
+            category="AGENT_EVAL",
+            severity=severity,
+            check_name="eval_dataset_required",
+            message=message,
+            file_path=str(dataset_path),
+            suggestion=suggestion,
+            metadata={"source_kind": source_kind, "source_validation": serialized_checks},
+        )
+    )
+    payload = _advisory_agent_eval_payload(message, skill_name=skill_name)
+    payload.update(
+        {
+            "verdict": verdict,
+            "execution_status": execution_status,
+            "applicability": applicability,
+            "reason_code": "eval_dataset_required",
+            "source_kind": source_kind,
+            "suggestions": [suggestion],
+        }
+    )
+    payload["summary"].update(
+        {
+            "verdict": verdict,
+            "execution_status": execution_status,
+            "applicability": applicability,
+            "reason_code": "eval_dataset_required",
+        }
+    )
+    payload["provenance"].update(
+        {
+            "source": "tier3_source_preflight",
+            "reason": "eval_dataset_required",
+            "advisory": not blocking,
+            "source_kind": source_kind,
+            "source_validation": serialized_checks,
+        }
+    )
+    result.metadata.update(
+        {
+            "agent_eval": payload,
+            "tier3_applicability": {
+                "applicability": applicability,
+                "reason_code": "eval_dataset_required",
+                "source_kind": source_kind,
+            },
+        }
+    )
     return result
 
 

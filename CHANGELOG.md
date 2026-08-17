@@ -46,6 +46,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Added explicit `--block-on-dedup` / `--no-block-on-dedup` and
+  `--block-on-agent-eval` / `--no-block-on-agent-eval` controls with
+  backward-compatible defaults, Tier 3 source preflight, and consistent gating
+  metadata across CLI, JSON, Markdown, and HTML reports.
 - Reduced pull-request runner use for changes confined to `docs/**` and
   `fern/**`: DCO, Gitleaks, and pinned Fern validation still run, while mixed
   and non-docs changes retain the complete Linux, macOS, Windows, packaging,

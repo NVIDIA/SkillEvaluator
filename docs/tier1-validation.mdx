@@ -19,7 +19,7 @@ Tier 1 is exposed through one umbrella command and five standalone commands. Eac
 | `pii-scan` | Detect PII, credentials, secrets, and local identifiers | No (only with `--llm-verify`) |
 | `lint-scripts` | Run advisory AST-based checks on Python scripts | No |
 
-`validate` is the umbrella command: Tier 1 checks gate the exit code (non-zero on failure or incomplete required scanner evidence), Tier 2 dedup runs by default and degrades gracefully without embedding access, and Tier 3 can be attached as an advisory pass with `--tier3`, `--autopilot`, `--full`, or an explicit tier selection such as `--tiers 1,3` (`--agent-eval` remains a supported compatibility alias and is not currently deprecated).
+`validate` is the umbrella command: Tier 1 checks always gate the exit code (non-zero on failure or incomplete required scanner evidence), Tier 2 dedup runs and gates by default while degrading gracefully without embedding access, and Tier 3 can be attached as an advisory pass with `--tier3`, `--autopilot`, `--full`, or an explicit tier selection such as `--tiers 1,3` (`--agent-eval` remains a supported compatibility alias and is not currently deprecated). Use `--no-block-on-dedup` to keep Tier 2 advisory or `--block-on-agent-eval` to promote Tier 3 into the gate.
 
 ## Run a validation
 
@@ -288,7 +288,7 @@ Bundled Python scanners resolve next to the SkillEvaluator interpreter before `P
 | `2` | Configuration error — invalid flags, arguments, or target path |
 | `3` | Runtime error — an unexpected internal failure |
 
-Tier 1 checks — and the Tier 2 dedup pass, when it runs — gate the exit code inside `validate`; Tier 3 findings are advisory and never change it. The `quality` check passes when the composite score reaches `--min-score` (default `70`).
+Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it runs unless `--no-block-on-dedup` is set. Tier 3 is advisory unless `--block-on-agent-eval` is set. The `quality` check passes when the composite score reaches `--min-score` (default `70`). Reports record the effective gate membership for every tier so saved evidence and process status agree.
 
 `--fail-fast` stops after the first failed check. `-c`/`--continue-on-failure` overrides it, records the full pipeline, and keeps scanning a collection past a CRITICAL finding. Wiring these exit codes into a merge gate — including a complete GitHub Actions recipe — is covered in [Gate Your CI](ci-integration.mdx).
 

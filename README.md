@@ -128,8 +128,10 @@ avoids managed sandbox charges, not hosted model charges. It is experimental
 and only for trusted skills and workspaces; use Docker or cloud for untrusted
 code. Start with one agent and a small dataset.
 See the [Tier 3 guide](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation#plan-for-cost)
-before scaling a run. Tier 3 results are advisory within `validate`; Tier 1 and
-Tier 2 determine its exit status.
+before scaling a run. Tier 1 always gates `validate`. Tier 2 gates by default;
+`--no-block-on-dedup` keeps its scan and reports but makes its findings
+advisory. Tier 3 is advisory by default; `--block-on-agent-eval` promotes its
+findings, including invalid task-source evidence, into the exit gate.
 
 ## Documentation
 

@@ -451,16 +451,32 @@ def _run_agent_eval_or_skip(
     copy_repo: bool = False,
     timeout_multiplier: float | None = None,
     harbor_keep_jobs: bool = False,
+    block_on_agent_eval: bool = False,
+    validate_source: bool = True,
     progress_reporter=None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
 
     Returns an ``AGENT_EVAL`` :class:`ValidationResult` carrying the canonical
-    ``metadata["agent_eval"]`` payload on success, or a non-blocking advisory
-    result describing why Tier 3 could not run. Tier 3 is always advisory: it is
-    reported in the combined HTML/JSON/BENCHMARK.md but never gates the
-    ``validate`` exit code.
+    ``metadata["agent_eval"]`` payload on success, or a structured result
+    describing why Tier 3 could not run. Tier 3 remains advisory by default,
+    and callers can opt into blocking behavior.
     """
+    if validate_source:
+        from skillevaluator.evaluation.tier3_report import dataset_required_result
+        from skillevaluator.tier3.evals_spec import validate_tier3_source
+
+        source_kind, source_checks = validate_tier3_source(target_path)
+        source_errors = [check for check in source_checks if check.status in {"missing", "error"}]
+        if source_errors:
+            return dataset_required_result(
+                target_path / "evals" / "evals.json",
+                source_errors,
+                blocking=block_on_agent_eval,
+                skill_name=target_path.name,
+                source_kind=source_kind,
+            )
+
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
     from skillevaluator.evaluation.tier3_report import (
         advisory_skip_result,
@@ -493,8 +509,9 @@ def _run_agent_eval_or_skip(
         else:
             engine_result = service.evaluate(options)
     except Exception as exc:
-        # Tier 3 is advisory: degrade any evaluation error to a non-blocking
-        # note rather than aborting the whole validate pipeline.
+        # Preserve a reportable Tier 3 result rather than aborting after the
+        # earlier tiers have already completed. The caller's gating metadata
+        # decides whether this failure is advisory or blocking.
         return advisory_skip_result(
             f"Tier 3 live evaluation skipped: {exc}",
             skill_name=target_path.name,
@@ -759,9 +776,9 @@ def _finish_pipeline_view(
 
     if not gate_failed:
         ran = sum(1 for block in view.blocks if block.status not in ("pending", "skip"))
-        advisory_failed = any(block.status == "fail" and block.number == 3 for block in view.blocks)
+        advisory_failed = any(block.status == "fail" and block.number in {2, 3} for block in view.blocks)
         if advisory_failed:
-            headline = "gating tiers passed · Tier 3 reported errors (advisory — see report)"
+            headline = "gating tiers passed · advisory tier reported findings (see report)"
         else:
             headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
             lift = summary.get("overall_lift")
@@ -774,7 +791,9 @@ def _finish_pipeline_view(
     if failed:
         first = failed[0].validator_name or "validation"
         extra = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-        headline = f"{first}{extra} failed"
+        tier_no = (failed[0].metadata.get("gating") or {}).get("tier")
+        tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
+        headline = f"{first}{extra} failed{tier_label}"
     else:
         headline = "validation failed"
     rerun = _rerun_hint(target_path, agent_eval)
@@ -939,13 +958,27 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "gracefully without public embedding access. Use --no-tier2 (or --no-dedup) to disable.",
 )
 @click.option(
+    "--block-on-dedup/--no-block-on-dedup",
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER2_GROUP,
+    help="Make Tier 2 findings gate the exit code. Default: blocking.",
+)
+@click.option(
     "--tier3",
     "--agent-eval",
     "agent_eval",
     is_flag=True,
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
-    help="Also run Tier 3 live agent evaluation (requires evals/evals.json).",
+    help="Also run Tier 3 live agent evaluation (requires a valid eval dataset or native Harbor source).",
+)
+@click.option(
+    "--block-on-agent-eval/--no-block-on-agent-eval",
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Make Tier 3 findings gate the exit code. Default: advisory.",
 )
 @click.option(
     "--autopilot",
@@ -1096,7 +1129,9 @@ def validate(
     external: bool,
     policy_path: Path | None,
     dedup: bool,
+    block_on_dedup: bool | None,
     agent_eval: bool,
+    block_on_agent_eval: bool | None,
     autopilot: bool,
     agents: str,
     env_mode: str,
@@ -1120,8 +1155,9 @@ def validate(
     """Validate a skill, rule, workflow, or plugin (Tier 1, with optional Tier 2/Tier 3).
 
     Runs Tier 1 static, security, and quality checks (which gate the exit code),
-    plus Tier 2 deduplication by default. Add --agent-eval for advisory Tier 3
-    live agent evaluation. Reports are written per --report and --output-dir.
+    plus blocking Tier 2 deduplication by default. Add --agent-eval for
+    advisory Tier 3 live evaluation, or --block-on-agent-eval to make it gate.
+    Reports are written per --report and --output-dir.
 
     A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest or a
     contained ``.claude-plugin/plugin.json`` manifest) is auto-detected and
@@ -1152,7 +1188,13 @@ def validate(
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
+    block_on_dedup_effective = True if block_on_dedup is None else block_on_dedup
+    block_on_agent_eval_effective = False if block_on_agent_eval is None else block_on_agent_eval
+
     resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
+    # Only skills own an evals/ task source. Plugins, rules, and workflows can
+    # still run Tier 3, but must bypass the skill-directory source preflight.
+    preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
 
     # --full is the one-shot (everything incl. autopilot); --autopilot implies
     # Tier 3; --tiers is the explicit selector. Explicit --no-tier2 still wins.
@@ -1250,6 +1292,8 @@ def validate(
         apply_policy(results, policy)
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
+    tier1_gate_results = list(results)
+    tier2_gate_results: list[ValidationResult] = []
 
     if dedup and not (fail_fast and not continue_on_failure and tier1_raw_failed):
         if not quiet:
@@ -1258,6 +1302,7 @@ def validate(
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
         tier2_results = _run_dedup_or_skip(target_path)
         results.extend(tier2_results)
+        tier2_gate_results.extend(tier2_results)
         if quiet:
             apply_policy(tier2_results, policy)
         tier2_ran, tier2_ok, tier2_rows, tier2_skip = summarize_tier2(tier2_results)
@@ -1268,12 +1313,9 @@ def validate(
     elif dedup:
         view.tier_skip(tier2_index, "skipped after Tier 1 failure (fail-fast)")
 
-    # Tier 1 (and Tier 2) gate the exit code; Tier 3 is advisory. Snapshot the
-    # gating set before Tier 3 is appended so a non-PASS live-eval verdict is
-    # reported in the combined report but never changes the exit code
-    # emit_reports applies the policy in
-    # place, so these same objects carry the finalized pass/fail afterward.
-    tier_gate_results = list(results)
+    # Preserve the pre-Tier 3 results for progressive output. Final gate
+    # membership is resolved from the explicit tri-state options below.
+    tier_gate_results = [*tier1_gate_results, *tier2_gate_results]
 
     # Flush Tier 1 + Tier 2 results to the terminal BEFORE the long-running
     # Tier 3 agent evaluation so they stay visible in CI logs even when Tier 3
@@ -1347,6 +1389,8 @@ def validate(
             copy_repo=copy_repo,
             timeout_multiplier=timeout_multiplier,
             harbor_keep_jobs=harbor_keep_jobs,
+            block_on_agent_eval=block_on_agent_eval_effective,
+            validate_source=preflight_tier3_source,
             progress_reporter=reporter,
         )
         results.append(tier3_result)
@@ -1360,6 +1404,37 @@ def validate(
             view.tier_done(tier3_index, failed=not tier3_ok, rows=[*tier3_config_rows[3:], *tier3_rows])
         else:
             view.tier_skip(tier3_index, tier3_skip)
+
+    for result in tier1_gate_results:
+        result.metadata["gating"] = {"tier": 1, "blocking": True}
+    for result in tier2_gate_results:
+        result.metadata["gating"] = {
+            "tier": 2,
+            "blocking": block_on_dedup_effective and not bool(result.metadata.get("advisory_tier2")),
+        }
+    if tier3_result is not None:
+        source_kind = "plugin"
+        if preflight_tier3_source:
+            from skillevaluator.tier3.evals_spec import validate_tier3_source
+
+            source_kind, _source_checks = validate_tier3_source(target_path)
+        tier3_result.metadata.setdefault(
+            "tier3_applicability",
+            {
+                "applicability": "required",
+                "reason_code": "tier3_source_present",
+                "source_kind": source_kind,
+            },
+        )
+        agent_eval_payload = tier3_result.metadata.get("agent_eval")
+        if isinstance(agent_eval_payload, dict):
+            agent_eval_payload.setdefault("applicability", "required")
+            agent_eval_payload.setdefault("reason_code", "tier3_source_present")
+            agent_eval_payload.setdefault("source_kind", source_kind)
+        tier3_result.metadata["gating"] = {"tier": 3, "blocking": block_on_agent_eval_effective}
+
+    # Reporters and the exit gate consume the same finalized result objects.
+    apply_policy(results, policy)
 
     content_label = {
         CONTENT_TYPE_SKILL: "Skill",
@@ -1399,11 +1474,18 @@ def validate(
         output_dir.mkdir(parents=True, exist_ok=True)
         BenchmarkReporter(skill_name=target_path.name).save(results, output_dir / BENCHMARK_FILENAME)
 
-    gate_failed = not all(r.passed for r in tier_gate_results)
+    effective_gate_results = list(tier1_gate_results)
+    if block_on_dedup_effective:
+        effective_gate_results.extend(
+            result for result in tier2_gate_results if not (result.metadata or {}).get("advisory_tier2")
+        )
+    if tier3_result is not None and block_on_agent_eval_effective:
+        effective_gate_results.append(tier3_result)
+    gate_failed = not all(result.passed for result in effective_gate_results)
     if quiet:
         _finish_pipeline_view(
             view,
-            tier_gate_results=tier_gate_results,
+            tier_gate_results=effective_gate_results,
             tier3_result=tier3_result,
             gate_failed=gate_failed,
             output_dir=output_dir,

@@ -6,6 +6,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
@@ -75,6 +77,42 @@ class TestFindSkillsInDirectory:
         """Test that empty directory returns empty list."""
         result = find_skills_in_directory(tmp_path)
         assert len(result) == 0
+
+    def test_linked_final_root_is_rejected_without_following_target_type(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_root = tmp_path / "real"
+        real_root.mkdir()
+        linked_root = tmp_path / "linked"
+        linked_root.symlink_to(real_root, target_is_directory=True)
+        real_is_dir = Path.is_dir
+
+        def guarded_is_dir(path: Path) -> bool:
+            if path == linked_root:
+                raise AssertionError("linked root target type must not be queried")
+            return real_is_dir(path)
+
+        monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+        with pytest.raises(ValueError, match=r"root|symlink|reparse|unsafe"):
+            find_skills_in_directory(linked_root)
+
+    def test_root_inspection_error_is_not_treated_as_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "catalog"
+        root.mkdir()
+        real_lstat = Path.lstat
+
+        def denied_lstat(path: Path):
+            if path == root:
+                raise PermissionError("denied")
+            return real_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", denied_lstat)
+
+        with pytest.raises(ValueError, match=r"inspect|access|denied"):
+            find_skills_in_directory(root)
 
 
 class TestGetSkillNameFromPath:

@@ -2424,6 +2424,28 @@
                 </div>
             </details>
 
+            {% if tier3.integration %}
+            {% set integ = tier3.integration %}
+            {% set integ_pill = 'ok' if integ.verdict == 'real_integration' else ('critical' if integ.verdict == 'negative_integration' else 'warning') %}
+            <details class="t3-details" id="tier3-integration" open>
+                <summary>Integration (Plugin Composition) &mdash; <span class="t3-pill warning">Advisory &middot; Report-only</span></summary>
+                <div class="t3-details-body">
+                <p class="t3-section-hint">Compositional-lift ablation: the coordinated plugin versus its member components staged individually. This signal never affects the overall score or verdict.</p>
+                <div class="table-scroll"><table class="summary-table">
+                    <thead><tr><th>Verdict</th><th>Plugin</th><th>Sum-of-parts</th><th>Integration Lift</th><th>Components</th></tr></thead>
+                    <tbody><tr>
+                        <td><span class="t3-pill {{ integ_pill }}">{{ (integ.verdict or 'inconclusive') | replace('_', ' ') | title }}</span></td>
+                        <td>{{ "%.2f" | format(integ.with_plugin) if integ.with_plugin is not none else "N/A" }}</td>
+                        <td>{{ "%.2f" | format(integ.sum_of_parts) if integ.sum_of_parts is not none else "N/A" }}</td>
+                        <td>{{ "%+.2f" | format(integ.integration_lift) if integ.integration_lift is not none else "N/A" }}</td>
+                        <td>{% for comp in integ.components or [] %}<span class="metadata-tag">{{ comp }}</span>{% endfor %}</td>
+                    </tr></tbody>
+                </table></div>
+                {% if integ.interpretation %}<p class="t3-section-hint">{{ integ.interpretation }}</p>{% endif %}
+                </div>
+            </details>
+            {% endif %}
+
             {% if t3_agents | length > 1 %}
             <details class="t3-details" open>
                 <summary>Multi-Agent Dimension Lift</summary>

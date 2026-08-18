@@ -3,51 +3,62 @@
 
 """Plugin manifest and bundled-skill validation.
 
-Validates bundle-reference manifests (``agent_plugin.yaml`` / ``agent_plugin.yml``)
-and contained manifests (``.claude-plugin/plugin.json``). Bundle-reference
-manifests take precedence when both are present.
+Two plugin models are recognized:
 
-Mirrors the structure of
-:class:`~skillevaluator.validators.rules_schema.RulesSchemaValidator` but emits
-structured :class:`~skillevaluator.models.result.Finding` objects (category
-``PLUGIN_SCHEMA``) instead of legacy error strings, and attaches reporting
-metadata (``manifest_type``, ``plugin_mode``, ``plugin``) on success.
+* **Bundle-reference** (``agent_plugin.yaml`` / ``agent_plugin.yml``), validated
+  in full against :class:`~skillevaluator.models.plugin.PluginManifest`.
+* **Contained** (``.claude-plugin/plugin.json``), shallowly validated as a JSON
+  object with a non-empty ``name``. Full Claude-plugin schema validation is
+  intentionally deferred.
+
+For either model, skills under ``<plugin-root>/skills/`` are discovered and
+validated with :class:`~skillevaluator.validators.schema.SchemaValidator`.
+Reporting metadata identifies the selected manifest model and summarizes
+declared dependencies without resolving or fetching them.
 """
 
-import json
-from pathlib import Path
-from typing import Any
+from __future__ import annotations
 
-import yaml
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
 from pydantic import ValidationError
 
 from skillevaluator.constants import (
+    NAME_MAX_LENGTH,
     PLUGIN_CONTAINED_MANIFEST_DIR,
     PLUGIN_CONTAINED_MANIFEST_FILE,
     PLUGIN_CONTAINED_MANIFEST_TYPE,
     PLUGIN_CONTAINED_MODE,
     PLUGIN_MANIFEST_FILES,
-    PLUGIN_MANIFEST_TYPE,
     PLUGIN_MODE,
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.plugin_manifest import PluginManifestLocation, PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.utils.secure_fs import SecurePathError
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_json,
+    load_bounded_yaml,
+    require_bounded_string,
+)
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.mcp_static import validate_contained_mcp_servers
+
+if TYPE_CHECKING:
+    from skillevaluator.validators.policy import ValidationPolicy
 
 logger = get_logger(__name__)
+MAX_PLUGIN_SCHEMA_FINDINGS = 100
 
 
 class PluginSchemaValidator(ValidatorBase):
-    """Validate a plugin manifest and any skills bundled by the plugin.
+    """Validate a plugin manifest and any skills bundled by the plugin."""
 
-    Checks: manifest presence, parseable YAML, and the
-    :class:`PluginManifest` contract (allowed top-level fields, required
-    ``name`` + ``author.email``, at least one dependency, well-formed
-    selectors/MCP entries).
-    """
-
-    def __init__(self, policy=None) -> None:
+    def __init__(self, policy: ValidationPolicy | None = None) -> None:
         self.policy = policy
 
     @property
@@ -59,10 +70,39 @@ class PluginSchemaValidator(ValidatorBase):
         return "Validate the plugin manifest and any bundled skills"
 
     def validate(self, path: Path) -> ValidationResult:
-        """Validate the plugin manifest located at (or under) ``path``."""
+        """Validate the plugin manifest located at or under *path*."""
         result = ValidationResult()
 
-        located = self._locate_manifest(path)
+        try:
+            located = locate_plugin_manifest(path)
+        except PluginManifestPathError as exc:
+            result.metadata["security_failure"] = True
+            selected_manifests = {
+                *PLUGIN_MANIFEST_FILES,
+                f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}",
+            }
+            if exc.relative_path in selected_manifests:
+                check_name = "manifest_outside_root"
+                message = str(exc)
+                suggestion = "Replace the manifest symlink with a regular file contained by the plugin root."
+            else:
+                check_name = "unsafe_plugin_filesystem"
+                message = f"Unsafe bundled plugin filesystem path '{exc.relative_path}': {exc}"
+                suggestion = (
+                    "Replace linked, reparse-point, or special bundled plugin paths with regular files and "
+                    "directories contained by the plugin root."
+                )
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name=check_name,
+                    message=message,
+                    file_path=str(path),
+                    suggestion=suggestion,
+                )
+            )
+            return result
         if located is None:
             result.add_finding(
                 Finding(
@@ -72,86 +112,113 @@ class PluginSchemaValidator(ValidatorBase):
                     message=(
                         "No plugin manifest found. Expected one of "
                         f"{', '.join(PLUGIN_MANIFEST_FILES)} or "
-                        f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE} at the plugin root."
+                        f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE} "
+                        "at the plugin root."
                     ),
                     file_path=str(path),
                     suggestion=(
                         "Add an agent_plugin.yaml (or agent_plugin.yml), or a "
-                        f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}, at the plugin root."
+                        f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}, "
+                        "at the plugin root."
                     ),
                 )
             )
             return result
 
-        manifest_path, manifest_type = located
-        root = manifest_path.parent.parent if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE else manifest_path.parent
-        self._stamp_manifest_metadata(manifest_path, root, manifest_type, result)
+        manifest_type = located.manifest_type
+        root = located.root
+        self._stamp_manifest_metadata(located.manifest_filename, root, manifest_type, result)
 
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
-            self._validate_contained_manifest(manifest_path, result)
+            self._validate_contained_manifest(located, result)
         else:
-            data = self._load_yaml(manifest_path, result)
-            if data is not None:
-                try:
-                    manifest = PluginManifest(**data)
-                except ValidationError as exc:
-                    self._add_validation_findings(exc, manifest_path, result)
-                else:
-                    self._add_success(manifest, manifest_path, result)
+            self._validate_bundle_manifest(located, result)
 
+        # A manifest error must not hide problems in skills bundled alongside it.
         self._validate_in_plugin_skills(root, result)
         return result
 
-    def _locate_manifest(self, path: Path) -> tuple[Path, str] | None:
-        """Return ``(manifest_path, manifest_type)`` with bundle precedence."""
-        if path.is_file():
-            if path.name in PLUGIN_MANIFEST_FILES:
-                return path, PLUGIN_MANIFEST_TYPE
-            if path.name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name == PLUGIN_CONTAINED_MANIFEST_DIR:
-                return path, PLUGIN_CONTAINED_MANIFEST_TYPE
-            return None
-        if path.is_dir():
-            for manifest_name in PLUGIN_MANIFEST_FILES:
-                candidate = path / manifest_name
-                if candidate.exists():
-                    return candidate, PLUGIN_MANIFEST_TYPE
-            contained = path / PLUGIN_CONTAINED_MANIFEST_DIR / PLUGIN_CONTAINED_MANIFEST_FILE
-            if contained.exists():
-                return contained, PLUGIN_CONTAINED_MANIFEST_TYPE
-        return None
-
     @staticmethod
-    def _stamp_manifest_metadata(manifest_path: Path, root: Path, manifest_type: str, result: ValidationResult) -> None:
+    def _stamp_manifest_metadata(
+        manifest_filename: str,
+        root: Path,
+        manifest_type: str,
+        result: ValidationResult,
+    ) -> None:
+        """Attach manifest metadata even when validation later fails."""
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
             mode = PLUGIN_CONTAINED_MODE
-            filename = f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}"
         else:
             mode = PLUGIN_MODE
-            filename = manifest_path.name
+
         result.metadata["manifest_type"] = manifest_type
         result.metadata["plugin_mode"] = mode
-        result.metadata["plugin"] = {"manifest_filename": filename, "root": str(root)}
+        result.metadata["plugin"] = {
+            "manifest_filename": manifest_filename,
+            "root": str(root),
+        }
 
-    def _load_yaml(self, manifest_path: Path, result: ValidationResult) -> dict | None:
-        """Parse the manifest YAML; record a finding and return None on failure."""
+    def _validate_bundle_manifest(self, location: PluginManifestLocation, result: ValidationResult) -> None:
+        """Validate a bundle-reference manifest against ``PluginManifest``."""
+        manifest_path = location.path
+        data = self._load_yaml(location, result)
+        if data is None:
+            return
+
         try:
-            raw = manifest_path.read_text(encoding="utf-8")
-        except OSError as exc:
+            manifest = PluginManifest(**data)
+        except ValidationError as exc:
+            self._add_validation_findings(exc, manifest_path, result)
+            return
+
+        result.add_message(f"Plugin name: {manifest.name}")
+        result.add_message(f"Author: {manifest.author.email}")
+        result.add_success(
+            check_name="plugin_manifest",
+            message=f"Plugin manifest '{manifest.name}' is valid",
+        )
+        plugin_meta = result.metadata.setdefault("plugin", {})
+        plugin_meta["name"] = manifest.name
+        plugin_meta["declared_dependencies"] = {
+            "skills": len(manifest.skills.refs) if manifest.skills and manifest.skills.refs else 0,
+            "rules": len(manifest.rules.refs) if manifest.rules and manifest.rules.refs else 0,
+            "mcp": len(manifest.mcp) if manifest.mcp else 0,
+        }
+
+    def _load_yaml(self, location: PluginManifestLocation, result: ValidationResult) -> dict | None:
+        """Parse manifest YAML, recording a finding on failure."""
+        manifest_path = location.path
+        try:
+            raw = location.read_text()
+        except PluginManifestPathError as exc:
+            result.metadata["security_failure"] = True
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
                     severity=Severity.HIGH,
-                    check_name="manifest_unreadable",
-                    message=f"Could not read plugin manifest: {exc}",
+                    check_name="manifest_unsafe",
+                    message=f"Could not securely read plugin manifest: {exc}",
                     file_path=str(manifest_path),
-                    suggestion="Ensure the manifest file exists and is readable.",
+                    suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
                 )
             )
             return None
 
         try:
-            data = yaml.safe_load(raw)
-        except yaml.YAMLError as exc:
+            data = load_bounded_yaml(raw)
+        except StructuredDataLimitError as exc:
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="manifest_complexity_limit",
+                    message=f"Plugin manifest exceeds structured-data complexity limits: {exc}",
+                    file_path=str(manifest_path),
+                    suggestion="Reduce manifest nesting, collection sizes, or YAML aliases.",
+                )
+            )
+            return None
+        except StructuredDataSyntaxError as exc:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
@@ -185,16 +252,16 @@ class PluginSchemaValidator(ValidatorBase):
         manifest_path: Path,
         result: ValidationResult,
     ) -> None:
-        """Translate a pydantic ``ValidationError`` into structured findings."""
-        for error in exc.errors():
+        """Translate a Pydantic validation error into structured findings."""
+        errors = exc.errors()
+        for error in errors[:MAX_PLUGIN_SCHEMA_FINDINGS]:
             location = ".".join(str(loc) for loc in error["loc"]) or "<root>"
             error_type = error.get("type", "value_error")
-            check_name = f"schema:{location}:{error_type}"
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
                     severity=Severity.HIGH,
-                    check_name=check_name,
+                    check_name=f"schema:{location}:{error_type}",
                     message=f"Field '{location}': {error['msg']}",
                     file_path=str(manifest_path),
                     suggestion=(
@@ -204,24 +271,56 @@ class PluginSchemaValidator(ValidatorBase):
                     ),
                 )
             )
-
-    def _validate_contained_manifest(self, manifest_path: Path, result: ValidationResult) -> None:
-        """Shallow-validate a contained ``.claude-plugin/plugin.json`` file."""
-        try:
-            data: Any = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        except OSError as exc:
+        if len(errors) > MAX_PLUGIN_SCHEMA_FINDINGS:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
                     severity=Severity.HIGH,
-                    check_name="manifest_unreadable",
-                    message=f"Could not read plugin manifest: {exc}",
+                    check_name="schema_errors_truncated",
+                    message=(
+                        f"Plugin schema produced {len(errors)} errors; only the first "
+                        f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported."
+                    ),
                     file_path=str(manifest_path),
-                    suggestion="Ensure the manifest file exists and is readable.",
+                    suggestion="Fix the reported schema errors, then rerun validation.",
+                    metadata={"actual": len(errors), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
+                )
+            )
+
+    def _validate_contained_manifest(self, location: PluginManifestLocation, result: ValidationResult) -> None:
+        """Shallow-validate a contained ``.claude-plugin/plugin.json`` file."""
+        manifest_path = location.path
+        try:
+            raw = location.read_text(encoding="utf-8-sig")
+        except PluginManifestPathError as exc:
+            result.metadata["security_failure"] = True
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="manifest_unsafe",
+                    message=f"Could not securely read plugin manifest: {exc}",
+                    file_path=str(manifest_path),
+                    suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
                 )
             )
             return
-        except json.JSONDecodeError as exc:
+
+        try:
+            data: Any = load_bounded_json(raw)
+        except StructuredDataLimitError as exc:
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="manifest_complexity_limit",
+                    message=f"Contained plugin manifest exceeds structured-data complexity limits: {exc}",
+                    file_path=str(manifest_path),
+                    suggestion="Reduce JSON nesting or collection sizes in plugin.json.",
+                )
+            )
+            return
+        except StructuredDataSyntaxError as exc:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
@@ -246,8 +345,10 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
-        name = data.get("name")
-        if not isinstance(name, str) or not name.strip():
+
+        try:
+            name = require_bounded_string(data.get("name"), "Contained plugin name", max_chars=NAME_MAX_LENGTH)
+        except ValueError:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
@@ -259,33 +360,91 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
-        result.add_success(
-            check_name="plugin_manifest",
-            message=f"Contained plugin manifest '{name}' is valid (name present; full schema deferred)",
-        )
-        plugin = result.metadata.setdefault("plugin", {})
-        plugin["name"] = name
-        dependencies = {key: len(value) for key, value in data.items() if isinstance(value, list)}
-        if dependencies:
-            plugin["declared_dependencies"] = dependencies
+
+        # Runnable MCP servers declared in a contained manifest get blocking,
+        # network-free static security validation (command/url/transport/env).
+        # Provider MCP entries in agent_plugin.yaml are validated by the Pydantic
+        # model instead; runnable entries only exist in the contained form.
+        mcp_findings = validate_contained_mcp_servers(data.get("mcpServers"), str(manifest_path))
+        for finding in mcp_findings[:MAX_PLUGIN_SCHEMA_FINDINGS]:
+            result.add_finding(finding)
+        if len(mcp_findings) > MAX_PLUGIN_SCHEMA_FINDINGS:
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="schema_errors_truncated",
+                    message=(
+                        f"Contained MCP validation produced {len(mcp_findings)} findings; only the first "
+                        f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported."
+                    ),
+                    file_path=str(manifest_path),
+                    suggestion="Fix the reported MCP declaration errors, then rerun validation.",
+                    metadata={"actual": len(mcp_findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
+                )
+            )
+
+        result.add_message(f"Plugin name: {name}")
+        if not mcp_findings:
+            result.add_success(
+                check_name="plugin_manifest",
+                message=(
+                    f"Contained plugin manifest '{name}' is valid (name present; full Claude-plugin schema deferred)"
+                ),
+            )
+        plugin_meta = result.metadata.setdefault("plugin", {})
+        plugin_meta["name"] = name
+        declared = {key: len(value) for key, value in data.items() if isinstance(value, list)}
+        if declared:
+            plugin_meta["declared_dependencies"] = declared
 
     def _validate_in_plugin_skills(self, root: Path, result: ValidationResult) -> None:
-        """Merge schema results for live skills bundled below ``skills/``."""
-        from skillevaluator.utils.helpers import find_bundled_plugin_skills
+        """Validate skills bundled under ``<root>/skills/``."""
+        skills_dir = root / "skills"
+        from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
         from skillevaluator.validators.schema import SchemaValidator
 
-        skills_root = root / "skills"
-        skill_dirs = find_bundled_plugin_skills(root)
-        if not skill_dirs:
+        try:
+            skill_manifests = find_bundled_plugin_skill_manifests(root)
+        except ValueError as exc:
+            result.metadata["security_failure"] = True
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="bundled_skill_path_unsafe",
+                    message=f"Could not securely discover bundled skills: {exc}",
+                    file_path=str(skills_dir),
+                    suggestion="Replace linked/junction bundled skill directories with regular contained directories.",
+                )
+            )
             return
-        names = [skill_dir.relative_to(skills_root).as_posix() for skill_dir in skill_dirs]
-        plugin = result.metadata.setdefault("plugin", {})
-        plugin["in_plugin_skills"] = len(skill_dirs)
-        plugin["bundled_skills"] = names
+        if not skill_manifests:
+            return
+
+        skill_names = [manifest.relative_path.parent.as_posix() for manifest in skill_manifests]
+        skill_dirs = [skills_dir / manifest.relative_path.parent for manifest in skill_manifests]
+        plugin_meta = result.metadata.setdefault("plugin", {})
+        plugin_meta["in_plugin_skills"] = len(skill_dirs)
+        plugin_meta["bundled_skills"] = skill_names
         validator = SchemaValidator(policy=self.policy)
-        for skill_dir, name in zip(skill_dirs, names, strict=True):
+
+        for skill_dir, skill_name, manifest in zip(skill_dirs, skill_names, skill_manifests, strict=True):
             try:
-                skill_result = validator.validate(skill_dir)
+                skill_result = validator.validate_secure_manifest(skill_dir, manifest)
+            except SecurePathError as exc:
+                result.metadata["security_failure"] = True
+                result.add_finding(
+                    Finding(
+                        category="PLUGIN_SCHEMA",
+                        severity=Severity.HIGH,
+                        check_name="bundled_skill_path_unsafe",
+                        message=f"Bundled skill '{skill_name}' changed or became unsafe after discovery: {exc}",
+                        file_path=f"[{skill_name}] {skill_dir}",
+                        suggestion="Replace linked, hard-linked, or special manifests with regular contained files.",
+                    )
+                )
+                continue
             except Exception as exc:
                 logger.warning("In-plugin skill validation failed for %s: %s", skill_dir, exc)
                 result.add_finding(
@@ -293,36 +452,18 @@ class PluginSchemaValidator(ValidatorBase):
                         category="PLUGIN_SCHEMA",
                         severity=Severity.HIGH,
                         check_name="in_plugin_skill_error",
-                        message=f"Could not validate bundled skill '{name}': {exc}",
-                        file_path=f"[{name}] {skill_dir}",
+                        message=f"Could not validate bundled skill '{skill_name}': {exc}",
+                        file_path=f"[{skill_name}] {skill_dir}",
                         suggestion="Inspect the bundled skill directory; it may be malformed.",
                     )
                 )
                 continue
+
             if skill_result.passed:
-                result.merge_with_prefix(skill_result, name)
-                result.add_success(check_name=name, message=f"Bundled skill '{name}' passed skill schema validation")
+                result.merge_with_prefix(skill_result, skill_name)
+                result.add_success(
+                    check_name=skill_name,
+                    message=f"Bundled skill '{skill_name}' passed skill schema validation",
+                )
             else:
-                result.merge_with_prefix(skill_result, name)
-
-    def _add_success(
-        self,
-        manifest: PluginManifest,
-        manifest_path: Path,
-        result: ValidationResult,
-    ) -> None:
-        """Record success details and reporting metadata for a valid manifest."""
-        result.add_message(f"Plugin name: {manifest.name}")
-        result.add_message(f"Author: {manifest.author.email}")
-        result.add_success(
-            check_name="plugin_manifest",
-            message=f"Plugin manifest '{manifest.name}' is valid",
-        )
-
-        result.metadata["manifest_type"] = PLUGIN_MANIFEST_TYPE
-        result.metadata["plugin_mode"] = PLUGIN_MODE
-        result.metadata["plugin"] = {
-            "name": manifest.name,
-            "manifest_filename": manifest_path.name,
-            "root": str(manifest_path.parent),
-        }
+                result.merge_with_prefix(skill_result, skill_name)

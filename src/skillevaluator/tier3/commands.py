@@ -610,9 +610,13 @@ def evaluate(
     custom_dockerfile_mode: str | None,
     skill_workspace_mode: str | None,
     include_skills: tuple[Path, ...],
+    workspace_skills_baseline: bool = True,
+    sum_of_parts_arm: bool = False,
+    eval_target_kind: str = "skill",
     copy_repo: bool,
     grading_mode: str | None,
     results_dir: Path | None,
+    resolved_results_root: Path | None = None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None = None,
     timeout_multiplier: float | None,
@@ -659,7 +663,7 @@ def evaluate(
                 "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
             )
 
-        output_dir = resolve_results_root(skill_path, results_dir)
+        output_dir = resolved_results_root or resolve_results_root(skill_path, results_dir)
         engine_started = True
         return run_harbor_eval(
             skill_path=skill_path.resolve(),
@@ -675,6 +679,9 @@ def evaluate(
             custom_dockerfile_mode=custom_dockerfile_mode,
             skill_workspace_mode=skill_workspace_mode,
             include_skills=[p.resolve() for p in include_skills] or None,
+            workspace_skills_baseline=workspace_skills_baseline,
+            sum_of_parts_arm=sum_of_parts_arm,
+            eval_target_kind=eval_target_kind,
             copy_repo=copy_repo,
             grading_mode=grading_mode,
             output_dir=output_dir,

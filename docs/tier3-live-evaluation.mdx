@@ -309,6 +309,56 @@ enabled — via `--tier3`, `--autopilot`, `--full`, or the `--agent-eval` alias.
 deprecated. See the [CLI Reference](cli-reference.mdx) for the full group.
 </Note>
 
+## Plugin evaluation
+
+Run all three tiers for a plugin with the same validation entry point:
+
+```bash title="Validate a plugin through Tier 3"
+skillevaluator validate ./my-plugin --type plugin --tier3
+```
+
+For focused Tier 3 iteration, use the plugin-specific command and optionally
+provide a combined dataset or local member skills:
+
+```bash title="Evaluate plugin effectiveness and integration"
+skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both
+skillevaluator tier3 evaluate-plugin ./my-plugin \
+  --evals-source ./evals/evals.json --include-skills ../skills/local-member
+```
+
+Tier 3 builds a temporary skill-shaped wrapper and reuses the Harbor evaluation
+engine. It evaluates locally available components only:
+
+- bundled skills under `skills/` and same-repository `github` or `git` refs;
+- contained rule files; and
+- contained command or secure URL MCP servers, staged only in the plugin arm.
+
+Remote components are never fetched. Unresolved refs and provider-only MCP
+servers are recorded in plugin provenance. A partial run is reported as
+`INCOMPLETE`, never as a full pass; a plugin with nothing locally evaluable is
+reported as an honest advisory skip.
+
+Plugin baselines are controlled with `--lift-mode`:
+
+| Mode | Comparison |
+| --- | --- |
+| `effectiveness` | Coordinated plugin versus no plugin; default |
+| `integration` | Coordinated plugin versus its member skills staged individually |
+| `both` | Effectiveness plus a third, report-only sum-of-parts arm |
+
+Integration is only meaningful when the dataset contains composition evidence:
+at least one case with `cross_component: true` and two or more distinct
+`expected_skills`. Explicit `integration` fails as inconclusive when that
+evidence is absent. `both` preserves the valid effectiveness run and records
+that Integration was skipped. Integration modes require the baseline and cannot
+be combined with `--skip-baseline`. Native Harbor-only sources remain valid for
+effectiveness but do not establish composition evidence by themselves.
+
+The Integration result is advisory and never changes the main Tier 3 score,
+verdict, or validation exit code. MCP declarations are statically checked before
+staging; inline credentials, shell command forms, insecure URLs, floating
+versions, and disabled TLS verification are rejected.
+
 ## Plan for cost
 
 Tier 3 performs live model and agent calls, so it can incur provider charges
@@ -358,6 +408,21 @@ Local mode is experimental and provides weaker isolation than Docker or a
 managed sandbox. Use it only for trusted skills and workspaces; saving sandbox
 cost is not worth running untrusted code directly on the host.
 
+## Follow progress
+
+The default `--progress auto` uses a fixed-height Rich view on an interactive
+terminal and durable line-oriented output in redirected or CI logs. The run
+reports configuration, model resolution, environment and credential preflight,
+input staging, image preparation, agent execution, result collection, and
+report writing. Plain mode also emits heartbeats while a stage is still active;
+use `--progress rich`, `plain`, or `off` to choose explicitly.
+
+Progress details remove terminal control sequences and redact known credentials
+and key-like assignments. The Rich view keeps a bounded recent-stage history so
+the frame does not grow as agents complete. Progress rendering is best effort:
+if its initialization, refresh thread, or terminal redraw fails, the reporter
+disables itself without aborting the evaluation.
+
 ## Tune the run
 
 The high-signal flags, with defaults:
@@ -371,7 +436,7 @@ The high-signal flags, with defaults:
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | on | One real, bounded smoke task per agent before the full A/B matrix; `--no-agent-runtime-preflight` skips it |
-| `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
+| `--progress` | `auto` | Progress rendering: `auto`, `rich` (fixed-height live TTY view with secret redaction), `plain`, or `off` |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
@@ -412,6 +477,15 @@ Missing metrics are never coerced to `0.0`: an unscored run reports an
 `overall_score` of `None`, averages omit unscored metrics, and the affected
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
 `execution_status` is not `succeeded`.
+
+A partially errored Harbor job remains an execution failure, but rewards from
+its completed trials are preserved when every aggregate error maps to a
+concrete failed trial and Harbor reports no failed status or non-zero aggregate
+exit code. Inspect `expected_attempts`, `scored_attempts`, `trial_failures`, and
+`execution_errors` before using those partial scores. When the error count is
+ambiguous, trials are still pending or cancelled, or the aggregate job itself
+failed, all rewards for that job are suppressed instead of presenting an
+uncertain score.
 
 [Reports & Results](reports.mdx) covers the full on-disk layout, the
 machine-readable JSON contract, and how to judge whether a given lift is good.

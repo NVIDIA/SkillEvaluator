@@ -331,17 +331,32 @@ def apply_policy(
     if policy is None:
         return results
     for result in results:
+        advisory = isinstance(result.metadata, dict) and result.metadata.get("advisory_tier2")
+        security_failure = isinstance(result.metadata, dict) and result.metadata.get("security_failure")
         changed = False
         for finding in result.findings:
             current = (
                 finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower())
             )
-            new_severity = policy.severity_for(finding.category, finding.check_name, current)
+            # Security failures describe unsafe input that was refused before a
+            # validator could run. Policy overrides must not hide that failure.
+            new_severity = current if security_failure else policy.severity_for(
+                finding.category,
+                finding.check_name,
+                current,
+            )
+            if advisory and not security_failure and new_severity in (Severity.CRITICAL, Severity.HIGH):
+                new_severity = Severity.MEDIUM
             if new_severity != current:
                 finding.severity = new_severity
                 changed = True
         if changed:
             result.recalculate_from_findings()
+        if security_failure:
+            result.passed = False
+            result.metadata["execution_status"] = "failed"
+        elif advisory:
+            result.passed = True
         if isinstance(result.metadata, dict):
             result.metadata["policy"] = policy.to_dict()
     return results

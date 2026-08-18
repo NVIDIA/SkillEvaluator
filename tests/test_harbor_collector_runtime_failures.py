@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
@@ -266,6 +268,61 @@ def test_partial_rewards_stay_suppressed_when_not_every_job_error_maps_to_a_tria
         (trial_dir / "verifier").mkdir(parents=True)
         result: dict[str, object] = {"trial_name": trial_dir.name}
         if case_id == "case-001":
+            result["exception_info"] = {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out",
+            }
+        (trial_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        (trial_dir / "verifier" / "reward.json").write_text(
+            json.dumps({"entry_id": case_id, "overall": 1.0}),
+            encoding="utf-8",
+        )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=2,
+        expected_case_ids=["case-001", "case-002"],
+        expected_trials=2,
+    )
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    assert results["agents"]["opencode"]["num_trials_with"] == 0
+
+
+@pytest.mark.parametrize(("field", "value"), [("status", "failed"), ("exit_code", 17), ("returncode", 9)])
+def test_partial_rewards_stay_suppressed_for_aggregate_job_failure(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    job_dir.mkdir(parents=True)
+    payload: dict[str, object] = {
+        "n_total_trials": 2,
+        "stats": {
+            "n_completed_trials": 2,
+            "n_errored_trials": 1,
+            "n_running_trials": 0,
+            "n_pending_trials": 0,
+            "n_cancelled_trials": 0,
+            "n_retries": 0,
+            "evals": {},
+        },
+        field: value,
+    }
+    (job_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    for case_id in ("case-001", "case-002"):
+        trial_dir = job_dir / f"{case_id}__attempt"
+        (trial_dir / "verifier").mkdir(parents=True)
+        result: dict[str, object] = {"trial_name": trial_dir.name}
+        if case_id == "case-002":
             result["exception_info"] = {
                 "exception_type": "AgentTimeoutError",
                 "exception_message": "Agent execution timed out",

@@ -11,7 +11,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Initial public release candidate.
 - Enabled optional semantic-version validation in the default Tier 1 pipeline,
   including a public `--previous-version` monotonic-bump bound.
-
+- Added public plugin evaluation across all tiers: static schema and MCP checks,
+  advisory offline dependency/context deduplication, and Harbor-backed live
+  evaluation with effectiveness and optional sum-of-parts Integration arms.
 - Added NVIDIA Build live-agent paths: direct OpenCode support plus Docker
   compatibility bridges for Codex and experimental Claude Code, including
   multi-turn tool-call continuation.
@@ -21,10 +23,20 @@ All notable changes to SkillEvaluator are documented in this file.
 - Expanded the documentation site to fifteen pages — quickstart, eval
   datasets, agents and sandboxes, custom graders, reports, CI integration,
   CLI reference, and environment variables — under a task-oriented
-  navigation, with every command verified against the current CLI.
+  navigation, with every command verified against the current CLI. The public
+  guides now cover plugin evaluation flags, per-case input isolation, live
+  progress, partial-result safeguards, and context-aware quality scoring.
 
 ### Security
 
+- Hardened Tier 2 and plugin input handling with descriptor-anchored,
+  no-follow discovery and reads; linked, hard-linked, reparse-point, escaping,
+  and special files are rejected, while YAML/JSON nesting, scalar volume,
+  embedding work, and LLM prompt/response budgets are bounded before provider
+  calls or cache writes. The only redirect exception is the exact, contained
+  `CLAUDE.md -> AGENTS.md` public compatibility alias; Windows reads now use
+  native handle verification with the same fail-closed identity checks as
+  POSIX.
 - Secure Docker exec redaction now ignores environment values shorter than eight
   characters, matching the exact secret length floor used elsewhere. Short
   flags such as `CLAUDE_CODE_DISABLE_POLICY_SKILLS=1` no longer rewrite digits
@@ -90,6 +102,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Kept Tier 3's interactive progress frame at a stable height, bounded visible
+  stage history, serialized terminal redraws, and safely disabled a reporter
+  when initialization or background refresh fails.
+- Made the `evaluate` workflow visible in top-level CLI help while retaining
+  the documented `skillevaluator tier3 evaluate` spelling.
+- Tier 3 preserves completed rewards from partially errored jobs only when each
+  aggregate error maps to a concrete failed trial; explicit failed statuses and
+  non-zero aggregate exit codes still suppress ambiguous scores.
 - Quality scoring now uses boundary-aware and context-aware matching for XML tags,
   reserved names, MCP guidance, README references, time references, exclusivity
   language, instruction action verbs, and nested Markdown links, avoiding
@@ -137,6 +157,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Programmatic dataset generation now returns explicit created, preview, and
   unchanged outcomes, preserves actionable failures, and no longer mutates
   process-wide command-line arguments.
+- Plugin manifest discovery is now root-bounded across all tiers, and Integration
+  evaluation requires explicit cross-component dataset evidence instead of
+  reporting unsupported composition claims.
 - Security and full-feature installs now work on RHEL 8 and other glibc 2.28
   Linux systems by keeping Semgrep and SkillSpector in separate tool
   environments while retaining compatible bundled Python dependencies.

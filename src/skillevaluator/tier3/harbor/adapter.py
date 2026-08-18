@@ -1725,11 +1725,11 @@ def _write_instruction(task_dir: Path, question: str) -> None:
     (task_dir / "instruction.md").write_text(question + "\n", encoding="utf-8")
 
 
-def _load_mcp_servers(skill_path: Path) -> list[dict[str, Any]]:
-    """Load MCP server declarations from evals/environment/mcp_servers.toml."""
+def _load_mcp_servers(skill_path: Path, filename: str = "mcp_servers.toml") -> list[dict[str, Any]]:
+    """Load one MCP server declaration file through the evaluator snapshot."""
     evals_dir = skill_path / "evals"
     environment_dir = evals_dir / "environment"
-    mcp_file = environment_dir / "mcp_servers.toml"
+    mcp_file = environment_dir / filename
     if not os.path.lexists(environment_dir):
         return []
     parent_snapshot = _snapshot_evaluator_parent_path(mcp_file, evals_dir, label="MCP server configuration")
@@ -1753,19 +1753,19 @@ def _load_mcp_servers(skill_path: Path) -> list[dict[str, Any]]:
             return []
         servers = data.get("mcp_servers", [])
         if not isinstance(servers, list):
-            logger.warning("mcp_servers.toml: expected [[mcp_servers]] array, got %s", type(servers).__name__)
+            logger.warning("%s: expected [[mcp_servers]] array, got %s", filename, type(servers).__name__)
             return []
         valid = []
         for s in servers:
             if not isinstance(s, dict) or "name" not in s:
-                logger.warning("mcp_servers.toml: skipping entry missing 'name': %s", s)
+                logger.warning("%s: skipping entry missing 'name': %s", filename, s)
                 continue
             if "url" not in s and "command" not in s:
-                logger.warning("mcp_servers.toml: entry '%s' needs 'url' or 'command'", s.get("name"))
+                logger.warning("%s: entry '%s' needs 'url' or 'command'", filename, s.get("name"))
                 continue
             if "command" in s and "transport" not in s:
                 s = {**s, "transport": "stdio"}
-                logger.debug("mcp_servers.toml: inferred transport=stdio for '%s'", s["name"])
+                logger.debug("%s: inferred transport=stdio for '%s'", filename, s["name"])
             valid.append(s)
         if valid:
             logger.debug("Loaded %d MCP server(s) from %s", len(valid), mcp_file)
@@ -3609,6 +3609,7 @@ def _stage_task_inputs(
     source_skill_path: Path,
     evals_dir: Path,
 ) -> bool:
+    """Stage only an eval case's declared files from the evaluator snapshot."""
     input_dir = env_dir / "input"
     if os.path.lexists(input_dir) and (_path_is_link_or_reparse(input_dir) or not input_dir.is_dir()):
         input_dir.unlink()
@@ -4919,6 +4920,8 @@ def _generate_harbor_tasks_into(
         input_files_dir = None
 
     mcp_servers = _load_mcp_servers(evaluator_skill_path)
+    if with_skill:
+        mcp_servers.extend(_load_mcp_servers(evaluator_skill_path, "plugin_mcp_servers.toml"))
     prepared_entries = _preflight_generated_tasks(entries, output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     task_dirs: list[str] = []

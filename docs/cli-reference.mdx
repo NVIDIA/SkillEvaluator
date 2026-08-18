@@ -1,6 +1,6 @@
 ---
 title: "CLI Reference"
-description: "Every SkillEvaluator command, flag, and default — validate, quality-check, similarity-check, tier3 evaluate, and the tier1/tier2/tier3 expert groups."
+description: "Every SkillEvaluator command, flag, and default — validate, quality-check, similarity-check, tier3 evaluate, tier3 evaluate-plugin, and the tier1/tier2/tier3 expert groups."
 layout: reference
 ---
 
@@ -27,6 +27,7 @@ commands referenced below.
 | [dedup-scan](#dedup-scan) | Alias of `context-optimization-check` | Embeddings + LLM provider key |
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
+| [tier3 evaluate-plugin](#tier3-evaluate-plugin) | Run public plugin effectiveness or Integration evaluation | The same Tier 3 runtime requirements as `tier3 evaluate` |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
@@ -68,9 +69,9 @@ Most commands are also reachable under a tier-prefixed group — `skillevaluator
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `evaluate-plugin`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
 
-The exceptions run in both directions. `health-check` and [models](#models) are top-level only, with no tier-prefixed twin. And two commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
+The exceptions run in both directions. `health-check` and [models](#models) are top-level only, with no tier-prefixed twin. [tier3 evaluate](#tier3-evaluate) is also discoverable as top-level `evaluate`, while [tier3 evaluate-plugin](#tier3-evaluate-plugin) and `tier3 validate` are advertised only inside the `tier3` group:
 
 ### tier3 validate
 
@@ -102,6 +103,8 @@ skillevaluator validate ./my-skill --tier3 -a codex \
     --block-on-agent-eval                                  # gate on Tier 3 too
 skillevaluator validate ./my-skill --autopilot            # Tier 3, generating evals if missing
 skillevaluator validate ./my-skill --full -a codex        # everything, one shot
+skillevaluator validate ./my-plugin --type plugin --tier3 \
+    --lift-mode both                                      # plugin effectiveness + Integration
 skillevaluator validate ./my-skill --tiers 1,3            # explicit tier selection
 skillevaluator validate ./skills-folder --full            # whole catalog, serially
 skillevaluator validate ./my-skill --tier3 -a codex,claude-code \
@@ -165,6 +168,7 @@ The following flags are forwarded to the live-eval engine **only when Tier 3 is 
 | `--autopilot` | off | Generate an evaluation source automatically when missing, then run Tier 3 (implies `--tier3`). |
 | `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents to evaluate. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |
+| `--lift-mode [effectiveness\|integration\|both]` | `effectiveness` | Plugin only: compare the coordinated plugin with no plugin, its member skills staged individually, or both. Integration requires explicit cross-component dataset evidence. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -298,9 +302,8 @@ Run Tier 3 live agent evaluation: real agents attempt your eval cases with and w
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
 ```
 
-<Note>
-The old top-level spelling `skillevaluator evaluate` still works for existing scripts, but no longer appears in `--help`; `tier3 evaluate` is the advertised name.
-</Note>
+The focused workflow is also discoverable as `skillevaluator evaluate`; both
+spellings share the same flags and behavior.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
@@ -332,6 +335,54 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.4-mini` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
+
+## tier3 evaluate-plugin
+
+Run Tier 3 against a public plugin without fetching remote components. The
+command accepts a bundle-reference `agent_plugin.yaml`/`.yml` target or a
+contained `.claude-plugin/plugin.json` target, stages the locally evaluable
+skills, rules, and MCP declarations into a temporary wrapper, and records any
+unresolved remote references in plugin provenance.
+
+```bash title="Evaluate plugin effectiveness and Integration"
+skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
+  --evals-source ./evals/evals.json --agents codex
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--evals-source PATH` | auto-detect | Dataset file, `evals/` directory, or skill/plugin directory containing `evals/`. |
+| `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents. |
+| `--env-mode` | `docker` | Harbor environment backend; accepts the same values as [tier3 evaluate](#tier3-evaluate). |
+| `--skip-baseline` | off | Skip the no-plugin baseline. Invalid with `integration` or `both`, which require a baseline. |
+| `--lift-mode [effectiveness\|integration\|both]` | `effectiveness` | Compare the coordinated plugin with no plugin, its member skills staged individually, or both. `both` falls back to effectiveness when composition evidence is missing. |
+| `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
+| `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
+| `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
+| `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
+| `--model TEXT` | unset | Global agent model override. |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
+| `--custom-dockerfile-mode [preserve\|rebase]` | unset | Apply the dataset's custom Dockerfile using the same modes as `tier3 evaluate`. |
+| `--include-skills PATH` | none | Additional local member skills to stage (repeatable). Plugin evaluation always uses a group workspace. |
+| `--repo-root DIRECTORY` | auto-detect | Clone-root override used to resolve same-repository component references deterministically. |
+| `--copy-repo` | off | Copy the surrounding repository into the eval environment. |
+| `--grading-mode [default\|default_plus_custom\|custom_only]` | unset | Reward/grading mode — see [Custom Graders & Tasks](custom-graders.mdx). |
+| `--results-dir DIRECTORY` | unset | Directory for live-eval results. |
+| `--harbor-keep-jobs` | off | Retain Harbor job directories and artifacts for inspection. |
+| `--agent-runtime-preflight / --no-agent-runtime-preflight` | enabled | Run one bounded agent smoke task before the full evaluation matrix. |
+| `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
+| `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation. |
+| `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB. |
+| `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB. |
+| `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run. |
+
+Integration requires at least one dataset case with `cross_component: true`
+and two or more distinct `expected_skills`. An explicit `integration` run is
+inconclusive without that evidence; `both` still runs the valid effectiveness
+comparison and records why Integration was skipped. See [Plugin
+evaluation](tier3-live-evaluation.mdx#plugin-evaluation) for component support,
+security restrictions, and result semantics.
 
 ## create-eval-dataset
 

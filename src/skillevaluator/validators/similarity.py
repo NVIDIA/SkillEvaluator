@@ -9,14 +9,17 @@ similarity using public OpenAI-compatible embedding APIs.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 from skillevaluator.constants import (
     CONTENT_TYPE_UNKNOWN,
     SIMILARITY_DEFAULT_THRESHOLD,
 )
-from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError
+from skillevaluator.embedding.client import (
+    EmbeddingClient,
+    SimilarityConfigError,
+    validate_similarity_threshold,
+)
 from skillevaluator.embedding.extractor import extract_from_skill
 from skillevaluator.embedding.registry import EmbeddingRegistry, SimilarityMatch
 from skillevaluator.logging_config import get_logger
@@ -45,8 +48,7 @@ class SimilarityValidator(ValidatorBase):
         content_type: str | None = None,
         full_body: bool = False,
     ) -> None:
-        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
-            raise ValueError("Similarity threshold must be finite and within [0, 1]")
+        threshold = validate_similarity_threshold(threshold, context="Similarity")
         if catalog_path and cache_path and catalog_path != cache_path:
             raise ValueError("--catalog and deprecated --cache cannot be used together")
         if save_catalog_path and save_cache_path and save_catalog_path != save_cache_path:
@@ -105,9 +107,13 @@ class SimilarityValidator(ValidatorBase):
 
         try:
             if self._catalog_path:
-                if not self._catalog_path.exists():
+                try:
+                    self._catalog_path.lstat()
+                except FileNotFoundError:
                     result.add_error(f"Catalog does not exist: {self._catalog_display_name(self._catalog_path)}")
                     return result
+                except OSError as exc:
+                    raise SimilarityConfigError(f"Cannot inspect embedding catalog safely: {exc}") from exc
                 registry.load_catalog(self._catalog_path)
                 result.add_success(
                     "catalog_loaded",

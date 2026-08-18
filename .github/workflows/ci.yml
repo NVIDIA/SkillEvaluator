@@ -281,6 +281,7 @@ jobs:
           tests/test_results_location_legacy_compatibility.py
           tests/test_tier3_compare.py
           tests/test_tier3_progress.py
+          tests/utils/test_secure_fs_platform.py
           tests/utils/test_secure_fs_selected_reads.py
           tests/test_oss_packaging.py
 

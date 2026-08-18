@@ -15,6 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_FILE_BYTES,
     DEFAULT_ALLOWED_SKILL_DIRS,
     KEBAB_CASE_PATTERN,
     MAX_SKILL_MD_LINES,
@@ -27,6 +28,7 @@ from skillevaluator.constants import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.models.skill import SkillFrontmatter, SkillManifest
+from skillevaluator.utils.secure_fs import SecureFile, SecureRoot
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.policy import ValidationPolicy, default_policy
@@ -112,10 +114,29 @@ class SchemaValidator(ValidatorBase):
 
         return result
 
-    def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
+    def validate_secure_manifest(self, skill_path: Path, manifest: SecureFile) -> ValidationResult:
+        """Validate a manifest using the inode identity retained by secure discovery."""
+        with SecureRoot(manifest.root) as secure_root:
+            content = secure_root.read_file_text(manifest, CONTENT_DEDUP_MAX_FILE_BYTES)
+        manifest_path = skill_path / manifest.relative_path.name
+        return self._validate_single_skill(
+            skill_path,
+            manifest_path=manifest_path,
+            manifest_content=content,
+            inspect_optional_files=False,
+        )
+
+    def _validate_single_skill(
+        self,
+        skill_path: Path,
+        *,
+        manifest_path: Path | None = None,
+        manifest_content: str | None = None,
+        inspect_optional_files: bool = True,
+    ) -> ValidationResult:
         """Run all schema validation checks on a single skill directory."""
         result = ValidationResult()
-        skill_md = self._find_skill_manifest(skill_path)
+        skill_md = manifest_path or self._find_skill_manifest(skill_path)
 
         if not skill_md:
             result.add_finding(
@@ -136,7 +157,9 @@ class SchemaValidator(ValidatorBase):
             file_path=str(skill_md),
         )
 
-        if self._is_lowercase_manifest(skill_path):
+        if (manifest_path is not None and skill_md.name == "skill.md") or (
+            manifest_path is None and self._is_lowercase_manifest(skill_path)
+        ):
             result.add_finding(
                 Finding(
                     category="SCHEMA",
@@ -154,17 +177,23 @@ class SchemaValidator(ValidatorBase):
             )
 
         # Frontmatter validation is prerequisite for other checks
-        frontmatter_result = self._validate_frontmatter(skill_md)
+        frontmatter_result = self._validate_frontmatter(skill_md, content=manifest_content)
         result.merge(frontmatter_result)
         if not frontmatter_result.passed:
             return result
 
         # Run remaining validations
-        result.merge(self._validate_folder_structure(skill_path))
+        result.merge(
+            self._validate_folder_structure(
+                skill_path,
+                manifest_present=True if manifest_path is not None else None,
+            )
+        )
         result.merge(self._validate_naming_conventions(skill_path))
-        result.merge(self._validate_line_count(skill_md))
-        result.merge(self._validate_body_content(skill_md))
-        result.merge(self._validate_optional_files(skill_path))
+        result.merge(self._validate_line_count(skill_md, content=manifest_content))
+        result.merge(self._validate_body_content(skill_md, content=manifest_content))
+        if inspect_optional_files:
+            result.merge(self._validate_optional_files(skill_path))
 
         # Frontmatter-dependent validations
         if frontmatter := result.metadata.get("frontmatter"):
@@ -173,25 +202,26 @@ class SchemaValidator(ValidatorBase):
 
         return result
 
-    def _validate_frontmatter(self, skill_md: Path) -> ValidationResult:
+    def _validate_frontmatter(self, skill_md: Path, *, content: str | None = None) -> ValidationResult:
         """Parse SKILL.md and validate YAML frontmatter against Pydantic schema."""
         result = ValidationResult()
         file_path = str(skill_md)
 
-        try:
-            content = skill_md.read_text(encoding="utf-8")
-        except Exception as e:
-            result.add_finding(
-                Finding(
-                    category="SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="file_readable",
-                    message=f"Failed to read file: {e}",
-                    file_path=file_path,
-                    suggestion="Check file permissions and encoding",
+        if content is None:
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+            except Exception as e:
+                result.add_finding(
+                    Finding(
+                        category="SCHEMA",
+                        severity=Severity.HIGH,
+                        check_name="file_readable",
+                        message=f"Failed to read file: {e}",
+                        file_path=file_path,
+                        suggestion="Check file permissions and encoding",
+                    )
                 )
-            )
-            return result
+                return result
 
         match = FRONTMATTER_PATTERN.match(content)
         if not match:
@@ -274,7 +304,12 @@ class SchemaValidator(ValidatorBase):
 
         return result
 
-    def _validate_folder_structure(self, skill_path: Path) -> ValidationResult:
+    def _validate_folder_structure(
+        self,
+        skill_path: Path,
+        *,
+        manifest_present: bool | None = None,
+    ) -> ValidationResult:
         """Verify skill is in valid folder hierarchy (skills/ or team-skills/)."""
         result = ValidationResult()
         parts = skill_path.parts
@@ -333,7 +368,7 @@ class SchemaValidator(ValidatorBase):
             )
 
         # Verify SKILL.md exists (case-insensitive)
-        if not self._find_skill_manifest(skill_path):
+        if manifest_present is False or (manifest_present is None and not self._find_skill_manifest(skill_path)):
             result.add_finding(
                 Finding(
                     category="SCHEMA",
@@ -433,13 +468,13 @@ class SchemaValidator(ValidatorBase):
 
         return result
 
-    def _validate_line_count(self, skill_md: Path) -> ValidationResult:
+    def _validate_line_count(self, skill_md: Path, *, content: str | None = None) -> ValidationResult:
         """Warn if SKILL.md exceeds recommended line count."""
         result = ValidationResult()
         file_path = str(skill_md)
 
         try:
-            line_count = len(skill_md.read_text(encoding="utf-8").splitlines())
+            line_count = len((skill_md.read_text(encoding="utf-8") if content is None else content).splitlines())
             if line_count > MAX_SKILL_MD_LINES:
                 result.add_finding(
                     Finding(
@@ -476,7 +511,7 @@ class SchemaValidator(ValidatorBase):
 
     _INSTRUCTIONS_ALTERNATIVES = ("## Instructions", "## Usage")
 
-    def _validate_body_content(self, skill_md: Path) -> ValidationResult:
+    def _validate_body_content(self, skill_md: Path, *, content: str | None = None) -> ValidationResult:
         """Validate SKILL.md body has required heading and sections.
 
         Per agentskills.io spec, the body has no format restrictions, so we
@@ -489,10 +524,11 @@ class SchemaValidator(ValidatorBase):
         result = ValidationResult()
         file_path = str(skill_md)
 
-        try:
-            content = skill_md.read_text(encoding="utf-8")
-        except Exception:
-            return result
+        if content is None:
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+            except Exception:
+                return result
 
         match = FRONTMATTER_PATTERN.match(content)
         body = match.group(2) if match else content

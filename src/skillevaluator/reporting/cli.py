@@ -354,6 +354,20 @@ class CLIReporter(ReporterBase):
             console.print(table)
             console.print()
 
+        integration = agent_eval.get("integration")
+        if isinstance(integration, dict):
+            verdict = str(integration.get("verdict") or "inconclusive").replace("_", " ").upper()
+            lift = integration.get("integration_lift")
+            lift_text = f"{lift:+.2f}" if isinstance(lift, int | float) else "N/A"
+            console.print(f"  [bold]Integration:[/bold] {verdict} (lift {lift_text}) [dim](advisory)[/dim]")
+            components = integration.get("components") or []
+            if components:
+                console.print(f"    [dim]components: {', '.join(str(component) for component in components)}[/dim]")
+            interpretation = str(integration.get("interpretation") or "").strip()
+            if interpretation:
+                console.print(f"    [dim]{interpretation}[/dim]", soft_wrap=True)
+            console.print()
+
         recommendations = agent_eval.get("recommendations") or []
         if recommendations:
             printed = False

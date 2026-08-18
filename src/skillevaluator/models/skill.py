@@ -23,7 +23,7 @@ from skillevaluator.constants import (
     RESERVED_SKILL_NAMES,
 )
 
-XML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:\s[^<>]*)?>|</?[A-Za-z][A-Za-z0-9_-]*\s[^<>]*$")
+XML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:\s[^<>]*)?/?>|</?[A-Za-z][A-Za-z0-9_-]*\s[^<>]*$")
 
 #: Strict, bounded ASCII semantic-version pattern for optional metadata.version labels.
 _SEMVER_COMPONENT = r"(?:0|[1-9][0-9]{0,8})"

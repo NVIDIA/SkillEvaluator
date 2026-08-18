@@ -110,10 +110,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 preserves completed rewards from partially errored jobs only when each
   aggregate error maps to a concrete failed trial; explicit failed statuses and
   non-zero aggregate exit codes still suppress ambiguous scores.
-- Quality scoring now uses boundary-aware and context-aware matching for XML
-  tags, reserved names, MCP guidance, README references, time references,
-  exclusivity language, instruction action verbs, and nested Markdown links,
-  avoiding incidental-word score changes.
+- Quality scoring now uses boundary-aware and context-aware matching for XML tags,
+  reserved names, MCP guidance, README references, time references, exclusivity
+  language, instruction action verbs, and nested Markdown links, avoiding
+  incidental-word score changes.
 - Tier 3 generated tasks now stage only an entry's declared `files`, preventing
   undeclared fixtures from the shared `evals/files/` directory from appearing
   in that task's `/workspace/input/`, while preserving copy-all behavior for

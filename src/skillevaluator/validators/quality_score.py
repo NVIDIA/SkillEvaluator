@@ -42,6 +42,12 @@ logger = get_logger(__name__)
 _WORD_CHAR = r"A-Za-z0-9_"
 _MARKDOWN_LINK_START_RE = re.compile(r"\[[^\]\n]*\]\(\s*")
 _MARKDOWN_LINK_CLOSER_RE = re.compile(r"^\s*(?:(?:\"[^\"\n]*\"|'[^'\n]*'|\([^\)\n]*\))\s*)?\)")
+_MARKDOWN_REFERENCE_DEFINITION_RE = re.compile(
+    r"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]*)>|([^ \t\r\n]+))",
+    re.MULTILINE,
+)
+_MARKDOWN_REFERENCE_LINK_RE = re.compile(r"\[([^\]\n]+)\]\[([^\]\n]*)\]")
+_MARKDOWN_SHORTCUT_REFERENCE_RE = re.compile(r"(?<![!\]])\[([^\]\n]+)\](?![\(\[])")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
     r"validat(?:e|es|ed|ing|ion|ions))\b",
@@ -55,15 +61,21 @@ _NEGATED_MCP_RES = (
         r"(?:\w+\s+){0,3}mcp\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\b(?:(?:is|are|was|were)\s+not|(?:isn't|aren't|wasn't|weren't))\s+"
+        r"(?:(?:currently|actively)\s+){0,2}"
+        r"(?:using|requiring|depending\s+on|relying\s+on)\s+(?:an?\s+|the\s+)?mcp\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bwithout\s+(?:an?\s+)?mcp\b", re.IGNORECASE),
     re.compile(r"\b(?:no|not\s+(?:an?\s+)?)mcp\b", re.IGNORECASE),
     re.compile(
-        r"\bmcp\b\s+(?:"
+        r"\bmcp\b(?:\s+(?:use|usage|support|integration|access|capability|server))?\s+(?:"
         r"(?:(?:is|are|was|were)\s+not|(?:isn't|aren't|wasn't|weren't))|"
         r"(?:(?:should|must|shall|can|could|would)\s+not|"
         r"(?:shouldn't|mustn't|shan't|can't|couldn't|wouldn't))\s+be"
         r")\s+"
-        r"(?:used|required|needed|enabled|supported|involved)\b",
+        r"(?:used|required|needed|enabled|supported|involved|necessary|available)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -92,12 +104,11 @@ _MARKDOWN_H2_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*\r?$", re.MULTILINE)
 _MCP_SUPPORT_HEADINGS = frozenset({"troubleshooting", "common issues", "faq"})
 _MCP_SUPPORT_SUBJECT_RE = re.compile(r"\b(?:connections?|sessions?|api\s+keys?)\b", re.IGNORECASE)
 _TIME_REFERENCE_RE = re.compile(
-    r"\b(?:before|after|as of|until)\s+(?:the\s+year\s+)?(?:19\d{2}|2\d{3})\b",
+    r"\b(?:before|after|as of|until)\s+(?P<explicit_year>the\s+year\s+)?(?:19\d{2}|2\d{3})\b",
     re.IGNORECASE,
 )
 _NON_TEMPORAL_COUNT_RE = re.compile(
-    r"^\s+(?:iterations?|tokens?|bytes?|kilobytes?|megabytes?|gigabytes?|"
-    r"milliseconds?|seconds?|minutes?|hours?|rows?|items?|attempts?|samples?|steps?|calls?)\b",
+    r"^\s+(?:[A-Za-z][A-Za-z0-9_-]*s|bytes?|people|children|data\s+points?)\b",
     re.IGNORECASE,
 )
 _EXCLUSIVITY_RE = re.compile(
@@ -198,8 +209,8 @@ def _without_html_comments(content: str) -> str:
 
 
 def _markdown_link_targets(content: str) -> list[str]:
-    """Extract inline Markdown link targets, including balanced parentheses."""
-    content = _without_fenced_code(content)
+    """Extract inline and reference-style Markdown link targets."""
+    content = _without_html_comments(_without_fenced_code(content))
     targets = []
     skip_until = 0
     for match in _MARKDOWN_LINK_START_RE.finditer(content):
@@ -244,6 +255,27 @@ def _markdown_link_targets(content: str) -> list[str]:
             targets.append("".join(chars))
         elif not closed:
             skip_until = max(skip_until, cursor)
+
+    definitions: dict[str, str] = {}
+    definition_label_starts: set[int] = set()
+    for match in _MARKDOWN_REFERENCE_DEFINITION_RE.finditer(content):
+        label = re.sub(r"\s+", " ", match.group(1).strip()).casefold()
+        target = match.group(2) if match.group(2) is not None else match.group(3)
+        definitions.setdefault(label, target)
+        definition_label_starts.add(match.start(1))
+
+    for match in _MARKDOWN_REFERENCE_LINK_RE.finditer(content):
+        label = match.group(2) or match.group(1)
+        normalized = re.sub(r"\s+", " ", label.strip()).casefold()
+        if normalized in definitions:
+            targets.append(definitions[normalized])
+
+    for match in _MARKDOWN_SHORTCUT_REFERENCE_RE.finditer(content):
+        if match.start(1) in definition_label_starts:
+            continue
+        normalized = re.sub(r"\s+", " ", match.group(1).strip()).casefold()
+        if normalized in definitions:
+            targets.append(definitions[normalized])
     return targets
 
 
@@ -274,9 +306,10 @@ def _is_other_cli_mcp_comparison(sentence: str, mcp_end: int, skill_name: str | 
 
 
 def _mcp_usage_contexts(content: str, skill_name: str | None = None) -> list[str]:
-    """Return paragraphs where MCP is used as a capability rather than negated."""
+    """Return sentences where MCP is used as a capability rather than negated."""
     content = _without_html_comments(_without_fenced_code(content))
     contexts = []
+    seen_contexts = set()
     for paragraph in re.split(r"\n\s*\n", content):
         for match in _MCP_RE.finditer(paragraph):
             sentence_start = max(paragraph.rfind(mark, 0, match.start()) for mark in ".!?") + 1
@@ -294,9 +327,9 @@ def _mcp_usage_contexts(content: str, skill_name: str | None = None) -> list[str
                 match.end() - sentence_start,
                 skill_name,
             )
-            if not is_negated and not is_other_cli_comparison:
-                contexts.append(paragraph)
-                break
+            if not is_negated and not is_other_cli_comparison and sentence not in seen_contexts:
+                contexts.append(sentence)
+                seen_contexts.add(sentence)
     return contexts
 
 
@@ -349,7 +382,7 @@ def _has_exclusive_replacement(content: str) -> bool:
 
 def _has_time_reference(content: str) -> bool:
     for match in _TIME_REFERENCE_RE.finditer(content):
-        if not _NON_TEMPORAL_COUNT_RE.match(content[match.end() : match.end() + 32]):
+        if match.group("explicit_year") or not _NON_TEMPORAL_COUNT_RE.match(content[match.end() : match.end() + 32]):
             return True
     return False
 

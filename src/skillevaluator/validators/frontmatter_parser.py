@@ -17,7 +17,10 @@ import yaml
 from skillevaluator.validators.base import ValidationResult
 
 # Regex pattern for extracting frontmatter between --- markers
-FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)", re.DOTALL)
+FRONTMATTER_PATTERN = re.compile(
+    r"^---[^\S\r\n]*\r?\n(.*?)\r?\n---[^\S\r\n]*(?=\r?\n|\Z)(?:\r?\n)?(.*)",
+    re.DOTALL,
+)
 
 
 @dataclass

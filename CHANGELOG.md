@@ -90,10 +90,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Quality scoring now uses boundary-aware and context-aware matching for XML tags,
-  reserved names, MCP guidance, README references, time references, exclusivity
-  language, instruction action verbs, and nested Markdown links, avoiding
-  incidental-word score changes.
+- Quality scoring now uses boundary-aware lexical matching and CommonMark-parsed
+  structural links instead of hand-written Markdown parsing or regex inference
+  of author intent. Deterministic checks no longer infer MCP negation, temporal
+  intent, README guidance, or exclusivity from prose;
+  use `rubric-eval` for semantic documentation judgments and Tier 3 for
+  observed agent behavior.
 - Tier 3 generated tasks now stage only an entry's declared `files`, preventing
   undeclared fixtures from the shared `evals/files/` directory from appearing
   in that task's `/workspace/input/`, while preserving copy-all behavior for

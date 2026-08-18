@@ -208,7 +208,7 @@ The default set is `schema`, `version`, `security`, `pii`, `license`, `code-inte
 
     The checker detects five skill shapes and applies relevant checks: **script-based** (Python or shell files under `scripts/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
 
-    Quality signals use boundary-aware and context-aware matching. A score changes only when the relevant construct is present — for example, a complete reserved-name segment, an actual XML-like tag, active MCP usage without nearby negation, an actionable link to `README.md`, a calendar-year reference, an exclusivity claim, an instruction action verb, or a local Markdown link from a reference file. Incidental substrings, prose inside fenced examples or comments, external URLs, and unrelated troubleshooting text do not satisfy or trigger those checks.
+    Quality signals use boundary-aware lexical matching for unambiguous terms and CommonMark parsing for structural link evidence. Links inside code, images, or comments do not count, and external URLs do not satisfy local-reference checks. Deterministic Tier 1 checks do not infer author intent from ambiguous prose such as MCP negation, temporal language, README guidance, or exclusivity claims. Use `rubric-eval` for semantic judgments about the documentation and Tier 3 for observed agent behavior.
 
     <Tip>
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.

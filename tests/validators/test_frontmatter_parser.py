@@ -5,6 +5,7 @@
 
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel
 
 from skillevaluator.validators.base import ValidationResult
@@ -29,6 +30,18 @@ description: A test file
         assert result.passed
         assert parsed.yaml_data["title"] == "Test"
         assert parsed.content.strip() == "# Content here"
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+    def test_first_body_line_indentation_is_preserved(self, tmp_path: Path, newline: str):
+        test_file = tmp_path / "indented-body.mdc"
+        content = newline.join(["---", "title: Test", "---", "    [code](false.md)", ""])
+        test_file.write_bytes(content.encode())
+
+        parsed, result = parse_frontmatter(test_file)
+
+        assert parsed is not None
+        assert result.passed
+        assert parsed.content == "    [code](false.md)\n"
 
     def test_missing_frontmatter(self, tmp_path: Path):
         """Test file without frontmatter markers."""

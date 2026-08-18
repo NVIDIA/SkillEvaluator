@@ -1972,6 +1972,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "jinja2" },
+    { name = "markdown-it-py" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "rich" },
@@ -2034,6 +2035,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "litellm", marker = "extra == 'llm'", specifier = ">=1.83.10,<1.89.0.dev0" },
+    { name = "markdown-it-py", specifier = ">=4.2,<5" },
     { name = "mcp", marker = "extra == 'tier3'", specifier = ">=1.28.1,<2" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=2.21.0" },
     { name = "pip-audit", marker = "extra == 'security'", specifier = ">=2.10.0" },

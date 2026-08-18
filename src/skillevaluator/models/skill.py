@@ -23,7 +23,7 @@ from skillevaluator.constants import (
     RESERVED_SKILL_NAMES,
 )
 
-_XML_TAG_RE = re.compile(r"<[a-zA-Z][^>]*>")
+XML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:\s[^<>]*)?/?>|</?[A-Za-z][A-Za-z0-9_-]*\s[^<>]*$")
 
 #: Strict, bounded ASCII semantic-version pattern for optional metadata.version labels.
 _SEMVER_COMPONENT = r"(?:0|[1-9][0-9]{0,8})"
@@ -150,10 +150,10 @@ class SkillFrontmatter(BaseModel):
         if v.endswith("-"):
             raise ValueError(f"Skill name '{v}' cannot end with a hyphen")
 
-        if any(w in v.lower() for w in RESERVED_SKILL_NAMES):
+        if any(segment in RESERVED_SKILL_NAMES for segment in v.lower().split("-")):
             raise ValueError(f"Skill name '{v}' must not contain reserved words {RESERVED_SKILL_NAMES}")
 
-        if _XML_TAG_RE.search(v):
+        if XML_TAG_RE.search(v):
             raise ValueError(f"Skill name '{v}' must not contain XML tags")
 
         return v
@@ -162,7 +162,7 @@ class SkillFrontmatter(BaseModel):
     @classmethod
     def validate_description_content(cls, v: str) -> str:
         """Reject descriptions that contain XML tags."""
-        if _XML_TAG_RE.search(v):
+        if XML_TAG_RE.search(v):
             raise ValueError("Skill description must not contain XML tags")
         return v
 

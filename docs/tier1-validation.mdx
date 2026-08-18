@@ -207,6 +207,12 @@ The default set is `schema`, `version`, `security`, `pii`, `license`, `code-inte
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70.
 
     The checker detects five skill shapes and applies relevant checks: **script-based** (Python or shell files under `scripts/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
+
+    Quality signals use boundary-aware and context-aware matching. A score changes only when the relevant construct is present — for example, a complete reserved-name segment, an actual XML-like tag, active MCP usage without nearby negation, an actionable link to `README.md`, a calendar-year reference, an exclusivity claim, an instruction action verb, or a local Markdown link from a reference file. Incidental substrings, prose inside fenced examples or comments, external URLs, and unrelated troubleshooting text do not satisfy or trigger those checks.
+
+    <Tip>
+      If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
+    </Tip>
   </Accordion>
 
   <Accordion title="rubric-eval — LLM-as-judge (requires a provider)">

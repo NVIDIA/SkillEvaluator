@@ -354,6 +354,26 @@ Example.
             assert not result.passed, f"Name containing '{word}' should be rejected"
             assert any("reserved" in err.lower() for err in result.errors)
 
+    def test_reserved_word_substring_in_name_is_allowed(self, tmp_path: Path):
+        """Reserved providers only match complete hyphen-delimited name segments."""
+        skill_dir = tmp_path / "philanthropic-grant-matcher"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: philanthropic-grant-matcher\n"
+            "description: Use when matching philanthropic grants to eligible programs.\n"
+            "metadata:\n"
+            "  author: Test User <test@nvidia.com>\n"
+            "---\n\n"
+            "# Philanthropic Grant Matcher\n\n"
+            "## Instructions\n\n1. Match each grant to an eligible program.\n\n"
+            "## Examples\n\nMatch the example grant.\n"
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, result.errors
+
     def test_xml_tags_in_name_rejected(self, tmp_path: Path):
         """Test validation fails when name contains XML tags."""
         skill_dir = tmp_path / "xml-name"
@@ -436,6 +456,48 @@ Example.
 
         assert not result.passed
         assert any("xml" in err.lower() or "description" in err.lower() for err in result.errors)
+
+    def test_closing_xml_tag_in_description_rejected(self, tmp_path: Path):
+        """Opening and closing XML tags use the same schema and quality definition."""
+        skill_dir = tmp_path / "closing-xml-desc"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: closing-xml-desc\n"
+            'description: "Use when validating a closing </tool> tag."\n'
+            "metadata:\n"
+            "  author: Test User <test@nvidia.com>\n"
+            "---\n\n"
+            "# Closing XML Description\n\n"
+            "## Instructions\n\n1. Run.\n\n"
+            "## Examples\n\nExample.\n"
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert any("xml" in err.lower() for err in result.errors)
+
+    def test_self_closing_xml_tag_in_description_rejected(self, tmp_path: Path):
+        """Self-closing XML tags remain forbidden in frontmatter descriptions."""
+        skill_dir = tmp_path / "self-closing-xml-desc"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: self-closing-xml-desc\n"
+            'description: "Use when validating an injected <tool/> tag."\n'
+            "metadata:\n"
+            "  author: Test User <test@nvidia.com>\n"
+            "---\n\n"
+            "# Self-closing XML Description\n\n"
+            "## Instructions\n\n1. Run.\n\n"
+            "## Examples\n\nExample.\n"
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert any("xml" in err.lower() for err in result.errors)
 
     def test_comparison_operators_in_description_allowed(self, tmp_path: Path):
         """Test threshold comparators in descriptions are not treated as XML tags."""

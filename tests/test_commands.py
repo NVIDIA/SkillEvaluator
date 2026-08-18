@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -571,10 +572,102 @@ def test_run_agent_eval_partial_run_returns_ran_with_errors(monkeypatch, tmp_pat
         skip_baseline=False,
         n_concurrent=None,
         max_agents=None,
+        validate_source=False,
     )
     assert result.passed is False
     assert "1 of 2 agents crashed" in result.errors
     assert (result.metadata or {}).get("execution_status") != "skipped"
+
+
+def test_validate_tier2_default_is_blocking_and_can_be_advisory(monkeypatch) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.models.result import ValidationResult
+
+    tier1 = ValidationResult(validator_name="SCHEMA")
+    tier1.add_success("schema", "ok")
+
+    def _tier2(*_args, **_kwargs) -> list[ValidationResult]:
+        result = ValidationResult(validator_name="Context Deduplication")
+        result.add_error("dedup failed")
+        return [result]
+
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [tier1])
+    monkeypatch.setattr(cli_module, "_run_dedup_or_skip", _tier2)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        blocking = runner.invoke(cli, ["validate", str(FIXTURE), "--checks", "schema"])
+        advisory = runner.invoke(
+            cli,
+            ["validate", str(FIXTURE), "--checks", "schema", "--no-block-on-dedup"],
+        )
+
+    assert blocking.exit_code != 0
+    assert "failed in Tier 2" in _plain_text(blocking.output)
+    assert advisory.exit_code == 0, advisory.output
+
+
+def test_validate_missing_tier3_source_respects_blocking_flag(monkeypatch, tmp_path: Path) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.models.result import ValidationResult
+
+    skill = tmp_path / "source-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: source-skill\ndescription: test\n---\n")
+    tier1 = ValidationResult(validator_name="SCHEMA")
+    tier1.add_success("schema", "ok")
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [tier1])
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda *_args, **_kwargs: pytest.fail("source preflight must run before live evaluation"),
+    )
+
+    runner = CliRunner()
+    advisory = runner.invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--no-tier2",
+            "--tier3",
+            "--verbose",
+            "--report",
+            "json",
+            "--output-dir",
+            str(tmp_path / "advisory"),
+        ],
+    )
+    blocking = runner.invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--no-tier2",
+            "--tier3",
+            "--block-on-agent-eval",
+            "--verbose",
+            "--report",
+            "json",
+            "--output-dir",
+            str(tmp_path / "blocking"),
+        ],
+    )
+
+    assert advisory.exit_code == 0, advisory.output
+    assert blocking.exit_code != 0
+
+    advisory_report = json.loads(next((tmp_path / "advisory").glob("*.json")).read_text())
+    blocking_report = json.loads(next((tmp_path / "blocking").glob("*.json")).read_text())
+    assert advisory_report["tier3_applicability"]["applicability"] == "not_required"
+    assert advisory_report["tier3"]["verdict"] == "neutral"
+    assert advisory_report["gating"]["tiers"]["3"]["blocking"] is False
+    assert advisory_report["overall_status"] == "passed"
+    assert blocking_report["tier3_applicability"]["applicability"] == "required"
+    assert blocking_report["tier3"]["verdict"] == "fail"
+    assert blocking_report["gating"]["tiers"]["3"]["blocking"] is True
+    assert blocking_report["overall_status"] == "failed"
 
 
 def test_validate_quiet_honors_explicit_report_formats() -> None:

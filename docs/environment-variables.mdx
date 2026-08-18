@@ -79,7 +79,7 @@ These variables tune the static and security checks. The check-by-check guide is
 | `SKILLEVALUATOR_SKILLSPECTOR_PATH` | auto-discovered | Absolute path to the SkillSpector executable. |
 | `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` | — | Extra allowed skill-root directory names (comma- or whitespace-separated), e.g. `data,fixtures`. Additive only — names extend the built-in allowlist and never replace it. |
 | `SKILLEVALUATOR_SUBMITTER` | auto-detected | Explicit submitter identity for the home-path PII check. It is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected. If none resolves, the home-path check is disabled with a warning. |
-| `SKILLEVALUATOR_PREVIOUS_VERSION` | — | The previously published skill version that the opt-in version check (`--checks version`) compares against. |
+| `SKILLEVALUATOR_PREVIOUS_VERSION` | — | The previously published skill version that the default version check compares against. Without this value or `--previous-version`, the check validates the current version's format but does not enforce an increase. |
 
 <Warning>
 The scanner path overrides fail closed: a value that is not an absolute, executable file is treated as a configuration error rather than silently falling back to another same-named binary on `PATH`. This prevents a planted executable from hijacking a security scan.

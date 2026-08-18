@@ -120,3 +120,56 @@ def test_real_agent_eval_failure_still_fails_required_validation() -> None:
     tier3 = _html_tab(html, "tier3")
     assert re.search(r'tier-card-verdict">\s*FAIL\s*</span>', html)
     assert "Harbor execution failed" in tier3
+
+
+def test_explicit_advisory_gating_keeps_failed_result_non_blocking() -> None:
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.add_error("Harbor execution failed")
+    result.metadata["gating"] = {"tier": 3, "blocking": False}
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["overall_status"] == "passed"
+    assert payload["overall_passed"] is True
+    assert payload["gating"]["tiers"]["3"]["blocking"] is False
+    assert html_data["summary"]["status"] == "passed"
+    assert html_data["gating"]["would_block"] is False
+
+
+def test_explicit_blocking_gating_promotes_tier3_failure() -> None:
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.add_error("Harbor execution failed")
+    result.metadata["gating"] = {"tier": 3, "blocking": True}
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["overall_status"] == "failed"
+    assert payload["gating"]["tiers"]["3"]["blocking"] is True
+    assert html_data["summary"]["status"] == "failed"
+    assert html_data["gating"]["would_block"] is True
+
+
+def test_explicit_blocking_gating_overrides_legacy_advisory_skip_shape() -> None:
+    result = advisory_skip_result("Harbor runtime unavailable", skill_name="demo")
+    result.metadata["gating"] = {"tier": 3, "blocking": True}
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
+
+    assert payload["overall_status"] == "failed"
+    assert payload["overall_passed"] is False
+    assert payload["total_advisory_skipped"] == 0
+    assert payload["results"][0]["status"] == "failed"
+    assert payload["gating"]["tiers"]["3"]["blocking"] is True
+    assert html_data["summary"]["status"] == "failed"
+    assert html_data["summary"]["advisory_skipped_count"] == 0
+    assert html_data["results"][0]["status"] == "failed"
+    assert html_data["gating"]["would_block"] is True
+    assert "**Status:** ❌ FAILED" in markdown
+    assert "### ❌ AGENT_EVAL" in markdown
+    assert "SKIPPED AGENT_EVAL" not in markdown
+    assert "Overall verdict: FAIL" in benchmark

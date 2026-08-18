@@ -217,6 +217,57 @@ def test_compose_check_false_redacts_success_output(
     assert result.stderr == "stderr [REDACTED]"
 
 
+def test_redact_ignores_short_env_values_that_would_corrupt_loopback_origins() -> None:
+    from skillevaluator.tier3.harbor.secure_docker_environment import _redact
+
+    origin = "http://127.0.0.1:41927\n"
+    assert _redact(origin, {"1"}) == origin
+    assert _redact(origin, {"1", "41927"}) == origin
+    assert _redact("token=abcdefgh", {"abcdefgh"}) == "token=[REDACTED]"
+
+
+def test_compose_redacts_long_secrets_without_rewriting_short_env_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = object.__new__(SkillEvaluatorDockerEnvironment)
+    environment.session_id = "secure-short-secret-test"
+    environment.environment_name = "secure-short-secret-test"
+    environment.environment_dir = tmp_path
+    environment._resources_compose_path = None
+    environment._mounts_compose_path = None
+    environment._use_prebuilt = True
+    environment._is_windows_container = False
+    environment.extra_docker_compose_paths = []
+    environment._network_policy = SimpleNamespace(network_mode="public")
+    environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
+    long_secret = "abcdefgh"
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"http://127.0.0.1:41927\n", f"stderr {long_secret}".encode()
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> Process:
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    result = asyncio.run(
+        environment._run_docker_compose_command(
+            ["exec", "-e", "CLAUDE_CODE_DISABLE_POLICY_SKILLS", "-e", "DATABASE_URL", "main", "true"],
+            check=False,
+            env_overrides={
+                "CLAUDE_CODE_DISABLE_POLICY_SKILLS": "1",
+                "DATABASE_URL": long_secret,
+            },
+        )
+    )
+
+    assert result.stdout == "http://127.0.0.1:41927\n"
+    assert result.stderr == "stderr [REDACTED]"
+
+
 def test_compose_cancellation_reaps_process_tree_even_when_repeated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

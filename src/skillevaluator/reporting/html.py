@@ -1100,34 +1100,70 @@ class HTMLReporter(ReporterBase):
             "failed_skills": tier1_display_total_skills - tier1_display_passed_skills,
         }
 
-        # Tier 1 and Tier 2 gate the CLI exit code; Tier 3 remains advisory.
-        # Use each result's finalized ``passed`` state for ``would_block`` so
-        # policy-remapped findings and validator errors match the actual CLI.
-        blocking_results = tier1_results + tier2_results
-        blocking_critical = tier1_summary["critical"] + tier2_summary["critical"]
-        blocking_high = tier1_summary["high"] + tier2_summary["high"]
-        blocking_medium = tier1_summary["medium"] + tier2_summary["medium"]
-        blocking_low = tier1_summary["low"] + tier2_summary["low"]
-        advisory_critical = tier3_summary["critical"]
-        advisory_high = tier3_summary["high"]
-        advisory_medium = tier3_summary["medium"]
-        advisory_low = tier3_summary["low"]
+        # Keep report gating aligned with the exact policy used for the CLI
+        # exit code. Results produced outside ``validate`` retain the public
+        # defaults: Tier 1/Tier 2 block and Tier 3 is advisory.
+        blocking_results: list[ValidationResult] = []
+        advisory_results: list[ValidationResult] = []
+        blocking_tiers: list[str] = []
+        advisory_tiers: list[str] = []
+        for tier_name, tier_results, default_blocking in (
+            ("tier1", tier1_results, True),
+            ("tier2", tier2_results, True),
+            ("tier3", tier3_results, False),
+        ):
+            if not tier_results:
+                (blocking_tiers if default_blocking else advisory_tiers).append(tier_name)
+                continue
+            tier_blocks = False
+            tier_advises = False
+            for result in tier_results:
+                result_gating = result.metadata.get("gating") if isinstance(result.metadata, dict) else None
+                is_blocking = (
+                    bool(result_gating.get("blocking", default_blocking))
+                    if isinstance(result_gating, dict)
+                    else default_blocking
+                )
+                if is_blocking:
+                    blocking_results.append(result)
+                    tier_blocks = True
+                else:
+                    advisory_results.append(result)
+                    tier_advises = True
+            if tier_blocks:
+                blocking_tiers.append(tier_name)
+            if tier_advises:
+                advisory_tiers.append(tier_name)
+
+        def _severity_totals(tier_results: list[ValidationResult]) -> dict[str, int]:
+            totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+            for result in tier_results:
+                for finding in result.findings:
+                    severity = (
+                        finding.severity.value
+                        if hasattr(finding.severity, "value")
+                        else str(finding.severity).lower()
+                    )
+                    if severity in totals:
+                        totals[severity] += 1
+            return totals
+
+        blocking_totals = _severity_totals(blocking_results)
+        advisory_totals = _severity_totals(advisory_results)
+        blocking_critical = blocking_totals["critical"]
+        blocking_high = blocking_totals["high"]
+        blocking_medium = blocking_totals["medium"]
+        blocking_low = blocking_totals["low"]
+        advisory_critical = advisory_totals["critical"]
+        advisory_high = advisory_totals["high"]
+        advisory_medium = advisory_totals["medium"]
+        advisory_low = advisory_totals["low"]
         gating = {
-            "blocking_tiers": ["tier1", "tier2"],
-            "advisory_tiers": ["tier3"],
-            "blocking": {
-                "critical": blocking_critical,
-                "high": blocking_high,
-                "medium": blocking_medium,
-                "low": blocking_low,
-            },
-            "advisory": {
-                "critical": advisory_critical,
-                "high": advisory_high,
-                "medium": advisory_medium,
-                "low": advisory_low,
-            },
-            "blocking_findings": blocking_critical + blocking_high,
+            "blocking_tiers": blocking_tiers,
+            "advisory_tiers": advisory_tiers,
+            "blocking": blocking_totals,
+            "advisory": advisory_totals,
+            "blocking_findings": blocking_totals["critical"] + blocking_totals["high"],
             "would_block": any(not result.passed for result in blocking_results),
         }
 

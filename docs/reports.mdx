@@ -280,7 +280,9 @@ For CI and tooling, two JSON entry points matter:
 - **`validate --tier3` runs** — the combined
   `skillevaluator-output-<timestamp>.json` report embeds the Tier 3 payload
   alongside the Tier 1 and Tier 2 results, so one file covers all three
-  tiers. Tier 3 findings are advisory there: they never change the exit code.
+  tiers. Each result carries finalized gating metadata. Tier 3 is advisory by
+  default and becomes blocking with `--block-on-agent-eval`; Tier 2 is blocking
+  by default and becomes advisory with `--no-block-on-dedup`.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

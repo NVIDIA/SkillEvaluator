@@ -375,6 +375,65 @@ def validate_skillevaluators(skill_path: Path) -> list[CheckResult]:
     return results
 
 
+def validate_tier3_source(skill_path: Path) -> tuple[str, list[CheckResult]]:
+    """Resolve and validate the Tier 3 source selected by a skill."""
+    from skillevaluator.tier3.dataset_utils import find_eval_file
+    from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+
+    try:
+        config, config_path = load_evals_config(skill_path)
+    except EvalsConfigError as exc:
+        return "invalid", [CheckResult("evals/config.yml", "error", str(exc))]
+
+    configured = str((config.get("harbor") or {}).get("task_source") or "auto")
+    evals_file = find_eval_file(skill_path)
+    native_dir = skill_path / "evals" / "harbor"
+
+    if configured == "auto":
+        if evals_file is not None:
+            source = "evals_json"
+        elif native_dir.is_dir():
+            source = "native_harbor"
+        else:
+            return "missing", [
+                CheckResult(
+                    "evals/",
+                    "error",
+                    "No Tier 3 task source found. Add evals/evals.{json,jsonl,yaml,yml} "
+                    "or an evals/harbor native task source.",
+                )
+            ]
+    else:
+        source = configured
+
+    if source == "evals_json":
+        if evals_file is None:
+            selected_at = str(config_path) if config_path else "the default configuration"
+            return source, [
+                CheckResult(
+                    "evals/evals.json",
+                    "error",
+                    f"Tier 3 source evals_json was selected by {selected_at}, but no supported eval dataset exists.",
+                )
+            ]
+        results = [CheckResult(str(evals_file.relative_to(skill_path)), "ok", "Tier 3 eval dataset found.")]
+        _validate_dataset_contents(evals_file, results)
+        return source, results
+
+    if source == "native_harbor":
+        if not native_dir.is_dir():
+            return source, [
+                CheckResult(
+                    "evals/harbor/",
+                    "error",
+                    "Tier 3 source native_harbor was selected, but evals/harbor does not exist.",
+                )
+            ]
+        return source, validate_harbor_contract(skill_path)
+
+    return "invalid", [CheckResult("evals/config.yml", "error", f"Unsupported Tier 3 task source: {source}")]
+
+
 def validate_harbor_contract(skill_path: Path) -> list[CheckResult]:
     """Validate the BYOT Harbor task contract without mutating user files."""
     results: list[CheckResult] = []

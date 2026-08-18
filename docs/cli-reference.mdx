@@ -17,7 +17,7 @@ commands referenced below.
 
 | Command | Purpose | Needs |
 | --- | --- | --- |
-| [validate](#validate) | Run Tier 1 checks plus Tier 2 dedup by default (both gate the exit code), optional advisory Tier 3 | Nothing by default |
+| [validate](#validate) | Run Tier 1 checks plus Tier 2 dedup by default, with explicit Tier 2 and Tier 3 gating controls | Nothing by default |
 | [quality-check](#quality-check) | Score skill quality across four weighted categories | Nothing |
 | [rubric-eval](#rubric-eval) | LLM-as-judge rubric evaluation | LLM provider key |
 | [security-scan](#security-scan) | Scan for security vulnerabilities | Nothing (key only with `--llm`/`--llm-verify`) |
@@ -88,15 +88,18 @@ skillevaluator tier3 validate ./my-skill --strict
 
 ## validate
 
-Validate a skill, rule, workflow, or plugin. Tier 1 static, security, and quality checks gate the exit code — and so do Tier 2 deduplication findings when that pass runs (on by default, degrading gracefully without embedding access); Tier 3 live evaluation attaches as an advisory pass when enabled with `--tier3`, `--autopilot`, `--full`, or the supported `--agent-eval` compatibility alias.
+Validate a skill, rule, workflow, or plugin. Tier 1 static, security, and quality checks always gate the exit code. Tier 2 deduplication runs and gates by default, but `--no-block-on-dedup` keeps the scan while making its findings advisory. Tier 3 live evaluation attaches as an advisory pass when enabled with `--tier3`, `--autopilot`, `--full`, or the supported `--agent-eval` compatibility alias; add `--block-on-agent-eval` to make its findings gate.
 
 ```bash title="Common invocations"
 skillevaluator validate ./my-skill                        # Tier 1 + Tier 2
 skillevaluator validate ./my-skill --llm                  # add LLM security analysis
 skillevaluator validate ./my-skill -r cli,json,html       # multiple report formats
 skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
+skillevaluator validate ./my-skill --no-block-on-dedup    # run Tier 2 as advisory
 skillevaluator validate ./my-skill --external             # strict publication profile
 skillevaluator validate ./my-skill --tier3 -a codex       # add advisory Tier 3 eval
+skillevaluator validate ./my-skill --tier3 -a codex \
+    --block-on-agent-eval                                  # gate on Tier 3 too
 skillevaluator validate ./my-skill --autopilot            # Tier 3, generating evals if missing
 skillevaluator validate ./my-skill --full -a codex        # everything, one shot
 skillevaluator validate ./my-skill --tiers 1,3            # explicit tier selection
@@ -133,7 +136,7 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Choices: `schema`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `version`, `dependency`. `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`. `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
 | `--fail-fast` | off | Stop on the first failing check instead of collecting all issues. |
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
@@ -147,6 +150,7 @@ Embedding + LLM dedup; on by default, skips gracefully without a provider key.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--dedup, --tier2 / --no-dedup, --no-tier2` | `dedup` | Run Tier 2 intra-skill semantic-overlap checks. On by default; skipped gracefully without public embedding access. Use `--no-tier2` (or `--no-dedup`) to disable. |
+| `--block-on-dedup / --no-block-on-dedup` | blocking | Choose whether Tier 2 findings participate in the `validate` exit gate. The scan and its report entries still run with `--no-block-on-dedup`. |
 
 ### Tier 3 · Live Agent Evaluation
 
@@ -156,7 +160,8 @@ The following flags are forwarded to the live-eval engine **only when Tier 3 is 
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--tier3, --agent-eval` | off | Also run Tier 3 live agent evaluation (requires `evals/evals.json`). Advisory: it never changes the exit code. `--tier3` is the primary name; `--agent-eval` is a supported compatibility alias and is not currently deprecated. |
+| `--tier3, --agent-eval` | off | Also run Tier 3 live agent evaluation. Accepts a supported YAML/JSON dataset or native Harbor source and validates it before execution. Tier 3 is advisory by default. `--tier3` is the primary name; `--agent-eval` is a supported compatibility alias and is not currently deprecated. |
+| `--block-on-agent-eval / --no-block-on-agent-eval` | advisory | Choose whether Tier 3 findings, including missing or invalid selected task-source evidence, participate in the `validate` exit gate. This flag does not enable Tier 3 by itself. |
 | `--autopilot` | off | Generate an evaluation source automatically when missing, then run Tier 3 (implies `--tier3`). |
 | `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents to evaluate. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |

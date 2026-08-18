@@ -206,6 +206,11 @@ produce a non-zero exit code; MEDIUM and LOW findings are advisory. Exit
 behavior is identical in every output mode, so these commands work as CI gates
 — see [Gate Your CI](ci-integration.mdx).
 
+Inside the combined `validate` pipeline, Tier 2 also gates by default. Pass
+`--no-block-on-dedup` to keep the scan and its findings in every report without
+letting those findings change `validate`'s exit code. Use `--no-dedup` only when
+you intend to skip Tier 2 entirely.
+
 ## Defaults and safety limits
 
 | Setting | Default | Purpose |

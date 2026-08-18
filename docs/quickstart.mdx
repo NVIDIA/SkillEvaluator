@@ -92,7 +92,7 @@ Get your first evaluation result in about two minutes, with no API key. This pag
 | Gate skill quality and security | `validate` | [Tier 1: Validation](tier1-validation.mdx) | Exit code `0`, no CRITICAL findings |
 | Find overlapping or duplicate skills | `similarity-check` | [Tier 2: Deduplication](tier2-deduplication.mdx) | No `EXACT_DUPLICATE` or `HIGH_SIMILARITY` findings |
 | Prove the skill helps a real agent | `tier3 evaluate` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) | Positive Skill Lift across the five dimensions |
-| Run all three tiers in one shot | `validate --full` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) | Exit code `0` plus an auto-generated dataset and advisory Tier 3 results |
+| Run all three tiers in one shot | `validate --full` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) | Exit code `0` plus an auto-generated dataset; Tier 3 is advisory unless you add `--block-on-agent-eval` |
 | Block bad skills at merge time | `validate` in CI | [Gate Your CI](ci-integration.mdx) | A red check on failing PRs |
 | Look up every flag and default | — | [CLI Reference](cli-reference.mdx) | — |
 

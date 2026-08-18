@@ -286,13 +286,20 @@ cloud backend for untrusted code.
 
 | Use case | Command | When to use |
 | --- | --- | --- |
-| Full validation | `skillevaluator validate ./my-skill --tier3` | Add advisory Tier 3 results after the standard validation stages |
+| Full validation | `skillevaluator validate ./my-skill --tier3` | Add Tier 3 after the standard stages; advisory by default, optionally blocking |
 | Focused evaluation | `skillevaluator tier3 evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
 
-Attached to `validate`, Tier 3 is advisory: its results appear in the combined
-reports but never change the exit code. `--full` is the one-shot variant
-— Tier 1+2+3 with `--autopilot` dataset generation — and `--autopilot` on its
-own enables Tier 3 while generating an eval case when none exists.
+Attached to `validate`, Tier 3 is advisory by default: its results appear in the
+combined reports without changing the exit code. Add `--block-on-agent-eval`
+to make its findings gate, including evidence that the selected YAML/JSON
+dataset or native Harbor source is missing or invalid. `--full` is the one-shot
+variant — Tier 1+2+3 with `--autopilot` dataset generation — and `--autopilot`
+on its own enables Tier 3 while generating an eval case when none exists.
+
+```bash title="Make attached Tier 3 blocking"
+skillevaluator validate ./my-skill --tier3 --agents codex \
+  --block-on-agent-eval
+```
 
 <Note>
 `validate` forwards a dedicated Tier 3 flag group (`--agents`, `--env-mode`,

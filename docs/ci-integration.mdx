@@ -16,7 +16,7 @@ Turn SkillEvaluator into a merge gate for your skill repository. The recommended
 | `2` | Configuration error — bad flags or an unreadable target | Fix the pipeline, not the skill |
 | `3` | Runtime error — an unexpected internal failure | Re-run; the skill was never judged. File an issue if it persists |
 
-Tier 1 checks gate the exit code — and so do Tier 2 deduplication findings when dedup runs (the recommended gate below disables it with `--no-dedup`). Tier 3 live-evaluation results are always advisory inside `validate`: they appear in the reports but never flip a passing run to `1`. That means you can layer Tier 3 on later without destabilizing the gate.
+Tier 1 checks always gate the exit code. Tier 2 deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below instead disables Tier 2 with `--no-dedup`. Tier 3 live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each tier.
 
 ## The recommended gate
 
@@ -156,11 +156,11 @@ You do not have to turn on the strictest gate on day one. A path that works well
 
   ### Add LLM-backed checks
 
-  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and drop `--no-dedup` so Tier 2 overlap checks run too. Note that once dedup runs, its findings gate the exit code alongside Tier 1. See [Providers & Credentials](configuration.mdx) for provider setup.
+  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and drop `--no-dedup` so Tier 2 overlap checks run too. Once dedup runs, its findings gate alongside Tier 1 by default; add `--no-block-on-dedup` if you want evidence without enforcing it yet. See [Providers & Credentials](configuration.mdx) for provider setup.
 
   ### Add an advisory Tier 3 job
 
-  Run live agent evaluation as a separate, non-blocking job — either `skillevaluator tier3 evaluate` on its own or `validate --tier3` (`--agent-eval` is a supported compatibility alias and is not currently deprecated; `validate --full` runs Tier 1+2+3 in one shot). Tier 3 results never gate `validate`'s exit code; the standalone `tier3 evaluate` exits non-zero only when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+  Run live agent evaluation as a separate job — either `skillevaluator tier3 evaluate` on its own or `validate --tier3` (`--agent-eval` is a supported compatibility alias and is not currently deprecated; `validate --full` runs Tier 1+2+3 in one shot). Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. The standalone `tier3 evaluate` exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
 </Steps>
 
 <Note>

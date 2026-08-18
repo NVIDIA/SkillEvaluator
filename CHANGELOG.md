@@ -37,6 +37,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `CLAUDE.md -> AGENTS.md` public compatibility alias; Windows reads now use
   native handle verification with the same fail-closed identity checks as
   POSIX.
+- Secure Docker exec redaction now ignores environment values shorter than eight
+  characters, matching the exact secret length floor used elsewhere. Short
+  flags such as `CLAUDE_CODE_DISABLE_POLICY_SKILLS=1` no longer rewrite digits
+  in `docker exec` output, which had broken NVIDIA Build bridge loopback
+  origins during Tier 3 preflight.
 - Isolated NVIDIA Build bridge credentials from vendor CLI processes using a
   transient, root-managed, container-only key handoff with cleanup on failure.
 - Removed NVIDIA Build secrets from Harbor and Docker exec arguments using a
@@ -53,6 +58,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Added explicit `--block-on-dedup` / `--no-block-on-dedup` and
+  `--block-on-agent-eval` / `--no-block-on-agent-eval` controls with
+  backward-compatible defaults, Tier 3 source preflight, and consistent gating
+  metadata across CLI, JSON, Markdown, and HTML reports.
 - Reduced pull-request runner use for changes confined to `docs/**` and
   `fern/**`: DCO, Gitleaks, and pinned Fern validation still run, while mixed
   and non-docs changes retain the complete Linux, macOS, Windows, packaging,

@@ -574,6 +574,7 @@ def test_combined_evaluate_keeps_exit_advisory_but_result_false_for_empty_engine
         skip_baseline=True,
         n_concurrent=1,
         max_agents=1,
+        validate_source=False,
     )
 
     assert result.passed is False
@@ -606,6 +607,7 @@ def test_combined_evaluate_converts_normalization_error_to_advisory_skip(
         skip_baseline=True,
         n_concurrent=1,
         max_agents=1,
+        validate_source=False,
     )
 
     assert result.passed is False
@@ -649,6 +651,7 @@ def test_combined_evaluate_forwards_results_dir_to_normalizer(
         n_concurrent=1,
         max_agents=1,
         results_dir=results_root,
+        validate_source=False,
     )
 
     assert actual is expected

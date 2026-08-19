@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -33,6 +34,32 @@ _EMBEDDING_DEFAULT_MODELS = {
     "nv_build": "nvidia/nv-embed-v1",
 }
 _SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "nv_build", "bedrock", "openai-compatible"})
+_ANTHROPIC_BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+_VERSIONED_CLAUDE_MODEL_RE = re.compile(
+    r"^claude-[a-z][a-z-]*-(?P<major>\d+)"
+    r"(?:-(?P<minor>\d{1,2}))?"
+    r"(?:-(?:\d{8}|latest))?"
+    r"(?:-v\d+)?(?::\d+)?$"
+)
+
+
+def _model_leaf(model: str) -> str:
+    """Return a normalized model ID for capability checks only."""
+    leaf = str(model or "").strip().casefold().rsplit("/", 1)[-1]
+    return _ANTHROPIC_BEDROCK_PREFIX_RE.sub("", leaf, count=1)
+
+
+def _supports_custom_temperature(model: str) -> bool:
+    """Return whether ``model`` accepts a non-default temperature value."""
+    leaf = _model_leaf(model)
+    if leaf.startswith("gpt-5"):
+        return False
+
+    match = _VERSIONED_CLAUDE_MODEL_RE.fullmatch(leaf)
+    if match is None:
+        return True
+    version = (int(match.group("major")), int(match.group("minor") or 0))
+    return version < (4, 7)
 
 
 class ProviderConfigurationError(ValueError):

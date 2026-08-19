@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -362,6 +363,73 @@ def test_template_gpt5_temperature_guard_matches_eval_core():
     ):
         assert eval_template._model_leaf(model) == llm_judge._model_leaf(model)
         assert eval_template._supports_custom_temperature(model) == llm_judge._supports_custom_temperature(model)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_temperature"),
+    [
+        ("claude-opus-4-8", None),
+        ("claude-3-5-sonnet-20241022", 0.3),
+    ],
+)
+def test_template_anthropic_request_uses_model_compatible_temperature(
+    monkeypatch, model, expected_temperature
+):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"content":[{"type":"text","text":"Done"}]}'
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 90
+        captured.update(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+
+    content, error = eval_template._call_anthropic("prompt", model, 4096, 0.3)
+
+    assert (content, error) == ("Done", None)
+    assert captured["max_tokens"] == 4096
+    if expected_temperature is None:
+        assert "temperature" not in captured
+    else:
+        assert captured["temperature"] == expected_temperature
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_temperature"),
+    [
+        ("us.anthropic.claude-opus-4-8", None),
+        ("us.anthropic.claude-3-5-sonnet-20241022-v2:0", 0.3),
+    ],
+)
+def test_template_bedrock_request_uses_model_compatible_temperature(
+    monkeypatch, model, expected_temperature
+):
+    import boto3
+
+    client = MagicMock()
+    client.converse.return_value = {"output": {"message": {"content": [{"text": "Done"}]}}}
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+
+    content, error = eval_template._call_bedrock("prompt", model, 4096, 0.3)
+
+    assert (content, error) == ("Done", None)
+    inference_config = client.converse.call_args.kwargs["inferenceConfig"]
+    assert inference_config["maxTokens"] == 4096
+    if expected_temperature is None:
+        assert "temperature" not in inference_config
+    else:
+        assert inference_config["temperature"] == expected_temperature
 
 
 @pytest.mark.parametrize(

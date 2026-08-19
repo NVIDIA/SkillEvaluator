@@ -16,7 +16,7 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
-from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
 
 logger = logging.getLogger(__name__)
 
@@ -158,18 +158,6 @@ def _should_try_fallback(error: str) -> bool:
     )
 
 
-def _model_leaf(model: str) -> str:
-    """Return a normalized model ID without provider routing prefixes."""
-    return str(model or "").strip().casefold().rsplit("/", 1)[-1]
-
-
-def _supports_custom_temperature(model: str) -> bool:
-    """Return false for chat models that only accept their default temperature."""
-    # Bare ``gpt-5*`` and provider-prefixed forms (``openai/gpt-5*``,
-    # ``openai/openai/gpt-5*``) reject custom temperature on the Chat Completions API.
-    return not _model_leaf(model).startswith("gpt-5")
-
-
 def _chat_completion_payload(
     *,
     model: str,
@@ -192,7 +180,7 @@ def _chat_completion_payload(
         token_key: max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if _supports_custom_temperature(model):
+    if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
     return payload
 

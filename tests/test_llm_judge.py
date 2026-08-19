@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENAI
@@ -51,9 +53,48 @@ def test_gpt5_family_rejects_custom_temperature(model: str) -> None:
     assert not llm_judge._supports_custom_temperature(model)
 
 
-def test_non_gpt5_models_accept_custom_temperature() -> None:
+def test_older_models_accept_custom_temperature() -> None:
     assert llm_judge._supports_custom_temperature("gpt-4.1-mini")
-    assert llm_judge._supports_custom_temperature("claude-opus-4-8")
+    assert llm_judge._supports_custom_temperature("claude-opus-4-6")
+    assert llm_judge._supports_custom_temperature("claude-opus-4-20250514")
+    assert llm_judge._supports_custom_temperature("claude-3-5-sonnet-20241022")
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "anthropic/claude-opus-4-8",
+        "azure/anthropic/claude-opus-4-8",
+        "us.anthropic.claude-opus-4-8",
+        "bedrock/us.anthropic.claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+    ],
+)
+def test_post_opus46_claude_models_reject_custom_temperature(model: str) -> None:
+    assert not llm_judge._supports_custom_temperature(model)
+
+
+def test_call_public_llm_uses_production_gpt5_payload_without_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="Done"))]
+
+    with patch("openai.OpenAI", return_value=mock_openai):
+        content, error = llm_judge.call_public_llm("Judge this response", max_tokens=4096, temperature=0.0)
+
+    assert (content, error) == ("Done", None)
+    call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+    assert call_kwargs["max_completion_tokens"] == 4096
+    assert "temperature" not in call_kwargs
 
 
 @pytest.mark.parametrize(

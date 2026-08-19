@@ -31,6 +31,8 @@ from skillevaluator.provider_config import (
     OPENAI_BASE_URL,
     ProviderConfig,
     ProviderConfigurationError,
+    _model_leaf,
+    _supports_custom_temperature,
     resolve_llm_provider,
 )
 
@@ -91,9 +93,15 @@ def _sdk_targets_native_openai(client: Any) -> bool:
 def _token_limit_kwargs(config: ProviderConfig, max_tokens: int | None) -> dict[str, int]:
     if max_tokens is None:
         return {}
-    if _is_native_openai_endpoint(config) and config.model.lower().startswith("gpt-5"):
+    if _is_native_openai_endpoint(config) and _model_leaf(config.model).startswith("gpt-5"):
         return {"max_completion_tokens": max_tokens}
     return {"max_tokens": max_tokens}
+
+
+def _temperature_kwargs(model: str, temperature: float | None) -> dict[str, float]:
+    if temperature is None or not _supports_custom_temperature(model):
+        return {}
+    return {"temperature": temperature}
 
 
 class LLMClient:
@@ -114,7 +122,7 @@ class LLMClient:
 
     default_model: str = LLM_VERIFY_MODEL
     default_max_tokens: int | None = None
-    default_temperature: float = LLM_VERIFY_TEMPERATURE
+    default_temperature: float | None = LLM_VERIFY_TEMPERATURE
 
     def __init__(
         self,
@@ -148,7 +156,7 @@ class LLMClient:
         return self._api_key or self._resolved_config().api_key
 
     @property
-    def temperature(self) -> float:
+    def temperature(self) -> float | None:
         return self._temperature
 
     # -- client management ------------------------------------------------
@@ -236,13 +244,14 @@ class LLMClient:
         config = self._resolved_config()
         client = self._get_client()
         if config.provider == "anthropic":
-            response = client.messages.create(
-                model=config.model,
-                max_tokens=self._max_tokens or 4096,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-                temperature=self._temperature,
-            )
+            call_kwargs: dict[str, Any] = {
+                "model": config.model,
+                "max_tokens": self._max_tokens or 4096,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+                **_temperature_kwargs(config.model, self._temperature),
+            }
+            response = client.messages.create(**call_kwargs)
             content = "".join(str(block.text) for block in response.content if getattr(block, "type", None) == "text")
             if not content:
                 raise LLMClientError("LLM returned empty response content")
@@ -260,8 +269,8 @@ class LLMClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=self._temperature,
                 aws_region_name=config.region,
+                **_temperature_kwargs(config.model, self._temperature),
                 **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
             )
             content = response.choices[0].message.content
@@ -274,7 +283,7 @@ class LLMClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": self._temperature,
+            **_temperature_kwargs(config.model, self._temperature),
             **_token_limit_kwargs(config, self._max_tokens),
         }
 

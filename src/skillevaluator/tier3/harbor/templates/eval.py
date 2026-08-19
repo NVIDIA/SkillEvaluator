@@ -1110,14 +1110,26 @@ def _should_try_fallback(error):
 
 def _model_leaf(model):
     # Keep in sync with skillevaluator.tier3.eval_core.llm_judge (drift test).
-    return str(model or "").strip().casefold().rsplit("/", 1)[-1]
+    leaf = str(model or "").strip().casefold().rsplit("/", 1)[-1]
+    return re.sub(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.", "", leaf, count=1)
 
 
 def _supports_custom_temperature(model):
-    # Bare ``gpt-5*`` and provider-prefixed forms (``openai/gpt-5*``,
-    # ``openai/openai/gpt-5*``) reject custom temperature on the Chat Completions API.
     # Keep in sync with skillevaluator.tier3.eval_core.llm_judge (drift test).
-    return not _model_leaf(model).startswith("gpt-5")
+    leaf = _model_leaf(model)
+    if leaf.startswith("gpt-5"):
+        return False
+    match = re.fullmatch(
+        r"claude-[a-z][a-z-]*-(?P<major>\d+)"
+        r"(?:-(?P<minor>\d{1,2}))?"
+        r"(?:-(?:\d{8}|latest))?"
+        r"(?:-v\d+)?(?::\d+)?",
+        leaf,
+    )
+    if match is None:
+        return True
+    version = (int(match.group("major")), int(match.group("minor") or 0))
+    return version < (4, 7)
 
 
 def _is_native_openai_chat_url(provider, request_url):
@@ -1165,7 +1177,7 @@ def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=No
         token_key: max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if _supports_custom_temperature(model):
+    if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
     return payload
 
@@ -1208,16 +1220,16 @@ def _call_anthropic(prompt, model, max_tokens, temperature):
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None, "ANTHROPIC_API_KEY is required for the anthropic provider"
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if temperature is not None and _supports_custom_temperature(model):
+        payload["temperature"] = temperature
     request = urllib.request.Request(
         _anthropic_url(),
-        data=json.dumps(
-            {
-                "model": model,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-        ).encode(),
+        data=json.dumps(payload).encode(),
         headers={
             "Content-Type": "application/json",
             "x-api-key": api_key,
@@ -1242,10 +1254,13 @@ def _call_bedrock(prompt, model, max_tokens, temperature):
         return None, "boto3 is required for the bedrock provider"
     try:
         client = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-west-2"))
+        inference_config = {"maxTokens": max_tokens}
+        if temperature is not None and _supports_custom_temperature(model):
+            inference_config["temperature"] = temperature
         response = client.converse(
             modelId=model,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
+            inferenceConfig=inference_config,
         )
         content = "".join(
             str(block.get("text", ""))

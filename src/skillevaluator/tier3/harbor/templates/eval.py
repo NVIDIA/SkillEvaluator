@@ -1117,7 +1117,7 @@ def _model_leaf(model):
 def _supports_custom_temperature(model):
     # Keep in sync with skillevaluator.tier3.eval_core.llm_judge (drift test).
     leaf = _model_leaf(model)
-    if leaf.startswith("gpt-5"):
+    if leaf.startswith("gpt-5") or leaf == "claude-mythos-preview":
         return False
     match = re.fullmatch(
         r"claude-[a-z][a-z-]*-(?P<major>\d+)"

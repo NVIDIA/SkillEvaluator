@@ -360,6 +360,8 @@ def test_template_gpt5_temperature_guard_matches_eval_core():
         "openai/openai/gpt-5.6-sol",
         "gpt-5.4-mini",
         "gpt-4.1-mini",
+        "claude-mythos-preview",
+        "anthropic/claude-mythos-preview",
     ):
         assert eval_template._model_leaf(model) == llm_judge._model_leaf(model)
         assert eval_template._supports_custom_temperature(model) == llm_judge._supports_custom_temperature(model)
@@ -369,6 +371,7 @@ def test_template_gpt5_temperature_guard_matches_eval_core():
     ("model", "expected_temperature"),
     [
         ("claude-opus-4-8", None),
+        ("claude-mythos-preview", None),
         ("claude-3-5-sonnet-20241022", 0.3),
     ],
 )

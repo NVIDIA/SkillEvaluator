@@ -34,6 +34,7 @@ _EMBEDDING_DEFAULT_MODELS = {
     "nv_build": "nvidia/nv-embed-v1",
 }
 _SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "nv_build", "bedrock", "openai-compatible"})
+_NO_CUSTOM_TEMPERATURE_MODEL_IDS = frozenset({"claude-mythos-preview"})
 _ANTHROPIC_BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.")
 _VERSIONED_CLAUDE_MODEL_RE = re.compile(
     r"^claude-[a-z][a-z-]*-(?P<major>\d+)"
@@ -52,7 +53,7 @@ def _model_leaf(model: str) -> str:
 def _supports_custom_temperature(model: str) -> bool:
     """Return whether ``model`` accepts a non-default temperature value."""
     leaf = _model_leaf(model)
-    if leaf.startswith("gpt-5"):
+    if leaf.startswith("gpt-5") or leaf in _NO_CUSTOM_TEMPERATURE_MODEL_IDS:
         return False
 
     match = _VERSIONED_CLAUDE_MODEL_RE.fullmatch(leaf)

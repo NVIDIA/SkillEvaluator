@@ -71,9 +71,12 @@ def test_older_models_accept_custom_temperature() -> None:
         "bedrock/us.anthropic.claude-opus-4-8",
         "claude-opus-5",
         "claude-sonnet-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+        "anthropic/claude-mythos-preview",
     ],
 )
-def test_post_opus46_claude_models_reject_custom_temperature(model: str) -> None:
+def test_newer_claude_models_reject_custom_temperature(model: str) -> None:
     assert not llm_judge._supports_custom_temperature(model)
 
 

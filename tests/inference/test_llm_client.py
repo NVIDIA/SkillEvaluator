@@ -450,6 +450,18 @@ class TestCompletions:
 
         assert mock_anthropic.messages.create.call_args.kwargs["temperature"] == 0.2
 
+    def test_anthropic_mythos_preview_omits_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-mythos-preview")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value.content = [SimpleNamespace(type="text", text="Done")]
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            LLMClient(temperature=0.2).completions("system", "user")
+
+        assert "temperature" not in mock_anthropic.messages.create.call_args.kwargs
+
     @pytest.mark.parametrize("max_tokens", [None, 0])
     def test_bedrock_opus48_preserves_token_limits_and_omits_temperature(
         self,

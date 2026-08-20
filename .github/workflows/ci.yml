@@ -66,6 +66,9 @@ jobs:
       - name: Scan OSS source boundary
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
+      - name: Lint committed BENCHMARK.md fixtures for leak patterns
+        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
+        run: python scripts/ci/check_public_benchmarks.py --require-files tests/golden
       - name: Lint
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv run ruff check .

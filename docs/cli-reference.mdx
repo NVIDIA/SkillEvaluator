@@ -314,7 +314,7 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
 | `--model TEXT` | unset | Global agent model override. |
-| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-5.4-mini`. Accepts the `claude` alias for `claude-code`. |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-5.6-sol`. Accepts the `claude` alias for `claude-code`. |
 | `--custom-dockerfile-mode [preserve\|rebase]` | unset | How a custom `evals/environment/Dockerfile` is applied: `rebase` (built-in default) swaps its `FROM` line onto the eval base image; `preserve` keeps your `FROM` and appends the eval dependencies. |
 | `--skill-workspace-mode [isolated\|group]` | unset | `isolated` (built-in default) stages only the target skill in the agent workspace; `group` also stages the skills from `--include-skills` / `skill_workspace.include`. |
 | `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode (`--skill-workspace-mode group` or `skill_workspace.mode: group` in `evals/config.yml`). |
@@ -329,7 +329,7 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 | `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB (passed through to Harbor). |
 | `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
 
-Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.4-mini` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.
+Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.6-sol` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
 

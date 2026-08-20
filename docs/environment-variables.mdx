@@ -26,7 +26,7 @@ These variables select and configure the provider used for LLM-backed checks and
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `SKILL_EVAL_LLM_PROVIDER` | auto-selected (see below) | Provider for chat and judging: `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. |
-| `SKILL_EVAL_LLM_MODEL` | provider default | Chat model override. Required for `openai-compatible` — that provider has no default. Setting it to an empty string is a configuration error. |
+| `SKILL_EVAL_LLM_MODEL` | OpenAI: `gpt-5.6-sol`; Anthropic: `claude-opus-5`; NVIDIA Build: `nvidia/nemotron-3-nano-30b-a3b`; Bedrock: `us.anthropic.claude-opus-5` | Chat model override. Required for `openai-compatible` — that provider has no default. Setting it to an empty string is a configuration error. For a lower-cost OpenAI option, use `gpt-5.4-mini`. |
 | `SKILL_EVAL_LLM_BASE_URL` | provider default endpoint | Endpoint override; takes precedence over `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`. Required for `openai-compatible`. Ignored by `nv_build`, whose endpoint is fixed to `https://integrate.api.nvidia.com/v1` — point a custom endpoint at the `openai-compatible` provider instead. |
 | `SKILL_EVAL_LLM_API_KEY` | — | API key for the `openai-compatible` provider (local servers still require it to be set). |
 | `NVIDIA_API_KEY` | — | Credential for the `nv_build` provider (NVIDIA Build). |

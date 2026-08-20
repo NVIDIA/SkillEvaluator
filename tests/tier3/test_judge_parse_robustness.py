@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -342,6 +343,114 @@ def test_template_behavior_judge_matches_eval_core(monkeypatch, responses):
 def test_template_behavior_judge_max_tokens_matches_eval_core_constant():
     assert eval_template.BEHAVIOR_JUDGE_MAX_TOKENS == llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS
     assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS >= 4096
+
+
+def test_template_default_judge_model_matches_central_constant():
+    from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+
+    assert eval_template.DEFAULT_JUDGE_MODEL == llm_judge.DEFAULT_JUDGE_MODEL
+    assert llm_judge.DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
+    assert CHAT_DEFAULT_OPENAI == "gpt-5.6-sol"
+
+
+def test_template_gpt5_temperature_guard_matches_eval_core():
+    for model in (
+        "gpt-5.6-sol",
+        "openai/gpt-5.6-sol",
+        "openai/openai/gpt-5.6-sol",
+        "gpt-5.4-mini",
+        "gpt-4.1-mini",
+        "claude-mythos-preview",
+        "anthropic/claude-mythos-preview",
+    ):
+        assert eval_template._model_leaf(model) == llm_judge._model_leaf(model)
+        assert eval_template._supports_custom_temperature(model) == llm_judge._supports_custom_temperature(model)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_temperature"),
+    [
+        ("claude-opus-4-8", None),
+        ("claude-opus-5", None),
+        ("claude-mythos-preview", None),
+        ("claude-3-5-sonnet-20241022", 0.3),
+    ],
+)
+def test_template_anthropic_request_uses_model_compatible_temperature(monkeypatch, model, expected_temperature):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"content":[{"type":"text","text":"Done"}]}'
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 90
+        captured.update(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+
+    content, error = eval_template._call_anthropic("prompt", model, 4096, 0.3)
+
+    assert (content, error) == ("Done", None)
+    assert captured["max_tokens"] == 4096
+    if expected_temperature is None:
+        assert "temperature" not in captured
+    else:
+        assert captured["temperature"] == expected_temperature
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_temperature"),
+    [
+        ("us.anthropic.claude-opus-4-8", None),
+        ("us.anthropic.claude-opus-5", None),
+        ("us.anthropic.claude-3-5-sonnet-20241022-v2:0", 0.3),
+    ],
+)
+def test_template_bedrock_request_uses_model_compatible_temperature(monkeypatch, model, expected_temperature):
+    import boto3
+
+    client = MagicMock()
+    client.converse.return_value = {"output": {"message": {"content": [{"text": "Done"}]}}}
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+
+    content, error = eval_template._call_bedrock("prompt", model, 4096, 0.3)
+
+    assert (content, error) == ("Done", None)
+    inference_config = client.converse.call_args.kwargs["inferenceConfig"]
+    assert inference_config["maxTokens"] == 4096
+    if expected_temperature is None:
+        assert "temperature" not in inference_config
+    else:
+        assert inference_config["temperature"] == expected_temperature
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-5.6-sol", "openai/gpt-5.6-sol", "openai/openai/gpt-5.6-sol"],
+)
+def test_template_native_openai_gpt5_payload_matches_eval_core(model):
+    kwargs = {
+        "model": model,
+        "prompt": "Judge this response",
+        "max_tokens": 321,
+        "temperature": 0.25,
+        "provider": "openai",
+        "request_url": llm_judge.OPENAI_CHAT_URL,
+    }
+
+    template_payload = eval_template._chat_completion_payload(**kwargs)
+    assert template_payload == llm_judge._chat_completion_payload(**kwargs)
+    assert "max_completion_tokens" in template_payload
+    assert "max_tokens" not in template_payload
 
 
 def test_template_salvage_score_matches_eval_core_on_partial_recovery(monkeypatch):

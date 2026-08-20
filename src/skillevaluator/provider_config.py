@@ -6,23 +6,61 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
-_CHAT_DEFAULT_MODELS = {
-    "openai": "gpt-5.4-mini",
-    "anthropic": "claude-sonnet-4-5",
+# Pinned frontier chat defaults (not floating aliases like ``gpt-5`` / ``claude-opus-latest``).
+# Harbor ``templates/eval.py`` cannot import this module — keep its local
+# ``DEFAULT_JUDGE_MODEL`` in sync via the drift test in
+# ``tests/tier3/test_judge_parse_robustness.py``.
+CHAT_DEFAULT_OPENAI = "gpt-5.6-sol"
+CHAT_DEFAULT_ANTHROPIC = "claude-opus-5"
+CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5"
+# Lower-cost OpenAI alternative for ``SKILL_EVAL_LLM_MODEL`` overrides.
+CHAT_CHEAP_OPENAI = "gpt-5.4-mini"
+
+CHAT_DEFAULT_MODELS = {
+    "openai": CHAT_DEFAULT_OPENAI,
+    "anthropic": CHAT_DEFAULT_ANTHROPIC,
     "nv_build": "nvidia/nemotron-3-nano-30b-a3b",
-    "bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "bedrock": CHAT_DEFAULT_BEDROCK,
 }
 _EMBEDDING_DEFAULT_MODELS = {
     "openai": "text-embedding-3-small",
     "nv_build": "nvidia/nv-embed-v1",
 }
 _SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "nv_build", "bedrock", "openai-compatible"})
+_NO_CUSTOM_TEMPERATURE_MODEL_IDS = frozenset({"claude-mythos-preview"})
+_ANTHROPIC_BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+_VERSIONED_CLAUDE_MODEL_RE = re.compile(
+    r"^claude-[a-z][a-z-]*-(?P<major>\d+)"
+    r"(?:-(?P<minor>\d{1,2}))?"
+    r"(?:-(?:\d{8}|latest))?"
+    r"(?:-v\d+)?(?::\d+)?$"
+)
+
+
+def _model_leaf(model: str) -> str:
+    """Return a normalized model ID for capability checks only."""
+    leaf = str(model or "").strip().casefold().rsplit("/", 1)[-1]
+    return _ANTHROPIC_BEDROCK_PREFIX_RE.sub("", leaf, count=1)
+
+
+def _supports_custom_temperature(model: str) -> bool:
+    """Return whether ``model`` accepts a non-default temperature value."""
+    leaf = _model_leaf(model)
+    if leaf.startswith("gpt-5") or leaf in _NO_CUSTOM_TEMPERATURE_MODEL_IDS:
+        return False
+
+    match = _VERSIONED_CLAUDE_MODEL_RE.fullmatch(leaf)
+    if match is None:
+        return True
+    version = (int(match.group("major")), int(match.group("minor") or 0))
+    return version < (4, 7)
 
 
 class ProviderConfigurationError(ValueError):
@@ -238,6 +276,6 @@ def _validate_provider(provider: str, *, variable: str) -> None:
 
 def _default_chat_model(provider: str) -> str:
     try:
-        return _CHAT_DEFAULT_MODELS[provider]
+        return CHAT_DEFAULT_MODELS[provider]
     except KeyError as exc:
         raise ProviderConfigurationError("SKILL_EVAL_LLM_MODEL is required for openai-compatible providers.") from exc

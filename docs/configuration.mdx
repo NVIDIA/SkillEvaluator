@@ -38,7 +38,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export OPENAI_API_KEY='sk-...'
     ```
 
-    Default model: `gpt-5.4-mini`, endpoint `https://api.openai.com/v1`. Override the endpoint with `SKILL_EVAL_LLM_BASE_URL` (takes precedence) or `OPENAI_BASE_URL` — but a base URL that is a non-canonical alias of the native OpenAI endpoint is rejected; use `https://api.openai.com/v1` verbatim. On the canonical endpoint, `gpt-5*` models automatically send `max_completion_tokens` instead of `max_tokens`.
+    Default model: `gpt-5.6-sol` (OpenAI GPT-5.6 Sol frontier). For a lower-cost override set `SKILL_EVAL_LLM_MODEL=gpt-5.4-mini`. Endpoint `https://api.openai.com/v1`. Override the endpoint with `SKILL_EVAL_LLM_BASE_URL` (takes precedence) or `OPENAI_BASE_URL` — but a base URL that is a non-canonical alias of the native OpenAI endpoint is rejected; use `https://api.openai.com/v1` verbatim. On the canonical endpoint, `gpt-5*` models automatically send `max_completion_tokens` instead of `max_tokens`.
   </Tab>
   <Tab title="Anthropic" language="anthropic">
     ```bash title="Anthropic setup"
@@ -46,7 +46,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export ANTHROPIC_API_KEY='sk-ant-...'
     ```
 
-    Default model: `claude-sonnet-4-5`, using the Anthropic SDK's default endpoint. Override with `SKILL_EVAL_LLM_BASE_URL` (takes precedence) or `ANTHROPIC_BASE_URL`.
+    Default model: `claude-opus-5`, using the Anthropic SDK's default endpoint. Override with `SKILL_EVAL_LLM_BASE_URL` (takes precedence) or `ANTHROPIC_BASE_URL`.
   </Tab>
   <Tab title="NVIDIA Build" language="nv_build">
     ```bash title="NVIDIA Build setup"
@@ -68,7 +68,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     # (environment variables, shared profile, or an assumed role).
     ```
 
-    Default model: `us.anthropic.claude-sonnet-4-5-20250929-v1:0` on the AWS Bedrock Runtime.
+    Default model: `us.anthropic.claude-opus-5` on the AWS Bedrock Runtime (US geo inference profile for Claude Opus 5).
   </Tab>
   <Tab title="OpenAI-compatible" language="openai-compatible">
     ```bash title="OpenAI-compatible setup"
@@ -173,7 +173,7 @@ schema_version: 1
 harbor:
   agents:
     codex:
-      model: gpt-5.4-mini
+      model: gpt-5.6-sol
 ```
 
 You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) for the full run workflow.

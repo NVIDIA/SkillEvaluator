@@ -1,17 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Publication-ready BENCHMARK.md reporter for SkillEvaluator cards."""
+"""Publication-ready BENCHMARK.md reporter for skill evaluation cards."""
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.constants import DIMENSION_HINTS, DIMENSION_MAPPING, KEBAB_CASE_PATTERN
+from skillevaluator.constants import (
+    DIMENSION_HINTS,
+    DIMENSION_MAPPING,
+    DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
+    DIMENSION_VERDICT_PASS_THRESHOLD,
+    KEBAB_CASE_PATTERN,
+    TIER3_LIFT_FAIL_THRESHOLD,
+    TIER3_LIFT_PASS_THRESHOLD,
+)
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
@@ -19,25 +28,14 @@ if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
 
 
-_DIMENSION_DESCRIPTIONS = {
-    "security": (
-        "checks whether skill-assisted execution avoids unsafe behavior such as "
-        "secret leakage, destructive commands, or unauthorized access."
-    ),
-    "correctness": ("checks whether the agent follows the expected workflow and produces the correct final output."),
-    "discoverability": ("checks whether the agent loads the skill when relevant and avoids using it when irrelevant."),
-    "effectiveness": ("checks whether the agent performs measurably better with the skill than without it."),
-    "efficiency": "checks whether the agent uses fewer tokens and avoids redundant work.",
-}
-
 _SIGNAL_DESCRIPTIONS = {
-    "security": "checks for unsafe operations, secret leakage, and unauthorized access.",
-    "skill_execution": "verifies that the agent loaded the expected skill and workflow.",
-    "skill_efficiency": "checks routing quality, decoy avoidance, and redundant tool usage.",
-    "accuracy": "grades final-answer correctness against the reference answer.",
-    "goal_accuracy": "checks whether the overall user task completed successfully.",
-    "behavior_check": "verifies expected behavior steps, including safety expectations.",
-    "token_efficiency": "compares token usage with and without the skill.",
+    "security": "unsafe operations, secret leakage, and unauthorized access",
+    "skill_execution": "whether the expected skill was found and executed",
+    "skill_efficiency": "routing quality, workspace-aware skill reads, and productive tool use",
+    "accuracy": "final-answer correctness against the reference answer",
+    "goal_accuracy": "whether the user's goal was achieved",
+    "behavior_check": "whether the expected workflow behavior was followed",
+    "token_efficiency": "token usage with and without the skill (reported separately; not scored as a dimension)",
 }
 
 _TIER2_VALIDATORS = {
@@ -46,10 +44,12 @@ _TIER2_VALIDATORS = {
 }
 
 _RETIRED_PRODUCT_NAME = re.compile(r"\b[a-z]*[\s_-]*skills[\s_-]*eval\b", flags=re.IGNORECASE)
-_PATH_START = re.compile(r"(?<![A-Za-z0-9:/])(?:[A-Za-z]:[\\/]|\\\\|\\|/)")
-_QUOTED_ABSOLUTE_PATH = re.compile(
-    r"(?P<quote>['\"])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|\\|/)[^'\"\r\n]+)(?P=quote)"
+_RETIRED_SANDBOX_REFERENCE = re.compile(
+    rf"\b{re.escape(chr(97) + 'stra')}[\s_-]+sandbox\b",
+    flags=re.IGNORECASE,
 )
+_PATH_START = re.compile(r"(?<![A-Za-z0-9:/])(?:[A-Za-z]:[\\/]|\\\\|\\|/)")
+_QUOTED_ABSOLUTE_PATH = re.compile(r"(?P<quote>['\"])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|\\|/)[^'\"\r\n]+)(?P=quote)")
 _QUOTED_FILE_URI_PATH = re.compile(
     r"(?P<quote>['\"])(?:file:)(?://[^/'\"\r\n]*)?(?P<path>/[^'\"\r\n]+)(?P=quote)",
     flags=re.IGNORECASE,
@@ -67,7 +67,7 @@ _TRAILING_PATH_PUNCTUATION = ".,;!?)]}>`'\""
 
 
 class BenchmarkReporter(ReporterBase):
-    """Render a stable ``BENCHMARK.md`` skill evaluation card."""
+    """Render a stable, publication-oriented ``BENCHMARK.md`` card."""
 
     def __init__(
         self,
@@ -86,7 +86,7 @@ class BenchmarkReporter(ReporterBase):
 
     @property
     def description(self) -> str:
-        return "BENCHMARK.md skill evaluation card"
+        return "Publication-ready BENCHMARK.md skill evaluation card"
 
     def render(self, result: ValidationResult) -> str:
         return self.render_all([result])
@@ -95,249 +95,306 @@ class BenchmarkReporter(ReporterBase):
         ae = _agent_eval_payload(results)
         skill_name = _publication_safe_skill_name(self.skill_name or _skill_name(results, ae))
         private_labels = _private_environment_labels(ae)
+        policy = _benchmark_policy(results, ae)
+        status = _overall_status(results, ae, policy)
 
         lines: list[str] = [
-            "# Evaluation Report",
+            f"# Skill Benchmark: {skill_name}",
             "",
-            (f"Evaluation of the `{skill_name}` skill before publication through SkillEvaluator."),
-            "",
-            (
-                "This benchmark summarizes 3-Tier Evaluation from SkillEvaluator "
-                "results for the skill. The goal is to document whether the "
-                "skill is safe, discoverable, effective, and useful for agents before "
-                "it is published for broader workflow use."
-            ),
+            _verdict_callout(status),
             "",
         ]
+        if status == "PASS":
+            self._render_publication_recommendation(lines, results)
+        elif status == "FAIL":
+            lines.extend(
+                [
+                    (
+                        "The skill should be reviewed before publication. Address the blocking findings below, "
+                        "then rerun SkillEvaluator."
+                    ),
+                    "",
+                ]
+            )
+        elif status == "INCOMPLETE":
+            lines.extend(
+                [
+                    (
+                        "One or more required evaluation tiers did not complete, so this benchmark is not "
+                        "publication-complete."
+                    ),
+                    "",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    (
+                        "Live evaluation did not show a material gain or regression. Collect more evidence or "
+                        "improve the skill before making a publication decision."
+                    ),
+                    "",
+                ]
+            )
 
-        self._render_evaluation_summary(lines, results, ae, skill_name, private_labels)
-        self._render_agents_used(lines, ae, private_labels)
-        self._render_metrics_used(lines, ae, private_labels)
-        self._render_test_tasks(lines, ae)
-        self._render_results(lines, ae, private_labels)
-        self._render_tier_summary(
+        self._render_metadata(
             lines,
-            "Tier 1: Static Validation Summary",
-            _tier1_results(results),
-            private_labels,
+            results,
+            ae,
+            skill_name,
+            policy,
+            private_labels=private_labels,
         )
-        self._render_tier_summary(
-            lines,
-            "Tier 2: Deduplication Summary",
-            _tier2_results(results),
-            private_labels,
-        )
-        self._render_publication_recommendation(lines, results, ae)
+        self._render_report_purpose(lines)
+        self._render_results_at_a_glance(lines, ae, private_labels)
+        self._render_tier_status(lines, results, ae, policy, private_labels)
+        self._render_findings(lines, results, private_labels)
+        self._render_methodology(lines, ae, private_labels)
+        self._render_freshness(lines)
 
         return "\n".join(lines).rstrip() + "\n"
 
-    def _render_evaluation_summary(
+    def _render_publication_recommendation(
+        self,
+        lines: list[str],
+        results: list[ValidationResult],
+    ) -> None:
+        lines.extend(["## Publication Recommendation", ""])
+        if _advisory_agent_eval_skip_message(results):
+            lines.append(
+                "Tier 3 live evaluation was skipped and does not block required validation. "
+                "Publication suitability in this report is based on the completed required-tier "
+                "results; rerun Tier 3 when the live evaluation runtime is available."
+            )
+        else:
+            lines.append("Recommended for publication based on the completed evaluation evidence in this report.")
+        lines.append("")
+
+    def _render_metadata(
         self,
         lines: list[str],
         results: list[ValidationResult],
         ae: dict[str, Any] | None,
         skill_name: str,
+        benchmark_policy: dict[str, bool],
+        *,
         private_labels: tuple[str, ...],
     ) -> None:
-        lines.append("## Evaluation Summary")
-        lines.append("")
-        lines.append(f"- Skill: `{skill_name}`")
-        if self.include_timestamp:
-            date = datetime.now(tz=UTC).date().isoformat()
-            lines.append(f"- Evaluation date: {date}")
+        lines.extend(["## Evaluation Metadata", "", f"- Skill: `{skill_name}`"])
 
-        if ae:
-            summary_value = ae.get("summary")
-            summary = summary_value if isinstance(summary_value, dict) else {}
-            environment = summary.get("environment") or ae.get("environment")
-            if environment:
-                lines.append(f"- Environment: `{_publication_safe_environment(environment)}`")
+        evaluated_at = _evaluated_at(ae)
+        lines.append(
+            f"- Evaluation date: {_publication_safe_inline(_evaluation_date(evaluated_at), private_labels)}"
+            if evaluated_at
+            else "- Evaluation date: not recorded (legacy or non-live result)"
+        )
 
-            dataset_count = _dataset_count(ae)
-            if dataset_count is not None:
-                lines.append(f"- Dataset: {dataset_count} evaluation tasks")
+        summary = _mapping((ae or {}).get("summary"))
+        version = (ae or {}).get("evaluator_version") or summary.get("evaluator_version")
+        lines.append(
+            f"- Evaluator version: `{_publication_safe_inline(version, private_labels)}`"
+            if version
+            else "- Evaluator version: not recorded (legacy or non-live result)"
+        )
 
-            attempt_policy_value = ae.get("attempt_policy")
-            attempt_policy = attempt_policy_value if isinstance(attempt_policy_value, dict) else {}
-            attempts = attempt_policy.get("max_attempts")
-            if attempts is not None:
-                lines.append(f"- Attempts per task: {_publication_safe_inline(attempts, private_labels)}")
-
-            pass_threshold = attempt_policy.get("pass_threshold")
-            if isinstance(pass_threshold, (int, float)):
-                lines.append(f"- Pass threshold: {pass_threshold:.0%}")
-
-            verdict = ae.get("verdict") or summary.get("verdict")
-            combined = _combined_verdict(results, verdict)
-            lines.append(f"- Overall verdict: {combined}")
-            if skip_message := _advisory_agent_eval_skip_message(results):
-                lines.append(
-                    "- Tier 3 live evaluation: SKIPPED — "
-                    f"{_publication_safe_inline(skip_message, private_labels)}"
-                )
-            if combined == "INCOMPLETE":
-                _render_incomplete_benchmark_notes(lines, results, private_labels)
-            elif combined == "FAIL":
-                _render_failed_benchmark_notes(lines)
-        else:
-            combined = _combined_verdict(results, None)
-            lines.append(f"- Overall verdict: {combined}")
-            if combined == "INCOMPLETE":
-                _render_incomplete_benchmark_notes(lines, results, private_labels)
-            elif combined == "FAIL":
-                _render_failed_benchmark_notes(lines)
-            lines.append("- Tier 3 live agent evaluation: not available in this report")
-        lines.append("")
-
-    @staticmethod
-    def _render_agents_used(
-        lines: list[str],
-        ae: dict[str, Any] | None,
-        private_labels: tuple[str, ...],
-    ) -> None:
-        lines.append("## Agents Used")
-        lines.append("")
         agents = _agents(ae)
-        if not agents:
-            lines.append("- Tier 3 agent details were not available in this report.")
+        if agents:
+            lines.append(
+                "- Agents: " + ", ".join(_agent_label(name, agent, private_labels) for name, agent in agents.items())
+            )
         else:
-            for name, agent in agents.items():
-                lines.append(f"- {_agent_label(name, agent, private_labels)}")
-        lines.append("")
-
-    @staticmethod
-    def _render_metrics_used(
-        lines: list[str],
-        ae: dict[str, Any] | None,
-        private_labels: tuple[str, ...],
-    ) -> None:
-        lines.append("## Metrics Used")
-        lines.append("")
-        lines.append("Reported benchmark dimensions:")
-        lines.append("")
-        for dim_id in DIMENSION_MAPPING:
-            desc = _DIMENSION_DESCRIPTIONS.get(dim_id) or DIMENSION_HINTS.get(dim_id, "")
-            lines.append(f"- {dim_id.title()}: {desc}")
-        lines.append("")
-        lines.append("Underlying evaluation signals used in this run:")
-        lines.append("")
-        signals = _metric_signals(ae)
-        if not signals:
-            lines.append("- No Tier 3 evaluation signal details were available in this report.")
-        else:
-            labels = _metric_labels(ae)
-            for signal in signals:
-                safe_signal = _publication_safe_inline(signal, private_labels)
-                label = _publication_safe_label(labels.get(signal, signal.replace("_", " ").title()), private_labels)
-                desc = _SIGNAL_DESCRIPTIONS.get(signal, "captured by the Tier 3 evaluation payload.")
-                lines.append(f"- `{safe_signal}` ({label}): {desc}")
-        lines.append("")
-
-    @staticmethod
-    def _render_test_tasks(lines: list[str], ae: dict[str, Any] | None) -> None:
-        lines.append("## Test Tasks")
-        lines.append("")
-        if not ae:
-            lines.append("Tier 3 evaluation task details were not available in this report.")
-            lines.append("")
-            return
-
-        dataset = _dataset(ae)
-        if not dataset:
-            trial_count = len(ae.get("trials") or [])
-            if trial_count:
-                lines.append(
-                    f"The benchmark included {trial_count} recorded Tier 3 trials, but "
-                    "the source evaluation dataset was not available in this report payload."
+            requested = (ae or {}).get("requested_agents") or []
+            if isinstance(requested, list) and requested:
+                labels = ", ".join(
+                    f"{_human_agent_name(_publication_safe_label(agent, private_labels))} (model not recorded)"
+                    for agent in requested
                 )
+                lines.append("- Agents: requested but not run — " + labels)
             else:
-                lines.append("The evaluation dataset was not available in this report payload.")
-            lines.append("")
-            return
+                lines.append("- Agents: not recorded (legacy or non-live result)")
 
-        counts = _dataset_composition(dataset)
-        lines.append(f"The benchmark dataset contained {len(dataset)} evaluation tasks:")
+        dataset_summary = _dataset_summary(ae)
+        if dataset_summary["total_tasks"] > 0:
+            composition = _dataset_composition_label(dataset_summary)
+            lines.append(f"- Tasks: {dataset_summary['total_tasks']} evaluation tasks{composition}")
+        else:
+            lines.append("- Tasks: not recorded (legacy or non-live result)")
+
+        digest = (ae or {}).get("dataset_digest") or summary.get("dataset_digest")
+        digest_algorithm = (ae or {}).get("dataset_digest_algorithm") or summary.get("dataset_digest_algorithm")
+        if digest:
+            safe_digest = _publication_safe_inline(digest, private_labels)
+            algorithm_label = (
+                f" ({_publication_safe_inline(digest_algorithm, private_labels)})" if digest_algorithm else ""
+            )
+            lines.append(f"- Dataset digest: `{safe_digest}`{algorithm_label}")
+        else:
+            lines.append("- Dataset digest: not recorded (legacy or non-live result)")
+
+        policy = _mapping((ae or {}).get("attempt_policy"))
+        attempts = policy.get("max_attempts")
+        if attempts is not None:
+            lines.append(f"- Attempts per task: {_publication_safe_inline(attempts, private_labels)}")
+        else:
+            lines.append("- Attempts per task: not recorded (legacy or non-live result)")
+
+        environment = _environment(ae)
+        if environment:
+            lines.append(f"- Environment: `{_publication_safe_environment(environment)}`")
+        else:
+            lines.append("- Environment: not recorded (legacy or non-live result)")
+
+        tier3_requirement = "required for publication" if benchmark_policy["tier3_required"] else "optional by policy"
+        lines.append(f"- Tier 3 evidence: {tier3_requirement}")
+        if skip_message := _advisory_agent_eval_skip_message(results):
+            lines.append(
+                f"- Tier 3 live evaluation: SKIPPED — {_publication_safe_inline(skip_message, private_labels)}"
+            )
+
         lines.append("")
-        lines.append(f"- Positive tasks: {counts['positive']} tasks where the skill was expected to activate.")
-        lines.append(f"- Negative tasks: {counts['negative']} tasks where no skill was expected.")
-        lines.append(
-            f"- Unlabeled tasks: {counts['unlabeled']} tasks where positive/negative intent could not be inferred."
-        )
-        lines.append("")
-        lines.append(
-            "Task composition is derived from the evaluation dataset when possible. Entries "
-            "with `expected_skill` set are treated as positive skill-activation cases, while "
-            "entries with `expected_skill: null` are treated as negative activation cases."
-        )
-        lines.append("")
+        environment_note = _environment_note(environment)
+        if environment_note:
+            lines.extend([environment_note, ""])
 
     @staticmethod
-    def _render_results(
+    def _render_report_purpose(lines: list[str]) -> None:
+        lines.extend(
+            [
+                "## What This Report Answers",
+                "",
+                "The three-tier evaluation checks whether the skill:",
+                "",
+                "- is safe to use;",
+                "- produces correct answers;",
+                "- is discovered and activated when needed;",
+                "- helps the agent complete the user's goal and expected workflow; and",
+                "- avoids wasted skill and tool usage.",
+                "",
+            ]
+        )
+
+    @staticmethod
+    def _render_results_at_a_glance(
         lines: list[str],
         ae: dict[str, Any] | None,
         private_labels: tuple[str, ...],
     ) -> None:
-        lines.append("## Results")
-        lines.append("")
+        lines.extend(["## Results at a Glance", ""])
         agents = _agents(ae)
         if not agents:
-            lines.append("Tier 3 dimension rollup was not available in this report.")
-            lines.append("")
+            lines.extend(
+                [
+                    "Tier 3 live-agent scores were not available. See the tier status table for what ran.",
+                    "",
+                ]
+            )
             return
 
-        header = [
-            "Dimension",
-            "Num",
-            *[_agent_label(name, agent, private_labels) for name, agent in agents.items()],
+        headers = [
+            "Measure",
+            *[_agent_table_label(name, agent, private_labels) for name, agent in agents.items()],
         ]
-        lines.append("| " + " | ".join(_md_cell(cell, private_labels) for cell in header) + " |")
-        lines.append("|---|---:|" + "|".join(["---:"] * len(agents)) + "|")
-        for dim_id in DIMENSION_MAPPING:
-            row = [dim_id.title(), _dimension_num(ae, dim_id)]
-            for agent in agents.values():
-                row.append(_score_lift_cell(_agent_dimension(agent, dim_id)))
-            lines.append("| " + " | ".join(_md_cell(cell, private_labels) for cell in row) + " |")
-        lines.append("")
-        lines.append(
-            "Score values show skill-assisted performance. Values in parentheses show "
-            "uplift versus the no-skill baseline when baseline data is available."
-        )
-        lines.append("")
+        lines.append("| " + " | ".join(_md_cell(header, private_labels) for header in headers) + " |")
+        lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
-    def _render_tier_summary(
+        overall_row = ["Overall"]
+        overall_row.extend(
+            _score_transition_values(
+                _number(agent.get("baseline")),
+                _number(agent.get("with_skill", agent.get("overall_score"))),
+            )
+            for agent in agents.values()
+        )
+        lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
+
+        has_partial = False
+        for dim_id in DIMENSION_MAPPING:
+            row = [dim_id.title()]
+            for agent in agents.values():
+                dimension = _agent_dimension(agent, dim_id)
+                if dimension and dimension.get("partial"):
+                    has_partial = True
+                row.append(_score_transition(dimension))
+            lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
+
+        lines.extend(
+            [
+                "",
+                (
+                    "**How to read this table:** baseline is the same task attempted without the target skill. "
+                    "Uplift is `skill score - baseline score`, shown in percentage points."
+                ),
+                "",
+                (
+                    "Example: `47% → 92% (+45 points)` means the skill-assisted run scored 92%, "
+                    "45 percentage points above its 47% no-skill baseline."
+                ),
+                "",
+            ]
+        )
+        if has_partial:
+            lines.extend(
+                [
+                    (
+                        "A partial dimension was calculated from only the available configured signals; "
+                        "review the detailed report before relying on it."
+                    ),
+                    "",
+                ]
+            )
+
+    def _render_tier_status(
         self,
         lines: list[str],
-        title: str,
+        results: list[ValidationResult],
+        ae: dict[str, Any] | None,
+        benchmark_policy: dict[str, bool],
+        private_labels: tuple[str, ...],
+    ) -> None:
+        tier_groups = [
+            ("Tier 1", "Static validation", _tier1_results(results)),
+            ("Tier 2", "Semantic deduplication", _tier2_results(results)),
+            ("Tier 3", "Live agent evaluation", _tier3_results(results)),
+        ]
+
+        lines.extend(
+            [
+                "## Tier Status",
+                "",
+                "| Tier | Purpose | Status | Evidence |",
+                "|---|---|---|---|",
+            ]
+        )
+        for tier, purpose, tier_results in tier_groups:
+            status, evidence = _tier_status(tier, tier_results, ae, benchmark_policy)
+            lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
+        lines.append("")
+
+        for tier, _purpose, tier_results in tier_groups:
+            if tier_results and all(_result_skipped(result) for result in tier_results):
+                lines.append(f"{tier} validation was skipped and executed 0 checks.")
+                for reason in _skip_reasons(tier_results):
+                    lines.append(f"- {_publication_safe_inline(reason, private_labels)}")
+                lines.append("")
+
+    def _render_findings(
+        self,
+        lines: list[str],
         results: list[ValidationResult],
         private_labels: tuple[str, ...],
     ) -> None:
-        lines.append(f"## {title}")
-        lines.append("")
-        if not results:
-            lines.append("This tier was not run or did not produce findings in this report.")
-            lines.append("")
-            return
+        findings_with_result = [(finding, result) for result in results for finding in result.findings]
+        blocking = [
+            finding
+            for finding, result in findings_with_result
+            if not result.passed or finding.severity.value in {"critical", "high"}
+        ]
 
-        incomplete = [r for r in results if r.is_incomplete]
-        failures = [r for r in results if not r.passed]
-        findings = [finding for result in results for finding in result.findings]
-        high_count = _severity_count(findings, "high") + _severity_count(findings, "critical")
-        if incomplete:
-            tools = list(dict.fromkeys(tool for result in incomplete for tool in result.incomplete_scans))
-            safe_tools = [_publication_safe_inline(tool, private_labels) for tool in tools]
-            status = f"is incomplete because {', '.join(safe_tools)} did not produce trustworthy evidence"
-        elif failures or high_count:
-            status = "reported findings"
-        elif findings:
-            status = "passed with observations"
-        else:
-            status = "passed"
-        lines.append(
-            f"{title.split(':', 1)[0]} validation {status}. "
-            f"SkillEvaluator ran {len(results)} checks and found "
-            f"{len(findings)} total findings."
-        )
-        lines.append("")
+        if blocking:
+            lines.extend(["## Blocking Findings", ""])
+            for finding in _top_findings(blocking, limit=self.max_findings_shown):
+                lines.append(_finding_line(finding, private_labels))
+            lines.append("")
 
         static_test_limitations = list(
             dict.fromkeys(
@@ -345,40 +402,36 @@ class BenchmarkReporter(ReporterBase):
             )
         )
         if static_test_limitations:
-            lines.append("Test execution limitations:")
-            lines.append("")
-            for message in static_test_limitations:
-                lines.append(f"- {_publication_safe_inline(message, private_labels)}")
-            lines.append("")
-
-        if not findings:
-            lines.append("Notable observations:")
-            lines.append("")
-            for result in results[: self.max_findings_shown]:
-                validator_name = _publication_safe_inline(result.validator_name, private_labels)
-                if result.success_details:
-                    message = _publication_safe_inline(result.success_details[0].message, private_labels)
-                    lines.append(f"- {validator_name}: {message}")
-                else:
-                    lines.append(f"- {validator_name}: no findings reported.")
-            lines.append("")
-            return
-
-        lines.append("Top findings:")
-        lines.append("")
-        for finding in _top_findings(findings, limit=self.max_findings_shown):
-            loc = f" (`{_publication_safe_location(finding)}`)" if finding.file_path else ""
-            category = _publication_safe_inline(finding.category, private_labels)
-            check_name = _publication_safe_inline(finding.check_name, private_labels)
-            message = _publication_safe_inline(finding.message, private_labels)
-            lines.append(
-                f"- {finding.severity.value.upper()} {category}/{check_name}: {message}{loc}"
+            lines.extend(["Test execution limitations:", ""])
+            lines.extend(
+                f"- {_publication_safe_inline(message, private_labels)}" for message in static_test_limitations
             )
-        lines.append("")
+            lines.append("")
+
+        lines.extend(["## Findings and Observations", ""])
+        lines.extend(["<details>", "<summary>Show detailed findings and successful checks</summary>", ""])
+
+        findings = [finding for finding, _result in findings_with_result]
+        if findings:
+            for finding in _top_findings(findings, limit=self.max_findings_shown):
+                lines.append(_finding_line(finding, private_labels))
+            remaining = len(findings) - min(len(findings), self.max_findings_shown)
+            if remaining > 0:
+                lines.append(f"- {remaining} additional finding(s) are available in the full evaluation artifacts.")
+        else:
+            observations = [
+                f"- {_publication_safe_inline(result.validator_name, private_labels)}: "
+                f"{_publication_safe_inline(detail.message, private_labels)}"
+                for result in results
+                for detail in result.success_details[:1]
+            ]
+            lines.extend(observations or ["- No findings or successful-check details were recorded."])
+
+        lines.extend(["", "</details>", ""])
 
     @staticmethod
     def _static_test_evidence_message(result: ValidationResult) -> str | None:
-        """Return the static test limitation from direct or folder-aggregated results."""
+        """Return the static-test limitation from direct or aggregated results."""
         for detail in result.success_details:
             if detail.check_name == "test_discovery":
                 return detail.message
@@ -392,31 +445,110 @@ class BenchmarkReporter(ReporterBase):
         return None
 
     @staticmethod
-    def _render_publication_recommendation(
+    def _render_methodology(
         lines: list[str],
-        results: list[ValidationResult],
         ae: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
     ) -> None:
-        verdict = (ae or {}).get("verdict")
-        if _combined_verdict(results, verdict) != "PASS":
-            return
+        policy = _mapping((ae or {}).get("verdict_policy"))
+        attempt_policy = _mapping((ae or {}).get("attempt_policy"))
+        attempt_threshold = _number(policy.get("attempt_pass_threshold", attempt_policy.get("pass_threshold")))
+        dimension_pass = _number(policy.get("dimension_pass_threshold")) or DIMENSION_VERDICT_PASS_THRESHOLD
+        dimension_neutral = (
+            _number(policy.get("dimension_neutral_threshold"))
+            if policy.get("dimension_neutral_threshold") is not None
+            else DIMENSION_VERDICT_NEUTRAL_THRESHOLD
+        )
+        lift_pass = _number(policy.get("lift_pass_threshold"))
+        lift_fail = _number(policy.get("lift_fail_threshold"))
+        if lift_pass is None:
+            lift_pass = TIER3_LIFT_PASS_THRESHOLD
+        if lift_fail is None:
+            lift_fail = TIER3_LIFT_FAIL_THRESHOLD
 
-        lines.append("## Publication Recommendation")
-        lines.append("")
-        if _advisory_agent_eval_skip_message(results):
+        lines.extend(
+            [
+                "## Scoring Methodology",
+                "",
+                "<details>",
+                "<summary>Show dimension definitions, source signals, and thresholds</summary>",
+                "",
+                "| Dimension | Question | Scored signals |",
+                "|---|---|---|",
+            ]
+        )
+        for dim_id, config in DIMENSION_MAPPING.items():
+            signals = _weighted_signals(config)
+            question = config.get("question") or DIMENSION_HINTS.get(dim_id, "")
+            lines.append(f"| {dim_id.title()} | {_trusted_md_cell(question)} | {_trusted_md_cell(signals)} |")
+
+        lines.extend(
+            [
+                "",
+                (
+                    f"- Dimension bands: PASS at {dimension_pass:.0%} or above; NEUTRAL from "
+                    f"{dimension_neutral:.0%} to below {dimension_pass:.0%}; FAIL below {dimension_neutral:.0%}."
+                ),
+                (
+                    f"- Overall Tier 3 lift: PASS at +{lift_pass * 100:.0f} points or more; "
+                    f"FAIL at {lift_fail * 100:.0f} points or less; values between those bands are NEUTRAL."
+                ),
+                (
+                    "- Overall verdict: PASS only when every configured dimension passes for at least one "
+                    "supported agent. Lift is reported as diagnostic evidence and does not override this gate."
+                ),
+            ]
+        )
+        if attempt_threshold is not None:
             lines.append(
-                "Tier 3 live evaluation was skipped and does not block required validation. "
-                "Publication suitability in this report is based on the completed required-tier "
-                "results; rerun Tier 3 when the live evaluation runtime is available."
+                f"- The {attempt_threshold:.0%} attempt pass threshold is a separate per-task gate; "
+                "it is not the dimension pass threshold."
             )
-        else:
-            lines.append(
-                "The skill is suitable to proceed toward SkillEvaluator publication "
-                "based on this benchmark. Skill owners should keep this file with the "
-                "skill and refresh it when the evaluation dataset, skill behavior, or "
-                "target agents materially change."
-            )
-        lines.append("")
+
+        lines.extend(
+            [
+                (
+                    "- Effectiveness is the equal-weight mean of goal completion (`goal_accuracy`) and "
+                    "expected workflow adherence (`behavior_check`)."
+                ),
+                (
+                    "- Token efficiency is a separate report-only signal. It does not change a dimension "
+                    "score or the overall verdict."
+                ),
+                "",
+            ]
+        )
+
+        signals = _metric_signals(ae)
+        if signals:
+            labels = _metric_labels(ae)
+            lines.append("Signals present in this run:")
+            lines.append("")
+            for signal in signals:
+                safe_signal = _publication_safe_inline(signal, private_labels)
+                label = _publication_safe_label(
+                    labels.get(signal, signal.replace("_", " ").title()),
+                    private_labels,
+                )
+                description = _SIGNAL_DESCRIPTIONS.get(signal, "additional evaluator signal")
+                lines.append(f"- `{safe_signal}` ({label}): {description}.")
+            lines.append("")
+
+        lines.extend(["</details>", ""])
+
+    @staticmethod
+    def _render_freshness(lines: list[str]) -> None:
+        lines.extend(
+            [
+                "## Freshness",
+                "",
+                (
+                    "Regenerate this benchmark when the skill, evaluation dataset, target agent/model, "
+                    "evaluator version, environment, or scoring policy changes."
+                ),
+                "",
+            ]
+        )
 
     def get_file_extension(self) -> str:
         return ".md"
@@ -430,12 +562,118 @@ def _agent_eval_payload(results: list[ValidationResult]) -> dict[str, Any] | Non
     return None
 
 
-def _render_failed_benchmark_notes(lines: list[str]) -> None:
-    lines.append(
-        "The skill should be reviewed before SkillEvaluator publication. "
-        "**Skill owners should address the applicable findings below and rerun "
-        "SkillEvaluator to refresh this benchmark.**"
+def _mapping(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _benchmark_policy(
+    results: list[ValidationResult],
+    ae: dict[str, Any] | None,
+) -> dict[str, bool]:
+    """Resolve the persisted publication policy, defaulting Tier 3 to required."""
+    candidates: list[object] = [
+        (ae or {}).get("benchmark_policy"),
+        _mapping((ae or {}).get("summary")).get("benchmark_policy"),
+    ]
+    candidates.extend(
+        result.metadata.get("benchmark_policy") for result in results if isinstance(result.metadata, dict)
     )
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        required = candidate.get("tier3_required")
+        if isinstance(required, bool):
+            return {"tier3_required": required}
+    return {"tier3_required": True}
+
+
+def _tier3_evidence_complete(ae: dict[str, Any] | None) -> bool:
+    """Require a succeeded run with the minimum publication provenance."""
+    if not isinstance(ae, dict):
+        return False
+    agents = _agents(ae)
+    if not agents or any(
+        not str(agent.get("model") or agent.get("model_name") or agent.get("llm_model") or "").strip()
+        for agent in agents.values()
+    ):
+        return False
+    summary = _mapping(ae.get("summary"))
+    verdict = str(ae.get("verdict") or summary.get("verdict") or "").lower()
+    if verdict not in {"pass", "neutral", "fail"}:
+        return False
+    execution_status = str(ae.get("execution_status") or summary.get("execution_status") or "").lower()
+    evaluated_at = ae.get("evaluated_at") or summary.get("evaluated_at")
+    evaluator_version = ae.get("evaluator_version") or summary.get("evaluator_version")
+    dataset_digest = ae.get("dataset_digest") or summary.get("dataset_digest")
+    attempt_policy = _mapping(ae.get("attempt_policy"))
+    attempts = _nonnegative_int(attempt_policy.get("max_attempts"))
+    environment = summary.get("environment") or ae.get("environment")
+    return bool(
+        execution_status == "succeeded"
+        and _tier3_dimension_verdict(ae) is not None
+        and str(evaluated_at or "").strip()
+        and str(evaluator_version or "").strip()
+        and str(dataset_digest or "").strip()
+        and _dataset_summary(ae)["total_tasks"] > 0
+        and attempts > 0
+        and str(environment or "").strip()
+    )
+
+
+def _tier3_dimension_verdict(ae: dict[str, Any] | None) -> str | None:
+    """Recompute the canonical verdict from every supported agent's dimensions."""
+    supported_agents = [agent for agent in _agents(ae).values() if agent.get("execution_status") == "succeeded"]
+    if not supported_agents:
+        return None
+
+    agent_verdicts: list[str] = []
+    has_partial_evidence = False
+    for agent in supported_agents:
+        scores = _agent_dimension_scores(agent)
+        if scores is None:
+            has_partial_evidence = True
+            continue
+        if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
+            agent_verdicts.append("fail")
+        elif any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
+            agent_verdicts.append("neutral")
+        else:
+            agent_verdicts.append("pass")
+
+    if "pass" in agent_verdicts:
+        return "pass"
+    if has_partial_evidence or not agent_verdicts:
+        return None
+    if "neutral" in agent_verdicts:
+        return "neutral"
+    return "fail"
+
+
+def _agent_dimension_scores(agent: dict[str, Any]) -> list[float] | None:
+    """Return all configured in-range dimension scores, rejecting partial evidence."""
+    raw_dimensions = agent.get("dimensions")
+    if not isinstance(raw_dimensions, list):
+        return None
+    dimensions: dict[str, dict[str, Any]] = {}
+    for dimension in raw_dimensions:
+        if not isinstance(dimension, dict):
+            continue
+        dimension_id = str(dimension.get("id") or "")
+        if dimension_id in dimensions:
+            return None
+        dimensions[dimension_id] = dimension
+
+    scores: list[float] = []
+    for dimension_id in DIMENSION_MAPPING:
+        dimension = dimensions.get(dimension_id)
+        if dimension is None:
+            return None
+        value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
+        score = _number(value)
+        if score is None or not 0.0 <= score <= 1.0:
+            return None
+        scores.append(score)
+    return scores
 
 
 def _advisory_agent_eval_skip_message(results: list[ValidationResult]) -> str | None:
@@ -449,33 +687,59 @@ def _advisory_agent_eval_skip_message(results: list[ValidationResult]) -> str | 
     return None
 
 
-def _combined_verdict(results: list[ValidationResult], tier3_verdict: object) -> str:
-    """Return one report verdict with incomplete evidence taking precedence."""
+def _result_skipped(result: ValidationResult) -> bool:
+    """Return whether a result records a skipped validator run."""
+    return bool(result.metadata.get("skipped")) or is_advisory_agent_eval_skip(result)
+
+
+def _overall_status(
+    results: list[ValidationResult],
+    ae: dict[str, Any] | None,
+    benchmark_policy: dict[str, bool],
+) -> str:
     if any(result.is_incomplete for result in results):
         return "INCOMPLETE"
-    if not all(passes_required_gate(result) for result in results) or str(tier3_verdict or "pass").lower() == "fail":
+
+    blocking_skips = [
+        result
+        for result in results
+        if _result_skipped(result) and not result.metadata.get("optional") and not is_advisory_agent_eval_skip(result)
+    ]
+    if blocking_skips:
+        return "INCOMPLETE"
+
+    has_failures = not all(passes_required_gate(result) for result in results)
+    summary = _mapping((ae or {}).get("summary"))
+    verdict = str((ae or {}).get("verdict") or summary.get("verdict") or "").lower()
+    dimension_verdict = _tier3_dimension_verdict(ae)
+    if has_failures or verdict == "fail" or dimension_verdict == "fail":
         return "FAIL"
+
+    tier3_results = _tier3_results(results)
+    has_present_tier3_result = bool(tier3_results) and not all(_result_skipped(result) for result in tier3_results)
+    if (benchmark_policy["tier3_required"] or has_present_tier3_result) and not _tier3_evidence_complete(ae):
+        return "INCOMPLETE"
+    execution_status = str((ae or {}).get("execution_status") or summary.get("execution_status") or "").lower()
+    if verdict == "neutral" and execution_status in {"succeeded", ""}:
+        return "NEUTRAL"
+    if verdict == "pass" and dimension_verdict == "neutral":
+        return "NEUTRAL"
     return "PASS"
 
 
-def _render_incomplete_benchmark_notes(
-    lines: list[str],
-    results: list[ValidationResult],
-    private_labels: tuple[str, ...],
-) -> None:
-    tools = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
-    safe_tools = [_publication_safe_inline(tool, private_labels) for tool in tools]
-    lines.append(
-        "Required scanner evidence is incomplete "
-        f"({', '.join(safe_tools)}). **Do not use this benchmark to recommend publication; "
-        "restore the scanners and rerun SkillEvaluator.**"
-    )
+def _verdict_callout(status: str) -> str:
+    labels = {
+        "PASS": "✅ **Overall verdict: PASS — Recommended for publication**",
+        "FAIL": "❌ **Overall verdict: FAIL — Publication blocked**",
+        "INCOMPLETE": "⚠️ **Overall verdict: INCOMPLETE — Required evidence is missing**",
+        "NEUTRAL": "**Overall verdict: NEUTRAL — One or more dimensions remain below PASS**",
+    }
+    return f"> {labels.get(status, f'**Overall verdict: {status}**')}"
 
 
 def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str:
     if ae:
-        summary_value = ae.get("summary")
-        summary = summary_value if isinstance(summary_value, dict) else {}
+        summary = _mapping(ae.get("summary"))
         candidate = ae.get("skill_name") or summary.get("skill_name")
         if candidate:
             return str(candidate)
@@ -487,72 +751,123 @@ def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> s
 
 
 def _agents(ae: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    if not ae:
+    agents = (ae or {}).get("agents")
+    if not isinstance(agents, dict):
         return {}
-    agents = ae.get("agents")
-    if isinstance(agents, dict) and agents:
-        return {str(name): value for name, value in agents.items() if isinstance(value, dict)}
-    return {}
+    return {str(name): agent for name, agent in agents.items() if isinstance(agent, dict)}
 
 
-def _agent_label(name: str, agent: dict[str, Any], private_labels: tuple[str, ...]) -> str:
-    display = agent.get("display_name") or agent.get("label") or name
+def _agent_label(
+    name: str,
+    agent: dict[str, Any],
+    private_labels: tuple[str, ...] = (),
+) -> str:
+    display = _human_agent_name(
+        _publication_safe_label(agent.get("display_name") or agent.get("label") or name, private_labels)
+    )
     model = agent.get("model") or agent.get("model_name") or agent.get("llm_model")
-    safe_name = _publication_safe_label(name, private_labels)
-    safe_display = _publication_safe_label(display, private_labels)
     if model:
-        safe_model = _publication_safe_label(model, private_labels)
-        return f"{_human_agent_name(safe_display)} (`{safe_model}`)"
-    return f"`{safe_name}`" if display == name else _human_agent_name(safe_display)
+        return f"{display} (`{_publication_safe_label(model, private_labels)}`)"
+    return f"{display} (model not recorded)"
+
+
+def _agent_table_label(
+    name: str,
+    agent: dict[str, Any],
+    private_labels: tuple[str, ...] = (),
+) -> str:
+    display = _human_agent_name(
+        _publication_safe_label(agent.get("display_name") or agent.get("label") or name, private_labels)
+    )
+    return f"{display} (Baseline → Skill Uplift)"
 
 
 def _human_agent_name(name: str) -> str:
     if name == "claude-code":
         return "Claude Code"
-    if name.startswith("\\"):
-        return name.title()
-    return name.replace("_", " ").replace("-", " ").title()
+    if re.fullmatch(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", name):
+        return name.replace("_", " ").replace("-", " ").title()
+    return name.title()
 
 
-def _metric_labels(ae: dict[str, Any] | None) -> dict[str, str]:
-    labels = (ae or {}).get("metric_labels")
-    return labels if isinstance(labels, dict) else {}
+def _evaluated_at(ae: dict[str, Any] | None) -> str | None:
+    value = (ae or {}).get("evaluated_at") or _mapping((ae or {}).get("summary")).get("evaluated_at")
+    return str(value).strip() if value else None
 
 
-def _metric_signals(ae: dict[str, Any] | None) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for agent in _agents(ae).values():
-        evaluators = agent.get("evaluators") if isinstance(agent, dict) else None
-        if not isinstance(evaluators, dict):
-            continue
-        for key, value in evaluators.items():
-            if key in seen or not isinstance(value, dict):
-                continue
-            if any(value.get(field) is not None for field in ("with_skill", "baseline", "lift")):
-                seen.add(str(key))
-                ordered.append(str(key))
-    if ordered:
-        return ordered
-    metric_ids = (ae or {}).get("metric_ids")
-    return [str(item) for item in metric_ids] if isinstance(metric_ids, list) else []
+def _evaluation_date(value: str) -> str:
+    candidate = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(candidate).date().isoformat()
+    except ValueError:
+        return value[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", value) else value
 
 
-def _dataset(ae: dict[str, Any]) -> list[dict[str, Any]]:
-    dataset = ae.get("dataset")
-    if isinstance(dataset, list):
-        return [item for item in dataset if isinstance(item, dict)]
-    return []
+def _environment(ae: dict[str, Any] | None) -> str | None:
+    summary = _mapping((ae or {}).get("summary"))
+    value = summary.get("environment") or (ae or {}).get("environment")
+    return str(value) if value else None
 
 
-def _dataset_count(ae: dict[str, Any]) -> int | None:
+def _environment_note(environment: str | None) -> str | None:
+    if not environment:
+        return None
+    public_environment = _publication_safe_environment(environment)
+    lowered = public_environment.lower().replace("_", "-")
+    if public_environment == "Isolated sandbox":
+        return "Each task attempt ran in its own isolated sandbox."
+    if "k8s" in lowered or "sandbox" in lowered:
+        return "Each task attempt ran in its own isolated sandbox pod."
+    if "docker" in lowered:
+        return "Each task attempt ran in its own isolated Docker container."
+    if "local" in lowered:
+        return "Tasks ran on the trusted local host; local mode is not sandboxed."
+    return None
+
+
+def _dataset(ae: dict[str, Any] | None) -> list[dict[str, Any]]:
+    dataset = (ae or {}).get("dataset")
+    return [item for item in dataset if isinstance(item, dict)] if isinstance(dataset, list) else []
+
+
+def _dataset_summary(ae: dict[str, Any] | None) -> dict[str, int | str]:
+    summary = (ae or {}).get("dataset_summary")
+    if isinstance(summary, dict):
+        return {
+            "total_tasks": _nonnegative_int(summary.get("total_tasks")),
+            "positive_tasks": _nonnegative_int(summary.get("positive_tasks")),
+            "negative_tasks": _nonnegative_int(summary.get("negative_tasks")),
+            "unclassified_tasks": _nonnegative_int(summary.get("unclassified_tasks")),
+            "source": str(summary.get("source") or "payload"),
+        }
+
     dataset = _dataset(ae)
     if dataset:
-        return len(dataset)
-    trials = ae.get("trials")
-    if isinstance(trials, list) and trials:
-        return len(trials)
-    return None
+        composition = _dataset_composition(dataset)
+        return {
+            "total_tasks": len(dataset),
+            "positive_tasks": composition["positive"],
+            "negative_tasks": composition["negative"],
+            "unclassified_tasks": composition["unlabeled"],
+            "source": "dataset",
+        }
+
+    task_ids: set[str] = set()
+    for trial in (ae or {}).get("trials") or []:
+        if not isinstance(trial, dict):
+            continue
+        for key in ("entry_id", "case_id", "task_id", "id"):
+            value = trial.get(key)
+            if value is not None and str(value).strip():
+                task_ids.add(str(value).strip())
+                break
+    return {
+        "total_tasks": len(task_ids),
+        "positive_tasks": 0,
+        "negative_tasks": 0,
+        "unclassified_tasks": len(task_ids),
+        "source": "trials" if task_ids else "unavailable",
+    }
 
 
 def _dataset_composition(dataset: list[dict[str, Any]]) -> Counter[str]:
@@ -567,99 +882,202 @@ def _dataset_composition(dataset: list[dict[str, Any]]) -> Counter[str]:
     return counts
 
 
-def _dimension_num(ae: dict[str, Any] | None, dim_id: str) -> str:
-    explicit = _explicit_dimension_num(ae, dim_id)
-    if explicit is not None:
-        return explicit
-    evidence_count = _dimension_evidence_count(ae, dim_id)
-    if evidence_count is not None:
-        return str(evidence_count)
-    dataset_size = _dataset_count(ae or {})
-    return str(dataset_size) if dataset_size is not None else "N/A"
+def _dataset_composition_label(summary: dict[str, int | str]) -> str:
+    positive = int(summary["positive_tasks"])
+    negative = int(summary["negative_tasks"])
+    unclassified = int(summary["unclassified_tasks"])
+    parts = []
+    if positive:
+        parts.append(f"{positive} positive")
+    if negative:
+        parts.append(f"{negative} negative")
+    if unclassified:
+        parts.append(f"{unclassified} unclassified")
+    return f" ({', '.join(parts)})" if parts else ""
 
 
-def _explicit_dimension_num(ae: dict[str, Any] | None, dim_id: str) -> str | None:
-    for agent in _agents(ae).values():
-        dim = _agent_dimension(agent, dim_id)
-        if not dim:
-            continue
-        for key in ("num", "n", "sample_count", "samples"):
-            value = dim.get(key)
-            if value is not None:
-                return str(value)
-    return None
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
-def _dimension_evidence_count(ae: dict[str, Any] | None, dim_id: str) -> int | None:
-    counts: list[int] = []
-    for agent in _agents(ae).values():
-        metric_ids = _dimension_metric_ids(agent, dim_id)
-        for card in agent.get("evaluator_cards") or []:
-            if not isinstance(card, dict) or card.get("id") not in metric_ids:
-                continue
-            evidence = card.get("evidence")
-            if isinstance(evidence, list) and evidence:
-                counts.append(len(evidence))
-    return max(counts) if counts else None
-
-
-def _dimension_metric_ids(agent: dict[str, Any], dim_id: str) -> list[str]:
-    dim = _agent_dimension(agent, dim_id)
-    if isinstance(dim, dict) and isinstance(dim.get("evaluators"), list) and dim["evaluators"]:
-        return [str(item) for item in dim["evaluators"]]
-    return [str(item) for item in DIMENSION_MAPPING.get(dim_id, {}).get("evaluators") or []]
+def _number(value: object) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | None:
-    for dim in agent.get("dimensions") or []:
-        if isinstance(dim, dict) and dim.get("id") == dim_id:
-            return dim
+    for dimension in agent.get("dimensions") or []:
+        if isinstance(dimension, dict) and dimension.get("id") == dim_id:
+            return dimension
     return None
 
 
-def _score_lift_cell(dim: dict[str, Any] | None) -> str:
-    if not dim:
-        return "N/A"
-    score = dim.get("with_skill", dim.get("score"))
-    if not isinstance(score, (int, float)):
-        return "N/A"
-    value = f"{score:.0%}"
-    lift = dim.get("lift")
-    if isinstance(lift, (int, float)):
-        value += f" ({lift:+.0%})"
-    return value
+def _score_transition(dimension: dict[str, Any] | None) -> str:
+    if not dimension:
+        return "Not available"
+    baseline = _number(dimension.get("baseline"))
+    score = _number(dimension.get("with_skill", dimension.get("score")))
+    return _score_transition_values(baseline, score)
+
+
+def _score_transition_values(baseline: float | None, score: float | None) -> str:
+    if score is None:
+        return "Not available"
+    skill_label = f"{score:.0%}"
+    if baseline is None:
+        return f"{skill_label} — baseline not run; uplift unavailable"
+    delta = score - baseline
+    return f"{baseline:.0%} → {skill_label} ({_format_points(delta)})"
+
+
+def _format_points(delta: float) -> str:
+    points = delta * 100
+    if math.isclose(points, 0.0, abs_tol=0.05):
+        return "±0 points"
+    sign = "+" if points > 0 else "-"
+    return f"{sign}{abs(points):.0f} points"
+
+
+def _tier_status(
+    tier: str,
+    results: list[ValidationResult],
+    ae: dict[str, Any] | None,
+    benchmark_policy: dict[str, bool],
+) -> tuple[str, str]:
+    if not results:
+        return "NOT RUN", "No result was recorded"
+    incomplete = [result for result in results if result.is_incomplete]
+    if incomplete:
+        tools = list(dict.fromkeys(tool for result in incomplete for tool in result.incomplete_scans))
+        return "INCOMPLETE", f"Missing trustworthy evidence from {', '.join(tools)}"
+    if all(_result_skipped(result) for result in results):
+        optional = all(result.metadata.get("optional") or is_advisory_agent_eval_skip(result) for result in results)
+        return ("SKIPPED (ADVISORY)" if optional else "INCOMPLETE"), "; ".join(_skip_reasons(results))
+
+    findings = [finding for result in results for finding in result.findings]
+    if any(not result.passed and not _result_skipped(result) for result in results):
+        return "FAILED", f"{len(results)} validator(s); {len(findings)} finding(s)"
+
+    if tier == "Tier 3" and ae:
+        summary = _mapping(ae.get("summary"))
+        execution = str(ae.get("execution_status") or summary.get("execution_status") or "").lower()
+        verdict = str(ae.get("verdict") or summary.get("verdict") or "").lower()
+        dimension_verdict = _tier3_dimension_verdict(ae)
+        if verdict == "fail" or dimension_verdict == "fail":
+            return "FAIL", f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
+        if execution and execution != "succeeded":
+            return "INCOMPLETE", f"Execution status: {execution}"
+        if not _tier3_evidence_complete(ae):
+            evidence = (
+                "Required Tier 3 evidence is missing"
+                if benchmark_policy["tier3_required"]
+                else "Present Tier 3 result lacks complete evidence"
+            )
+            return "INCOMPLETE", evidence
+        effective_verdict = verdict
+        if verdict == "pass" and dimension_verdict == "neutral":
+            effective_verdict = "neutral"
+        if effective_verdict in {"pass", "neutral"}:
+            return effective_verdict.upper(), (
+                f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
+            )
+
+    status = "PASSED WITH OBSERVATIONS" if findings else "PASSED"
+    return status, f"{len(results)} validator(s); {len(findings)} finding(s)"
+
+
+def _skip_reasons(results: list[ValidationResult]) -> list[str]:
+    reasons: list[str] = []
+    for result in results:
+        payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
+        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
+        advisory_message = provenance.get("message") if isinstance(provenance, dict) else None
+        reasons.append(str(result.metadata.get("skip_reason") or advisory_message or "Prerequisite unavailable"))
+    return list(dict.fromkeys(reasons))
+
+
+def _metric_signals(ae: dict[str, Any] | None) -> list[str]:
+    seen: set[str] = set()
+    signals: list[str] = []
+    for agent in _agents(ae).values():
+        evaluators = agent.get("evaluators")
+        if not isinstance(evaluators, dict):
+            continue
+        for name, values in evaluators.items():
+            if name in seen or not isinstance(values, dict):
+                continue
+            if any(values.get(field) is not None for field in ("with_skill", "baseline", "lift")):
+                seen.add(str(name))
+                signals.append(str(name))
+    if signals:
+        return signals
+    metric_ids = (ae or {}).get("metric_ids")
+    return [str(item) for item in metric_ids] if isinstance(metric_ids, list) else []
+
+
+def _metric_labels(ae: dict[str, Any] | None) -> dict[str, str]:
+    labels = (ae or {}).get("metric_labels")
+    return labels if isinstance(labels, dict) else {}
+
+
+def _weighted_signals(config: dict[str, Any]) -> str:
+    evaluators = list(config.get("evaluators") or [])
+    weights = list(config.get("weights") or [])
+    parts = []
+    for evaluator, weight in zip(evaluators, weights, strict=False):
+        parts.append(f"`{evaluator}` ({float(weight):.0%})")
+    return " + ".join(parts) or "Not configured"
 
 
 def _tier1_results(results: list[ValidationResult]) -> list[ValidationResult]:
-    return [r for r in results if not _is_tier2(r) and not _is_tier3(r)]
+    return [result for result in results if not _is_tier2(result) and not _is_tier3(result)]
 
 
 def _tier2_results(results: list[ValidationResult]) -> list[ValidationResult]:
-    return [r for r in results if _is_tier2(r)]
+    return [result for result in results if _is_tier2(result)]
+
+
+def _tier3_results(results: list[ValidationResult]) -> list[ValidationResult]:
+    return [result for result in results if _is_tier3(result)]
 
 
 def _is_tier2(result: ValidationResult) -> bool:
     name = result.validator_name.lower()
     if name in _TIER2_VALIDATORS or "dedup" in name:
         return True
-    return any(f.category == "CONTENT_DEDUP" for f in result.findings)
+    return any(finding.category == "CONTENT_DEDUP" for finding in result.findings)
 
 
 def _is_tier3(result: ValidationResult) -> bool:
     return bool(result.metadata.get("agent_eval")) or result.validator_name == "AGENT_EVAL"
 
 
-def _severity_count(findings: list[Finding], severity: str) -> int:
-    return sum(1 for finding in findings if finding.severity.value == severity)
-
-
 def _top_findings(findings: list[Finding], *, limit: int) -> list[Finding]:
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    return sorted(findings, key=lambda f: (order.get(f.severity.value, 99), f.category))[:limit]
+    return sorted(findings, key=lambda finding: (order.get(finding.severity.value, 99), finding.category))[:limit]
+
+
+def _finding_line(finding: Finding, private_labels: tuple[str, ...] = ()) -> str:
+    location = f" (`{_publication_safe_location(finding)}`)" if finding.file_path else ""
+    category = _publication_safe_inline(finding.category, private_labels)
+    check_name = _publication_safe_inline(finding.check_name, private_labels)
+    message = _publication_safe_inline(finding.message, private_labels)
+    return f"- **{finding.severity.value.upper()}** {category}/{check_name}: {message}{location}"
 
 
 def _md_cell(value: object, private_labels: tuple[str, ...] = ()) -> str:
     return _publication_safe_inline(value, private_labels).replace("|", "\\|")
+
+
+def _trusted_md_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def _publication_safe_skill_name(value: object) -> str:
@@ -676,9 +1094,13 @@ def _private_environment_labels(ae: dict[str, Any] | None) -> tuple[str, ...]:
     """Return imported non-public environment labels that must not escape in free text."""
     if not ae:
         return ()
-    summary_value = ae.get("summary")
-    summary = summary_value if isinstance(summary_value, dict) else {}
-    candidates = [summary.get("environment"), ae.get("environment")]
+    summary = _mapping(ae.get("summary"))
+    candidates = [
+        summary.get("environment"),
+        summary.get("requested_environment"),
+        ae.get("environment"),
+        ae.get("requested_environment"),
+    ]
     labels: list[str] = []
     for value in candidates:
         label = " ".join(str(value or "").split())
@@ -699,6 +1121,7 @@ def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()
     """Render untrusted metadata as one publication-safe Markdown line."""
     text = " ".join(str(value).split())
     text = _redact_absolute_paths(text)
+    text = _RETIRED_SANDBOX_REFERENCE.sub("isolated sandbox", text)
     for label in sorted(private_labels, key=len, reverse=True):
         text = re.sub(
             re.escape(label),
@@ -769,13 +1192,11 @@ def _absolute_path_basename(value: str) -> str | None:
 
 
 def _publication_safe_environment(value: object) -> str:
-    """Keep public environment names and generalize unknown imported labels."""
     environment = str(value).strip()
     return environment if environment.casefold() in HARBOR_ENV_MODES else "Isolated sandbox"
 
 
 def _publication_safe_location(finding: Finding) -> str:
-    """Render a finding location without publishing an absolute host path."""
     file_path = str(finding.file_path)
     posix_path = PurePosixPath(file_path)
     windows_path = PureWindowsPath(file_path)

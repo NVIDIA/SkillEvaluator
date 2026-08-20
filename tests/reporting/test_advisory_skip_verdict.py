@@ -56,7 +56,7 @@ def test_advisory_skip_is_non_blocking_in_markdown() -> None:
     assert "❌ FAILED" not in output
 
 
-def test_advisory_skip_is_non_blocking_in_html_and_benchmark() -> None:
+def test_advisory_skip_is_non_blocking_in_html_but_incomplete_for_benchmark_publication() -> None:
     result = advisory_skip_result("No public provider key", skill_name="demo")
     html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
     benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
@@ -72,10 +72,10 @@ def test_advisory_skip_is_non_blocking_in_html_and_benchmark() -> None:
     assert re.search(r'tier-card-verdict">\s*SKIPPED\s*</span>', html)
     assert "Live evaluation skipped:</strong> No public provider key" in html
     assert not re.search(r'tier-card-verdict">\s*NEUTRAL\s*</span>', html)
-    assert "Overall verdict: PASS" in benchmark
+    assert "Overall verdict: INCOMPLETE" in benchmark
     assert "Overall verdict: FAIL" not in benchmark
     assert "Tier 3 live evaluation: SKIPPED — No public provider key" in benchmark
-    assert "based on the completed required-tier results" in benchmark
+    assert "benchmark is not publication-complete" in benchmark
 
 
 def test_benchmark_redacts_advisory_skip_path() -> None:

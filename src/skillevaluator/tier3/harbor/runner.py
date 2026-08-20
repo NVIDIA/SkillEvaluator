@@ -28,6 +28,7 @@ from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
+from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
@@ -57,6 +58,10 @@ from skillevaluator.tier3.harbor.progress import (
     safe_progress_reporter,
     secret_values_from_environment,
 )
+from skillevaluator.tier3.harbor.report_data import (
+    build_dataset_snapshot,
+    load_staged_harbor_dataset,
+)
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
 from skillevaluator.tier3.output_provenance import (
@@ -69,6 +74,30 @@ from skillevaluator.tier3.results_location import publish_latest_results
 from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
 
 logger = logging.getLogger(__name__)
+
+
+def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> dict[str, Any]:
+    """Persist immutable dataset and evaluator identity before staging cleanup."""
+    entries = load_staged_harbor_dataset(run_dir)
+    if not entries:
+        entries = [{"id": task_id} for task_id in fallback_task_ids]
+    snapshot = build_dataset_snapshot(entries, evaluator_version=__version__)
+    target = run_dir / "dataset_snapshot.json"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=run_dir,
+        prefix=".dataset_snapshot.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        json.dump(snapshot, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(target)
+    return snapshot
+
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
@@ -2238,6 +2267,7 @@ def _run_harbor_eval_impl(
         "grading": {"mode": grading_mode},
         "agents": model_resolution,
     }
+    dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
     results.update(
         {
             "skill_name": skill_path.name,
@@ -2246,6 +2276,13 @@ def _run_harbor_eval_impl(
             "result_path": str(result_path),
             "harbor_jobs_dir": str(jobs_dir),
             "harbor_jobs_retained": keep_harbor_jobs,
+            "evaluated_at": datetime.now(UTC).isoformat(),
+            "evaluator_version": dataset_truth["evaluator_version"],
+            "dataset_snapshot": dataset_truth,
+            "dataset_snapshot_path": str(run_dir / "dataset_snapshot.json"),
+            "dataset_summary": dataset_truth["dataset_summary"],
+            "dataset_digest": dataset_truth["dataset_digest"],
+            "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
             "run_config": run_config,
             "attempt_policy": {
                 "max_attempts": n_attempts,

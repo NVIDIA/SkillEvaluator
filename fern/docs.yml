@@ -65,6 +65,9 @@ navigation:
       - page: Reports & Results
         path: ../docs/reports.mdx
         slug: reports
+      - page: "BENCHMARK.md Rollout and Backfill"
+        path: ../docs/benchmark-rollout.mdx
+        slug: benchmark-rollout
       - page: Gate Your CI
         path: ../docs/ci-integration.mdx
         slug: ci-integration

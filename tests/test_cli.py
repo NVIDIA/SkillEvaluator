@@ -703,7 +703,7 @@ def test_validate_code_integrity_reports_only_static_test_evidence(tmp_path: Pat
     benchmark_path = reports / "BENCHMARK.md"
     assert benchmark_path.is_file()
     benchmark = benchmark_path.read_text(encoding="utf-8")
-    assert "Evaluation of the `untrusted-skill` skill" in benchmark
+    assert "# Skill Benchmark: untrusted-skill" in benchmark
     assert "- Skill: `untrusted-skill`" in benchmark
     data = json.loads(next(reports.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
     hygiene = next(item for item in data["results"] if item["validator"] == "Code Integrity & Hygiene")

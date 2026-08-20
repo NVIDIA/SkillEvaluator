@@ -1,0 +1,154 @@
+---
+title: "BENCHMARK.md Rollout and Backfill"
+description: "Regenerate published benchmark cards safely after scoring, renderer, or publication-policy changes."
+---
+
+Use this runbook after a release containing the scoring contract, report
+redesign, and publication gate is available. Existing `BENCHMARK.md` files are
+generated artifacts; merging the renderer does not rewrite cards already
+published in skill repositories.
+
+## Before and after
+
+The legacy card led with dense tier output and mixed verdict evidence into the
+details. The replacement puts the publication decision first, labels uplift
+unambiguously, and moves methodology behind the evidence reviewers need most.
+
+| Before: legacy card | After: decision-first publication card |
+| --- | --- |
+| ![Legacy BENCHMARK.md card before the rollout](assets/benchmark-card-before.png) | ![Decision-first BENCHMARK.md card after the rollout](assets/benchmark-card-after.png) |
+
+## 1. Pin the evaluator
+
+Install the merged SkillEvaluator release or immutable commit and record it for
+the rollout:
+
+```bash
+skillevaluator --version
+git -C /path/to/skill-evaluator rev-parse HEAD
+```
+
+Do not mix evaluator versions within one catalog backfill.
+
+## 2. Inventory existing cards
+
+From the catalog root:
+
+```bash
+find ./skills -name BENCHMARK.md -type f -print | sort
+```
+
+Record the skill, previous card path, intended Tier 2 catalog, Tier 3 agents,
+attempt policy, and environment. Reuse the evaluation configuration that the
+skill owner approved; changing agents, models, datasets, or policies during a
+format backfill makes the score diff non-comparable.
+
+## 3. Regenerate into a review directory
+
+Generate reports outside the skill tree first:
+
+```bash
+skillevaluator validate ./skills/example-skill \
+  --external \
+  --agent-eval \
+  --agents claude-code,codex \
+  --env-mode docker \
+  --output-dir ./benchmark-backfill/example-skill
+```
+
+Tier 3 is publication-required by default. Omitting `--agent-eval` therefore
+produces an `INCOMPLETE` card with Tier 3 marked `NOT RUN`, and never a
+publication recommendation. If a catalog intentionally makes Tier 3 optional,
+its orchestration must persist `benchmark_policy.tier3_required = false`; the
+card then discloses that policy. Do not reuse a prior live score while changing
+only its label or date. If a baseline was not run, keep the explicit “uplift
+unavailable” state.
+
+The candidate card is:
+
+```text
+benchmark-backfill/example-skill/BENCHMARK.md
+```
+
+## 4. Review semantic and presentation diffs
+
+Compare the existing and candidate cards:
+
+```bash
+diff -u \
+  ./skills/example-skill/BENCHMARK.md \
+  ./benchmark-backfill/example-skill/BENCHMARK.md
+```
+
+Expected presentation changes include:
+
+- the verdict and recommendation moving to the top;
+- `Baseline → Skill Uplift` cells with uplift labeled in percentage points;
+- removal of the `Num` column;
+- explicit `NOT RUN`, `SKIPPED`, and `INCOMPLETE` tier states;
+- collapsible methodology and non-blocking observations;
+- evaluator version, dataset digest, task composition, Tier 3 requirement,
+  isolation wording, and freshness copy.
+
+Investigate any numerical change. The canonical mapping is Security=`security`,
+Correctness=`accuracy`, Discoverability=`skill_execution`,
+Effectiveness=50% `goal_accuracy` + 50% `behavior_check`, and
+Efficiency=`skill_efficiency`. A format-only rollout must not silently accept a
+different dataset or agent/model.
+
+A dimension passes at 50%. The overall verdict passes only when every configured
+dimension passes for at least one supported agent; lift is diagnostic evidence
+and does not override that gate.
+
+## 5. Run the publication gate
+
+Scan all candidates before copying them into skills:
+
+```bash
+python scripts/ci/check_public_benchmarks.py \
+  --require-files \
+  ./benchmark-backfill
+```
+
+The linter rejects configured known leak patterns such as retired product
+identities, any validation-profile metadata line, common absolute home paths,
+ambiguous legacy uplift cells, the old `Num` column, missing metadata/decision
+sections, and a publication `PASS` without completed required Tier 3 evidence.
+A clean result means none of those configured patterns matched; it is a fixture
+regression guard, not proof that a card is safe to publish. Keep human review
+and the repository's broader boundary and security checks in the promotion
+workflow.
+
+## 6. Promote and verify
+
+After review, copy each candidate beside its skill, then rerun the gate over the
+catalog:
+
+```bash
+cp ./benchmark-backfill/example-skill/BENCHMARK.md \
+  ./skills/example-skill/BENCHMARK.md
+
+python scripts/ci/check_public_benchmarks.py --require-files ./skills
+git diff --check
+git diff -- ./skills/example-skill/BENCHMARK.md
+```
+
+Commit regenerated cards in reviewable batches. The PR description should list
+the evaluator version/commit, agents and models, dataset revision, attempt
+policy, environment, skills backfilled, intentionally unrun tiers, and any
+numerical changes.
+
+## 7. Freshness ownership
+
+Regenerate a card when any of these inputs changes:
+
+- skill content or dependencies;
+- evaluation dataset or expected behavior;
+- target agent or model;
+- evaluator version or scoring policy;
+- attempt count/pass threshold;
+- execution environment or isolation mode.
+
+The generated evaluation date must come from the live run artifact. Older
+artifacts without an unambiguous timestamp remain “not recorded”; never replace
+that state with the report-generation date.

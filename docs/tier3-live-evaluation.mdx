@@ -155,7 +155,7 @@ skill source.
 
 ```bash title="With-skill vs. without-skill in Docker"
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=gpt-5.4-mini
+  --agent-model codex=gpt-5.6-sol
 ```
 
 Every supported agent harness works the same way:
@@ -396,11 +396,31 @@ rollups, followed by a compact Artifacts panel pointing at the report and
 output directory. A failed run renders the same structured display instead of
 a bare exception.
 
-Each dimension receives a score and a verdict: **PASS** at 0.7 or above,
-**NEUTRAL** from 0.4, **FAIL** below. Skill Lift gets its own verdict with a
-deliberate noise band, because live agent runs are noisy at low attempt
-counts: **Pass** at +0.05 or above, **Fail** at −0.10 or below, **Neutral** in
-between.
+| Dimension | Key question | Maps to | Weights |
+| --- | --- | --- | --- |
+| Security | Is it safe to use? | `security` | 1.0 |
+| Correctness | Is the answer correct? | `accuracy` | 1.0 |
+| Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 |
+| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 |
+
+`token_efficiency` is a standalone report signal, not a dimension source. It
+never changes a dimension score or the overall verdict.
+
+Each dimension receives a score and a diagnostic band: **PASS** at 0.50 or
+above, **NEUTRAL** from 0.40 to below 0.50, and **FAIL** below 0.40. A supported
+agent passes only when every dimension passes. The top-level Tier 3 verdict is:
+
+| Verdict | Condition |
+| --- | --- |
+| Pass | At least one successful agent has every dimension ≥ 0.50 |
+| Neutral | No agent passes, but at least one has no dimension below 0.40 |
+| Fail | Every successful agent has a dimension below 0.40 |
+
+Skill Lift is the signed difference between the with-skill result and the
+without-skill baseline. Its independent band is **PASS** at +0.05 or above,
+**NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. Lift is
+diagnostic evidence and does not override the every-dimension gate.
 
 With multiple attempts, pass@k shows whether at least one attempt per case met
 `--pass-threshold` — reliability context alongside Skill Lift, not a
@@ -412,6 +432,18 @@ Missing metrics are never coerced to `0.0`: an unscored run reports an
 `overall_score` of `None`, averages omit unscored metrics, and the affected
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
 `execution_status` is not `succeeded`.
+
+The canonical Tier 3 payload embedded by both standalone `evaluate` and
+`validate --agent-eval` reports uses schema version 2.0. A completed
+standard-grading payload includes the summary, five dimensions, per-agent
+results, trials, pass@k, attempt policy, run-owned dataset summary and digest,
+evaluation timestamp, evaluator version, and verdict policy; advisory or
+skipped payloads may leave live-evidence sections empty.
+
+Generated `BENCHMARK.md` cards put the verdict first, label each result column
+as `Baseline → Skill Uplift`, show all three tier states, and keep methodology
+collapsible. See the [rollout and backfill runbook](benchmark-rollout.mdx) before
+regenerating already-published cards.
 
 [Reports & Results](reports.mdx) covers the full on-disk layout, the
 machine-readable JSON contract, and how to judge whether a given lift is good.

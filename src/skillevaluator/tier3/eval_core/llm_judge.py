@@ -16,11 +16,13 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
+
 logger = logging.getLogger(__name__)
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_JUDGE_MODEL = "gpt-5.4-mini"
+DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 # Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
@@ -156,12 +158,6 @@ def _should_try_fallback(error: str) -> bool:
     )
 
 
-def _supports_custom_temperature(model: str) -> bool:
-    """Return false for chat models that only accept their default temperature."""
-    lowered = str(model or "").lower()
-    return not lowered.startswith("openai/openai/gpt-5")
-
-
 def _chat_completion_payload(
     *,
     model: str,
@@ -175,7 +171,7 @@ def _chat_completion_payload(
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
         "max_completion_tokens"
-        if str(model or "").casefold().startswith("gpt-5")
+        if _model_leaf(model).startswith("gpt-5")
         and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
         else "max_tokens"
     )
@@ -184,7 +180,7 @@ def _chat_completion_payload(
         token_key: max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if _supports_custom_temperature(model):
+    if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
     return payload
 

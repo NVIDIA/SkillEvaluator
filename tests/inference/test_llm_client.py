@@ -12,16 +12,28 @@ import pytest
 
 from skillevaluator.inference import LLMClient, LLMClientError, LLMVerdict
 from skillevaluator.inference.client import _is_native_openai_endpoint, _token_limit_kwargs
-from skillevaluator.provider_config import OPENAI_BASE_URL, PUBLIC_NVIDIA_BUILD_BASE_URL, ProviderConfig
+from skillevaluator.provider_config import (
+    CHAT_DEFAULT_ANTHROPIC,
+    CHAT_DEFAULT_BEDROCK,
+    CHAT_DEFAULT_OPENAI,
+    OPENAI_BASE_URL,
+    PUBLIC_NVIDIA_BUILD_BASE_URL,
+    ProviderConfig,
+)
 
 
-def _gpt5_config(*, provider: str = "openai", base_url: str = OPENAI_BASE_URL) -> ProviderConfig:
+def _gpt5_config(
+    *,
+    provider: str = "openai",
+    base_url: str = OPENAI_BASE_URL,
+    model: str = "gpt-5.4-mini",
+) -> ProviderConfig:
     return ProviderConfig(
         provider=provider,
-        model="gpt-5.4-mini",
+        model=model,
         api_key="test-key",
         base_url=base_url,
-        litellm_model="openai/gpt-5.4-mini",
+        litellm_model=f"openai/{model}",
     )
 
 
@@ -226,6 +238,19 @@ class TestNativeOpenAIEndpoint:
         assert _token_limit_kwargs(config, 512) == {"max_tokens": 512}
 
     @pytest.mark.parametrize(
+        "model",
+        [
+            CHAT_DEFAULT_OPENAI,
+            f"openai/{CHAT_DEFAULT_OPENAI}",
+            f"openai/openai/{CHAT_DEFAULT_OPENAI}",
+        ],
+    )
+    def test_provider_prefixed_gpt5_models_use_completion_tokens(self, model: str) -> None:
+        config = _gpt5_config(model=model)
+
+        assert _token_limit_kwargs(config, 512) == {"max_completion_tokens": 512}
+
+    @pytest.mark.parametrize(
         "base_url",
         [
             OPENAI_BASE_URL,
@@ -304,10 +329,23 @@ class TestCompletions:
             result = client.completions("system", "user")
         assert result == "Hello world"
 
-    def test_openai_gpt5_uses_max_completion_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_none_temperature_is_omitted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class NoTemperatureClient(LLMClient):
+            default_temperature = None
+
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="Done"))]
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            NoTemperatureClient(model="gpt-4.1-mini", api_key="test-key").completions("system", "user")
+
+        assert "temperature" not in mock_openai.chat.completions.create.call_args.kwargs
+
+    def test_openai_gpt5_uses_max_completion_tokens_without_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "gpt-5.4-mini")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", CHAT_DEFAULT_OPENAI)
         monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         mock_openai = MagicMock()
@@ -320,6 +358,7 @@ class TestCompletions:
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
         assert "max_tokens" not in call_kwargs
         assert call_kwargs["max_completion_tokens"] == 512
+        assert "temperature" not in call_kwargs
 
     def test_nvidia_build_uses_max_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
@@ -336,6 +375,7 @@ class TestCompletions:
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
         assert call_kwargs["model"] == "nvidia/nemotron-3-nano-30b-a3b"
         assert call_kwargs["max_tokens"] == 512
+        assert call_kwargs["temperature"] == 0.0
         assert "max_completion_tokens" not in call_kwargs
 
     @pytest.mark.parametrize(
@@ -365,13 +405,18 @@ class TestCompletions:
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
         assert call_kwargs["max_tokens"] == 512
         assert "max_completion_tokens" not in call_kwargs
+        assert "temperature" not in call_kwargs
 
-    @pytest.mark.parametrize(("max_tokens", "expected_max_tokens"), [(None, 4096), (512, 512)])
-    def test_anthropic_completion_branch_preserves_token_limit_contract(
+    @pytest.mark.parametrize(
+        ("max_tokens", "expected_max_tokens", "temperature"),
+        [(None, 4096, 0.0), (512, 512, 0.3)],
+    )
+    def test_anthropic_opus5_preserves_token_limit_and_omits_temperature(
         self,
         monkeypatch: pytest.MonkeyPatch,
         max_tokens: int | None,
         expected_max_tokens: int,
+        temperature: float,
     ) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
@@ -382,15 +427,41 @@ class TestCompletions:
         mock_anthropic.messages.create.return_value.content = [SimpleNamespace(type="text", text="Done")]
 
         with patch("anthropic.Anthropic", return_value=mock_anthropic):
-            content = LLMClient(max_tokens=max_tokens).completions("system", "user")
+            content = LLMClient(max_tokens=max_tokens, temperature=temperature).completions("system", "user")
 
         assert content == "Done"
         call_kwargs = mock_anthropic.messages.create.call_args.kwargs
+        assert call_kwargs["model"] == CHAT_DEFAULT_ANTHROPIC
         assert call_kwargs["max_tokens"] == expected_max_tokens
         assert "max_completion_tokens" not in call_kwargs
+        assert "temperature" not in call_kwargs
+
+    def test_older_anthropic_model_preserves_custom_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-3-5-sonnet-20241022")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value.content = [SimpleNamespace(type="text", text="Done")]
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            LLMClient(temperature=0.2).completions("system", "user")
+
+        assert mock_anthropic.messages.create.call_args.kwargs["temperature"] == 0.2
+
+    def test_anthropic_mythos_preview_omits_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-mythos-preview")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value.content = [SimpleNamespace(type="text", text="Done")]
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            LLMClient(temperature=0.2).completions("system", "user")
+
+        assert "temperature" not in mock_anthropic.messages.create.call_args.kwargs
 
     @pytest.mark.parametrize("max_tokens", [None, 0])
-    def test_bedrock_completion_branch_preserves_none_and_zero_token_limits(
+    def test_bedrock_opus5_preserves_token_limits_and_omits_temperature(
         self,
         monkeypatch: pytest.MonkeyPatch,
         max_tokens: int | None,
@@ -400,15 +471,27 @@ class TestCompletions:
         response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Done"))])
 
         with patch("litellm.completion", return_value=response) as completion:
-            content = LLMClient(max_tokens=max_tokens).completions("system", "user")
+            content = LLMClient(max_tokens=max_tokens, temperature=0.2).completions("system", "user")
 
         assert content == "Done"
         call_kwargs = completion.call_args.kwargs
+        assert call_kwargs["model"] == f"bedrock/{CHAT_DEFAULT_BEDROCK}"
+        assert "temperature" not in call_kwargs
         if max_tokens is None:
             assert {"max_tokens", "max_completion_tokens"}.isdisjoint(call_kwargs)
         else:
             assert call_kwargs["max_tokens"] == 0
             assert "max_completion_tokens" not in call_kwargs
+
+    def test_older_bedrock_model_preserves_custom_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Done"))])
+
+        with patch("litellm.completion", return_value=response) as completion:
+            LLMClient(temperature=0.2).completions("system", "user")
+
+        assert completion.call_args.kwargs["temperature"] == 0.2
 
     @pytest.mark.parametrize("base_url_env", ["SKILL_EVAL_LLM_BASE_URL", "OPENAI_BASE_URL"])
     def test_openai_provider_custom_base_url_uses_max_tokens(

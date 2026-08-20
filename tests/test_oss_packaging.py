@@ -505,7 +505,7 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
 
     assert "gpt-5.6-sol" in public_docs
     assert "gpt-5.4-mini" in public_docs
-    assert "claude-opus-4-8" in public_docs
+    assert "claude-opus-5" in public_docs
     assert "nvidia/nemotron-3-nano-30b-a3b" in public_docs
     assert "nvidia/nvidia/nemotron-3-nano-30b-a3b" in public_docs
     assert "Nemotron Super" in public_docs

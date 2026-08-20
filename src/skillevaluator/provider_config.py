@@ -18,8 +18,8 @@ OPENAI_BASE_URL = "https://api.openai.com/v1"
 # ``DEFAULT_JUDGE_MODEL`` in sync via the drift test in
 # ``tests/tier3/test_judge_parse_robustness.py``.
 CHAT_DEFAULT_OPENAI = "gpt-5.6-sol"
-CHAT_DEFAULT_ANTHROPIC = "claude-opus-4-8"
-CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-4-8"
+CHAT_DEFAULT_ANTHROPIC = "claude-opus-5"
+CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5"
 # Lower-cost OpenAI alternative for ``SKILL_EVAL_LLM_MODEL`` overrides.
 CHAT_CHEAP_OPENAI = "gpt-5.4-mini"
 

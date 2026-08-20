@@ -41,20 +41,18 @@ def test_openai_provider_uses_gpt_5_5_by_default() -> None:
     assert config.litellm_model == "openai/gpt-5.6-sol"
 
 
-def test_anthropic_provider_uses_claude_opus_4_8_by_default() -> None:
-    config = resolve_llm_provider(
-        {"SKILL_EVAL_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "test-anthropic-key"}
-    )
+def test_anthropic_provider_uses_claude_opus_5_by_default() -> None:
+    config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "test-anthropic-key"})
 
-    assert config.model == "claude-opus-4-8"
-    assert config.litellm_model == "anthropic/claude-opus-4-8"
+    assert config.model == "claude-opus-5"
+    assert config.litellm_model == "anthropic/claude-opus-5"
 
 
-def test_bedrock_provider_uses_claude_opus_4_8_us_profile_by_default() -> None:
+def test_bedrock_provider_uses_claude_opus_5_us_profile_by_default() -> None:
     config = resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "bedrock"})
 
-    assert config.model == "us.anthropic.claude-opus-4-8"
-    assert config.litellm_model == "bedrock/us.anthropic.claude-opus-4-8"
+    assert config.model == "us.anthropic.claude-opus-5"
+    assert config.litellm_model == "bedrock/us.anthropic.claude-opus-5"
 
 
 def test_chat_default_models_are_the_single_source_of_truth() -> None:
@@ -69,8 +67,8 @@ def test_chat_default_models_are_the_single_source_of_truth() -> None:
     from skillevaluator.tier3.eval_core.llm_judge import DEFAULT_JUDGE_MODEL
 
     assert CHAT_DEFAULT_MODELS["openai"] == CHAT_DEFAULT_OPENAI == "gpt-5.6-sol"
-    assert CHAT_DEFAULT_MODELS["anthropic"] == CHAT_DEFAULT_ANTHROPIC == "claude-opus-4-8"
-    assert CHAT_DEFAULT_MODELS["bedrock"] == CHAT_DEFAULT_BEDROCK == "us.anthropic.claude-opus-4-8"
+    assert CHAT_DEFAULT_MODELS["anthropic"] == CHAT_DEFAULT_ANTHROPIC == "claude-opus-5"
+    assert CHAT_DEFAULT_MODELS["bedrock"] == CHAT_DEFAULT_BEDROCK == "us.anthropic.claude-opus-5"
     assert CHAT_CHEAP_OPENAI == "gpt-5.4-mini"
     assert DIMENSION_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
     assert DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI

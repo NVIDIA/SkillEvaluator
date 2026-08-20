@@ -371,13 +371,12 @@ def test_template_gpt5_temperature_guard_matches_eval_core():
     ("model", "expected_temperature"),
     [
         ("claude-opus-4-8", None),
+        ("claude-opus-5", None),
         ("claude-mythos-preview", None),
         ("claude-3-5-sonnet-20241022", 0.3),
     ],
 )
-def test_template_anthropic_request_uses_model_compatible_temperature(
-    monkeypatch, model, expected_temperature
-):
+def test_template_anthropic_request_uses_model_compatible_temperature(monkeypatch, model, expected_temperature):
     captured = {}
 
     class Response:
@@ -412,12 +411,11 @@ def test_template_anthropic_request_uses_model_compatible_temperature(
     ("model", "expected_temperature"),
     [
         ("us.anthropic.claude-opus-4-8", None),
+        ("us.anthropic.claude-opus-5", None),
         ("us.anthropic.claude-3-5-sonnet-20241022-v2:0", 0.3),
     ],
 )
-def test_template_bedrock_request_uses_model_compatible_temperature(
-    monkeypatch, model, expected_temperature
-):
+def test_template_bedrock_request_uses_model_compatible_temperature(monkeypatch, model, expected_temperature):
     import boto3
 
     client = MagicMock()

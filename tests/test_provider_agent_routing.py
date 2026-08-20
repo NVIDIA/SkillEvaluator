@@ -32,7 +32,7 @@ def _provider(name: str, model: str) -> ProviderConfig:
     [
         (_provider("openai", "gpt-5.5"), "codex", "gpt-5.5"),
         (_provider("openai", "gpt-5.5"), "opencode", "openai/gpt-5.5"),
-        (_provider("anthropic", "claude-opus-4-8"), "claude-code", "claude-opus-4-8"),
+        (_provider("anthropic", "claude-opus-5"), "claude-code", "claude-opus-5"),
         (
             _provider("nv_build", "nvidia/nemotron-3-nano-30b-a3b"),
             "opencode",

@@ -342,9 +342,7 @@ class TestCompletions:
 
         assert "temperature" not in mock_openai.chat.completions.create.call_args.kwargs
 
-    def test_openai_gpt5_uses_max_completion_tokens_without_temperature(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_openai_gpt5_uses_max_completion_tokens_without_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", CHAT_DEFAULT_OPENAI)
@@ -413,7 +411,7 @@ class TestCompletions:
         ("max_tokens", "expected_max_tokens", "temperature"),
         [(None, 4096, 0.0), (512, 512, 0.3)],
     )
-    def test_anthropic_opus48_preserves_token_limit_and_omits_temperature(
+    def test_anthropic_opus5_preserves_token_limit_and_omits_temperature(
         self,
         monkeypatch: pytest.MonkeyPatch,
         max_tokens: int | None,
@@ -463,7 +461,7 @@ class TestCompletions:
         assert "temperature" not in mock_anthropic.messages.create.call_args.kwargs
 
     @pytest.mark.parametrize("max_tokens", [None, 0])
-    def test_bedrock_opus48_preserves_token_limits_and_omits_temperature(
+    def test_bedrock_opus5_preserves_token_limits_and_omits_temperature(
         self,
         monkeypatch: pytest.MonkeyPatch,
         max_tokens: int | None,

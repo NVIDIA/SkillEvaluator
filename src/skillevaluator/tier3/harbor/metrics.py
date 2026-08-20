@@ -8,6 +8,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from skillevaluator.constants import DIMENSION_MAPPING
+
 DEFAULT_METRIC_SET = "skill-evaluator-default-v2"
 LEGACY_METRIC_SET = "skill-evaluator-default-v1"
 CUSTOM_ONLY_METRIC_SET = "custom-only"
@@ -56,12 +58,12 @@ METRIC_QUESTIONS = {
     "behavior_check": "Did it follow the expected workflow?",
 }
 
+# Collection, deterministic judging, and publication share one canonical
+# mapping. Legacy fallbacks remain in ``DIMENSION_MAPPING`` for old artifacts,
+# but only the primary evaluators participate in newly collected scores.
 DIMENSION_DEFINITIONS = {
-    "security": {"security": 1.0},
-    "correctness": {"accuracy": 1.0},
-    "discoverability": {"skill_execution": 1.0},
-    "effectiveness": {"goal_accuracy": 0.5, "behavior_check": 0.5},
-    "efficiency": {"skill_efficiency": 1.0},
+    dimension: dict(zip(config["evaluators"], config["weights"], strict=True))
+    for dimension, config in DIMENSION_MAPPING.items()
 }
 
 DIMENSION_DISPLAY = {

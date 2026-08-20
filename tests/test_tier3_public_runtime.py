@@ -117,6 +117,26 @@ def test_native_environment_is_forwarded_to_harbor() -> None:
     assert "--environment-import-path" not in command
 
 
+def test_judge_model_overrides_are_forwarded_only_as_harbor_verifier_env() -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="judge-model-test",
+        env_mode="docker",
+        verifier_env={
+            "LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}",
+            "SKILL_EVAL_JUDGE_MODEL": "${SKILL_EVAL_JUDGE_MODEL}",
+        },
+    )
+
+    forwarded = [command[index + 1] for index, value in enumerate(command) if value == "--verifier-env"]
+    assert forwarded == [
+        "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL}",
+        "SKILL_EVAL_JUDGE_MODEL=${SKILL_EVAL_JUDGE_MODEL}",
+    ]
+    assert "--agent-env" not in command
+
+
 def test_nvidia_build_agent_import_selection_includes_local_bridge_agents() -> None:
     provider = ProviderConfig(
         provider="nv_build",
@@ -361,7 +381,9 @@ def test_generated_task_keeps_evaluator_provider_variables_out_of_agent_environm
         has_skill=True,
         runtime_env={"SERVICE_API_TOKEN": "${SERVICE_API_TOKEN}"},
         verifier_env={
+            "LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}",
             "SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}",
+            "SKILL_EVAL_JUDGE_MODEL": "${SKILL_EVAL_JUDGE_MODEL}",
             "NVIDIA_API_KEY": "${NVIDIA_API_KEY}",
         },
     )

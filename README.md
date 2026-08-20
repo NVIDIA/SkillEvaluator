@@ -83,6 +83,12 @@ Other supported provider setups are:
   `SKILL_EVAL_LLM_BASE_URL`, `SKILL_EVAL_LLM_MODEL`, and
   `SKILL_EVAL_LLM_API_KEY`.
 
+The pinned chat defaults are `gpt-5.6-sol` for OpenAI,
+`claude-opus-5` for Anthropic, and
+`us.anthropic.claude-opus-5` for Amazon Bedrock. Override any provider with
+`SKILL_EVAL_LLM_MODEL`; `gpt-5.4-mini` is the documented lower-cost OpenAI
+alternative.
+
 When exactly one of `NVIDIA_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`
 is present, SkillEvaluator can auto-select that provider. Anthropic and Bedrock
 do not provide embeddings, so Tier 2 also needs a separate OpenAI, NVIDIA

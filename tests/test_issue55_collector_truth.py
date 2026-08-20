@@ -875,7 +875,9 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
     report_payload = json.loads(payload_match.group(1))
     assert report_payload["overall_score"] == 0.8
     assert report_payload["overall_lift"] == 0.1
-    assert report_payload["verdict"] == "pass"
+    # Custom-only metrics retain their score and lift, but they do not satisfy
+    # the canonical five-dimension publication gate introduced on main.
+    assert report_payload["verdict"] == "neutral"
     assert report_payload["agents"]["opencode"]["with_skill"] == 0.8
     assert report_payload["agents"]["opencode"]["baseline"] == 0.7
     assert report_payload["agents"]["opencode"]["lift"] == 0.1

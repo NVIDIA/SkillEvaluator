@@ -5,14 +5,25 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
+from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENAI
 from skillevaluator.tier3.eval_core import llm_judge
 
 
-def test_native_openai_gpt5_uses_max_completion_tokens() -> None:
+@pytest.mark.parametrize(
+    "model",
+    [
+        CHAT_DEFAULT_OPENAI,
+        f"openai/{CHAT_DEFAULT_OPENAI}",
+        f"openai/openai/{CHAT_DEFAULT_OPENAI}",
+    ],
+)
+def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model: str) -> None:
     payload = llm_judge._chat_completion_payload(
-        model="gpt-5.4-mini",
+        model=model,
         prompt="Judge this response",
         max_tokens=321,
         temperature=0.25,
@@ -21,12 +32,75 @@ def test_native_openai_gpt5_uses_max_completion_tokens() -> None:
     )
 
     assert payload == {
-        "model": "gpt-5.4-mini",
+        "model": model,
         "max_completion_tokens": 321,
         "messages": [{"role": "user", "content": "Judge this response"}],
-        "temperature": 0.25,
     }
     assert "max_tokens" not in payload
+    assert "temperature" not in payload
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        CHAT_DEFAULT_OPENAI,
+        CHAT_CHEAP_OPENAI,
+        f"openai/{CHAT_DEFAULT_OPENAI}",
+        f"openai/openai/{CHAT_DEFAULT_OPENAI}",
+    ],
+)
+def test_gpt5_family_rejects_custom_temperature(model: str) -> None:
+    assert not llm_judge._supports_custom_temperature(model)
+
+
+def test_older_models_accept_custom_temperature() -> None:
+    assert llm_judge._supports_custom_temperature("gpt-4.1-mini")
+    assert llm_judge._supports_custom_temperature("claude-opus-4-6")
+    assert llm_judge._supports_custom_temperature("claude-opus-4-20250514")
+    assert llm_judge._supports_custom_temperature("claude-3-5-sonnet-20241022")
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "anthropic/claude-opus-4-8",
+        "azure/anthropic/claude-opus-4-8",
+        "us.anthropic.claude-opus-4-8",
+        "bedrock/us.anthropic.claude-opus-4-8",
+        "claude-opus-5",
+        "anthropic/claude-opus-5",
+        "us.anthropic.claude-opus-5",
+        "bedrock/us.anthropic.claude-opus-5",
+        "claude-sonnet-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+        "anthropic/claude-mythos-preview",
+    ],
+)
+def test_newer_claude_models_reject_custom_temperature(model: str) -> None:
+    assert not llm_judge._supports_custom_temperature(model)
+
+
+def test_call_public_llm_uses_production_gpt5_payload_without_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="Done"))]
+
+    with patch("openai.OpenAI", return_value=mock_openai):
+        content, error = llm_judge.call_public_llm("Judge this response", max_tokens=4096, temperature=0.0)
+
+    assert (content, error) == ("Done", None)
+    call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+    assert call_kwargs["max_completion_tokens"] == 4096
+    assert "temperature" not in call_kwargs
 
 
 @pytest.mark.parametrize(
@@ -38,7 +112,7 @@ def test_native_openai_gpt5_uses_max_completion_tokens() -> None:
 )
 def test_non_native_gpt5_requests_keep_max_tokens(provider: str, request_url: str) -> None:
     payload = llm_judge._chat_completion_payload(
-        model="gpt-5.4-mini",
+        model=CHAT_DEFAULT_OPENAI,
         prompt="Judge this response",
         max_tokens=321,
         temperature=0.0,
@@ -48,6 +122,7 @@ def test_non_native_gpt5_requests_keep_max_tokens(provider: str, request_url: st
 
     assert payload["max_tokens"] == 321
     assert "max_completion_tokens" not in payload
+    assert "temperature" not in payload
 
 
 def test_native_openai_non_gpt5_keeps_max_tokens() -> None:
@@ -61,6 +136,7 @@ def test_native_openai_non_gpt5_keeps_max_tokens() -> None:
     )
 
     assert payload["max_tokens"] == 321
+    assert payload["temperature"] == 0.0
     assert "max_completion_tokens" not in payload
 
 
@@ -73,7 +149,7 @@ def test_completion_token_payload_resolves_provider_and_url_when_omitted(
     monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
 
     payload = llm_judge._chat_completion_payload(
-        model="gpt-5.4-mini",
+        model=CHAT_DEFAULT_OPENAI,
         prompt="Judge this response",
         max_tokens=321,
         temperature=0.0,
@@ -81,6 +157,7 @@ def test_completion_token_payload_resolves_provider_and_url_when_omitted(
 
     assert payload["max_completion_tokens"] == 321
     assert "max_tokens" not in payload
+    assert "temperature" not in payload
 
 
 @pytest.mark.parametrize(

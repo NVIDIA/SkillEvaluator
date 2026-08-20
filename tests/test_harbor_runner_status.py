@@ -158,12 +158,16 @@ def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
         agent_import_path=import_path,
         stop_on_pass=True,
         task_names=["case-001"],
+        verifier_env={"SKILL_EVAL_JUDGE_MODEL": "${SKILL_EVAL_JUDGE_MODEL}"},
     )
 
     assert errors == []
     assert len(launches) == 1
     assert launches[0]["agent_import_path"] == import_path
     assert launches[0]["include_task_names"] == ["case-001"]
+    assert launches[0]["verifier_env"] == {
+        "SKILL_EVAL_JUDGE_MODEL": "${SKILL_EVAL_JUDGE_MODEL}",
+    }
 
 
 _UNSAFE_LINK = r"symlink|reparse"

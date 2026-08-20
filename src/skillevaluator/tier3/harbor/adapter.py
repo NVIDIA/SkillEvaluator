@@ -201,6 +201,7 @@ _COMPOSE_ALLOWED_BUILD_KEYS = frozenset(
 )
 _COMPOSE_ALLOWED_NETWORK_KEYS = frozenset({"attachable", "enable_ipv4", "enable_ipv6", "internal", "labels"})
 _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
+_VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
 _VERIFIER_PROVIDER_ENV_VARS = frozenset(
     {
         "SKILL_EVAL_LLM_PROVIDER",
@@ -4215,6 +4216,43 @@ def _native_entry_id(task_dir: Path) -> str:
     return task_dir.name
 
 
+def _environment_reference_names(value: object) -> set[str]:
+    """Return portable shell-style environment references from a TOML value."""
+    if not isinstance(value, str):
+        return set()
+    dollar_references = {
+        braced or plain
+        for braced, plain in re.findall(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)\b",
+            value,
+        )
+    }
+    percent_references = set(re.findall(r"%([A-Za-z_][A-Za-z0-9_]*)%", value))
+    return dollar_references | percent_references
+
+
+def _judge_model_env_controls(environment: dict[str, Any]) -> set[str]:
+    """Return reserved judge-model names used as keys or value references."""
+    authored_keys = {name for name in environment if name.upper() in _VERIFIER_JUDGE_MODEL_ENV_VARS}
+    authored_references = {
+        reference
+        for value in environment.values()
+        for reference in _environment_reference_names(value)
+        if reference.upper() in _VERIFIER_JUDGE_MODEL_ENV_VARS
+    }
+    return authored_keys | authored_references
+
+
+def _validate_native_agent_judge_model_controls(task_toml: Path, environment_env: dict[str, Any]) -> None:
+    """Keep host judge controls out of the native task's agent environment."""
+    controls = sorted(_judge_model_env_controls(environment_env))
+    if controls:
+        raise ValueError(
+            f"Native Harbor task [environment.env] cannot name or reference evaluator-controlled judge model "
+            f"variable(s): {', '.join(controls)}: {task_toml}"
+        )
+
+
 def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) -> str | None:
     """Read and validate the workdir Harbor will use for a native task."""
     try:
@@ -4229,6 +4267,7 @@ def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) ->
     environment_env = environment.get("env", {})
     if not isinstance(environment_env, dict):
         raise ValueError(f"Native Harbor task [environment.env] must be a table: {task_dir / 'task.toml'}")
+    _validate_native_agent_judge_model_controls(task_dir / "task.toml", environment_env)
     _validate_runtime_discovery_env(environment_env)
     _validate_runtime_loader_env(environment_env)
     skills_dir = environment.get("skills_dir")

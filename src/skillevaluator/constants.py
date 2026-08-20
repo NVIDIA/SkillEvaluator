@@ -6,6 +6,8 @@
 Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+
 # =============================================================================
 # SKILLS CONSTANTS
 # =============================================================================
@@ -518,34 +520,36 @@ DIMENSION_MAPPING: dict[str, dict] = {
         "question": "Is it safe to use?",
     },
     "correctness": {
-        "evaluators": ["skill_execution", "accuracy"],
-        "weights": [0.5, 0.5],
-        "question": "Does it do what it's supposed to?",
+        "evaluators": ["accuracy"],
+        "weights": [1.0],
+        "question": "Is the answer correct?",
     },
     "discoverability": {
-        "evaluators": ["skill_execution", "skill_efficiency"],
-        "weights": [0.5, 0.5],
-        "question": "Is it loaded when it should be?",
+        "evaluators": ["skill_execution"],
+        "weights": [1.0],
+        "question": "Was the right skill loaded when needed?",
     },
     "effectiveness": {
-        "evaluators": ["goal_accuracy", "behavior_check", "accuracy"],
-        "weights": [0.4, 0.3, 0.3],
-        "question": "Is it better with the skill than without?",
+        "evaluators": ["goal_accuracy", "behavior_check"],
+        "weights": [0.5, 0.5],
+        "question": "Did the skill help complete the task?",
     },
     "efficiency": {
-        "evaluators": ["skill_efficiency", "token_efficiency"],
-        "weights": [0.7, 0.3],
-        "question": "Does it use fewer tool calls and tokens?",
+        # token_efficiency is intentionally report-only. Including it here
+        # would let token usage alone change the canonical quality verdict.
+        "evaluators": ["skill_efficiency"],
+        "weights": [1.0],
+        "question": "Did it avoid wasted tool or skill usage?",
     },
 }
 
 # Short, user-facing one-liner describing each Tier 3 dimension.
 DIMENSION_HINTS: dict[str, str] = {
     "security": "Avoids unsafe operations, secret leakage, and unauthorized access.",
-    "correctness": "Produces accurate output and follows the prescribed skill workflow.",
+    "correctness": "Produces factually accurate output.",
     "discoverability": "Activates the right skill when relevant; ignores unrelated skills.",
-    "effectiveness": "Reaches the user's goal \u2014 measurably better with the skill than without.",
-    "efficiency": "Completes the task with fewer tool calls and tokens.",
+    "effectiveness": "Reaches the user's goal and follows the expected behavior.",
+    "efficiency": "Uses the skill and tools productively without wasted work.",
 }
 
 # Token-efficiency evaluator: derived locally from ``trial.tokens`` (the
@@ -563,16 +567,16 @@ TOKEN_EFFICIENCY_EVALUATOR_NAME: str = "token_efficiency"
 # LLM-AS-JUDGE: TIER 3 DIMENSION + INSIGHTS
 # =============================================================================
 
-DIMENSION_JUDGE_MODEL = "gpt-5.4-mini"
-DIMENSION_JUDGE_MAX_TOKENS = 2048
+DIMENSION_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
+DIMENSION_JUDGE_MAX_TOKENS = 4096
 DIMENSION_JUDGE_TEMPERATURE: float | None = 0.0
-DIMENSION_VERDICT_PASS_THRESHOLD = 0.7
+DIMENSION_VERDICT_PASS_THRESHOLD = 0.5
 DIMENSION_VERDICT_NEUTRAL_THRESHOLD = 0.4
 
 # LLM-as-Judge for the Insights tab (additional Conclusions and Recommendations
 # on top of the deterministic ones produced by tier3_normalizer).
 INSIGHTS_JUDGE_MODEL = DIMENSION_JUDGE_MODEL
-INSIGHTS_JUDGE_MAX_TOKENS = 2048
+INSIGHTS_JUDGE_MAX_TOKENS = 4096
 INSIGHTS_JUDGE_TEMPERATURE: float | None = None
 INSIGHTS_JUDGE_MAX_CONCLUSIONS = 5
 INSIGHTS_JUDGE_MAX_RECOMMENDATIONS = 5

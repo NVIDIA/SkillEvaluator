@@ -69,19 +69,29 @@ and never clobbers the previous run.
 
 When the target is a skill, `validate` always writes `BENCHMARK.md` to the
 output directory — regardless of which `-r` formats you picked, and even when
-validation fails. It is a publication card: evaluation date, the active
-validation profile, per-tier summaries, and (when Tier 3 ran) agents, dataset
-composition, and the dimension-by-dimension results table.
+validation fails. It is a decision-first publication card: the overall verdict
+and recommendation come first, followed by per-tier evidence, evaluator and
+dataset provenance, agent/model details, and a dimension-by-dimension
+`Baseline → Skill Uplift` table when Tier 3 ran. Public cards omit validation
+profile names and absolute host paths.
 
-The card carries one overall verdict — `PASS`, `FAIL`, or `INCOMPLETE`. It
+The card carries one overall verdict — `PASS`, `NEUTRAL`, `FAIL`, or
+`INCOMPLETE`. It
 fails closed: if a required scanner produced no trustworthy evidence, the
 verdict is `INCOMPLETE` and the card explicitly says not to use it to recommend
 publication. A Publication Recommendation section appears only on a clean
-`PASS`. An advisory Tier 3 run that was skipped doesn't fail the combined
-verdict: the card adds an explicit `Tier 3 live evaluation: SKIPPED — <reason>`
-line and adjusts the publication recommendation to say the live evaluation
-didn't run. Keep the file with the skill and refresh it whenever the skill or
-its eval dataset materially changes.
+`PASS`; `NEUTRAL` means the evidence is complete but at least one required
+dimension remains below the pass band. Tier 3 evidence is publication-required
+by default, so a missing, skipped, or incomplete live evaluation produces
+`INCOMPLETE` rather than a publication recommendation. A catalog may
+explicitly persist `benchmark_policy.tier3_required = false`; the card
+discloses that exception instead of implying that Tier 3 ran.
+
+Keep the file with the skill and refresh it whenever the skill, eval dataset,
+agent/model, evaluator version, scoring policy, attempt policy, or execution
+environment materially changes. Follow the
+[rollout and backfill runbook](benchmark-rollout.mdx) when regenerating existing
+published cards.
 
 ## Safety guarantees
 
@@ -184,15 +194,15 @@ dimensions, each answering one question:
 | Dimension | Question answered |
 | --- | --- |
 | Security | Is it safe to use? |
-| Correctness | Does it do what it's supposed to? |
-| Discoverability | Is it loaded when it should be? |
-| Effectiveness | Is it better with the skill than without? |
-| Efficiency | Does it use fewer tool calls and tokens? |
+| Correctness | Is the answer correct? |
+| Discoverability | Was the right skill loaded when needed? |
+| Effectiveness | Did the skill help complete the task? |
+| Efficiency | Did it avoid wasted tool or skill usage? |
 
 Dimension scores are 0.0–1.0 rollups of the underlying evaluation signals. The
-LLM judge's verdict bands are fixed: a dimension **passes** at 0.7 or above, is
-**neutral** from 0.4 up to 0.7, and **fails** below 0.4. The judge runs on the
-configured provider model; override it per run as described in
+verdict bands are fixed: a dimension **passes** at 0.50 or above, is
+**neutral** from 0.40 to below 0.50, and **fails** below 0.40. The judge runs on
+the configured provider model; override it per run as described in
 [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
 
 ### Skill Lift
@@ -208,9 +218,12 @@ neutral. The verdict bands:
 | between −0.10 and +0.05 | Neutral | Within run noise; raise `--n-attempts` before concluding anything |
 | ≤ −0.10 | Fail | The skill makes the agent worse — investigate before shipping |
 
-These are the bands the reports color-code, with one exception: the single
-overall Tier 3 verdict in the combined `validate --tier3` report (and in
-`BENCHMARK.md`) is stricter, flipping to fail at −0.05 or below.
+These bands color-code Skill Lift as diagnostic evidence. They do not determine
+the combined `validate --tier3` or `BENCHMARK.md` verdict. The overall verdict
+comes from the five dimensions: **PASS** when at least one successful agent has
+all five dimensions at 0.50 or above; **NEUTRAL** when no agent passes but at
+least one has no dimension below 0.40; and **FAIL** when every successful agent
+has a dimension below 0.40.
 
 So a +0.03 lift isn't a pass — it's noise until more attempts say otherwise.
 Lift requires both arms; if you ran with `--skip-baseline`, there is no lift to

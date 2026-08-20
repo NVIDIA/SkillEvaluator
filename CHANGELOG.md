@@ -4,6 +4,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added a public benchmark publication gate, regression coverage, and a
+  documented rollout plan for generated `BENCHMARK.md` cards.
+
+### Changed
+
+- Unified Tier 3 scoring around the canonical five dimensions, persisted an
+  immutable dataset-truth snapshot with provenance metadata, and redesigned
+  `BENCHMARK.md` as a decision-first publication card.
+
 ## 0.2.0 - 2026-08-18
 
 ### Security
@@ -16,6 +27,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Updated public OpenAI / Anthropic / Bedrock chat defaults to pinned frontier
+  models (`gpt-5.6-sol`, `claude-opus-5`, `us.anthropic.claude-opus-5`),
+  centralized in `provider_config`, and documented `gpt-5.4-mini` as the
+  lower-cost OpenAI `SKILL_EVAL_LLM_MODEL` alternative. Raised
+  dimension/insights judge token budgets to 4096 and widened the gpt-5\*
+  temperature guard to bare model IDs.
 - Added explicit `--block-on-dedup` / `--no-block-on-dedup` and
   `--block-on-agent-eval` / `--no-block-on-agent-eval` controls with
   backward-compatible defaults, Tier 3 source preflight, and consistent gating
@@ -34,6 +51,18 @@ All notable changes to SkillEvaluator are documented in this file.
   paths, and made required Tier 3 judge failures fail closed instead of
   appearing as numeric zero scores or publishing misleading quality results
   ([#55](https://github.com/NVIDIA/SkillEvaluator/issues/55)).
+- Tier 3 now normalizes host-configured `LLM_JUDGE_MODEL` and
+  `SKILL_EVAL_JUDGE_MODEL` overrides in Harbor's parent process and forwards
+  the selected value through its verifier-only job layer for standard grading.
+  This lets native separate-verifier placeholders resolve without injecting
+  either name into the evaluated agent's initial environment. Skill-authored
+  `runtime_env` and native task `[environment.env]` tables cannot set or alias
+  either operator-controlled override.
+  Native verifier declarations remain compatible, while the job-level value
+  takes precedence during standard grading. Tier 3 results now record the
+  configured judge provider, model, source, and whether a dedicated job-wide
+  override was applied, separately from agent models. A provider fallback may
+  still use a different model for an individual judge call.
 - Quality scoring now uses boundary-aware and context-aware matching for XML tags,
   reserved names, MCP guidance, README references, time references, exclusivity
   language, instruction action verbs, and nested Markdown links, avoiding

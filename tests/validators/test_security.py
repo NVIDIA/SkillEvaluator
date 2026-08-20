@@ -1499,7 +1499,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         ("provider", "credential", "model"),
         (
             ("openai", "OPENAI_API_KEY", "gpt-5.6-sol"),
-            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-4-8"),
+            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5"),
         ),
     )
     def test_skillspector_child_environment_maps_supported_public_provider_defaults(

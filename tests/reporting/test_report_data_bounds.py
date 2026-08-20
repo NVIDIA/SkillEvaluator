@@ -73,6 +73,48 @@ def test_normal_agent_artifacts_are_loaded_without_truncation_marker(tmp_path: P
     assert "_report_truncation" not in agents["codex"]
 
 
+def test_agent_directory_symlink_is_not_discovered(tmp_path: Path) -> None:
+    outside_agent = tmp_path / "outside" / "codex"
+    _write_summary(outside_agent)
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "codex").symlink_to(outside_agent, target_is_directory=True)
+
+    assert report_data.load_agent_data(results_dir) == {}
+
+
+@pytest.mark.parametrize("escape", ["condition", "trials", "trial"])
+def test_intermediate_directory_symlinks_are_not_followed(tmp_path: Path, escape: str) -> None:
+    results_dir = tmp_path / "results"
+    agent_dir = results_dir / "codex"
+    outside = tmp_path / "outside"
+    if escape == "condition":
+        _write_summary(outside)
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "with-skill").symlink_to(outside / "with-skill", target_is_directory=True)
+    else:
+        _write_summary(agent_dir)
+        outside_trial = outside / "case-001__1"
+        outside_trial.mkdir(parents=True)
+        (outside_trial / "reward.json").write_text(
+            json.dumps({"entry_id": "case-001", "accuracy": 1.0}),
+            encoding="utf-8",
+        )
+        trials_dir = agent_dir / "with-skill" / "trials"
+        if escape == "trials":
+            trials_dir.symlink_to(outside, target_is_directory=True)
+        else:
+            trials_dir.mkdir()
+            (trials_dir / "case-001__1").symlink_to(outside_trial, target_is_directory=True)
+
+    agents = report_data.load_agent_data(results_dir)
+
+    if escape == "condition":
+        assert agents == {}
+    else:
+        assert agents["codex"]["rewards"] == []
+
+
 def test_oversized_summary_reward_and_trajectory_are_skipped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -139,6 +181,16 @@ def test_pathological_json_is_skipped_before_report_processing(
 
     assert agents["codex"]["rewards"] == []
     assert any(reason["code"] == expected_code for reason in _reasons(agents["codex"]))
+
+
+def test_huge_json_integer_is_rejected_without_crashing() -> None:
+    diagnostics: list[dict] = []
+    raw = ('{"scores": {"accuracy": ' + "9" * 10_000 + "}}").encode()
+
+    loaded = report_data._decode_bounded_json(raw, diagnostics, artifact="summary")
+
+    assert loaded is report_data._INVALID_JSON
+    assert any(reason["code"] == "json_number" for reason in diagnostics)
 
 
 def test_excess_trials_are_capped_in_name_order(

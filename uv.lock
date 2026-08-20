@@ -1971,6 +1971,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "idna" },
     { name = "jinja2" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -2032,6 +2033,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.3.3,<9" },
     { name = "harbor", marker = "extra == 'tier3'", specifier = "==0.13.2" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "idna", specifier = ">=3.10,<4" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "litellm", marker = "extra == 'llm'", specifier = ">=1.83.10,<1.89.0.dev0" },
     { name = "mcp", marker = "extra == 'tier3'", specifier = ">=1.28.1,<2" },

@@ -29,7 +29,12 @@ from typing import Any
 from uuid import uuid4
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
-from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.provider_config import (
+    ProviderConfig,
+    ProviderConfigurationError,
+    _normalize_anthropic_base_url,
+    resolve_llm_provider,
+)
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
     _prevalidate_baseline_skill_candidates,
@@ -793,6 +798,23 @@ def _harbor_subprocess_environment(
     return environment
 
 
+def _independent_anthropic_agent_credentials() -> dict[str, str]:
+    """Resolve and validate a host-owned Anthropic credential pair."""
+    credentials = {
+        name: os.environ.get(name, "") for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL") if os.environ.get(name)
+    }
+    if base_url := credentials.get("ANTHROPIC_BASE_URL"):
+        normalized_base_url = _normalize_anthropic_base_url(
+            base_url,
+            variable="ANTHROPIC_BASE_URL",
+        )
+        if normalized_base_url is None:
+            credentials.pop("ANTHROPIC_BASE_URL")
+        else:
+            credentials["ANTHROPIC_BASE_URL"] = normalized_base_url
+    return credentials
+
+
 def _agent_credentials(
     *,
     provider: ProviderConfig,
@@ -811,11 +833,7 @@ def _agent_credentials(
             # sentinel and must not inherit NVIDIA_API_KEY in task env.
             return {}
         if agent == "claude-code":
-            return {
-                name: os.environ.get(name, "")
-                for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
-                if os.environ.get(name)
-            }
+            return _independent_anthropic_agent_credentials()
         if agent == "codex":
             return {
                 name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -823,11 +841,7 @@ def _agent_credentials(
         return {}
 
     if provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
-        return {
-            name: os.environ.get(name, "")
-            for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
-            if os.environ.get(name)
-        }
+        return _independent_anthropic_agent_credentials()
     if provider.provider == "anthropic" and agent == "codex":
         return {
             name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)

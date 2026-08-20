@@ -2662,6 +2662,7 @@ def test_verifier_constraint_and_skill_requirements_share_resolver_transaction(t
     install_line = next(line for line in dockerfile.splitlines() if '"pip", "install"' in line)
     assert "langchain-community<0.4.2" in install_line
     assert "langchain-community>=0.4.2" in install_line
+    assert "idna>=3.10,<4" in install_line
     assert dockerfile.count('"pip", "install"') == 1
     assert "from ragas.llms.base import llm_factory" in dockerfile
 

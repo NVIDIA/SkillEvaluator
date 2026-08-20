@@ -6,16 +6,21 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tomllib
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from unittest.mock import Mock
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.provider_config import ProviderConfig
+from skillevaluator.provider_config import ProviderConfig, resolve_llm_provider
 from skillevaluator.tier3 import commands as tier3_commands
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import _EVALUATOR_MANAGED_RUNTIME_ENV, _write_task_toml
@@ -819,3 +824,328 @@ def test_generated_verifier_rejects_non_http_provider_base_urls(monkeypatch) -> 
         verifier._resolve_url("openai")
     with pytest.raises(ValueError, match="absolute HTTP or HTTPS URL"):
         verifier._anthropic_url()
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_url"),
+    [
+        ("https://gateway.example", "https://gateway.example/v1/messages"),
+        ("https://gateway.example/", "https://gateway.example/v1/messages"),
+        ("https://gateway.example/v1", "https://gateway.example/v1/messages"),
+        ("https://gateway.example/team", "https://gateway.example/team/v1/messages"),
+        ("https://gateway.example/team/v1", "https://gateway.example/team/v1/messages"),
+        ("https://gateway.example:8443/team/v1/", "https://gateway.example:8443/team/v1/messages"),
+        ("http://gateway.internal:8080/v1", "http://gateway.internal:8080/v1/messages"),
+        ("http://anthropic_proxy:8000/v1", "http://anthropic_proxy:8000/v1/messages"),
+        ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1/messages"),
+        ("http://[::1]:8080/team/v1", "http://[::1]:8080/team/v1/messages"),
+        (
+            "http://[fe80::1%25eth0]:8080/team/v1",
+            "http://[fe80::1%25eth0]:8080/team/v1/messages",
+        ),
+        ("https://xn--bcher-kva.example/v1", "https://xn--bcher-kva.example/v1/messages"),
+        ("https://bücher.example/v1", "https://xn--bcher-kva.example/v1/messages"),
+        ("https://faß.de/v1", "https://xn--fa-hia.de/v1/messages"),
+        ("https://οδός.example/v1", "https://xn--pxavk3b.example/v1/messages"),
+        (
+            "https://bücher.example.:8443/bücher/v1",
+            "https://xn--bcher-kva.example.:8443/b%C3%BCcher/v1/messages",
+        ),
+        ("https://gateway.example/caf%C3%A9/v1", "https://gateway.example/caf%C3%A9/v1/messages"),
+        ("https://gateway.example/caf%c3%a9/v1", "https://gateway.example/caf%C3%A9/v1/messages"),
+        ("https://gateway.example/opaque%ff/v1", "https://gateway.example/opaque%FF/v1/messages"),
+        (
+            "https://gateway.example/tenant%25west/v1",
+            "https://gateway.example/tenant%25west/v1/messages",
+        ),
+        ("https://gateway.example/100%25/v1", "https://gateway.example/100%25/v1/messages"),
+        ("https://gateway.example/team/%76%31", "https://gateway.example/team/v1/messages"),
+        ("https://gateway.example/team/v1///", "https://gateway.example/team/v1/messages"),
+        (
+            "https://gateway.example/teams;v=1/@me+you/v1",
+            "https://gateway.example/teams;v=1/@me+you/v1/messages",
+        ),
+    ],
+)
+def test_generated_verifier_builds_exactly_one_anthropic_native_messages_path(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    expected_url: str,
+) -> None:
+    verifier = _load_verifier_template()
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+
+    assert verifier._anthropic_url() == expected_url
+
+
+@pytest.mark.parametrize(
+    ("variable", "base_url"),
+    [
+        ("SKILL_EVAL_LLM_BASE_URL", "https://gateway.example/v1/messages"),
+        ("ANTHROPIC_BASE_URL", "https://url-user:url-secret@gateway.example/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/v1?token=url-secret"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/v1#token=url-secret"),
+        ("ANTHROPIC_BASE_URL", "https://:443/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example:not-a-port/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example:/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example\\team\\v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/v1\n"),
+        ("ANTHROPIC_BASE_URL", "https:///team/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway example/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway%2eexample/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example|evil/v1"),
+        ("ANTHROPIC_BASE_URL", "https://999.1.1.1/v1"),
+        ("ANTHROPIC_BASE_URL", "https://[v1.not-ipv6]/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/%76%31/%6dessages"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%2Fv1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%5cv1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%0av1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%2"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%GG"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/../team/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/%2e%2e/team/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/%2576%2531/%256dessages"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/%252e%252e/team/v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%252Fv1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%255Cv1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%250Av1"),
+        (
+            "ANTHROPIC_BASE_URL",
+            "https://gateway.example/%25%37%36%25%33%31/%25%36%64essages",
+        ),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team%25%32%46v1"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/team//v1"),
+        ("ANTHROPIC_BASE_URL", "https://☃.example/v1"),
+    ],
+)
+def test_generated_verifier_rejects_unsafe_anthropic_api_roots_without_echoing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    base_url: str,
+) -> None:
+    verifier = _load_verifier_template()
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv(variable, base_url)
+
+    with pytest.raises(ValueError) as exc_info:
+        verifier._anthropic_url()
+
+    message = str(exc_info.value)
+    assert variable in message
+    assert base_url not in message
+    assert "url-user" not in message
+    assert "url-secret" not in message
+
+
+def test_generated_verifier_uses_the_official_anthropic_messages_url_when_base_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier_template()
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+    assert verifier._anthropic_url() == "https://api.anthropic.com/v1/messages"
+
+
+@pytest.mark.parametrize(
+    ("configured_path", "expected_path"),
+    [
+        ("bücher/v1", "/b%C3%BCcher/v1/messages"),
+        ("opaque%FF/v1", "/opaque%FF/v1/messages"),
+        ("tenant%25west/v1", "/tenant%25west/v1/messages"),
+        ("100%25/v1", "/100%25/v1/messages"),
+        ("team/v1///", "/team/v1/messages"),
+    ],
+)
+def test_anthropic_sdk_and_bundled_verifier_use_the_same_ascii_path(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_path: str,
+    expected_path: str,
+) -> None:
+    from anthropic import Anthropic
+
+    requested_paths: list[str] = []
+
+    class RecordingHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            requested_paths.append(self.path)
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.dumps(
+                {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-test",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args) -> None:
+            return None
+
+    verifier = _load_verifier_template()
+    with ThreadingHTTPServer(("127.0.0.1", 0), RecordingHandler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        provider = resolve_llm_provider(
+            {
+                "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+                "ANTHROPIC_API_KEY": "test-anthropic-key",
+                "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}/{configured_path}",
+            }
+        )
+        monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", provider.base_url or "")
+        try:
+            with Anthropic(
+                api_key="test-anthropic-key",
+                base_url=provider.base_url,
+                max_retries=0,
+                timeout=5.0,
+            ) as client:
+                sdk_response = client.messages.create(
+                    model="claude-test",
+                    max_tokens=16,
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            verifier_response, verifier_error = verifier._call_anthropic("hello", "claude-test", 16, 0.0)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    assert sdk_response.content[0].text == "ok"
+    assert verifier_response == "ok"
+    assert verifier_error is None
+    assert requested_paths == [expected_path, expected_path]
+
+
+def test_anthropic_sdk_and_bundled_verifier_prepare_the_same_scoped_ipv6_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anthropic import Anthropic
+
+    sdk_urls: list[str] = []
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        sdk_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "ANTHROPIC_BASE_URL": "http://[fe80::1%25eth0]:8080/bücher/v1",
+        }
+    )
+    verifier = _load_verifier_template()
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", provider.base_url or "")
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handle_request)) as http_client,
+        Anthropic(
+            api_key="test-anthropic-key",
+            base_url=provider.base_url,
+            http_client=http_client,
+        ) as client,
+    ):
+        client.messages.create(
+            model="claude-test",
+            max_tokens=16,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+    verifier_url = verifier._anthropic_url()
+    verifier_request = urllib.request.Request(verifier_url)
+    expected_url = "http://[fe80::1%25eth0]:8080/b%C3%BCcher/v1/messages"
+    assert sdk_urls == [expected_url]
+    assert verifier_request.full_url == expected_url
+    assert verifier_request.selector == "/b%C3%BCcher/v1/messages"
+
+
+@pytest.mark.parametrize(
+    ("unicode_host", "ascii_host"),
+    [
+        ("faß.de", "xn--fa-hia.de"),
+        ("οδός.example", "xn--pxavk3b.example"),
+    ],
+)
+def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+    unicode_host: str,
+    ascii_host: str,
+) -> None:
+    from anthropic import Anthropic
+
+    sdk_urls: list[str] = []
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        sdk_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    configured_url = f"https://{unicode_host}/team/v1"
+    provider = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "ANTHROPIC_BASE_URL": configured_url,
+        }
+    )
+    expected_url = f"https://{ascii_host}/team/v1/messages"
+    assert str(httpx.URL(configured_url)) == f"https://{ascii_host}/team/v1"
+
+    verifier = _load_verifier_template()
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", provider.base_url or "")
+    with (
+        httpx.Client(transport=httpx.MockTransport(handle_request)) as http_client,
+        Anthropic(
+            api_key="test-anthropic-key",
+            base_url=provider.base_url,
+            http_client=http_client,
+        ) as client,
+    ):
+        client.messages.create(
+            model="claude-test",
+            max_tokens=16,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+    assert sdk_urls == [expected_url]
+    assert verifier._anthropic_url() == expected_url

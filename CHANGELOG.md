@@ -90,6 +90,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Fixed Anthropic API-root normalization across evaluator and Claude Code
+  paths, and made required Tier 3 judge failures fail closed instead of
+  appearing as numeric zero scores or publishing misleading quality results
+  ([#55](https://github.com/NVIDIA/SkillEvaluator/issues/55)).
 - Quality scoring now uses boundary-aware and context-aware matching for XML tags,
   reserved names, MCP guidance, README references, time references, exclusivity
   language, instruction action verbs, and nested Markdown links, avoiding

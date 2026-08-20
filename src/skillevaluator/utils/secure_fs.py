@@ -237,6 +237,20 @@ class SecureRoot:
             _windows_close_handle(self._windows_root_handles.pop())
         self._entered = False
 
+    def duplicate_posix_root_descriptor(self) -> int:
+        """Return a caller-owned descriptor pinned to the active POSIX root.
+
+        Descriptor-relative output operations need the same no-follow root
+        pinning as reads, while retaining ownership of their own descriptor.
+        The caller must close the returned descriptor.
+        """
+        if not self._entered or os.name != "posix" or self._root_fd is None:
+            raise SecurePathError(
+                "secure_open_unavailable",
+                "A pinned POSIX root descriptor is unavailable.",
+            )
+        return os.dup(self._root_fd)
+
     def read_bytes(
         self,
         relative_path: Path,

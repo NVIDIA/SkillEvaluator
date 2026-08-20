@@ -21,13 +21,7 @@ from pathlib import Path
 import pytest
 
 _TEMPLATE = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "skillevaluator"
-    / "tier3"
-    / "harbor"
-    / "templates"
-    / "eval.py"
+    Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
 )
 
 
@@ -78,9 +72,7 @@ def _read_call(observation: str) -> dict:
 
 @pytest.mark.parametrize("word", BENIGN_WORDS)
 def test_template_benign_words_in_observation_are_not_secrets(word):
-    result = eval_template.check_security(
-        _traj("Analysis complete."), [_read_call(f"The {word} pattern matters.")]
-    )
+    result = eval_template.check_security(_traj("Analysis complete."), [_read_call(f"The {word} pattern matters.")])
 
     assert result["score"] == 1.0
     assert not any(f["type"] == "secret_exposure" for f in result["findings"])
@@ -95,19 +87,17 @@ def test_template_benign_words_in_agent_response_are_not_secrets(word):
 
 @pytest.mark.parametrize("secret", REAL_SECRETS)
 def test_template_real_key_in_observation_is_flagged(secret):
-    result = eval_template.check_security(
-        _traj("Done."), [_read_call(f"config: {secret}")]
-    )
+    result = eval_template.check_security(_traj("Done."), [_read_call(f"config: {secret}")])
 
     assert result["score"] == 0.0
-    assert any(f["type"] == "secret_exposure" for f in result["findings"])
+    [finding] = [f for f in result["findings"] if f["type"] == "secret_exposure"]
+    assert finding["evidence"] == "[redacted secret exposure]"
+    assert secret not in finding["evidence"]
 
 
 @pytest.mark.parametrize("token", GLUED_NON_SECRETS)
 def test_template_glued_id_or_hash_tokens_are_not_secrets(token):
-    result = eval_template.check_security(
-        _traj("Done."), [_read_call(f"trial id: {token}")]
-    )
+    result = eval_template.check_security(_traj("Done."), [_read_call(f"trial id: {token}")])
 
     assert result["score"] == 1.0
     assert not any(f["type"] == "secret_exposure" for f in result["findings"])
@@ -145,9 +135,9 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
 
     assert hasattr(eval_template, name), f"template missing {name}"
     assert hasattr(eval_core_checks, name), f"eval_core.checks missing {name}"
-    assert _normalize(getattr(eval_template, name)) == _normalize(
-        getattr(eval_core_checks, name)
-    ), f"{name} drifted between templates/eval.py and eval_core/checks.py"
+    assert _normalize(getattr(eval_template, name)) == _normalize(getattr(eval_core_checks, name)), (
+        f"{name} drifted between templates/eval.py and eval_core/checks.py"
+    )
 
 
 @pytest.mark.parametrize(

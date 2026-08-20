@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     METRIC_DESCRIPTIONS,
@@ -38,18 +40,42 @@ _METRIC_LABELS = {
 }
 
 
-def _load_trial_rewards(results_dir: Path, agent: str) -> list[dict[str, Any]]:
-    """Load all reward.json files for a given agent's with-skill trials."""
-    trials_dir = results_dir / agent / "with-skill" / "trials"
-    if not trials_dir.exists():
-        return []
-    rewards = []
-    for reward_file in sorted(trials_dir.rglob("reward.json")):
-        try:
-            rewards.append(json.loads(reward_file.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to read %s: %s", reward_file, e)
-    return rewards
+def _findings_artifact_path(results_dir: Path, agent: str) -> Path | None:
+    """Return a findings path only when its parent remains inside results_dir."""
+    artifact = results_dir / agent / "findings.json"
+    try:
+        artifact.absolute().relative_to(results_dir.absolute())
+        artifact.parent.resolve().relative_to(results_dir.resolve())
+    except (OSError, RuntimeError, ValueError):
+        logger.warning("Refusing findings artifact outside results directory: %s", artifact)
+        return None
+    if artifact.parent.is_symlink():
+        logger.warning("Refusing findings artifact in symlinked agent directory: %s", artifact)
+        return None
+    return artifact
+
+
+def _remove_stale_findings_artifact(results_dir: Path, agent: str) -> None:
+    artifact = _findings_artifact_path(results_dir, agent)
+    if artifact is None:
+        return
+    try:
+        if artifact.is_symlink() or artifact.is_file():
+            artifact.unlink()
+    except OSError as e:
+        logger.warning("Failed to remove stale findings artifact %s: %s", artifact, e)
+
+
+def _load_trial_rewards(
+    results_dir: Path,
+    agent: str,
+    loaded_agents: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Load bounded, contained with-skill rewards for one agent."""
+    agents = loaded_agents if loaded_agents is not None else report_data.load_agent_data(results_dir)
+    agent_data = agents.get(agent)
+    rewards = agent_data.get("rewards") if isinstance(agent_data, dict) else None
+    return [reward for reward in rewards if isinstance(reward, dict)] if isinstance(rewards, list) else []
 
 
 def _pick_best_agent(
@@ -59,6 +85,8 @@ def _pick_best_agent(
     best_agent = ""
     best_score = -1.0
     for agent, data in agents_data.items():
+        if not _findings_eligible(data):
+            continue
         with_scores = data.get("with_skill", {})
         if not with_scores:
             continue
@@ -68,6 +96,15 @@ def _pick_best_agent(
             best_score = overall
             best_agent = agent
     return best_agent
+
+
+def _findings_eligible(agent_data: dict[str, Any]) -> bool:
+    """Return whether persisted execution truth permits quality findings."""
+    conditions = agent_data.get("conditions")
+    if not isinstance(conditions, dict) or "with_skill" not in conditions:
+        return agent_data.get("execution_status") == "succeeded"
+    with_skill = conditions.get("with_skill")
+    return isinstance(with_skill, dict) and with_skill.get("execution_status") == "succeeded"
 
 
 def _agent_model_for_display(
@@ -121,11 +158,12 @@ def _finding_metric_names(rewards: list[dict[str, Any]]) -> list[str]:
     return list(DISPLAY_METRICS) + sorted(custom_names.difference(DISPLAY_METRICS))
 
 
-def _metric_score(reward: dict[str, Any], metric: str) -> float:
+def _metric_score(reward: dict[str, Any], metric: str) -> float | None:
     value = reward.get(metric)
     if isinstance(value, int | float) and not isinstance(value, bool):
-        return float(value)
-    return extract_custom_metrics(reward).get(metric, 0.0)
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    return extract_custom_metrics(reward).get(metric)
 
 
 def _metric_label(metric: str) -> str:
@@ -137,30 +175,50 @@ def _metric_label(metric: str) -> str:
     )
 
 
-def _extract_findings(rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_findings(
+    rewards: list[dict[str, Any]],
+    *,
+    canonical_scores: dict[str, Any] | None = None,
+    rewards_complete: bool = True,
+) -> list[dict[str, Any]]:
     """Extract actionable findings from reward.json details across trials."""
     findings: list[dict[str, Any]] = []
 
     metric_names = _finding_metric_names(rewards)
-    aggregated: dict[str, list[dict[str, Any]]] = {m: [] for m in metric_names}
-    for reward in rewards:
-        details = _details_for_findings(reward)
+    aggregated: dict[str, list[list[dict[str, Any]]]] = {m: [] for m in metric_names}
+    logical_scores: dict[str, list[float]] = {m: [] for m in metric_names}
+    for reward_group in report_data.logical_trial_reward_groups(rewards):
         for metric in metric_names:
-            if metric in details:
-                aggregated[metric].append(
-                    {
-                        "score": _metric_score(reward, metric),
-                        "detail": details[metric],
-                        "entry_id": reward.get("entry_id", "?"),
-                    }
-                )
+            metric_values = [score for reward in reward_group if (score := _metric_score(reward, metric)) is not None]
+            trial_details = []
+            for reward in reward_group:
+                details = _details_for_findings(reward)
+                if metric in details:
+                    trial_details.append(
+                        {
+                            "score": _metric_score(reward, metric),
+                            "detail": details[metric],
+                            "entry_id": reward.get("entry_id", "?"),
+                        }
+                    )
+            if metric_values:
+                logical_scores[metric].append(round(sum(metric_values) / len(metric_values), 4))
+            if trial_details:
+                aggregated[metric].append(trial_details)
 
     for metric in metric_names:
-        trials = aggregated[metric]
-        if not trials:
+        trial_groups = aggregated[metric]
+        if not trial_groups:
             continue
 
-        avg_score = sum(t["score"] for t in trials) / len(trials)
+        trials = [trial for trial_group in trial_groups for trial in trial_group]
+        canonical_score = _metric_score(canonical_scores or {}, metric)
+        if canonical_score is not None:
+            avg_score = canonical_score
+        elif rewards_complete and logical_scores[metric]:
+            avg_score = round(sum(logical_scores[metric]) / len(logical_scores[metric]), 4)
+        else:
+            continue
         label = _metric_label(metric)
 
         metric_refs = []
@@ -723,7 +781,9 @@ def _write_findings_artifact(
     suggestion_mode: str,
     suggestions_v2: list[dict[str, Any]] | None = None,
 ) -> Path | None:
-    artifact = results_dir / agent / "findings.json"
+    artifact = _findings_artifact_path(results_dir, agent)
+    if artifact is None:
+        return None
     payload = {
         "skill_name": skill_name,
         "agent": agent,
@@ -759,6 +819,9 @@ def display_findings_report(
     console = Console()
 
     agents_data = harbor_result.get("agents", {})
+    report_agents = list(dict.fromkeys([*harbor_agents, *agents_data.keys()]))
+    for agent in report_agents:
+        _remove_stale_findings_artifact(results_dir, agent)
 
     if len(harbor_agents) > 1:
         best_agent = _pick_best_agent(agents_data)
@@ -772,18 +835,37 @@ def display_findings_report(
     else:
         best_agent = harbor_agents[0] if harbor_agents else ""
 
-    if not best_agent or best_agent not in agents_data:
+    if (
+        not best_agent
+        or best_agent not in agents_data
+        or not isinstance(agents_data[best_agent], dict)
+        or not _findings_eligible(agents_data[best_agent])
+    ):
         return set()
 
+    loaded_agents = report_data.load_agent_data(results_dir)
     agent_reports: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
-    report_agents = list(dict.fromkeys([*harbor_agents, *agents_data.keys()]))
     for agent in report_agents:
-        if agent not in agents_data:
+        agent_data = agents_data.get(agent)
+        if not isinstance(agent_data, dict) or not _findings_eligible(agent_data):
             continue
-        rewards_for_agent = _load_trial_rewards(results_dir, agent)
+        rewards_for_agent = _load_trial_rewards(results_dir, agent, loaded_agents)
         if not rewards_for_agent:
             continue
-        findings_for_agent = _extract_findings(rewards_for_agent)
+        loaded_agent = loaded_agents.get(agent)
+        canonical_scores: dict[str, Any] = {}
+        rewards_complete = True
+        if isinstance(loaded_agent, dict):
+            for score_key in ("with_skill", "custom_with_skill"):
+                scores = loaded_agent.get(score_key)
+                if isinstance(scores, dict):
+                    canonical_scores.update(scores)
+            rewards_complete = loaded_agent.get("rewards_complete") is not False
+        findings_for_agent = _extract_findings(
+            rewards_for_agent,
+            canonical_scores=canonical_scores,
+            rewards_complete=rewards_complete,
+        )
         if findings_for_agent:
             agent_reports[agent] = (findings_for_agent, rewards_for_agent)
 

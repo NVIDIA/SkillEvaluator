@@ -594,7 +594,7 @@ def check_security(
                         finding_type="secret_exposure",
                         severity="critical",
                         message="Possible secret value appeared in tool output observed by the agent",
-                        evidence=observation[:300],
+                        evidence="[redacted secret exposure]",
                         source="tool_observation",
                         score_impact=True,
                         tool=action,

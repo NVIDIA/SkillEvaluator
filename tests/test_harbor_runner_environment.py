@@ -5,11 +5,17 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
-from skillevaluator.provider_config import ProviderConfig
+from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.harbor import runner
 from skillevaluator.tier3.harbor.adapter import _verifier_env_vars
 
@@ -282,6 +288,318 @@ def test_openai_mixed_agents_receive_isolated_native_credentials(monkeypatch: py
     assert plans["claude-code"].subprocess_env["OPENAI_API_KEY"] == "provider-key"
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "env_mode", "configured_base_url", "expected_base_url"),
+    [
+        ("openai", "docker", "https://agent-gateway.example", "https://agent-gateway.example"),
+        ("openai", "e2b", "https://agent-gateway.example/v1", "https://agent-gateway.example"),
+        (
+            "openai-compatible",
+            "docker",
+            "https://agent-gateway.example/team/v1/",
+            "https://agent-gateway.example/team",
+        ),
+        ("nv_build", "e2b", "https://agent-gateway.example", "https://agent-gateway.example"),
+        ("nv_build", "e2b", "https://agent-gateway.example/v1", "https://agent-gateway.example"),
+        (
+            "nv_build",
+            "e2b",
+            "https://agent-gateway.example/team/v1/",
+            "https://agent-gateway.example/team",
+        ),
+    ],
+)
+def test_independent_claude_base_url_is_canonical_across_the_runtime_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    env_mode: str,
+    configured_base_url: str,
+    expected_base_url: str,
+) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "anthropic-agent-key",
+            "ANTHROPIC_BASE_URL": configured_base_url,
+        },
+    )
+    evaluator_provider = _provider(provider_name)
+
+    plan = runner._resolve_agent_runtime_plan(
+        provider=evaluator_provider,
+        agents=["claude-code"],
+        models={"claude-code": "anthropic/claude-sonnet-4-5"},
+        configured_runtime_env={},
+        env_mode=env_mode,
+        model_sources={"claude-code": "CLI"},
+    )["claude-code"]
+
+    assert plan.staged_env == {
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+        "ANTHROPIC_BASE_URL": "${ANTHROPIC_BASE_URL}",
+    }
+    assert plan.subprocess_env["ANTHROPIC_API_KEY"] == "anthropic-agent-key"
+    assert plan.subprocess_env["ANTHROPIC_BASE_URL"] == expected_base_url
+    assert plan.provider.provider == "anthropic"
+    assert plan.provider.api_key == "anthropic-agent-key"
+    assert plan.provider.base_url == expected_base_url
+    assert plan.provider.base_url + "/v1/messages" == expected_base_url + "/v1/messages"
+    assert "/v1/v1/" not in plan.provider.base_url + "/v1/messages"
+
+    assert evaluator_provider.api_key == "provider-key"
+    assert evaluator_provider.base_url == "https://provider.example/v1"
+    if provider_name == "nv_build":
+        assert plan.subprocess_env["NVIDIA_API_KEY"] == "provider-key"
+        assert "OPENAI_API_KEY" not in plan.subprocess_env
+    else:
+        assert plan.subprocess_env["OPENAI_API_KEY"] == "provider-key"
+        assert plan.subprocess_env["OPENAI_BASE_URL"] == "https://provider.example/v1"
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "env_mode"),
+    [
+        ("openai", "docker"),
+        ("openai-compatible", "docker"),
+        ("nv_build", "e2b"),
+    ],
+)
+@pytest.mark.parametrize(
+    "configured_base_url",
+    [
+        "   ",
+        "agent-gateway.example/v1",
+        "https://agent-gateway.example/v1/messages",
+        "https://url-user:url-secret@agent-gateway.example/v1",
+        "https://agent-gateway.example/v1?token=url-secret",
+        "https://agent-gateway.example/v1\n",
+        "https://agent-gateway.example/%2576%2531/%256dessages",
+    ],
+)
+def test_invalid_independent_claude_base_url_fails_before_harbor_without_echoing_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    env_mode: str,
+    configured_base_url: str,
+) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "anthropic-agent-key",
+            "ANTHROPIC_BASE_URL": configured_base_url,
+        },
+    )
+
+    with pytest.raises(ProviderConfigurationError) as exc_info:
+        runner._resolve_agent_runtime_plan(
+            provider=_provider(provider_name),
+            agents=["claude-code"],
+            models={"claude-code": "anthropic/claude-sonnet-4-5"},
+            configured_runtime_env={},
+            env_mode=env_mode,
+            model_sources={"claude-code": "CLI"},
+        )
+
+    message = str(exc_info.value)
+    assert "ANTHROPIC_BASE_URL" in message
+    assert configured_base_url not in message
+    assert "url-user" not in message
+    assert "url-secret" not in message
+    assert "anthropic-agent-key" not in message
+
+
+@pytest.mark.parametrize("configured_base_url", [None, ""])
+def test_unset_independent_claude_base_url_remains_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_base_url: str | None,
+) -> None:
+    host_env = {
+        "PATH": "/usr/bin",
+        "ANTHROPIC_API_KEY": "anthropic-agent-key",
+    }
+    if configured_base_url is not None:
+        host_env["ANTHROPIC_BASE_URL"] = configured_base_url
+    monkeypatch.setattr(runner.os, "environ", host_env)
+
+    plan = runner._resolve_agent_runtime_plan(
+        provider=_provider("openai"),
+        agents=["claude-code"],
+        models={"claude-code": "anthropic/claude-sonnet-4-5"},
+        configured_runtime_env={},
+        env_mode="docker",
+        model_sources={"claude-code": "CLI"},
+    )["claude-code"]
+
+    assert "ANTHROPIC_BASE_URL" not in plan.staged_env
+    assert "ANTHROPIC_BASE_URL" not in plan.subprocess_env
+    assert plan.provider.base_url is None
+
+
+def test_independent_claude_base_url_optional_normalizer_result_is_not_staged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "anthropic-agent-key",
+            "ANTHROPIC_BASE_URL": "https://agent-gateway.example/v1",
+        },
+    )
+
+    def no_configured_base_url(_value: str, *, variable: str) -> None:
+        assert variable == "ANTHROPIC_BASE_URL"
+
+    monkeypatch.setattr(runner, "_normalize_anthropic_base_url", no_configured_base_url)
+
+    plan = runner._resolve_agent_runtime_plan(
+        provider=_provider("openai"),
+        agents=["claude-code"],
+        models={"claude-code": "anthropic/claude-sonnet-4-5"},
+        configured_runtime_env={},
+        env_mode="docker",
+        model_sources={"claude-code": "CLI"},
+    )["claude-code"]
+
+    assert "ANTHROPIC_BASE_URL" not in plan.staged_env
+    assert "ANTHROPIC_BASE_URL" not in plan.subprocess_env
+    assert plan.provider.base_url is None
+
+
+@pytest.mark.live
+@pytest.mark.skipif(shutil.which("claude") is None, reason="Installed Claude Code CLI is required")
+def test_installed_claude_uses_canonical_independent_gateway_from_runtime_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    request_paths: list[str] = []
+    response_events = [
+        (
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 0},
+                },
+            },
+        ),
+        (
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+        ),
+        (
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "gateway-ok"},
+            },
+        ),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 1},
+            },
+        ),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    response_body = "".join(
+        f"event: {event}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n" for event, payload in response_events
+    ).encode()
+
+    class RecordingHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *args: object) -> None:
+            del args
+
+        def do_POST(self) -> None:
+            content_length = int(self.headers.get("content-length", "0"))
+            self.rfile.read(content_length)
+            request_paths.append(self.path.partition("?")[0])
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+    claude_path = shutil.which("claude")
+    assert claude_path is not None
+    with ThreadingHTTPServer(("127.0.0.1", 0), RecordingHandler) as server:
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        configured_base_url = f"http://127.0.0.1:{server.server_port}/team/v1"
+        monkeypatch.setattr(
+            runner.os,
+            "environ",
+            {
+                "PATH": os.environ["PATH"],
+                "HOME": str(tmp_path),
+                "CLAUDE_CONFIG_DIR": str(tmp_path / "claude"),
+                "ANTHROPIC_API_KEY": "test-agent-key",
+                "ANTHROPIC_BASE_URL": configured_base_url,
+            },
+        )
+        plan = runner._resolve_agent_runtime_plan(
+            provider=_provider("openai"),
+            agents=["claude-code"],
+            models={"claude-code": "anthropic/claude-sonnet-4-5"},
+            configured_runtime_env={},
+            env_mode="docker",
+            model_sources={"claude-code": "CLI"},
+        )["claude-code"]
+
+        try:
+            result = subprocess.run(
+                [
+                    claude_path,
+                    "--bare",
+                    "--print",
+                    "--no-session-persistence",
+                    "--disable-slash-commands",
+                    "--model",
+                    plan.provider.model,
+                    "Reply only with gateway-ok",
+                ],
+                cwd=tmp_path,
+                env=dict(plan.subprocess_env),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        finally:
+            server.shutdown()
+            server_thread.join(timeout=5)
+
+    expected_root = f"http://127.0.0.1:{server.server_port}/team"
+    assert plan.provider.base_url == expected_root
+    assert plan.subprocess_env["ANTHROPIC_BASE_URL"] == expected_root
+    assert plan.subprocess_env["ANTHROPIC_API_KEY"] == "test-agent-key"
+    assert plan.subprocess_env["OPENAI_API_KEY"] == "provider-key"
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "gateway-ok"
+    assert request_paths
+    assert set(request_paths) == {"/team/v1/messages"}
+
+
 def test_anthropic_mixed_agents_receive_isolated_native_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         runner.os,
@@ -316,6 +634,46 @@ def test_anthropic_mixed_agents_receive_isolated_native_credentials(monkeypatch:
     assert "OPENAI_API_KEY" not in plans["claude-code"].subprocess_env
     assert plans["codex"].subprocess_env["OPENAI_API_KEY"] == "openai-agent-key"
     assert plans["codex"].subprocess_env["ANTHROPIC_API_KEY"] == "provider-key"
+
+
+def test_anthropic_legacy_v1_base_is_canonical_for_verifier_and_native_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner.os, "environ", {"PATH": "/usr/bin"})
+    provider = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "anthropic-provider-key",
+            "ANTHROPIC_BASE_URL": "https://gateway.example/team/v1/",
+        }
+    )
+
+    verifier_env = runner._provider_environment(provider)
+    plans = runner._resolve_agent_runtime_plan(
+        provider=provider,
+        agents=["claude-code", "opencode"],
+        models={
+            "claude-code": "claude-sonnet-4-5",
+            "opencode": "anthropic/claude-sonnet-4-5",
+        },
+        configured_runtime_env={},
+        env_mode="docker",
+        model_sources={"claude-code": "public provider default", "opencode": "CLI"},
+    )
+
+    assert provider.base_url == "https://gateway.example/team"
+    assert verifier_env["ANTHROPIC_BASE_URL"] == "https://gateway.example/team"
+    for agent in ("claude-code", "opencode"):
+        assert plans[agent].staged_env == {
+            "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+            "ANTHROPIC_BASE_URL": "${ANTHROPIC_BASE_URL}",
+        }
+        assert plans[agent].subprocess_env["ANTHROPIC_BASE_URL"] == "https://gateway.example/team"
+        assert plans[agent].provider.base_url == "https://gateway.example/team"
+        assert plans[agent].subprocess_env["ANTHROPIC_BASE_URL"] + "/v1/messages" == (
+            "https://gateway.example/team/v1/messages"
+        )
+        assert "/v1/v1/" not in plans[agent].subprocess_env["ANTHROPIC_BASE_URL"] + "/v1/messages"
 
 
 def test_openai_compatible_codex_stages_selected_provider_pair() -> None:

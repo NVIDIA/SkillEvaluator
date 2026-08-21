@@ -33,9 +33,15 @@ These variables select and configure the provider used for LLM-backed checks and
 | `OPENAI_API_KEY` | — | Credential for the `openai` provider. |
 | `ANTHROPIC_API_KEY` | — | Credential for the `anthropic` provider. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Alternate OpenAI endpoint; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
-| `ANTHROPIC_BASE_URL` | Anthropic SDK default | Alternate Anthropic endpoint; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
+| `ANTHROPIC_BASE_URL` | Anthropic SDK default | Absolute HTTP(S) Anthropic API root. Accepts an unversioned root or a legacy terminal `/v1`; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
 | `AWS_REGION` | `us-west-2` | Region for the `bedrock` provider. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, ... | — | Standard AWS credential chain, used as-is by the `bedrock` provider. |
+
+### Anthropic endpoint roots
+
+When `anthropic` is the selected evaluator provider, endpoint precedence is `SKILL_EVAL_LLM_BASE_URL`, then `ANTHROPIC_BASE_URL`, then the Anthropic default. A root such as `https://gateway.example.com` and a legacy terminal `/v1` root such as `https://gateway.example.com/team/v1` both produce request paths with exactly one `/v1/messages` suffix for the Anthropic SDK, the Tier 3 verifier, and a matching Claude Code agent. An independently credentialed Claude Code route applies the same normalization and validation to `ANTHROPIC_BASE_URL` when the evaluator uses another provider. Routing through path prefixes, ports, IP addresses, internationalized domain names, and ordinary safe percent escapes is preserved.
+
+Anthropic configuration fails before Harbor starts for a full `/v1/messages` endpoint, embedded credentials, a query or fragment, whitespace or control characters, a backslash, an invalid authority, interior empty or dot path segments, or ambiguous multi-layer endpoint encoding. This normalization applies only to Anthropic. OpenAI-compatible endpoints commonly include `/v1`, which remains unchanged.
 
 ### Auto-selection
 
@@ -101,8 +107,14 @@ execution environments are covered in
 | `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
 | `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
 | `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
-| `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. |
-| `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory; oversized artifacts are skipped and recorded in the artifact manifest. |
+| `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Operator-controlled model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. Both spellings change only the model used with the configured `SKILL_EVAL_LLM_PROVIDER`; they do not select a separate judge provider, so the model must be supported by that provider. Standard grading makes both spellings resolve to the selected override in Harbor's parent process, then forwards them through its verifier-only job layer, which takes precedence over task and step verifier declarations. Neither name is injected into the evaluated agent's initial environment; attempts to set or reference one from skill-authored `runtime_env` or native `[environment.env]` tables are rejected. Native custom-only graders keep ownership of their verifier configuration. Shared agent/verifier containers are a process boundary, not a confidentiality boundary; use a separate verifier environment when the model name itself must be hidden from untrusted agent processes. `run_config.json` records the configured judge provider, model, source, and `override_applied` separately from agent models; an allowed provider fallback may use a different model for an individual judge call. When `override_applied` is false for a native Harbor task, an authored task or step verifier declaration may supersede that recorded fallback. |
+| `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory. Values are bounded to 0–67108864 bytes (64 MiB); `0` skips non-empty artifacts. Oversized artifacts are skipped and recorded in the artifact manifest. |
+
+### Tier 3 judge failure semantics
+
+In standard grading, a required judge transport, authentication, timeout, HTTP, or exhausted response-parsing error is an evaluation infrastructure failure, not a numeric `0.0`. A condition containing a failed or incomplete default trial publishes none of its scores, dimensions, pass@k, or quality findings, and no cross-condition lift is published. Redacted diagnostics and coverage information remain available. A genuine model score of `0.0` remains valid and is published normally.
+
+`default_plus_custom` cannot use a custom score to rescue failed standard judging. `custom_only` is unchanged and does not invoke the standard judge.
 
 ## In-container grader contract
 

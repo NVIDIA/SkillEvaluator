@@ -1090,6 +1090,16 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
 # ---------------------------------------------------------------------------
 
 
+def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
+    """Return whether a condition may contribute score-bearing report fields."""
+    conditions = info.get("conditions")
+    condition_info = conditions.get(condition) if isinstance(conditions, dict) else None
+    status = condition_info.get("execution_status") if isinstance(condition_info, dict) else None
+    if status is None:
+        status = info.get("execution_status")
+    return status not in {"failed", "unknown", "skipped"}
+
+
 def _build_agent(
     name: str,
     info: dict[str, Any],
@@ -1099,6 +1109,12 @@ def _build_agent(
     with_scores = info.get("with_skill") or {}
     without_scores = info.get("without_skill") or {}
     lift_data = info.get("lift") or {}
+    with_quality_available = _condition_quality_available(info, "with_skill")
+    baseline_quality_available = _condition_quality_available(info, "without_skill")
+    if not with_quality_available:
+        with_scores = {}
+    if not baseline_quality_available:
+        without_scores = {}
 
     evaluators = _build_evaluators(metrics, with_scores, without_scores, lift_data)
     dimensions = _build_dimensions(
@@ -1109,12 +1125,14 @@ def _build_agent(
     )
     overall_ws = _mean([d["with_skill"] for d in dimensions])
     overall_bl = _mean([d["baseline"] for d in dimensions])
-    if overall_ws is None and not metrics:
-        overall_ws = _mean([reward.get("overall") for reward in info.get("rewards", []) if isinstance(reward, dict)])
-    if overall_bl is None and not metrics:
-        overall_bl = _mean(
-            [reward.get("overall") for reward in info.get("rewards_baseline", []) if isinstance(reward, dict)]
-        )
+    if overall_ws is None and not metrics and with_quality_available:
+        overall_ws = _finite_float(info.get("overall_with_skill"))
+        if overall_ws is None and info.get("rewards_complete") is not False:
+            overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
+    if overall_bl is None and not metrics and baseline_quality_available:
+        overall_bl = _finite_float(info.get("overall_without_skill"))
+        if overall_bl is None and info.get("rewards_baseline_complete") is not False:
+            overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
     overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
 
     trials = _normalize_trials(info.get("rewards") or [], metrics)
@@ -1142,7 +1160,7 @@ def _build_agent(
         "baseline": overall_bl,
         "lift": overall_lift,
         "num_trials": int(info.get("num_trials", 0) or 0),
-        "num_trials_baseline": len(baseline_trials),
+        "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
         "trials_baseline": baseline_trials,
         "pass_at_k": {
@@ -1279,9 +1297,20 @@ def _deterministic_reasoning(
         value = _finite_float(with_scores.get(signal))
         if value is not None:
             parts.append(f"{signal}={value:.2f}")
+    numeric_with_skill = _finite_float(ws)
+    numeric_baseline = _finite_float(bl)
+    if numeric_with_skill is None:
+        bullets = ["With-skill score unavailable; no verdict was computed."]
+        if numeric_baseline is not None:
+            bullets.append(
+                f"Baseline score {numeric_baseline:.2f}; lift cannot be computed without a with-skill score."
+            )
+        else:
+            bullets.append("No baseline run available; lift cannot be computed.")
+        return bullets, " ".join(bullets)
     bullets = _human_reasoning_bullets(
-        with_skill=_finite_float(ws) or 0.0,
-        baseline=_finite_float(bl),
+        with_skill=numeric_with_skill,
+        baseline=numeric_baseline,
         lift=lift,
         parts=parts,
     )
@@ -2532,6 +2561,20 @@ def _verdict_policy(attempt_policy: dict[str, Any]) -> dict[str, Any]:
 def _mean(values: list[float]) -> float | None:
     numeric = [finite for value in values if (finite := _finite_float(value)) is not None]
     return round(sum(numeric) / len(numeric), 4) if numeric else None
+
+
+def _logical_reward_mean(rewards: Any, field: str) -> float | None:
+    """Average a persisted reward field once per logical Harbor trial."""
+    if not isinstance(rewards, list):
+        return None
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+
+    group_means = [
+        group_mean
+        for group in logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
+        if (group_mean := _mean([reward.get(field) for reward in group])) is not None
+    ]
+    return _mean(group_means)
 
 
 def _as_float(value: Any) -> float:

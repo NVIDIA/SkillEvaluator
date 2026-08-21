@@ -74,6 +74,155 @@ def test_chat_default_models_are_the_single_source_of_truth() -> None:
     assert DEFAULT_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
 
 
+@pytest.mark.parametrize(
+    ("configured_base_url", "expected_base_url"),
+    [
+        ("https://gateway.example", "https://gateway.example"),
+        ("https://gateway.example/", "https://gateway.example"),
+        ("https://gateway.example/v1", "https://gateway.example"),
+        ("https://gateway.example/v1/", "https://gateway.example"),
+        ("https://gateway.example/team/v1/", "https://gateway.example/team"),
+        ("https://localhost/v1", "https://localhost"),
+        ("http://gateway.internal:8080/v1", "http://gateway.internal:8080"),
+        ("http://anthropic_proxy:8000/v1", "http://anthropic_proxy:8000"),
+        ("https://xn--bcher-kva.example:8443/team/v1", "https://xn--bcher-kva.example:8443/team"),
+        ("https://bücher.example/v1", "https://xn--bcher-kva.example"),
+        ("https://faß.de/v1", "https://xn--fa-hia.de"),
+        ("https://οδός.example/v1", "https://xn--pxavk3b.example"),
+        ("https://bücher.example.:8443/team/v1", "https://xn--bcher-kva.example.:8443/team"),
+        ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080"),
+        ("http://[::1]:8080/team/v1", "http://[::1]:8080/team"),
+        ("http://[fe80::1%25eth0]:8080/team/v1", "http://[fe80::1%25eth0]:8080/team"),
+        ("http://127.0.0.1:8080/bücher/v1", "http://127.0.0.1:8080/b%C3%BCcher"),
+        ("https://gateway.example/caf%C3%A9/v1", "https://gateway.example/caf%C3%A9"),
+        ("https://gateway.example/caf%c3%a9/v1", "https://gateway.example/caf%C3%A9"),
+        ("https://gateway.example/opaque%ff/v1", "https://gateway.example/opaque%FF"),
+        ("https://gateway.example/tenant%25west/v1", "https://gateway.example/tenant%25west"),
+        ("https://gateway.example/100%25/v1", "https://gateway.example/100%25"),
+        ("https://gateway.example/team/%76%31", "https://gateway.example/team"),
+        ("https://gateway.example/team/v1///", "https://gateway.example/team"),
+        (
+            "https://gateway.example/teams;v=1/@me+you/v1",
+            "https://gateway.example/teams;v=1/@me+you",
+        ),
+    ],
+)
+def test_anthropic_base_url_is_normalized_to_an_unversioned_root(
+    configured_base_url: str,
+    expected_base_url: str,
+) -> None:
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "ANTHROPIC_BASE_URL": configured_base_url,
+        }
+    )
+
+    assert config.base_url == expected_base_url
+
+
+def test_anthropic_base_url_remains_unset_for_the_official_default() -> None:
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+        }
+    )
+
+    assert config.base_url is None
+    assert config.child_environment() == {"ANTHROPIC_API_KEY": "test-anthropic-key"}
+
+
+def test_anthropic_skill_eval_base_url_takes_precedence_and_is_normalized() -> None:
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "SKILL_EVAL_LLM_BASE_URL": "https://selected.example/team/v1/",
+            "ANTHROPIC_BASE_URL": "https://ignored.example/v1",
+        }
+    )
+
+    assert config.base_url == "https://selected.example/team"
+    assert config.child_environment()["ANTHROPIC_BASE_URL"] == "https://selected.example/team"
+
+
+@pytest.mark.parametrize(
+    "configured_base_url",
+    [
+        "gateway.example/v1",
+        "file:///etc/passwd",
+        "https:///team/v1",
+        "https://:443/v1",
+        "https://url-user:url-secret@gateway.example/v1",
+        "https://gateway.example/v1?token=url-secret",
+        "https://gateway.example/v1#token=url-secret",
+        "https://gateway.example/v1/messages",
+        "https://gateway.example\\team\\v1",
+        "https://gateway.example/v1\n",
+        "https://gateway.example:not-a-port/v1",
+        "https://gateway.example:/v1",
+        "https://gateway example/v1",
+        "https://gateway%2eexample/v1",
+        "https://gateway.example|evil/v1",
+        "https://999.1.1.1/v1",
+        "https://[v1.not-ipv6]/v1",
+        "https://gateway.example/%76%31/%6dessages",
+        "https://gateway.example/team%2Fv1",
+        "https://gateway.example/team%5cv1",
+        "https://gateway.example/team%0av1",
+        "https://gateway.example/team%",
+        "https://gateway.example/team%2",
+        "https://gateway.example/team%GG",
+        "https://gateway.example/../team/v1",
+        "https://gateway.example/%2e%2e/team/v1",
+        "https://gateway.example/%2576%2531/%256dessages",
+        "https://gateway.example/%252e%252e/team/v1",
+        "https://gateway.example/team%252Fv1",
+        "https://gateway.example/team%255Cv1",
+        "https://gateway.example/team%250Av1",
+        "https://gateway.example/%25%37%36%25%33%31/%25%36%64essages",
+        "https://gateway.example/team%25%32%46v1",
+        "https://gateway.example/team//v1",
+        "https://☃.example/v1",
+    ],
+)
+def test_anthropic_base_url_rejects_unsafe_or_non_root_values(configured_base_url: str) -> None:
+    with pytest.raises(ProviderConfigurationError) as exc_info:
+        resolve_llm_provider(
+            {
+                "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+                "ANTHROPIC_API_KEY": "test-anthropic-key",
+                "ANTHROPIC_BASE_URL": configured_base_url,
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "ANTHROPIC_BASE_URL" in message
+    assert configured_base_url not in message
+    assert "url-user" not in message
+    assert "url-secret" not in message
+
+
+def test_anthropic_base_url_error_names_the_selected_precedence_variable_without_credentials() -> None:
+    with pytest.raises(ProviderConfigurationError) as exc_info:
+        resolve_llm_provider(
+            {
+                "SKILL_EVAL_LLM_PROVIDER": "anthropic",
+                "ANTHROPIC_API_KEY": "test-anthropic-key",
+                "SKILL_EVAL_LLM_BASE_URL": "https://url-user:url-secret@selected.example/v1",
+                "ANTHROPIC_BASE_URL": "https://valid-fallback.example/v1",
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "SKILL_EVAL_LLM_BASE_URL" in message
+    assert "ANTHROPIC_BASE_URL" not in message
+    assert "url-user" not in message
+    assert "url-secret" not in message
+
+
 def test_nvidia_build_uses_public_build_endpoint() -> None:
     config = resolve_llm_provider(
         {

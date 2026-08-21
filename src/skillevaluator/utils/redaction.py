@@ -43,7 +43,38 @@ _SENSITIVE_QUOTED_ASSIGNMENT_RE = re.compile(
 )
 _SENSITIVE_COLON_ASSIGNMENT_RE = re.compile(rf"(?im)\b(?P<key>{_SENSITIVE_KEY_PATTERN})\s*(?P<sep>:)\s*[^\r\n,;]+")
 _SENSITIVE_EQUALS_ASSIGNMENT_RE = re.compile(rf"(?i)\b(?P<key>{_SENSITIVE_KEY_PATTERN})\s*(?P<sep>=)\s*[^\s\"',;]+")
+_PRIVATE_KEY_LABEL = r"(?:[A-Z0-9][A-Z0-9-]* )*PRIVATE KEY(?: [A-Z0-9][A-Z0-9-]*)*"
+_PEM_REDACTIONS = (
+    (
+        re.compile(
+            rf"-----BEGIN (?P<private_key_label>{_PRIVATE_KEY_LABEL})-----"
+            r"(?:(?!-----BEGIN |-----END )[\s\S])*?"
+            r"-----END (?P=private_key_label)-----"
+        ),
+        "private-key-<redacted>",
+    ),
+    (
+        re.compile(
+            rf"-----BEGIN {_PRIVATE_KEY_LABEL}-----"
+            r"(?:(?!-----BEGIN |-----END )[\s\S])*?"
+            r"-----END (?:[A-Z0-9][A-Z0-9-]* )*[A-Z0-9][A-Z0-9-]*-----"
+        ),
+        "private-key-<redacted>",
+    ),
+    (
+        re.compile(
+            rf"-----BEGIN {_PRIVATE_KEY_LABEL}-----"
+            r"(?![\s\S]*-----END )[\s\S]*\Z"
+        ),
+        "private-key-<redacted>",
+    ),
+)
 _REDACTIONS = (
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        "jwt-<redacted>",
+    ),
+    (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"), "aws-access-key-<redacted>"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer <redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}"), "sk-<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
@@ -87,6 +118,10 @@ def _redact_auth_header(match: re.Match[str]) -> str:
 def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:
     """Best-effort masking for credentials before writing logs or artifacts."""
     out = value
+    # Remove multiline private-key material before any single-line assignment
+    # or header rule can consume only its BEGIN delimiter and orphan the body.
+    for pattern, replacement in _PEM_REDACTIONS:
+        out = pattern.sub(replacement, out)
     out = _AUTH_HEADER_RE.sub(_redact_auth_header, out)
     out = _SENSITIVE_QUOTED_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)
     out = _SENSITIVE_COLON_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)

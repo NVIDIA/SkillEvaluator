@@ -226,9 +226,33 @@ def test_display_findings_report_writes_artifact(tmp_path, monkeypatch):
     """Smoke the real findings report display path over a temporary run directory."""
     import json
 
-    trial_dir = tmp_path / "codex" / "with-skill" / "trials" / "case-001"
+    condition_dir = tmp_path / "codex" / "with-skill"
+    trial_dir = condition_dir / "trials" / "case-001"
     trial_dir.mkdir(parents=True)
     reward = _reward(0.1)
+    (condition_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "agent": "codex",
+                "scores": {
+                    metric: reward[metric]
+                    for metric in (
+                        "security",
+                        "skill_execution",
+                        "skill_efficiency",
+                        "accuracy",
+                        "goal_accuracy",
+                        "behavior_check",
+                    )
+                },
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
     (trial_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
     monkeypatch.setattr(
         report,
@@ -246,6 +270,7 @@ def test_display_findings_report_writes_artifact(tmp_path, monkeypatch):
             "env_mode": "local",
             "agents": {
                 "codex": {
+                    "execution_status": "succeeded",
                     "model": "gpt-test",
                     "model_source": "test",
                     "with_skill": {

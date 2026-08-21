@@ -15,6 +15,12 @@ All notable changes to SkillEvaluator are documented in this file.
   immutable dataset-truth snapshot with provenance metadata, and redesigned
   `BENCHMARK.md` as a decision-first publication card.
 
+### Fixed
+
+- GitHub Actions pull request reports now link source targets to the checked-out
+  repository revision instead of the synthetic `<number>/merge` ref, preventing
+  broken or cross-repository links.
+
 ## 0.2.0 - 2026-08-18
 
 ### Security
@@ -47,6 +53,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Fixed Anthropic API-root normalization across evaluator and Claude Code
+  paths, and made required Tier 3 judge failures fail closed instead of
+  appearing as numeric zero scores or publishing misleading quality results
+  ([#55](https://github.com/NVIDIA/SkillEvaluator/issues/55)).
+- Tier 3 now normalizes host-configured `LLM_JUDGE_MODEL` and
+  `SKILL_EVAL_JUDGE_MODEL` overrides in Harbor's parent process and forwards
+  the selected value through its verifier-only job layer for standard grading.
+  This lets native separate-verifier placeholders resolve without injecting
+  either name into the evaluated agent's initial environment. Skill-authored
+  `runtime_env` and native task `[environment.env]` tables cannot set or alias
+  either operator-controlled override.
+  Native verifier declarations remain compatible, while the job-level value
+  takes precedence during standard grading. Tier 3 results now record the
+  configured judge provider, model, source, and whether a dedicated job-wide
+  override was applied, separately from agent models. A provider fallback may
+  still use a different model for an individual judge call.
 - Quality scoring now uses boundary-aware lexical matching and CommonMark-parsed
   structural links instead of hand-written Markdown parsing or regex inference
   of author intent. Deterministic checks no longer infer MCP negation, temporal

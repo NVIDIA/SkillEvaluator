@@ -5,10 +5,15 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
+from urllib.parse import quote, unquote_to_bytes, urlsplit, urlunsplit
+
+import idna
 
 PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -34,6 +39,13 @@ _EMBEDDING_DEFAULT_MODELS = {
     "nv_build": "nvidia/nv-embed-v1",
 }
 _SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "nv_build", "bedrock", "openai-compatible"})
+_ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_ANTHROPIC_INTERNAL_LABEL_RE = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
+_ANTHROPIC_IPV6_ZONE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+_ANTHROPIC_PATH_SAFE = "/:@!$&'()*+,;=-._~%"
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_HEX_DIGIT_BYTES = frozenset(b"0123456789abcdefABCDEF")
+_UNRESERVED_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _NO_CUSTOM_TEMPERATURE_MODEL_IDS = frozenset({"claude-mythos-preview"})
 _ANTHROPIC_BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.")
 _VERSIONED_CLAUDE_MODEL_RE = re.compile(
@@ -128,7 +140,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             provider=provider,
             model=model,
             api_key=_required(env, "ANTHROPIC_API_KEY"),
-            base_url=(env.get("SKILL_EVAL_LLM_BASE_URL") or env.get("ANTHROPIC_BASE_URL") or None),
+            base_url=_anthropic_base_url(env),
             litellm_model=f"anthropic/{model}",
             credential_env="ANTHROPIC_API_KEY",
             base_url_env="ANTHROPIC_BASE_URL",
@@ -228,6 +240,158 @@ def _required(environ: Mapping[str, str], variable: str) -> str:
     if not value:
         raise ProviderConfigurationError(f"{variable} is required for the selected provider.")
     return value
+
+
+def _anthropic_base_url(environ: Mapping[str, str]) -> str | None:
+    for variable in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
+        if value := environ.get(variable):
+            return _normalize_anthropic_base_url(value, variable=variable)
+    return None
+
+
+def _normalize_anthropic_base_url(value: str, *, variable: str) -> str:
+    error = (
+        f"{variable} must be an absolute HTTP or HTTPS URL representing an API root without credentials, query, fragment, "
+        "whitespace, control characters, backslashes, an invalid authority, or a /v1/messages endpoint."
+    )
+    if "\\" in value or any(
+        character.isspace() or unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value
+    ):
+        raise ProviderConfigurationError(error)
+    if "?" in value or "#" in value:
+        raise ProviderConfigurationError(error)
+
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        raise ProviderConfigurationError(error) from None
+
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or hostname is None
+        or parsed.netloc.endswith(":")
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ProviderConfigurationError(error)
+
+    authority = _canonical_anthropic_authority(parsed.netloc, hostname)
+    path = _canonical_anthropic_path(parsed.path)
+    if authority is None or path is None:
+        raise ProviderConfigurationError(error)
+
+    path = path.rstrip("/")
+    if path.endswith("/v1/messages"):
+        raise ProviderConfigurationError(error)
+    if path.endswith("/v1"):
+        path = path.removesuffix("/v1")
+    return urlunsplit((parsed.scheme, authority, path, "", ""))
+
+
+def _canonical_anthropic_authority(netloc: str, hostname: str) -> str | None:
+    if netloc.startswith("["):
+        closing_bracket = netloc.find("]")
+        if closing_bracket < 0:
+            return None
+        literal = netloc[1:closing_bracket]
+        suffix = netloc[closing_bracket + 1 :]
+        if literal.casefold() != hostname.casefold() or (
+            suffix and (not suffix.startswith(":") or not suffix[1:].isascii() or not suffix[1:].isdigit())
+        ):
+            return None
+
+        address = literal
+        zone = ""
+        if "%" in literal:
+            address, separator, zone = literal.partition("%25")
+            if not separator or "%" in address or "%" in zone or not _ANTHROPIC_IPV6_ZONE_RE.fullmatch(zone):
+                return None
+        try:
+            ipaddress.IPv6Address(address)
+        except ValueError:
+            return None
+        return f"[{address}{'%25' + zone if zone else ''}]{suffix}"
+
+    if "%" in netloc or "[" in netloc or "]" in netloc:
+        return None
+    host = netloc
+    suffix = ""
+    if ":" in netloc:
+        host, port = netloc.rsplit(":", maxsplit=1)
+        if ":" in host or not port.isascii() or not port.isdigit():
+            return None
+        suffix = f":{port}"
+    if host.casefold() != hostname.casefold():
+        return None
+
+    if "." in hostname and all(character in "0123456789." for character in hostname):
+        try:
+            ipaddress.IPv4Address(hostname)
+        except ValueError:
+            return None
+        return f"{host}{suffix}"
+
+    trailing_dot = host.endswith(".")
+    dns_name = host.removesuffix(".")
+    if not dns_name:
+        return None
+    if dns_name.isascii() and "_" in dns_name:
+        canonical_name = dns_name.lower()
+        label_pattern = _ANTHROPIC_INTERNAL_LABEL_RE
+    else:
+        try:
+            canonical_name = idna.encode(dns_name.lower()).decode("ascii")
+        except idna.IDNAError:
+            return None
+        label_pattern = _ANTHROPIC_DNS_LABEL_RE
+    if len(canonical_name) > 253 or not all(label_pattern.fullmatch(label) for label in canonical_name.split(".")):
+        return None
+    return f"{canonical_name}{'.' if trailing_dot else ''}{suffix}"
+
+
+def _canonical_anthropic_path(path: str) -> str | None:
+    canonical: list[str] = []
+    index = 0
+    while index < len(path):
+        character = path[index]
+        if character != "%":
+            canonical.append(character)
+            index += 1
+            continue
+
+        if index + 2 >= len(path) or path[index + 1] not in _HEX_DIGITS or path[index + 2] not in _HEX_DIGITS:
+            return None
+        octet = int(path[index + 1 : index + 3], 16)
+        if octet in {0x2F, 0x5C, 0x7F} or octet < 0x20:
+            return None
+        if octet in _UNRESERVED_BYTES:
+            canonical.append(chr(octet))
+        else:
+            canonical.append(f"%{octet:02X}")
+        index += 3
+
+    canonical_path = "".join(canonical)
+    if "//" in canonical_path.rstrip("/"):
+        return None
+    decoded_octets = unquote_to_bytes(canonical_path)
+    # A decoded percent is safe as data unless it opens a second escape layer.
+    if any(
+        decoded_octets[index] == 0x25
+        and index + 2 < len(decoded_octets)
+        and decoded_octets[index + 1] in _HEX_DIGIT_BYTES
+        and decoded_octets[index + 2] in _HEX_DIGIT_BYTES
+        for index in range(len(decoded_octets))
+    ):
+        return None
+    decoded_path = decoded_octets.decode("utf-8", errors="replace")
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in decoded_path):
+        return None
+    if any(segment in {".", ".."} for segment in decoded_path.split("/")):
+        return None
+    return quote(canonical_path, safe=_ANTHROPIC_PATH_SAFE)
 
 
 def _selected_provider(environ: Mapping[str, str], variable: str) -> str:

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 _MAX_JSON_BYTES = 2 * 1024 * 1024
 _MAX_JSON_DEPTH = 64
 _MAX_JSON_NODES = 50_000
+_MAX_JSON_NUMBER_CHARS = 4_300
 _MAX_AGENTS = 64
 _MAX_AGENT_PATHS_SCANNED = 512
 _MAX_TRIALS_PER_CONDITION = 512
@@ -45,6 +46,7 @@ __all__ = (
     "load_dataset",
     "load_dataset_snapshot",
     "load_staged_harbor_dataset",
+    "logical_trial_reward_groups",
     "metrics_for_agents",
     "summarize_dataset_entries",
 )
@@ -204,6 +206,17 @@ def _bounded_smallest(
     return selected[:limit], len(selected) > limit, scanned > scan_limit
 
 
+def _is_safe_directory(path: Path, root: Path) -> bool:
+    """Return whether path is a real directory contained by the report root."""
+    try:
+        if not stat.S_ISDIR(path.lstat().st_mode):
+            return False
+        path.resolve().relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def _bounded_staged_entry_files(tasks_dir: Path) -> tuple[list[Path], bool, bool]:
     """Find staged entry files without allowing ``rglob`` to hide unbounded visits."""
     pending = [tasks_dir]
@@ -260,6 +273,8 @@ def _read_bounded_bytes(
     *,
     artifact: str,
 ) -> bytes | None:
+    if path.is_symlink():
+        return None
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -327,6 +342,16 @@ def _decode_bounded_json(
     except json.JSONDecodeError:
         if strict_syntax:
             raise
+        return _INVALID_JSON
+    except ValueError:
+        if strict_syntax:
+            raise
+        _record_truncation(
+            diagnostics,
+            code="json_number",
+            artifact=artifact,
+            limit=_MAX_JSON_NUMBER_CHARS,
+        )
         return _INVALID_JSON
     except UnicodeDecodeError:
         if strict_syntax:
@@ -419,6 +444,22 @@ def metrics_for_agents(agents: dict[str, dict[str, Any]]) -> list[str]:
     return list(LEGACY_METRICS) if saw_metrics else []
 
 
+def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group persisted reward rows by collector-issued logical trial identity.
+
+    Older or independently produced artifacts do not carry the opaque identity;
+    those rows remain singletons so report loading never guesses trial structure
+    from case IDs or ambiguous output-directory names.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for index, reward in enumerate(rewards):
+        identity = reward.get("trial_id")
+        valid_identity = isinstance(identity, str) and 0 < len(identity) <= 512
+        key = f"trial:{identity}" if valid_identity else f"row:{index}"
+        groups.setdefault(key, []).append(reward)
+    return list(groups.values())
+
+
 def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
@@ -442,7 +483,7 @@ def load_agent_data(
             results_dir.iterdir(),
             _MAX_AGENTS,
             scan_limit=_MAX_AGENT_PATHS_SCANNED,
-            predicate=lambda path: path.is_dir() and not path.name.startswith("_"),
+            predicate=lambda path: _is_safe_directory(path, results_dir) and not path.name.startswith("_"),
         )
     except OSError:
         return agents
@@ -468,17 +509,26 @@ def load_agent_data(
         condition_execution: dict[str, dict[str, Any]] = {}
 
         for variant in ("with-skill", "without-skill"):
-            summary = agent_dir / variant / "summary.json"
+            condition_dir = agent_dir / variant
+            if not _is_safe_directory(condition_dir, results_dir):
+                continue
+            summary = condition_dir / "summary.json"
             if summary.exists():
                 data = _load_bounded_json(summary, agent_diagnostics, artifact="summary")
                 if isinstance(data, dict):
+                    scores = data.get("scores")
+                    if not isinstance(scores, dict):
+                        continue
                     key = "with_skill" if variant == "with-skill" else "without_skill"
-                    agent_info[key] = data.get("scores", data)
+                    agent_info[key] = scores
                     metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
                     agent_info[metric_key] = data.get("metrics", [])
                     custom_key = "custom_with_skill" if variant == "with-skill" else "custom_without_skill"
                     if "custom_scores" in data:
                         agent_info[custom_key] = data.get("custom_scores", {})
+                    overall_key = "overall_with_skill" if variant == "with-skill" else "overall_without_skill"
+                    if "overall_score" in data:
+                        agent_info[overall_key] = data.get("overall_score")
                     dimension_key = "dimensions_with_skill" if variant == "with-skill" else "dimensions_without_skill"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})
@@ -510,8 +560,10 @@ def load_agent_data(
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
                     }
-                    if variant == "with-skill":
-                        agent_info["num_trials"] = data.get("num_trials", 0)
+                    count_key = "num_trials" if variant == "with-skill" else "num_trials_baseline"
+                    num_trials = data.get("num_trials")
+                    if isinstance(num_trials, int) and not isinstance(num_trials, bool) and num_trials >= 0:
+                        agent_info[count_key] = num_trials
 
         lift_file = agent_dir / "lift.json"
         if lift_file.exists():
@@ -533,17 +585,23 @@ def load_agent_data(
 
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
             trial_list: list[dict[str, Any]] = []
+            count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
+            expected_reward_rows = agent_info.get(count_key)
+            rewards_complete = isinstance(expected_reward_rows, int)
             trials_dir = agent_dir / variant_dir_name / "trials"
-            if trials_dir.exists():
+            if _is_safe_directory(trials_dir, results_dir):
                 try:
                     trial_dirs, trials_truncated, trial_scan_truncated = _bounded_smallest(
                         trials_dir.iterdir(),
                         _MAX_TRIALS_PER_CONDITION,
                         scan_limit=_MAX_TRIAL_PATHS_SCANNED,
-                        predicate=lambda path: path.is_dir(),
+                        predicate=lambda path: _is_safe_directory(path, results_dir),
                     )
                 except OSError:
                     trial_dirs, trials_truncated, trial_scan_truncated = [], False, False
+                    rewards_complete = False
+                if trials_truncated or trial_scan_truncated:
+                    rewards_complete = False
                 if trials_truncated:
                     _record_truncation(
                         agent_diagnostics,
@@ -561,9 +619,11 @@ def load_agent_data(
                 for trial_dir in trial_dirs:
                     reward_file = trial_dir / "reward.json"
                     if not reward_file.exists():
+                        rewards_complete = False
                         continue
                     reward = _load_bounded_json(reward_file, agent_diagnostics, artifact="reward")
                     if not isinstance(reward, dict):
+                        rewards_complete = False
                         continue
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
@@ -586,7 +646,12 @@ def load_agent_data(
                                 "cached_tokens": final_metrics.get("total_cached_tokens", 0),
                             }
                     trial_list.append(reward)
+            else:
+                rewards_complete = expected_reward_rows == 0
+            if expected_reward_rows != len(trial_list):
+                rewards_complete = False
             agent_info[variant_key] = trial_list
+            agent_info[f"{variant_key}_complete"] = rewards_complete
 
         if "with_skill" not in agent_info:
             continue
@@ -621,6 +686,7 @@ def load_agent_data(
             "with_skill": (
                 "with_skill",
                 "custom_with_skill",
+                "overall_with_skill",
                 "dimensions_with_skill",
                 "pass_with_skill",
                 "rewards",
@@ -628,6 +694,7 @@ def load_agent_data(
             "without_skill": (
                 "without_skill",
                 "custom_without_skill",
+                "overall_without_skill",
                 "dimensions_without_skill",
                 "pass_without_skill",
                 "rewards_baseline",
@@ -644,6 +711,8 @@ def load_agent_data(
                         "attempts_used": _nonnegative_counter(condition_info.get("scored_attempts")),
                         "max_attempts_possible": _nonnegative_counter(condition_info.get("expected_attempts")),
                     }
+                elif field.startswith("overall_"):
+                    agent_info[field] = None
                 else:
                     agent_info[field] = [] if field.startswith("rewards") else {}
         _attach_truncation(agent_info, agent_diagnostics)

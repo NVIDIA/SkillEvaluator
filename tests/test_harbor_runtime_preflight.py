@@ -691,6 +691,9 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
         return [task]
 
     full_matrix = Mock(return_value=[])
+    preflight_run_env: dict[str, str] = {}
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "host-legacy")
+    monkeypatch.delenv("SKILL_EVAL_JUDGE_MODEL", raising=False)
     monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
     monkeypatch.setattr(
         runner,
@@ -701,17 +704,18 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
     monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
     monkeypatch.setattr(runner, "generate_harbor_tasks", emit)
     monkeypatch.setattr(runner, "_run_agent_pair", full_matrix)
-    monkeypatch.setattr(
-        runtime_preflight,
-        "run_agent_runtime_preflight",
-        lambda **_kwargs: runtime_preflight.PreflightResult(
+
+    def fail_preflight(**kwargs):
+        preflight_run_env.update(kwargs["run_env"])
+        return runtime_preflight.PreflightResult(
             False,
             "opencode",
             "nvidia/meta/llama-3.1-8b-instruct",
             "401 Unauthorized",
             "runtime-preflight-opencode",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(runtime_preflight, "run_agent_runtime_preflight", fail_preflight)
 
     result = runner.run_harbor_eval(
         skill,
@@ -723,6 +727,8 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
 
     assert result["execution_status"] == "failed"
     assert result["execution_errors"] == ["opencode runtime preflight failed: 401 Unauthorized"]
+    assert preflight_run_env["LLM_JUDGE_MODEL"] == "host-legacy"
+    assert preflight_run_env["SKILL_EVAL_JUDGE_MODEL"] == "host-legacy"
     full_matrix.assert_not_called()
     result_path = Path(result["run_dir"]) / "result.json"
     assert result["result_path"] == str(result_path)

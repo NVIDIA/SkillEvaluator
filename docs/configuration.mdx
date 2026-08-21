@@ -46,7 +46,11 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export ANTHROPIC_API_KEY='sk-ant-...'
     ```
 
-    Default model: `claude-opus-5`, using the Anthropic SDK's default endpoint. Override with `SKILL_EVAL_LLM_BASE_URL` (takes precedence) or `ANTHROPIC_BASE_URL`.
+    Default model: `claude-opus-5`, using the Anthropic SDK's default endpoint. Override it with `SKILL_EVAL_LLM_BASE_URL` (highest precedence) or `ANTHROPIC_BASE_URL`; when neither is set, SkillEvaluator uses the Anthropic default.
+
+    For Anthropic, either base-URL variable must be an absolute HTTP(S) API root. Supply an unversioned root such as `https://gateway.example.com` or a legacy URL whose final segment is `/v1`, such as `https://gateway.example.com/team/v1`. SkillEvaluator normalizes the latter to its API root so the Anthropic SDK, the Tier 3 verifier, and a matching Claude Code agent each form request paths with exactly one `/v1/messages` suffix. An independently credentialed Claude Code route applies the same normalization and validation to `ANTHROPIC_BASE_URL` when the evaluator uses another provider. Routing through path prefixes, ports, IP addresses, internationalized domain names, and ordinary safe percent escapes is preserved.
+
+    Validation fails before Harbor starts if the URL contains a full `/v1/messages` endpoint, embedded credentials, a query or fragment, whitespace or control characters, a backslash, an invalid authority, interior empty or dot path segments, or ambiguous multi-layer endpoint encoding. This root convention is specific to Anthropic; OpenAI-compatible endpoints commonly retain a terminal `/v1` unchanged.
   </Tab>
   <Tab title="NVIDIA Build" language="nv_build">
     ```bash title="NVIDIA Build setup"
@@ -165,6 +169,12 @@ Both roles resolve from the operator's environment; a skill's `evals/config.yml`
 - **NVIDIA Build, one key** (`--env-mode docker` or `local`): a single `NVIDIA_API_KEY` powers the evaluator and all three supported agents — `opencode` calls NVIDIA Build directly, while `claude-code` and `codex` route through SkillEvaluator's compatibility bridge (in-container in Docker mode; an authenticated in-process host bridge in `local` mode). Agent models must be full NVIDIA Build catalog IDs in `publisher/model` form.
 - **NVIDIA Build on Harbor cloud modes** (`daytona`, `e2b`, ...): the bridge is not available. `claude-code` needs its own native `ANTHROPIC_API_KEY`, `codex` needs a full OpenAI Responses API credential (`OPENAI_API_KEY` plus `OPENAI_BASE_URL`), and each needs an explicit model via `--agent-model` or `harbor.agents.<agent>.model`.
 - **Matching native provider**: when the evaluator provider is the agent's own (for example `anthropic` with `claude-code`, or `openai` with `codex`), the same key serves both roles automatically.
+
+### Judge failures are not zero scores
+
+Standard Tier 3 grading treats a required judge transport, authentication, timeout, HTTP, or exhausted response-parsing error as an evaluation infrastructure failure. A condition containing a failed or incomplete default trial publishes none of its scores, dimensions, pass@k, or quality findings, and no cross-condition lift is published. Redacted diagnostics and coverage information remain available. A genuine model score of `0.0` is still a valid, published score.
+
+In `default_plus_custom` grading, a custom score cannot rescue failed standard judging. `custom_only` grading is unchanged: it does not invoke the standard judge and continues to publish a valid custom result.
 
 The agent's model lives in the skill's `evals/config.yml`:
 

@@ -280,6 +280,12 @@ jobs:
           tests/test_harbor_secure_copy.py::test_checked_windows_fallback_verifies_portable_chmod_semantics
           tests/test_harbor_secure_copy.py::test_native_windows_fallback_copies_tree_and_file
           tests/test_harbor_secure_copy.py::test_native_windows_tree_fingerprint_binds_writable_mode
+          tests/test_issue55_collector_truth.py::test_diagnostic_copy_preserves_bounded_redacted_regular_file
+          tests/test_issue55_collector_truth.py::test_diagnostic_copy_rejects_hard_linked_artifact
+          tests/test_issue55_collector_truth.py::test_diagnostic_copy_rejects_native_windows_trial_root_junction
+          tests/test_issue55_collector_truth.py::test_diagnostic_copy_rejects_native_windows_agent_junction
+          tests/test_issue55_collector_truth.py::test_diagnostic_copy_rejects_native_windows_destination_parent_junction
+          tests/test_issue55_collector_truth.py::test_judge_sidecar_scan_rejects_native_windows_verifier_junction
           tests/test_results_location.py
           tests/test_results_location_legacy_compatibility.py
           tests/test_tier3_compare.py

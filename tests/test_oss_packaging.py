@@ -184,6 +184,16 @@ def test_third_party_notices_do_not_list_removed_safety_dependency() -> None:
     assert "Safety (MIT)" not in notices
 
 
+def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
+    dependencies = [Requirement(raw) for raw in _project()["project"]["dependencies"]]
+    idna_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "idna"]
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+
+    assert len(idna_requirements) == 1
+    assert str(idna_requirements[0].specifier) == "<4,>=3.10"
+    assert "IDNA (BSD-3-Clause)" in notices
+
+
 def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -> None:
     project = _project()
     lock = _lock()

@@ -86,6 +86,8 @@ _RESERVED_METADATA_KEYS = {
     "details",
     "entry_id",
     "error",
+    "evaluation_errors",
+    "evaluation_status",
     "has_skill",
     "metric_set",
     "metric_set_version",

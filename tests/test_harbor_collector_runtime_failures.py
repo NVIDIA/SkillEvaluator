@@ -640,7 +640,7 @@ def test_multistep_stop_on_pass_uses_authoritative_root_reward(tmp_path: Path) -
     assert result["execution_status"] == "failed"
     assert result["expected_attempts"] == 2
     assert result["scored_attempts"] == 1
-    assert agent["pass_at_k"]["with_skill"]["rate"] == 0.0
+    assert agent["pass_at_k"]["with_skill"] == {}
 
 
 def test_duplicate_logical_attempt_ordinals_fail(tmp_path: Path) -> None:

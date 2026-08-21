@@ -22,7 +22,7 @@ Fix contract under test:
 - behavior judge requests a reasoning-safe ``max_tokens`` (>= 4096) by default;
 - one retry max with a "ONLY minified JSON" reminder on parse failure;
 - complete entries are salvaged from a truncated ``results`` array;
-- final parse failure keeps score 0.0 but reports a diagnostic reason;
+- final parse failure is a scoreless structured error with a bounded reason;
 - ``_extract_json`` tolerates fenced / prose-wrapped / trailing-junk responses;
 - the in-sandbox template copy (``harbor/templates/eval.py``) stays equivalent.
 """
@@ -146,16 +146,105 @@ def test_extract_json_preserves_top_level_arrays():
     assert eval_template.extract_json('[{"suggestion": "s"}]') == [{"suggestion": "s"}]
 
 
+def test_extract_json_preserves_prose_wrapped_top_level_arrays():
+    text = 'prefix [{"score": 1.0}] trailing prose'
+    expected = [{"score": 1.0}]
+
+    assert llm_judge._extract_json(text) == expected
+    assert eval_template.extract_json(text) == expected
+
+
+def test_extract_json_does_not_promote_object_from_truncated_outer_array():
+    text = '[{"score":0}'
+
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
+def test_extract_json_ignores_non_json_bracket_label_before_unique_object():
+    text = 'Judge [draft]: {"score": 0.5}'
+    expected = {"score": 0.5}
+
+    assert llm_judge._extract_json(text) == expected
+    assert eval_template.extract_json(text) == expected
+
+
+def test_extract_json_keeps_unique_object_before_unmatched_trailing_prose():
+    text = '{"score": 0.5}\nNote [draft'
+    expected = {"score": 0.5}
+
+    assert llm_judge._extract_json(text) == expected
+    assert eval_template.extract_json(text) == expected
+
+
+def test_extract_json_ignores_closed_non_json_label_before_unique_array():
+    text = 'Judge [draft]: [{"score": 0.5}]'
+    expected = [{"score": 0.5}]
+
+    assert llm_judge._extract_json(text) == expected
+    assert eval_template.extract_json(text) == expected
+
+
+def test_extract_json_does_not_cross_unclosed_structural_prefix():
+    text = '[draft {"score": 0.5}'
+
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('{"score": 0} {"score": 1}', id="adjacent-objects"),
+        pytest.param(
+            '{"score": 0}\n```json\n{"score": 1}\n```',
+            id="object-and-conflicting-fence",
+        ),
+    ],
+)
+def test_extract_json_rejects_multiple_complete_documents(text):
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
+def test_extract_json_returns_none_for_excessive_nesting():
+    text = "[" * 10_000 + '{"score": 1.0}' + "]" * 10_000
+
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('{"score": true, "score": 0.5}', id="top-level"),
+        pytest.param('{"results": [{"passed": 1, "passed": true}]}', id="nested"),
+    ],
+)
+def test_extract_json_rejects_duplicate_object_members(text):
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_extract_json_rejects_nonstandard_json_constants(constant):
+    text = f'{{"metadata": {constant}}}'
+
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
 def test_behavior_judge_treats_list_payload_as_unparseable(monkeypatch):
     # A bare array is valid JSON but not a judge object; old code raised
-    # AttributeError on parsed.get -- now it takes the diagnostic-zero path.
+    # AttributeError on parsed.get -- now it takes the structured-error path.
     calls: list[dict] = []
     monkeypatch.setattr(llm_judge, "call_public_llm", _scripted_hub(["[1, 2, 3]", "[1, 2, 3]"], calls))
 
     result = llm_judge.judge_behavior_check("conversation", ["b1"])
 
     assert len(calls) == 2
-    assert result["score"] == 0.0
+    assert result["score"] is None
+    assert result["status"] == "error"
     assert "unparseable" in result["reason"]
 
 
@@ -227,7 +316,7 @@ def test_behavior_judge_retries_once_with_minified_json_reminder(monkeypatch):
     assert result["reason"] == "All expected behaviors were observed."
 
 
-def test_behavior_judge_empty_reasoning_burn_yields_diagnostic_zero(monkeypatch):
+def test_behavior_judge_empty_reasoning_burn_yields_scoreless_error(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
         llm_judge,
@@ -238,12 +327,13 @@ def test_behavior_judge_empty_reasoning_burn_yields_diagnostic_zero(monkeypatch)
     result = llm_judge.judge_behavior_check("conversation", ["b1"])
 
     assert len(calls) == 2  # one retry max, never more
-    assert result["score"] == 0.0
+    assert result["score"] is None
+    assert result["status"] == "error"
     assert result["results"] == []
     # Diagnostic, filterable reason -- never the old ambiguous string.
     assert result["reason"] != "Could not parse judge response"
     assert "unparseable" in result["reason"]
-    assert "len=0" in result["reason"]
+    assert "response" in result["reason"].lower()
 
 
 def test_behavior_judge_salvages_truncated_results_after_retry(monkeypatch):

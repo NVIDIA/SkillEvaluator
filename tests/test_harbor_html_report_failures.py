@@ -14,6 +14,7 @@ from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.harbor import runner
 from skillevaluator.tier3.harbor.collector import _build_comparison, collect_harbor_results
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.results_location import external_results_root, resolve_latest_results
 
 if TYPE_CHECKING:
@@ -40,6 +41,40 @@ def _tier3_payload(output: str) -> dict:
     match = re.search(r'<script type="application/json" id="tier3-full">(.*?)</script>', output, re.DOTALL)
     assert match is not None
     return json.loads(match.group(1))
+
+
+def _visible_text_by_class(output: str, class_name: str) -> list[str]:
+    return [
+        text.strip()
+        for text in re.findall(
+            rf'<(?:div|span) class="{re.escape(class_name)}"[^>]*>\s*([^<]*?)\s*</(?:div|span)>',
+            output,
+        )
+    ]
+
+
+def _overall_kpi_values(output: str) -> list[str]:
+    return [
+        value.strip()
+        for value in re.findall(
+            r'<div class="t3-kpi-label">Overall Score</div>\s*'
+            r'<div class="t3-kpi-value"[^>]*>\s*([^<]*?)\s*</div>',
+            output,
+        )
+    ]
+
+
+def _overall_matrix_html(output: str) -> str:
+    match = re.search(r"<td><strong>Overall</strong></td>(.*?)</tr>", output, re.DOTALL)
+    assert match is not None
+    return match.group(1)
+
+
+def _agent_scorecard_bar_widths(output: str) -> list[str]:
+    return re.findall(
+        r'<div class="t3-mini-bar">\s*<span style="width:([^;]+);',
+        output,
+    )
 
 
 def test_report_renders_aggregate_and_trial_failure_details(tmp_path: Path) -> None:
@@ -133,7 +168,7 @@ def test_failed_agent_has_no_synthetic_score_in_comparison_or_html(tmp_path: Pat
         "failed": {
             "execution_status": "failed",
             "with_skill": {},
-            "without_skill": {},
+            "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
             "lift": {},
         },
         "succeeded": {
@@ -161,12 +196,46 @@ def test_failed_agent_has_no_synthetic_score_in_comparison_or_html(tmp_path: Pat
             "scored_attempts": 0 if name == "failed" else 1,
         }
         (summary_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        if data["without_skill"]:
+            baseline_dir = tmp_path / name / "without-skill"
+            baseline_dir.mkdir(parents=True)
+            (baseline_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "scores": data["without_skill"],
+                        "metrics": list(data["without_skill"]),
+                        "num_trials": 1,
+                        "execution_status": "succeeded",
+                        "execution_errors": [],
+                        "expected_attempts": 1,
+                        "scored_attempts": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
 
     output = _render_report("demo", tmp_path).read_text(encoding="utf-8")
     payload = _tier3_payload(output)
 
     assert payload["agents"]["failed"]["with_skill"] is None
     assert payload["agents"]["succeeded"]["with_skill"] == 0.8
+    failed_dimensions = payload["agents"]["failed"]["dimensions"]
+    assert len(failed_dimensions) == 5
+    assert all(dimension["score"] is None and dimension["baseline"] == 0.4 for dimension in failed_dimensions)
+
+    overall_matrix = _overall_matrix_html(output)
+    assert _visible_text_by_class(overall_matrix, "t3-mad-score") == ["N/A", "0.80"]
+    assert '<span class="t3-mad-score" style="color:var(--text-secondary);">N/A</span>' in overall_matrix
+    assert overall_matrix.count('class="t3-mad-bar"') == 1
+    assert _visible_text_by_class(output, "t3-agent-score") == ["N/A", "0.80"]
+    assert _visible_text_by_class(output, "t3-tab-score") == ["N/A", "0.80 (+0.30)"]
+    assert _overall_kpi_values(output) == ["N/A", "0.80"]
+    assert _agent_scorecard_bar_widths(output) == ["80.0%"]
+    assert output.count('<span class="t3-mad-score" style="color:var(--text-secondary);">N/A</span>') >= 6
+    # Five dimension cells plus overall matrix, scorecard, and lift KPI must
+    # distinguish an unavailable with-skill score from a missing baseline.
+    assert output.count("with-skill unavailable") == 8
+    assert "no baseline" not in output
 
 
 def test_partial_execution_failure_reports_coverage_without_quality_claims(tmp_path: Path) -> None:
@@ -438,6 +507,81 @@ def test_failed_default_run_without_metrics_is_not_labeled_custom_only(tmp_path:
     assert payload["metric_ids"] == []
     assert payload["overall_score"] is None
     assert "Custom Reward Mode" not in output
+    assert _visible_text_by_class(output, "t3-agent-score") == ["N/A"]
+    assert _visible_text_by_class(output, "t3-tab-score") == ["N/A"]
+    assert _overall_kpi_values(output) == ["N/A"]
+    assert '<div class="t3-agent-score" style="color:var(--text-secondary);">N/A</div>' in output
+    assert '<div class="t3-kpi-value" style="color:var(--text-secondary);">N/A</div>' in output
+    assert _agent_scorecard_bar_widths(output) == []
+
+
+def test_failed_custom_only_summary_cannot_publish_stale_overall_score(tmp_path: Path) -> None:
+    results_dir = tmp_path / "20260708_120006"
+    summary_dir = results_dir / "opencode" / "with-skill"
+    summary_dir.mkdir(parents=True)
+    (summary_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "scores": {},
+                "custom_scores": {"domain_quality": 0.8},
+                "overall_score": 0.8,
+                "metrics": [],
+                "num_trials": 1,
+                "execution_status": "failed",
+                "execution_errors": ["custom grader failed"],
+                "expected_attempts": 1,
+                "scored_attempts": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (results_dir / "run_config.json").write_text(
+        json.dumps({"grading": {"mode": {"value": "custom_only", "source": "CLI"}}}),
+        encoding="utf-8",
+    )
+
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
+    payload = _tier3_payload(output)
+
+    assert payload["execution_status"] == "failed"
+    assert payload["overall_score"] is None
+    assert payload["agents"]["opencode"]["with_skill"] is None
+    assert _visible_text_by_class(output, "t3-agent-score") == ["N/A"]
+    assert _overall_kpi_values(output) == ["N/A"]
+
+
+def test_successful_agent_with_legitimate_zero_score_renders_numeric_zero(tmp_path: Path) -> None:
+    results_dir = tmp_path / "20260708_120005"
+    metrics = ["skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check"]
+    for agent, score in (("positive", 0.8), ("zero", 0.0)):
+        summary_dir = results_dir / agent / "with-skill"
+        summary_dir.mkdir(parents=True)
+        (summary_dir / "summary.json").write_text(
+            json.dumps(
+                {
+                    "scores": dict.fromkeys(metrics, score),
+                    "metrics": metrics,
+                    "num_trials": 1,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    output = _render_report("demo", results_dir).read_text(encoding="utf-8")
+    payload = _tier3_payload(output)
+
+    assert payload["agents"]["zero"]["with_skill"] == 0.0
+    overall_matrix = _overall_matrix_html(output)
+    assert _visible_text_by_class(overall_matrix, "t3-mad-score") == ["0.80", "0.00"]
+    assert overall_matrix.count('class="t3-mad-bar"') == 2
+    assert _visible_text_by_class(output, "t3-agent-score") == ["0.80", "0.00"]
+    assert _visible_text_by_class(output, "t3-tab-score") == ["0.80", "0.00"]
+    assert _overall_kpi_values(output) == ["0.80", "0.00"]
+    assert _agent_scorecard_bar_widths(output) == ["80.0%", "0.0%"]
 
 
 def test_successful_custom_only_run_keeps_custom_reward_labels(tmp_path: Path) -> None:

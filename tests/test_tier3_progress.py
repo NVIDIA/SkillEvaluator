@@ -9,6 +9,7 @@ import errno
 import importlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -1684,8 +1685,20 @@ def test_runner_atomically_publishes_one_complete_final_result(
     def inspect_result_publication(source: str | Path, destination: str | Path, *args, **kwargs):
         destination_path = Path(destination)
         if destination_path.name == "result.json":
-            assert not destination_path.exists()
-            published_payloads.append(json.loads(Path(source).read_text(encoding="utf-8")))
+            source_directory_fd = kwargs.get("src_dir_fd")
+            destination_directory_fd = kwargs.get("dst_dir_fd")
+            if destination_directory_fd is None:
+                assert not destination_path.exists()
+            else:
+                with pytest.raises(FileNotFoundError):
+                    os.stat(destination_path.name, dir_fd=destination_directory_fd, follow_symlinks=False)
+            if source_directory_fd is None:
+                payload = Path(source).read_text(encoding="utf-8")
+            else:
+                descriptor = os.open(Path(source).name, os.O_RDONLY, dir_fd=source_directory_fd)
+                with os.fdopen(descriptor, encoding="utf-8") as handle:
+                    payload = handle.read()
+            published_payloads.append(json.loads(payload))
         return original_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(runner.os, "replace", inspect_result_publication)

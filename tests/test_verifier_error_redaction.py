@@ -30,6 +30,8 @@ _CREDENTIALS = {
     "AWS_SECRET_ACCESS_KEY": "dummy-aws-secret-credential-DO-NOT-USE",
     "AWS_SECURITY_TOKEN": "dummy-aws-legacy-security-token-DO-NOT-USE",
     "AWS_SESSION_TOKEN": "dummy-aws-session-credential-DO-NOT-USE",
+    "AWS_BEARER_TOKEN_BEDROCK": "dummy-bedrock-bearer-token-DO-NOT-USE",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN": "dummy-container-auth-token-DO-NOT-USE",
 }
 
 _PROVIDER_ENV = (
@@ -178,6 +180,25 @@ def test_exact_secret_redaction_uses_existing_eight_character_minimum(
     assert module._redact_configured_credentials("value=12345678") == "value=[REDACTED]"
 
 
+@pytest.mark.parametrize("module_fixture", ["source_judge", "verifier_module"])
+def test_judge_error_redacts_every_forwarded_credential(
+    module_fixture: str,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = llm_judge if module_fixture == "source_judge" else request.getfixturevalue(module_fixture)
+    for name, credential in _CREDENTIALS.items():
+        monkeypatch.setenv(name, credential)
+
+    result = module._judge_error("provider echoed " + " | ".join(_CREDENTIALS.values()))
+
+    assert result["status"] == "error"
+    assert result["score"] is None
+    assert "[REDACTED]" in result["reason"]
+    for credential in _CREDENTIALS.values():
+        assert credential not in result["reason"]
+
+
 def test_generated_call_public_llm_redacts_http_error_body(
     verifier_module,
     monkeypatch: pytest.MonkeyPatch,
@@ -222,6 +243,29 @@ def test_generated_call_public_llm_redacts_generic_exception(
         f"Public provider call failed for {verifier_module.DEFAULT_JUDGE_MODEL}: "
         "transport included [REDACTED] in diagnostics"
     )
+
+
+def test_generated_provider_error_preserves_selected_judge_provenance(
+    verifier_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = _CREDENTIALS["OPENAI_API_KEY"]
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", credential)
+
+    def time_out(*_args, **_kwargs):
+        raise TimeoutError(f"request timed out with {credential}")
+
+    monkeypatch.setattr(verifier_module.urllib.request, "urlopen", time_out)
+
+    content, error, provenance = verifier_module._call_public_llm_with_provenance(
+        "safe prompt",
+        model="selected-judge-model",
+    )
+
+    assert content is None
+    assert error == "Public provider call failed for selected-judge-model: request timed out with [REDACTED]"
+    assert provenance == {"provider": "openai", "model": "selected-judge-model"}
 
 
 @pytest.mark.parametrize(
@@ -355,6 +399,8 @@ def test_write_reward_outputs_recursively_redacts_credentials_in_actual_artifact
                             _CREDENTIALS["AWS_SECRET_ACCESS_KEY"],
                             _CREDENTIALS["AWS_SECURITY_TOKEN"],
                             _CREDENTIALS["AWS_SESSION_TOKEN"],
+                            _CREDENTIALS["AWS_BEARER_TOKEN_BEDROCK"],
+                            _CREDENTIALS["AWS_CONTAINER_AUTHORIZATION_TOKEN"],
                         ],
                     },
                 ),

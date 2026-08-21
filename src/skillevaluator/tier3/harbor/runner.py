@@ -30,9 +30,15 @@ from uuid import uuid4
 
 from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
-from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.provider_config import (
+    ProviderConfig,
+    ProviderConfigurationError,
+    _normalize_anthropic_base_url,
+    resolve_llm_provider,
+)
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
+    _VERIFIER_JUDGE_MODEL_ENV_VARS,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
     find_evals_file,
@@ -261,6 +267,7 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
         }
     )
     | _BEDROCK_HOST_ENV_VARS
+    | _VERIFIER_JUDGE_MODEL_ENV_VARS
     | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
 )
 _RUNTIME_ENV_HOST_CONTROL_PREFIXES = (
@@ -366,6 +373,7 @@ def build_harbor_run_command(
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
     agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build a Harbor invocation for a built-in environment type or local mode."""
     if env_mode not in HARBOR_ENV_MODES:
@@ -445,17 +453,22 @@ def build_harbor_run_command(
         command.extend(["--override-memory-mb", str(override_memory_mb)])
     if override_storage_mb is not None:
         command.extend(["--override-storage-mb", str(override_storage_mb)])
+    for name, value in sorted((verifier_env or {}).items()):
+        command.extend(["--verifier-env", f"{name}={value}"])
     if _harbor_supports_yes():
         command.append("--yes")
     return command
 
 
 def _provider_environment(config: ProviderConfig) -> dict[str, str]:
-    """Map a public provider config to evaluator-owned verifier variables."""
+    """Build evaluator-owned verifier variables from provider config and host overrides."""
     environment = {
         "SKILL_EVAL_LLM_PROVIDER": config.provider,
         "SKILL_EVAL_LLM_MODEL": config.model,
     }
+    environment.update(
+        {name: value for name in _VERIFIER_JUDGE_MODEL_ENV_VARS if (value := os.environ.get(name, "").strip())}
+    )
     if config.provider == "anthropic":
         environment["ANTHROPIC_API_KEY"] = config.api_key or ""
         if config.base_url:
@@ -748,13 +761,15 @@ def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, st
             errors.append(f"harbor.runtime_env.{name} controls the host process and is not allowed")
             continue
         template_value = str(template)
-        references = {
+        dollar_references = {
             braced or plain
             for braced, plain in re.findall(
-                r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)\b",
                 template_value,
             )
         }
+        percent_references = set(re.findall(r"%([A-Za-z_][A-Za-z0-9_]*)%", template_value))
+        references = dollar_references | percent_references
         owned_references = sorted(reference for reference in references if _is_operator_owned_runtime_name(reference))
         if owned_references:
             errors.append(
@@ -822,6 +837,82 @@ def _harbor_subprocess_environment(
     return environment
 
 
+def _independent_anthropic_agent_credentials() -> dict[str, str]:
+    """Resolve and validate a host-owned Anthropic credential pair."""
+    credentials = {
+        name: os.environ.get(name, "") for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL") if os.environ.get(name)
+    }
+    if base_url := credentials.get("ANTHROPIC_BASE_URL"):
+        normalized_base_url = _normalize_anthropic_base_url(
+            base_url,
+            variable="ANTHROPIC_BASE_URL",
+        )
+        if normalized_base_url is None:
+            credentials.pop("ANTHROPIC_BASE_URL")
+        else:
+            credentials["ANTHROPIC_BASE_URL"] = normalized_base_url
+    return credentials
+
+
+def _judge_model_config(
+    provider: ProviderConfig,
+    provider_env: Mapping[str, str],
+    grading_mode: str,
+) -> dict[str, str | bool]:
+    """Describe the configured standard-grading judge before any provider fallback."""
+    if grading_mode == "custom_only":
+        return {"enabled": False}
+    for name in ("LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"):
+        if model := provider_env.get(name):
+            return {
+                "enabled": True,
+                "provider": provider.provider,
+                "model": model,
+                "source": name,
+                "override_applied": True,
+            }
+    return {
+        "enabled": True,
+        "provider": provider.provider,
+        "model": provider.model,
+        "source": (
+            "SKILL_EVAL_LLM_MODEL" if os.environ.get("SKILL_EVAL_LLM_MODEL", "").strip() else "provider default"
+        ),
+        "override_applied": False,
+    }
+
+
+def _job_judge_override(provider_env: Mapping[str, str], grading_mode: str) -> tuple[str, str] | None:
+    """Return the selected dedicated host override name and value, if enabled."""
+    if grading_mode == "custom_only":
+        return None
+    for name in ("LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"):
+        if value := provider_env.get(name):
+            return name, value
+    return None
+
+
+def _job_judge_verifier_env(provider_env: Mapping[str, str], grading_mode: str) -> dict[str, str]:
+    """Return placeholder-based judge overrides for Harbor's verifier job layer."""
+    selected = _job_judge_override(provider_env, grading_mode)
+    if selected is None:
+        return {}
+    source, _value = selected
+    # Harbor resolves every task-authored placeholder before verifier startup.
+    # Override both spellings from the selected host source so a stale alias
+    # cannot fail resolution or survive task/step/job environment merging.
+    return dict.fromkeys(sorted(_VERIFIER_JUDGE_MODEL_ENV_VARS), f"${{{source}}}")
+
+
+def _job_judge_subprocess_env(provider_env: Mapping[str, str], grading_mode: str) -> dict[str, str]:
+    """Make both aliases resolvable while Harbor constructs verifier environments."""
+    selected = _job_judge_override(provider_env, grading_mode)
+    if selected is None:
+        return {}
+    _source, value = selected
+    return dict.fromkeys(_VERIFIER_JUDGE_MODEL_ENV_VARS, value)
+
+
 def _agent_credentials(
     *,
     provider: ProviderConfig,
@@ -840,11 +931,7 @@ def _agent_credentials(
             # sentinel and must not inherit NVIDIA_API_KEY in task env.
             return {}
         if agent == "claude-code":
-            return {
-                name: os.environ.get(name, "")
-                for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
-                if os.environ.get(name)
-            }
+            return _independent_anthropic_agent_credentials()
         if agent == "codex":
             return {
                 name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -852,11 +939,7 @@ def _agent_credentials(
         return {}
 
     if provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
-        return {
-            name: os.environ.get(name, "")
-            for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
-            if os.environ.get(name)
-        }
+        return _independent_anthropic_agent_credentials()
     if provider.provider == "anthropic" and agent == "codex":
         return {
             name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -995,7 +1078,14 @@ def _resolve_agent_runtime_plan(
         names = ", ".join(collisions)
         raise ValueError(f"harbor.runtime_env contains operator-owned credential name(s): {names}")
 
-    provider_env = _provider_environment(provider)
+    # Dedicated judge aliases are job-scoped. Standard grading adds the
+    # selected alias at launch time, while custom-only grading must not retain
+    # it in the reusable Harbor parent environment.
+    provider_env = {
+        name: value
+        for name, value in _provider_environment(provider).items()
+        if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
+    }
     plans: dict[str, AgentRuntimePlan] = {}
     for agent in agents:
         credentials = _agent_credentials(provider=provider, agent=agent, env_mode=env_mode)
@@ -1146,6 +1236,7 @@ def _run_harbor(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
@@ -1165,6 +1256,7 @@ def _run_harbor(
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
         agent_import_path=agent_import_path,
+        verifier_env=verifier_env,
     )
     try:
         with _nvidia_build_key_handoff(run_env, env_mode=env_mode) as subprocess_env:
@@ -1421,6 +1513,7 @@ def _run_stop_on_pass_variant(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
     errors: list[str] = []
@@ -1443,6 +1536,7 @@ def _run_stop_on_pass_variant(
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_path,
+                verifier_env=verifier_env,
                 expected_trials=1,
                 include_task_names=[task_name],
             )
@@ -1478,6 +1572,7 @@ def _run_agent_pair(
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
     task_names: list[str] | None = None,
+    verifier_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     jobs = [("with", with_skill)]
     if baseline is not None:
@@ -1505,6 +1600,7 @@ def _run_agent_pair(
                     override_memory_mb=override_memory_mb,
                     override_storage_mb=override_storage_mb,
                     agent_import_path=agent_import_path,
+                    verifier_env=verifier_env,
                 )
             )
         return sequential_errors
@@ -1535,6 +1631,7 @@ def _run_agent_pair(
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_path,
+                verifier_env=verifier_env,
                 expected_trials=expected_trials,
             ): variant
             for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
@@ -1857,7 +1954,9 @@ def _run_harbor_eval_impl(
     )
     reporter.emit(ProgressEvent(stage="credential-validation", state="complete", detail="credentials validated"))
     verifier_env = {**configured_runtime_env, **provider_env}
-    staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env}
+    staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
+    job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
+    job_judge_subprocess_env = _job_judge_subprocess_env(provider_env, grading_mode)
 
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
@@ -2109,7 +2208,7 @@ def _run_harbor_eval_impl(
                 model=model_resolution[agent]["model"],
                 env_mode=env_mode,
                 jobs_dir=jobs_dir,
-                run_env=runtime_plans[agent].subprocess_env,
+                run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
                 timeout_multiplier=float(timeout_multiplier),
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
@@ -2159,7 +2258,7 @@ def _run_harbor_eval_impl(
             with_skill=agent_task_dirs[agent][0],
             baseline=agent_task_dirs[agent][1],
             jobs_dir=jobs_dir,
-            run_env=dict(runtime_plans[agent].subprocess_env),
+            run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
             n_concurrent=n_concurrent,
             timeout_multiplier=float(timeout_multiplier),
@@ -2171,6 +2270,7 @@ def _run_harbor_eval_impl(
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
             task_names=task_names,
+            verifier_env=job_judge_verifier_env,
         )
 
     active_agents: set[str] = set()
@@ -2263,6 +2363,7 @@ def _run_harbor_eval_impl(
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
+        "judge": _judge_model_config(provider, provider_env, grading_mode),
         "task_source": task_source,
         "grading": {"mode": grading_mode},
         "agents": model_resolution,

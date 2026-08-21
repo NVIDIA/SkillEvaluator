@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -64,6 +65,11 @@ def _simulate_windows_crt_fstat_identity(monkeypatch: pytest.MonkeyPatch) -> Non
 
     def incompatible_fstat(descriptor: int) -> object:
         opened = original_fstat(descriptor)
+        # The test runs on POSIX, where the newly pinned output root still
+        # needs a real descriptor identity. Simulate Windows CRT identity only
+        # for the output file descriptors whose compatibility is under test.
+        if stat.S_ISDIR(opened.st_mode):
+            return opened
         return SimpleNamespace(
             st_dev=opened.st_dev + 10_000,
             st_ino=opened.st_ino + 10_000,
@@ -91,6 +97,81 @@ def test_atomic_output_accepts_windows_crt_descriptor_identity(
 
     assert destination.read_bytes() == b"complete"
     assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX descriptor-relative rename support")
+def test_atomic_output_parent_swap_cannot_publish_outside_validated_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    parked = tmp_path / "parked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    destination = trusted / "result.json"
+    destination.write_bytes(b"old")
+    original_replace = output_provenance.os.replace
+
+    def swap_parent_then_replace(
+        source: Path | str,
+        target: Path | str,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        trusted.rename(parked)
+        trusted.symlink_to(outside, target_is_directory=True)
+
+        # Model a same-UID attacker who can relink the already-written
+        # temporary into the redirected parent after the writer's final path
+        # validation.  An unanchored os.replace then publishes those bytes
+        # outside the declared output directory.
+        if kwargs.get("src_dir_fd") is None:
+            parked_source = parked / Path(source).name
+            os.link(parked_source, outside / Path(source).name)
+        original_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(output_provenance.os, "replace", swap_parent_then_replace)
+
+    with pytest.raises(ValueError, match="directory changed"):
+        output_provenance.write_output_file_atomically(destination, b"new-secret")
+
+    assert not list(outside.iterdir())
+    assert (parked / "result.json").read_bytes() in {b"old", b"new-secret"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows sharing semantics")
+def test_atomic_output_pins_windows_parent_against_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    parked = tmp_path / "parked"
+    destination = trusted / "result.json"
+    original_replace = output_provenance.os.replace
+    rename_was_blocked = False
+
+    def attempt_parent_rename(
+        source: Path | str,
+        target: Path | str,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal rename_was_blocked
+        try:
+            trusted.rename(parked)
+        except OSError:
+            rename_was_blocked = True
+        original_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(output_provenance.os, "replace", attempt_parent_rename)
+
+    output_provenance.write_output_file_atomically(destination, b"complete")
+
+    assert rename_was_blocked
+    assert destination.read_bytes() == b"complete"
+    assert not parked.exists()
 
 
 def test_marker_failure_cleanup_accepts_windows_crt_descriptor_identity(

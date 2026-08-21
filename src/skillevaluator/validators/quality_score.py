@@ -42,6 +42,7 @@ from skillevaluator.validators.markdown import markdown_link_targets
 logger = get_logger(__name__)
 
 _WORD_CHAR = r"A-Za-z0-9_"
+_URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
     r"validat(?:e|es|ed|ing|ion|ions))\b",
@@ -81,6 +82,7 @@ def _has_api_documentation(content: str) -> bool:
 
 def _normalized_local_path(href: str) -> str | None:
     """Return a once-decoded, normalized local path from a link destination."""
+    href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
     try:
         parsed = urlsplit(href)
     except ValueError:

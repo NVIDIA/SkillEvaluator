@@ -732,6 +732,7 @@ class TestQualityScoreDeterministicContracts:
             "[outer [inner]]({target})",
             r"[escaped \] label]({target})",
             '<a href="{target}">documentation</a>',
+            '<a href="{target} ">documentation</a>',
         ],
     )
     def test_navigation_links_trigger_link_findings(
@@ -754,6 +755,17 @@ class TestQualityScoreDeterministicContracts:
             "SKILL.md references README.md (pulls human-facing docs into agent context)",
             "Deeply nested references in mechanisms.md",
         }.issubset(messages)
+
+    def test_raw_html_encoded_trailing_space_remains_path_content(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body='\nSee <a href="README.md%20">other documentation</a>.\n',
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("SKILL.md references README.md" not in message for message in messages)
 
     @pytest.mark.parametrize(
         "target",

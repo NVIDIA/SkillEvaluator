@@ -81,7 +81,7 @@ def _has_api_documentation(content: str) -> bool:
 
 
 def _normalized_local_path(href: str) -> str | None:
-    """Return a once-decoded, normalized local path from a link destination."""
+    """Return a once-decoded, normalized local file path from a link destination."""
     href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
     try:
         parsed = urlsplit(href)
@@ -97,6 +97,8 @@ def _normalized_local_path(href: str) -> str | None:
         if urlsplit(path).scheme:
             return None
     except ValueError:
+        return None
+    if path.endswith(("/", "/.", "/..")):
         return None
     return posixpath.normpath(path)
 

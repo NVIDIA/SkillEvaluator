@@ -646,6 +646,30 @@ class TestQualityScoreDeterministicContracts:
     @pytest.mark.parametrize(
         "target",
         [
+            "README.md/",
+            "README.md/.",
+            "README.md/child/..",
+            "README.md%2F",
+            "README.md/%2E",
+            "README.md%5C",
+            "README.md%2Fchild%2F%2E%2E",
+            "README.md/?view=1",
+            "README.md/.#overview",
+        ],
+    )
+    def test_directory_form_readme_links_do_not_trigger_reference_finding(self, tmp_path: Path, target: str):
+        skill_dir = _write_issue_skill(tmp_path, extra_body=f"\nSee [documentation]({target}).\n")
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+
+        result = QualityScoreValidator(min_score=99).validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata["quality_scores"]["overall_score"] == 100.0
+        assert all("SKILL.md references README.md" not in finding.message for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
             "README.md",
             "./README.md",
             "docs/../README.md",
@@ -654,6 +678,7 @@ class TestQualityScoreDeterministicContracts:
             "README.md?view=1",
             "README.md#overview",
             "README.md?view=1#overview",
+            "README.md/../README.md",
         ],
     )
     def test_root_readme_link_variants_trigger_reference_finding(self, tmp_path: Path, target: str):
@@ -727,12 +752,35 @@ class TestQualityScoreDeterministicContracts:
         )
 
     @pytest.mark.parametrize(
+        "tag",
+        ["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "template", "plaintext"],
+    )
+    def test_non_navigation_html_does_not_trigger_link_findings(self, tmp_path: Path, tag: str):
+        content_template = f'<{tag}><a href="{{target}}">hidden documentation</a></{tag}>'
+        skill_dir = _write_issue_skill(
+            tmp_path,
+            extra_body=f"\n\n{content_template.format(target='README.md')}\n",
+        )
+        (skill_dir / "README.md").write_text("# Human documentation\n")
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "mechanisms.md").write_text(content_template.format(target="advanced.md") + "\n")
+
+        messages = set(_finding_messages(skill_dir))
+
+        assert not any(
+            "SKILL.md references README.md" in message or "Deeply nested references" in message for message in messages
+        )
+
+    @pytest.mark.parametrize(
         "content_template",
         [
             "[outer [inner]]({target})",
             r"[escaped \] label]({target})",
             '<a href="{target}">documentation</a>',
             '<a href="{target} ">documentation</a>',
+            '<pre><a href="{target}">documentation</a></pre>',
+            '<noscript><a href="{target}">documentation</a></noscript>',
         ],
     )
     def test_navigation_links_trigger_link_findings(
@@ -779,6 +827,30 @@ class TestQualityScoreDeterministicContracts:
         references = skill_dir / "references"
         references.mkdir()
         (references / "mechanisms.md").write_text(f"See [the specification]({target}).\n")
+
+        messages = _finding_messages(skill_dir)
+
+        assert all("Deeply nested references" not in message for message in messages)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "advanced.md/",
+            "advanced.md/.",
+            "advanced.md/child/..",
+            "advanced.md%2F",
+            "advanced.md/%2E",
+            "advanced.md%5C",
+            "advanced.md%2Fchild%2F%2E%2E",
+            "advanced.md/?view=1",
+            "advanced.md/.#overview",
+        ],
+    )
+    def test_directory_form_markdown_links_are_not_nested_references(self, tmp_path: Path, target: str):
+        skill_dir = _write_issue_skill(tmp_path)
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "mechanisms.md").write_text(f"See [the documentation directory]({target}).\n")
 
         messages = _finding_messages(skill_dir)
 
@@ -838,6 +910,7 @@ class TestQualityScoreDeterministicContracts:
             "../other.md",
             "nested/SKILL.md",
             "guide(v2).md",
+            "advanced.md/../advanced.md",
         ],
     )
     def test_other_local_markdown_paths_remain_nested_references(self, tmp_path: Path, target: str):

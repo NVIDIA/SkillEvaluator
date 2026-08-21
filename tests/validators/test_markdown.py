@@ -5,7 +5,21 @@
 
 import pytest
 
+from skillevaluator.validators import markdown as markdown_validator
 from skillevaluator.validators.markdown import markdown_link_targets
+
+_CLOSED_NON_NAVIGATION_HTML_TAGS = (
+    "script",
+    "style",
+    "textarea",
+    "title",
+    "xmp",
+    "iframe",
+    "noembed",
+    "noframes",
+    "template",
+    "XmP",
+)
 
 
 @pytest.mark.parametrize(
@@ -61,13 +75,133 @@ def test_markdown_and_html_links_preserve_source_order() -> None:
     assert markdown_link_targets(content) == ["first.md", "second.md", "third.md"]
 
 
-def test_raw_text_html_suppresses_links_and_then_restores_navigation() -> None:
-    content = (
-        'prefix <script><a href="hidden.md">[hidden](also-hidden.md)</a></script> '
-        '<a href="visible.md">visible</a> [last](last.md)'
-    )
+@pytest.mark.parametrize("tag", _CLOSED_NON_NAVIGATION_HTML_TAGS)
+def test_non_navigation_html_suppresses_links_and_then_restores_navigation(tag: str) -> None:
+    content = f'prefix <{tag}><a href="hidden.md">[hidden](also-hidden.md)</a></{tag}> '
+    content += '<a href="visible.md">visible</a> [last](last.md)'
 
     assert markdown_link_targets(content) == ["visible.md", "last.md"]
+
+
+@pytest.mark.parametrize("tag", _CLOSED_NON_NAVIGATION_HTML_TAGS)
+def test_self_closing_syntax_does_not_close_non_void_html_content(tag: str) -> None:
+    content = f'prefix <{tag}/><a href="hidden.md">hidden</a></{tag}> <a href="visible.md">visible</a>'
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+def test_nested_template_content_remains_non_navigation_until_outer_close() -> None:
+    content = (
+        '<template><template><a href="hidden.md">hidden</a></template>'
+        '<a href="still-hidden.md">still hidden</a></template>'
+        '<a href="visible.md">visible</a>'
+    )
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+def test_shadowroot_template_without_a_valid_host_remains_non_navigation() -> None:
+    content = (
+        '<a><template shadowrootmode="open"><a href="hidden.md">hidden</a></template></a>'
+        '<a href="visible.md">visible</a>'
+    )
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+@pytest.mark.parametrize("mode", ["open", "CLOSED"])
+def test_shadowroot_template_content_is_conservatively_non_navigation(mode: str) -> None:
+    content = (
+        f'<div><template shadowrootmode="{mode}"><a href="shadow.md">shadow link</a></template></div>'
+        '<a href="visible.md">visible</a>'
+    )
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+def test_raw_text_pseudo_start_tag_does_not_require_an_extra_close() -> None:
+    content = '<xmp><xmp><a href="hidden.md">hidden</a></xmp><a href="visible.md">visible</a>'
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+@pytest.mark.parametrize("outer", ["xmp", "iframe", "noembed", "noframes"])
+@pytest.mark.parametrize("pseudo_inner", ["script", "style", "textarea", "title"])
+def test_text_only_pseudo_start_does_not_hijack_outer_state(outer: str, pseudo_inner: str) -> None:
+    content = f'<{outer}><{pseudo_inner}></{outer}><a href="visible.md">visible</a>'
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+@pytest.mark.parametrize("tag", ["xmp", "iframe", "noembed", "noframes"])
+def test_comment_syntax_does_not_hide_raw_text_end_tag(tag: str) -> None:
+    content = f'<{tag}><!-- </{tag}> --><a href="visible.md">visible</a>'
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+@pytest.mark.parametrize("tag", ["xmp", "iframe", "noembed", "noframes"])
+def test_self_closing_raw_text_syntax_keeps_native_text_mode(tag: str) -> None:
+    content = f'<{tag}/><!-- </{tag}> --><a href="visible.md">visible</a>'
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+def test_mismatched_raw_text_close_does_not_restore_navigation() -> None:
+    content = '<iframe><a href="hidden.md">hidden</a></xmp><a href="still-hidden.md">still hidden</a>'
+
+    assert markdown_link_targets(content) == []
+
+
+def test_plaintext_html_suppresses_navigation_to_end_of_document() -> None:
+    content = (
+        '<plaintext><a href="hidden.md">[also hidden](also-hidden.md)</a>'
+        '</plaintext> <a href="still-hidden.md">still hidden</a> [last](last.md)'
+    )
+
+    assert markdown_link_targets(content) == []
+
+
+def test_script_double_escaped_content_does_not_produce_links() -> None:
+    content = '<script><!--<script></script><a href="hidden.md">hidden</a>--></script><a href="visible.md">visible</a>'
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+@pytest.mark.parametrize("escape_boundary", ["<!-->", "<!--->"])
+def test_script_escaped_dash_dash_greater_than_returns_to_data(escape_boundary: str) -> None:
+    content = (
+        f'<script>{escape_boundary}<script><a href="hidden.md">hidden</a></script><a href="visible.md">visible</a>'
+    )
+
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '<script><!--<\u017fcript></script><a href="visible.md">visible</a>',
+        '<script></\u017fcript><a href="hidden.md">hidden</a></script><a href="visible.md">visible</a>',
+    ],
+)
+def test_script_end_scanner_uses_ascii_case_insensitive_matching(content: str) -> None:
+    assert markdown_link_targets(content) == ["visible.md"]
+
+
+def test_many_inline_html_tokens_are_fed_to_html_parser_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    feed_calls = 0
+    original_feed = markdown_validator._AnchorHrefParser.feed
+
+    def counted_feed(parser: markdown_validator._AnchorHrefParser, content: str) -> None:
+        nonlocal feed_calls
+        feed_calls += 1
+        original_feed(parser, content)
+
+    monkeypatch.setattr(markdown_validator._AnchorHrefParser, "feed", counted_feed)
+    content = "prefix <xmp>" + ' <a href="hidden.md">hidden</a>' * 100
+
+    assert markdown_link_targets(content) == []
+    assert feed_calls == 1
 
 
 def test_escaped_space_destination_does_not_produce_link() -> None:

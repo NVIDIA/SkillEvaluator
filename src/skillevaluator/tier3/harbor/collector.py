@@ -164,12 +164,9 @@ def _remove_generated_output_path(path: Path, output_root: Path) -> None:
 
 
 def _write_generated_root_json(path: Path, output_root: Path, payload: Any) -> None:
-    """Write one root artifact without following a replacement symlink."""
+    """Publish one root artifact without following unsafe replacements."""
     _assert_safe_generated_output_path(path, output_root, follow_target=False)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o666)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        stream.write(json.dumps(payload, indent=2))
+    write_output_file_atomically(path, json.dumps(payload, indent=2).encode("utf-8"))
 
 
 def _agent_generated_output_paths(agent_dir: Path) -> list[Path]:

@@ -2175,6 +2175,51 @@ def test_root_generated_artifact_write_unlinks_symlink_without_following(
     assert not generated.is_symlink()
 
 
+@pytest.mark.parametrize(
+    ("artifact", "agents"),
+    (("attempt_policy.json", ["opencode"]), ("comparison.json", ["opencode", "claude-code"])),
+)
+def test_root_generated_artifact_write_rejects_hard_link_replacement_after_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+    agents: list[str],
+) -> None:
+    for agent in agents:
+        job_dir = tmp_path / "jobs" / f"demo-{agent}-with"
+        _write_reward(job_dir, "case-001__attempt", _default_reward("case-001", 0.8))
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    sentinel = tmp_path / f"outside-{artifact}"
+    sentinel.write_text("outside sentinel", encoding="utf-8")
+    generated = results_dir / artifact
+    original_prepare = collector_module._prepare_generated_outputs
+
+    def prepare_then_replace(output_root: Path, selected_agents: list[str]) -> None:
+        original_prepare(output_root, selected_agents)
+        os.link(sentinel, generated)
+
+    monkeypatch.setattr(collector_module, "_prepare_generated_outputs", prepare_then_replace)
+
+    with pytest.raises(ValueError, match="single-link regular file"):
+        collect_harbor_results(
+            skill_name="demo",
+            agents=agents,
+            output_dir=results_dir,
+            jobs_dir=tmp_path / "jobs",
+            skip_baseline=True,
+            expected_cases=1,
+            expected_case_ids=["case-001"],
+            expected_trials=1,
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "outside sentinel"
+    assert generated.samefile(sentinel)
+    assert generated.stat().st_nlink == 2
+    assert not list(results_dir.glob(f".{artifact}.*.tmp"))
+
+
 def test_findings_skip_failed_single_agent_even_when_stale_rewards_exist(tmp_path: Path, capsys) -> None:
     trial_dir = tmp_path / "opencode" / "with-skill" / "trials" / "case-001__attempt"
     trial_dir.mkdir(parents=True)

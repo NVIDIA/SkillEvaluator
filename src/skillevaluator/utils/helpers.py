@@ -101,6 +101,19 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
         # In CI pipelines (detached HEAD), git returns "HEAD" so prefer an
         # explicitly supplied branch name.
         branch = os.environ.get("GITHUB_REF_NAME", "")
+        if re.fullmatch(r"\d+/merge", branch):
+            # A pull request merge ref belongs to the workflow repository, but
+            # local_path may point into a different checkout. Resolve the
+            # revision from the repository that contains local_path.
+            try:
+                branch = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo_root,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                ).strip()
+            except subprocess.CalledProcessError:
+                branch = ""
         if not branch:
             try:
                 branch = subprocess.check_output(

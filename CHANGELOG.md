@@ -15,6 +15,12 @@ All notable changes to SkillEvaluator are documented in this file.
   immutable dataset-truth snapshot with provenance metadata, and redesigned
   `BENCHMARK.md` as a decision-first publication card.
 
+### Fixed
+
+- GitHub Actions pull request reports now link source targets to the checked-out
+  repository revision instead of the synthetic `<number>/merge` ref, preventing
+  broken or cross-repository links.
+
 ## 0.2.0 - 2026-08-18
 
 ### Security

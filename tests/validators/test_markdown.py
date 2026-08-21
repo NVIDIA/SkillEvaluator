@@ -62,6 +62,7 @@ def test_commonmark_links_are_extracted(content: str, target: str) -> None:
     ("content", "target"),
     [
         ('<a href="README.md">docs</a>', "README.md"),
+        ('<A HREF="upper.md">docs</A>', "upper.md"),
         ("<div>\n<a href='block.md'>docs</a>\n</div>", "block.md"),
     ],
 )
@@ -186,6 +187,12 @@ def test_script_escaped_dash_dash_greater_than_returns_to_data(escape_boundary: 
 )
 def test_script_end_scanner_uses_ascii_case_insensitive_matching(content: str) -> None:
     assert markdown_link_targets(content) == ["visible.md"]
+
+
+def test_html_tag_matching_does_not_casefold_non_ascii_characters() -> None:
+    content = '<noframe\u017f><a href="inside.md">inside</a></noframe\u017f><a href="outside.md">outside</a>'
+
+    assert markdown_link_targets(content) == ["inside.md", "outside.md"]
 
 
 def test_many_inline_html_tokens_are_fed_to_html_parser_once(monkeypatch: pytest.MonkeyPatch) -> None:

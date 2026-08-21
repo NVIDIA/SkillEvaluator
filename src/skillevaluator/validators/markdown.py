@@ -98,7 +98,7 @@ class _AnchorHrefParser(HTMLParser):
 
     def set_cdata_mode(self, elem: str, *, escapable: bool = False) -> None:
         super().set_cdata_mode(elem, escapable=escapable)
-        if elem.casefold() == "script":
+        if elem == "script":
             self.interesting = _SCRIPT_END_SEARCH
 
     @property
@@ -106,7 +106,10 @@ class _AnchorHrefParser(HTMLParser):
         return bool(self._non_navigation_tags)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        normalized_tag = tag.casefold()
+        # HTMLParser has already normalized ASCII tag and attribute names to
+        # lowercase. Unicode case folding would incorrectly turn unknown names
+        # containing U+017F into reserved HTML names such as ``noframes``.
+        normalized_tag = tag
         if self.suppresses_navigation:
             if (
                 self._non_navigation_tags[-1] not in _TEXT_ONLY_HTML_TAGS
@@ -120,12 +123,12 @@ class _AnchorHrefParser(HTMLParser):
         if normalized_tag != "a":
             return
         for name, value in attrs:
-            if name.casefold() == "href" and isinstance(value, str):
+            if name == "href" and isinstance(value, str):
                 self.targets.append(value)
                 break
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        normalized_tag = tag.casefold()
+        normalized_tag = tag
         if normalized_tag in _NON_NAVIGATION_HTML_TAGS:
             self.handle_starttag(tag, attrs)
             if normalized_tag in self.CDATA_CONTENT_ELEMENTS:
@@ -138,7 +141,7 @@ class _AnchorHrefParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if not self._non_navigation_tags or self._non_navigation_tags[-1] == "plaintext":
             return
-        if tag.casefold() == self._non_navigation_tags[-1]:
+        if tag == self._non_navigation_tags[-1]:
             self._non_navigation_tags.pop()
 
 

@@ -529,6 +529,31 @@ def test_stop_on_pass_does_not_report_intentionally_skipped_attempts(tmp_path: P
     assert result["scored_attempts"] == 4
 
 
+def test_complete_ab_run_records_paired_pass_evidence(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=1.0)
+    _write_reward(jobs_dir, variant="with", case_id="case-b", attempt=1, score=1.0)
+    _write_reward(jobs_dir, variant="without", case_id="case-a", attempt=1, score=0.0)
+    _write_reward(jobs_dir, variant="without", case_id="case-b", attempt=1, score=1.0)
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path, n_attempts=1)
+
+    assert result["execution_status"] == "succeeded"
+    pass_at_k = result["agents"]["opencode"]["pass_at_k"]
+    assert pass_at_k["with_skill"]["rate_interval"]["confidence_level"] == 0.95
+    paired = pass_at_k["lift"]["paired_comparison"]
+    assert paired["pairing_status"] == "complete"
+    assert paired["paired_cases"] == 2
+    assert paired["with_skill_only_pass"] == 1
+    assert paired["without_skill_only_pass"] == 0
+    assert paired["paired_rate_delta"] == 0.5
+    assert paired["mcnemar_exact"]["p_value"] == 1.0
+
+    persisted = json.loads((tmp_path / "results/opencode/pass_at_k_lift.json").read_text(encoding="utf-8"))
+    assert persisted["paired_comparison"] == paired
+
+
 def test_stop_on_pass_records_skipped_attempts_in_pass_summary(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=0.2)

@@ -11,10 +11,13 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import stat
+from decimal import Decimal, localcontext
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -1917,6 +1920,180 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
     )
 
 
+def _wilson_score_interval(successes: int, total: int) -> dict[str, Any] | None:
+    """Return a two-sided 95% Wilson score interval for a binomial rate."""
+    if total <= 0 or successes < 0 or successes > total:
+        return None
+
+    # Standard-normal 97.5th percentile for a two-sided 95% interval.
+    z = 1.959963984540054
+    proportion = successes / total
+    z_squared = z * z
+    denominator = 1.0 + z_squared / total
+    center = (proportion + z_squared / (2.0 * total)) / denominator
+    margin = (
+        z
+        * math.sqrt((proportion * (1.0 - proportion) + z_squared / (4.0 * total)) / total)
+        / denominator
+    )
+    return {
+        "method": "wilson_score",
+        "confidence_level": 0.95,
+        "lower": round(max(0.0, center - margin), 4),
+        "upper": round(min(1.0, center + margin), 4),
+    }
+
+
+def _mcnemar_exact_probability(with_only_pass: int, without_only_pass: int) -> Fraction:
+    """Return the exact two-sided McNemar probability as a rational number."""
+    discordant = with_only_pass + without_only_pass
+    if discordant == 0:
+        return Fraction(1, 1)
+    lower_tail = sum(math.comb(discordant, count) for count in range(min(with_only_pass, without_only_pass) + 1))
+    return min(Fraction(1, 1), Fraction(2 * lower_tail, 1 << discordant))
+
+
+def _probability_float(probability: Fraction) -> float | None:
+    """Return a nonzero float approximation, or None when conversion underflows."""
+    approximate = float(probability)
+    return approximate if approximate > 0.0 or probability == 0 else None
+
+
+def _probability_text(probability: Fraction) -> str:
+    """Return a compact decimal representation without binary-float underflow."""
+    with localcontext() as context:
+        context.prec = 10
+        decimal = Decimal(probability.numerator) / Decimal(probability.denominator)
+    return format(decimal, ".10g")
+
+
+def _probability_exact(probability: Fraction) -> str:
+    """Return the reduced rational representation used for the exact calculation."""
+    if probability.denominator == 1:
+        return str(probability.numerator)
+    return f"{probability.numerator}/{probability.denominator}"
+
+
+def _mcnemar_exact_p_value(with_only_pass: int, without_only_pass: int) -> float | None:
+    """Return the two-sided exact McNemar p-value, or None on float underflow."""
+    return _probability_float(_mcnemar_exact_probability(with_only_pass, without_only_pass))
+
+
+def _minimum_attainable_mcnemar_probability(discordant: int) -> Fraction:
+    """Return the smallest two-sided exact probability attainable for this pair count."""
+    if discordant <= 1:
+        return Fraction(1, 1)
+    return Fraction(2, 1 << discordant)
+
+
+def _minimum_attainable_mcnemar_p_value(discordant: int) -> float | None:
+    """Return the smallest two-sided exact p-value attainable for this pair count."""
+    return _probability_float(_minimum_attainable_mcnemar_probability(discordant))
+
+
+def _pass_rate_delta(with_skill: dict[str, Any], without_skill: dict[str, Any]) -> float:
+    """Return the arm-level pass-rate delta without subtracting pre-rounded rates."""
+    with_total = int(with_skill.get("total_cases", 0) or 0)
+    without_total = int(without_skill.get("total_cases", 0) or 0)
+    if with_total > 0 and without_total > 0:
+        with_rate = int(with_skill.get("passed_cases", 0) or 0) / with_total
+        without_rate = int(without_skill.get("passed_cases", 0) or 0) / without_total
+        return round(with_rate - without_rate, 4)
+    return round(float(with_skill.get("rate", 0.0) or 0.0) - float(without_skill.get("rate", 0.0) or 0.0), 4)
+
+
+def _paired_pass_comparison(
+    with_skill: dict[str, Any],
+    without_skill: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare pass@k outcomes for matching cases across both evaluation arms."""
+    with_cases = with_skill.get("cases")
+    without_cases = without_skill.get("cases")
+    if not isinstance(with_cases, dict) or not isinstance(without_cases, dict):
+        return {"pairing_status": "unavailable", "paired_cases": 0}
+
+    with_expected = {str(case_id): case for case_id, case in with_cases.items() if not case.get("extra_case")}
+    without_expected = {str(case_id): case for case_id, case in without_cases.items() if not case.get("extra_case")}
+    common_ids = sorted(set(with_expected) & set(without_expected))
+    with_only_ids = sorted(set(with_expected) - set(without_expected))
+    without_only_ids = sorted(set(without_expected) - set(with_expected))
+
+    with_total = int(with_skill.get("total_cases", 0) or 0)
+    without_total = int(without_skill.get("total_cases", 0) or 0)
+    unidentified_with = max(0, with_total - len(with_expected))
+    unidentified_without = max(0, without_total - len(without_expected))
+    complete = (
+        bool(common_ids)
+        and not with_only_ids
+        and not without_only_ids
+        and unidentified_with == 0
+        and unidentified_without == 0
+        and len(common_ids) == with_total == without_total
+    )
+
+    outcomes = {
+        "both_pass": 0,
+        "with_skill_only_pass": 0,
+        "without_skill_only_pass": 0,
+        "neither_pass": 0,
+    }
+    for case_id in common_ids:
+        with_passed = bool(with_expected[case_id].get("passed"))
+        without_passed = bool(without_expected[case_id].get("passed"))
+        if with_passed and without_passed:
+            outcomes["both_pass"] += 1
+        elif with_passed:
+            outcomes["with_skill_only_pass"] += 1
+        elif without_passed:
+            outcomes["without_skill_only_pass"] += 1
+        else:
+            outcomes["neither_pass"] += 1
+
+    paired_cases = len(common_ids)
+    paired_delta = (
+        round(
+            (outcomes["with_skill_only_pass"] - outcomes["without_skill_only_pass"]) / paired_cases,
+            4,
+        )
+        if paired_cases
+        else None
+    )
+    result: dict[str, Any] = {
+        "pairing_status": "complete" if complete else ("partial" if common_ids else "unavailable"),
+        "paired_cases": paired_cases,
+        "with_skill_unpaired_case_ids": with_only_ids,
+        "without_skill_unpaired_case_ids": without_only_ids,
+        "with_skill_unidentified_cases": unidentified_with,
+        "without_skill_unidentified_cases": unidentified_without,
+        **outcomes,
+        "discordant_cases": outcomes["with_skill_only_pass"] + outcomes["without_skill_only_pass"],
+        "paired_rate_delta": paired_delta,
+    }
+    if complete:
+        discordant = result["discordant_cases"]
+        exact_probability = _mcnemar_exact_probability(
+            outcomes["with_skill_only_pass"],
+            outcomes["without_skill_only_pass"],
+        )
+        minimum_attainable_probability = _minimum_attainable_mcnemar_probability(discordant)
+        result["mcnemar_exact"] = {
+            "method": "two_sided_exact_binomial",
+            "null_hypothesis": "equal marginal pass probabilities",
+            "p_value": _probability_float(exact_probability),
+            "p_value_text": _probability_text(exact_probability),
+            "p_value_exact": _probability_exact(exact_probability),
+            "p_value_numeric_underflow": _probability_float(exact_probability) is None,
+            "minimum_attainable_p_value": _probability_float(minimum_attainable_probability),
+            "minimum_attainable_p_value_text": _probability_text(minimum_attainable_probability),
+            "minimum_attainable_p_value_exact": _probability_exact(minimum_attainable_probability),
+            "minimum_attainable_p_value_numeric_underflow": (
+                _probability_float(minimum_attainable_probability) is None
+            ),
+            "resolution_limited_at_alpha_0_05": minimum_attainable_probability > Fraction(1, 20),
+        }
+    return result
+
+
 def _pass_summary(
     rewards: list[dict[str, Any]],
     *,
@@ -1998,6 +2175,7 @@ def _pass_summary(
         total_cases = len(grouped)
     failed_cases = max(0, total_cases - passed_cases)
     rate = round(passed_cases / total_cases, 4) if total_cases else 0.0
+    rate_interval = _wilson_score_interval(passed_cases, total_cases)
 
     return {
         "k": n_attempts,
@@ -2007,6 +2185,7 @@ def _pass_summary(
         "failed_cases": failed_cases,
         "total_cases": total_cases,
         "rate": rate,
+        "rate_interval": rate_interval,
         "attempts_used": attempts_used,
         "max_attempts_possible": total_cases * n_attempts,
         "avg_attempts_used": round(attempts_used / total_cases, 4) if total_cases else 0.0,
@@ -3117,8 +3296,9 @@ def collect_harbor_results(
             pass_lift = {
                 "with_skill": with_pass.get("rate", 0.0),
                 "without_skill": without_pass.get("rate", 0.0),
-                "delta": round(with_pass.get("rate", 0.0) - without_pass.get("rate", 0.0), 4),
+                "delta": _pass_rate_delta(with_pass, without_pass),
                 "passed_cases_delta": int(with_pass.get("passed_cases", 0)) - int(without_pass.get("passed_cases", 0)),
+                "paired_comparison": _paired_pass_comparison(with_pass, without_pass),
             }
             (agent_dir / "pass_at_k_lift.json").write_text(json.dumps(pass_lift, indent=2), encoding="utf-8")
 

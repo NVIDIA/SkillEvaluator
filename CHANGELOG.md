@@ -12,7 +12,8 @@ All notable changes to SkillEvaluator are documented in this file.
   documented rollout plan for generated `BENCHMARK.md` cards.
 - Tier 3 pass@k results now include per-arm 95% Wilson score intervals and,
   when case identities pair completely, direction-preserving paired outcomes
-  with a two-sided exact McNemar diagnostic.
+  with a two-sided exact McNemar diagnostic, its attainable-p resolution limit,
+  and the paired pass-rate delta.
 
 ### Changed
 

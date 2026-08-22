@@ -1171,3 +1171,59 @@ def test_partial_pass_at_k_case_without_attempts_skipped_still_renders(tmp_path:
     report = render_agent_eval_html_report(skill, run_dir, use_llm_judge=False)
 
     assert "Attempt Details" in report.read_text(encoding="utf-8")
+
+
+def test_pass_at_k_uncertainty_and_paired_evidence_render() -> None:
+    payload = build_agent_eval_payload(
+        "paired-evidence-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 8,
+                "scored_attempts": 8,
+                "overall_with_skill": 0.75,
+                "overall_without_skill": 0.5,
+                "pass_with_skill": {
+                    "rate": 0.75,
+                    "rate_interval": {"lower": 0.3006, "upper": 0.9544},
+                    "passed_cases": 3,
+                    "total_cases": 4,
+                    "attempts_used": 4,
+                    "max_attempts_possible": 4,
+                },
+                "pass_without_skill": {
+                    "rate": 0.5,
+                    "rate_interval": {"lower": 0.15, "upper": 0.85},
+                    "passed_cases": 2,
+                    "total_cases": 4,
+                    "attempts_used": 4,
+                    "max_attempts_possible": 4,
+                },
+                "pass_lift": {
+                    "delta": 0.25,
+                    "paired_comparison": {
+                        "pairing_status": "complete",
+                        "paired_cases": 4,
+                        "with_skill_only_pass": 1,
+                        "without_skill_only_pass": 0,
+                        "both_pass": 2,
+                        "neither_pass": 1,
+                        "mcnemar_exact": {"p_value": 1.0},
+                    },
+                },
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert "30%\u201395%" in html
+    assert "15%\u201385%" in html
+    assert "skill-only passes 1" in html
+    assert "baseline-only passes 0" in html
+    assert "Pairing: complete" in html
+    assert "Exact McNemar p=1" in html

@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import stat
+from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -1943,14 +1944,62 @@ def _wilson_score_interval(successes: int, total: int) -> dict[str, Any] | None:
     }
 
 
-def _mcnemar_exact_p_value(with_only_pass: int, without_only_pass: int) -> float:
-    """Return the two-sided exact McNemar p-value for discordant pairs."""
+def _mcnemar_exact_probability(with_only_pass: int, without_only_pass: int) -> Fraction:
+    """Return the exact two-sided McNemar probability as a rational number."""
     discordant = with_only_pass + without_only_pass
     if discordant == 0:
-        return 1.0
+        return Fraction(1, 1)
     lower_tail = sum(math.comb(discordant, count) for count in range(min(with_only_pass, without_only_pass) + 1))
-    probability = Fraction(2 * lower_tail, 1 << discordant)
-    return round(min(1.0, float(probability)), 8)
+    return min(Fraction(1, 1), Fraction(2 * lower_tail, 1 << discordant))
+
+
+def _probability_float(probability: Fraction) -> float | None:
+    """Return a nonzero float approximation, or None when conversion underflows."""
+    approximate = float(probability)
+    return approximate if approximate > 0.0 or probability == 0 else None
+
+
+def _probability_text(probability: Fraction) -> str:
+    """Return a compact decimal representation without binary-float underflow."""
+    with localcontext() as context:
+        context.prec = 10
+        decimal = Decimal(probability.numerator) / Decimal(probability.denominator)
+    return format(decimal, ".10g")
+
+
+def _probability_exact(probability: Fraction) -> str:
+    """Return the reduced rational representation used for the exact calculation."""
+    if probability.denominator == 1:
+        return str(probability.numerator)
+    return f"{probability.numerator}/{probability.denominator}"
+
+
+def _mcnemar_exact_p_value(with_only_pass: int, without_only_pass: int) -> float | None:
+    """Return the two-sided exact McNemar p-value, or None on float underflow."""
+    return _probability_float(_mcnemar_exact_probability(with_only_pass, without_only_pass))
+
+
+def _minimum_attainable_mcnemar_probability(discordant: int) -> Fraction:
+    """Return the smallest two-sided exact probability attainable for this pair count."""
+    if discordant <= 1:
+        return Fraction(1, 1)
+    return Fraction(2, 1 << discordant)
+
+
+def _minimum_attainable_mcnemar_p_value(discordant: int) -> float | None:
+    """Return the smallest two-sided exact p-value attainable for this pair count."""
+    return _probability_float(_minimum_attainable_mcnemar_probability(discordant))
+
+
+def _pass_rate_delta(with_skill: dict[str, Any], without_skill: dict[str, Any]) -> float:
+    """Return the arm-level pass-rate delta without subtracting pre-rounded rates."""
+    with_total = int(with_skill.get("total_cases", 0) or 0)
+    without_total = int(without_skill.get("total_cases", 0) or 0)
+    if with_total > 0 and without_total > 0:
+        with_rate = int(with_skill.get("passed_cases", 0) or 0) / with_total
+        without_rate = int(without_skill.get("passed_cases", 0) or 0) / without_total
+        return round(with_rate - without_rate, 4)
+    return round(float(with_skill.get("rate", 0.0) or 0.0) - float(without_skill.get("rate", 0.0) or 0.0), 4)
 
 
 def _paired_pass_comparison(
@@ -2021,13 +2070,26 @@ def _paired_pass_comparison(
         "paired_rate_delta": paired_delta,
     }
     if complete:
+        discordant = result["discordant_cases"]
+        exact_probability = _mcnemar_exact_probability(
+            outcomes["with_skill_only_pass"],
+            outcomes["without_skill_only_pass"],
+        )
+        minimum_attainable_probability = _minimum_attainable_mcnemar_probability(discordant)
         result["mcnemar_exact"] = {
             "method": "two_sided_exact_binomial",
             "null_hypothesis": "equal marginal pass probabilities",
-            "p_value": _mcnemar_exact_p_value(
-                outcomes["with_skill_only_pass"],
-                outcomes["without_skill_only_pass"],
+            "p_value": _probability_float(exact_probability),
+            "p_value_text": _probability_text(exact_probability),
+            "p_value_exact": _probability_exact(exact_probability),
+            "p_value_numeric_underflow": _probability_float(exact_probability) is None,
+            "minimum_attainable_p_value": _probability_float(minimum_attainable_probability),
+            "minimum_attainable_p_value_text": _probability_text(minimum_attainable_probability),
+            "minimum_attainable_p_value_exact": _probability_exact(minimum_attainable_probability),
+            "minimum_attainable_p_value_numeric_underflow": (
+                _probability_float(minimum_attainable_probability) is None
             ),
+            "resolution_limited_at_alpha_0_05": minimum_attainable_probability > Fraction(1, 20),
         }
     return result
 
@@ -3234,7 +3296,7 @@ def collect_harbor_results(
             pass_lift = {
                 "with_skill": with_pass.get("rate", 0.0),
                 "without_skill": without_pass.get("rate", 0.0),
-                "delta": round(with_pass.get("rate", 0.0) - without_pass.get("rate", 0.0), 4),
+                "delta": _pass_rate_delta(with_pass, without_pass),
                 "passed_cases_delta": int(with_pass.get("passed_cases", 0)) - int(without_pass.get("passed_cases", 0)),
                 "paired_comparison": _paired_pass_comparison(with_pass, without_pass),
             }

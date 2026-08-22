@@ -10,7 +10,10 @@ import pytest
 from skillevaluator.tier3.harbor.collector import (
     _compute_lift,
     _condition_execution_summary,
+    _mcnemar_exact_p_value,
+    _minimum_attainable_mcnemar_p_value,
     _paired_pass_comparison,
+    _pass_rate_delta,
     _pass_summary,
     _wilson_score_interval,
 )
@@ -131,6 +134,26 @@ def test_wilson_interval_is_unavailable_without_cases() -> None:
     assert _wilson_score_interval(0, 0) is None
 
 
+def test_mcnemar_exact_p_value_preserves_small_nonzero_results() -> None:
+    assert _mcnemar_exact_p_value(32, 0) == pytest.approx(2**-31)
+    assert _mcnemar_exact_p_value(32, 0) > 0.0
+
+
+@pytest.mark.parametrize(
+    ("discordant", "expected"),
+    [(1, 1.0), (2, 0.5), (3, 0.25), (4, 0.125), (5, 0.0625), (6, 0.03125)],
+)
+def test_mcnemar_exact_reports_attainable_resolution(discordant: int, expected: float) -> None:
+    assert _minimum_attainable_mcnemar_p_value(discordant) == expected
+
+
+def test_pass_rate_delta_uses_counts_instead_of_pre_rounded_rates() -> None:
+    with_skill = {"passed_cases": 2, "total_cases": 3, "rate": 0.6667}
+    without_skill = {"passed_cases": 1, "total_cases": 3, "rate": 0.3333}
+
+    assert _pass_rate_delta(with_skill, without_skill) == 0.3333
+
+
 def test_paired_pass_comparison_preserves_case_direction_and_exact_test() -> None:
     with_skill = {
         "total_cases": 4,
@@ -161,6 +184,47 @@ def test_paired_pass_comparison_preserves_case_direction_and_exact_test() -> Non
     assert paired["neither_pass"] == 1
     assert paired["paired_rate_delta"] == 0.0
     assert paired["mcnemar_exact"]["p_value"] == 1.0
+    assert paired["mcnemar_exact"]["minimum_attainable_p_value"] == 0.5
+    assert paired["mcnemar_exact"]["resolution_limited_at_alpha_0_05"] is True
+
+
+def test_complete_pairing_delta_matches_count_derived_arm_delta() -> None:
+    with_skill = {
+        "passed_cases": 2,
+        "total_cases": 3,
+        "rate": 0.6667,
+        "cases": {"a": {"passed": True}, "b": {"passed": True}, "c": {"passed": False}},
+    }
+    without_skill = {
+        "passed_cases": 1,
+        "total_cases": 3,
+        "rate": 0.3333,
+        "cases": {"a": {"passed": False}, "b": {"passed": True}, "c": {"passed": False}},
+    }
+
+    paired = _paired_pass_comparison(with_skill, without_skill)
+
+    assert paired["paired_rate_delta"] == 0.3333
+    assert paired["paired_rate_delta"] == _pass_rate_delta(with_skill, without_skill)
+
+
+def test_mcnemar_exact_preserves_machine_readable_value_beyond_float_range() -> None:
+    with_skill_cases = {f"case-{index}": {"passed": True} for index in range(1076)}
+    without_skill_cases = {case_id: {"passed": False} for case_id in with_skill_cases}
+
+    paired = _paired_pass_comparison(
+        {"total_cases": 1076, "cases": with_skill_cases},
+        {"total_cases": 1076, "cases": without_skill_cases},
+    )
+    exact = paired["mcnemar_exact"]
+
+    assert exact["p_value"] is None
+    assert exact["p_value_numeric_underflow"] is True
+    assert exact["p_value_text"] != "0"
+    assert exact["p_value_exact"].startswith("1/")
+    assert exact["minimum_attainable_p_value"] is None
+    assert exact["minimum_attainable_p_value_text"] != "0"
+    assert exact["minimum_attainable_p_value_exact"] == exact["p_value_exact"]
 
 
 def test_paired_pass_comparison_does_not_issue_exact_test_for_partial_pairing() -> None:

@@ -2616,7 +2616,7 @@
                             <td>baseline</td>
                         </tr>
                         {% endif %}
-                        {% if paired %}
+                        {% if paired and paired.paired_cases %}
                         <tr>
                             <td></td>
                             <td colspan="6" style="color:var(--text-secondary);font-size:0.82rem;">
@@ -2625,8 +2625,16 @@
                                 baseline-only passes {{ paired.without_skill_only_pass or 0 }},
                                 both pass {{ paired.both_pass or 0 }}, neither pass {{ paired.neither_pass or 0 }}).
                                 Pairing: {{ paired.pairing_status or 'unavailable' }}.
+                                {% if paired.paired_rate_delta is defined and paired.paired_rate_delta is not none %}
+                                Paired pass-rate delta: {{ "%+.1f%%" | format(paired.paired_rate_delta * 100) }}.
+                                {% endif %}
                                 {% if paired.mcnemar_exact %}
-                                Exact McNemar p={{ "%.4g" | format(paired.mcnemar_exact.p_value) }}; diagnostic only.
+                                Exact McNemar p={% if paired.mcnemar_exact.p_value_text is defined %}{{ paired.mcnemar_exact.p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.p_value) }}{% endif %}.
+                                {% if paired.mcnemar_exact.minimum_attainable_p_value is defined %}
+                                Minimum attainable p with {{ paired.discordant_cases or 0 }} observed discordant pair{{ 's' if (paired.discordant_cases or 0) != 1 else '' }}: {% if paired.mcnemar_exact.minimum_attainable_p_value_text is defined %}{{ paired.mcnemar_exact.minimum_attainable_p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.minimum_attainable_p_value) }}{% endif %}{% if paired.mcnemar_exact.resolution_limited_at_alpha_0_05 %}
+                                (resolution-limited at α=0.05){% endif %}.
+                                {% endif %}
+                                Diagnostic only.
                                 {% endif %}
                             </td>
                         </tr>

@@ -1209,7 +1209,15 @@ def test_pass_at_k_uncertainty_and_paired_evidence_render() -> None:
                         "without_skill_only_pass": 0,
                         "both_pass": 2,
                         "neither_pass": 1,
-                        "mcnemar_exact": {"p_value": 1.0},
+                        "discordant_cases": 1,
+                        "paired_rate_delta": 0.25,
+                        "mcnemar_exact": {
+                            "p_value": 1.0,
+                            "p_value_text": "1",
+                            "minimum_attainable_p_value": 1.0,
+                            "minimum_attainable_p_value_text": "1",
+                            "resolution_limited_at_alpha_0_05": True,
+                        },
                     },
                 },
             }
@@ -1226,4 +1234,36 @@ def test_pass_at_k_uncertainty_and_paired_evidence_render() -> None:
     assert "skill-only passes 1" in html
     assert "baseline-only passes 0" in html
     assert "Pairing: complete" in html
+    assert "Paired pass-rate delta: +25.0%" in html
     assert "Exact McNemar p=1" in html
+    assert "Minimum attainable p with 1 observed discordant pair:" in html
+    assert "resolution-limited at \N{GREEK SMALL LETTER ALPHA}=0.05" in html
+
+
+def test_unavailable_pairing_does_not_render_a_zero_evidence_row() -> None:
+    payload = build_agent_eval_payload(
+        "unpaired-evidence-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "overall_with_skill": 1.0,
+                "overall_without_skill": 0.0,
+                "pass_with_skill": {"rate": 1.0, "passed_cases": 1, "total_cases": 1},
+                "pass_without_skill": {"rate": 0.0, "passed_cases": 0, "total_cases": 1},
+                "pass_lift": {
+                    "delta": 1.0,
+                    "paired_comparison": {"pairing_status": "unavailable", "paired_cases": 0},
+                },
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert "Paired cases: 0" not in html

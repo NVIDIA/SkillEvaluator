@@ -244,6 +244,15 @@ baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
 McNemar diagnostic over the discordant pairs. Partial or unidentified pairing
 is labeled and does not receive that exact-test result.
 
+The paired record also reports its pass-rate delta and the minimum p-value the
+exact test could attain with the observed number of discordant pairs. When that
+minimum is above 0.05, the report labels the test resolution-limited at that
+threshold. This is a mathematical resolution limit, not evidence of no effect;
+with five or fewer discordant pairs, a two-sided exact result cannot fall below
+0.05 regardless of direction. The JSON preserves compact decimal and reduced
+rational representations of both probabilities; its numeric approximation is
+`null`, rather than a false zero, if binary floating-point conversion underflows.
+
 These uncertainty fields describe the cases in one configured run. They do not
 make heterogeneous cases independent, correct dataset leakage, or promote a
 small p-value into proof that a skill generalizes. Keep the dataset, attempt

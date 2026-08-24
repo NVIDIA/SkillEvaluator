@@ -263,3 +263,38 @@ def test_agent_collect_stages_agentskills_dataset(tmp_path, monkeypatch):
     assert data["skill_name"] == "my-skill"
     assert data["evals"][0]["prompt"] == "Use my-skill."
     assert data["evals"][0]["expected_output"] == "The agent uses the skill."
+
+
+def _parse(tmp_path, frontmatter: str):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n\n# body\n", encoding="utf-8")
+    return generate_dataset._parse_skill(skill)
+
+
+def test_parse_skill_folds_block_scalar_description(tmp_path):
+    """``description: >-`` must fold, not be captured as the literal indicator."""
+    parsed = _parse(
+        tmp_path,
+        "name: my-skill\ndescription: >-\n  Writing standards and a checklist.\n  Use when revising docs.",
+    )
+    assert parsed["description"] == "Writing standards and a checklist. Use when revising docs."
+    assert parsed["name"] == "my-skill"
+
+
+def test_parse_skill_keeps_literal_block_scalar_newlines(tmp_path):
+    parsed = _parse(tmp_path, "name: my-skill\ndescription: |-\n  first line\n  second line")
+    assert parsed["description"] == "first line\nsecond line"
+
+
+def test_parse_skill_does_not_truncate_multiline_quoted_description(tmp_path):
+    """A quoted scalar spanning lines was silently cut at the first line."""
+    parsed = _parse(tmp_path, 'name: my-skill\ndescription: "first part\n  second part"')
+    assert parsed["description"] == "first part second part"
+
+
+def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
+    """Unparseable YAML must degrade to the directory name and an empty description."""
+    parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
+    assert parsed["name"] == "my-skill"
+    assert parsed["description"] == ""

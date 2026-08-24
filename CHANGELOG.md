@@ -17,6 +17,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 eval-dataset generation now parses `SKILL.md` frontmatter as YAML.
+  The previous line-based scan captured block-scalar indicators verbatim, so a
+  `description: >-` became the literal string `>-` in every generated prompt,
+  and multi-line quoted scalars were silently truncated to their first line.
+
 - GitHub Actions pull request reports now link source targets to the checked-out
   repository revision instead of the synthetic `<number>/merge` ref, preventing
   broken or cross-repository links.

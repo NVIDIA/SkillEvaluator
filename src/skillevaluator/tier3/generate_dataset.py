@@ -51,7 +51,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
@@ -104,14 +107,20 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
     description = ""
     scripts: list[str] = []
 
-    # Parse frontmatter
-    fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+    # Parse frontmatter as YAML. A line-based scan would capture block-scalar
+    # indicators (``>-``, ``|``) verbatim and truncate multi-line quoted scalars,
+    # so both fields go through the same loader Tier 2 uses.
+    fm_match = FRONTMATTER_PATTERN.match(content)
     if fm_match:
-        for line in fm_match.group(1).split("\n"):
-            if line.startswith("name:"):
-                name = line.split(":", 1)[1].strip().strip("'\"")
-            elif line.startswith("description:"):
-                description = line.split(":", 1)[1].strip().strip("'\"")
+        try:
+            frontmatter = yaml.safe_load(fm_match.group(1))
+        except yaml.YAMLError:
+            frontmatter = None
+        if isinstance(frontmatter, dict):
+            if frontmatter.get("name"):
+                name = str(frontmatter["name"]).strip()
+            if frontmatter.get("description"):
+                description = str(frontmatter["description"]).strip()
 
     # Find scripts
     scripts_dir = skill_path / "scripts"

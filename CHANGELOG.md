@@ -17,6 +17,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 now scores single-step trials again. Harbor serializes
+  `TrialResult.step_results` without `exclude_none`, so every single-step trial
+  writes an explicit `"step_results": null`, which the collector rejected as a
+  malformed constituent-step container and reported as an unscoreable reward.
+  Wrong container types are still rejected.
+
 - GitHub Actions pull request reports now link source targets to the checked-out
   repository revision instead of the synthetic `<number>/merge` ref, preventing
   broken or cross-repository links.

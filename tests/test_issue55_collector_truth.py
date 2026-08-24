@@ -575,6 +575,30 @@ def test_authoritative_default_aggregate_rejects_malformed_step_results_containe
     assert "authoritative" in " ".join(result["execution_errors"]).casefold()
 
 
+def test_single_step_null_step_results_is_scored(tmp_path: Path) -> None:
+    """Harbor single-step trials serialize ``"step_results": null``; that must still score.
+
+    ``TrialResult.step_results`` is ``list[StepResult] | None`` and Harbor dumps it without
+    ``exclude_none``, so the key is always present with a null value for single-step trials --
+    the shape every generated eval case produces.
+    """
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_dir = _write_authoritative_multistep_result(
+        job_dir,
+        "case-001__attempt",
+        aggregate=_default_reward("case-001", 1.0),
+        step_rewards=[_default_reward("case-001", 1.0)],
+    )
+    payload = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    payload["step_results"] = None
+    (trial_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded"
+    assert result["agents"]["opencode"]["conditions"]["with_skill"]["scored_attempts"] == 1
+
+
 def test_v2_root_aggregate_does_not_reclassify_constituent_missing_security_as_legacy(tmp_path: Path) -> None:
     job_dir = tmp_path / "jobs" / "demo-opencode-with"
     undeclared_five_metric_step = dict.fromkeys(LEGACY_METRICS, 1.0)

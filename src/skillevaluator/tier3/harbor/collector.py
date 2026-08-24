@@ -1471,7 +1471,10 @@ def _constituent_default_reward_failure(result: dict[str, Any]) -> str:
         return "Authoritative verifier reward is failed; it was not scored"
 
     step_results = result.get("step_results")
-    if "step_results" in result and not isinstance(step_results, list):
+    # Harbor's TrialResult declares ``step_results`` as ``list[StepResult] | None`` and
+    # serializes it without ``exclude_none``, so every single-step trial writes an explicit
+    # ``null``. Treat that the same as an absent key; only a wrong container type is malformed.
+    if step_results is not None and not isinstance(step_results, list):
         return "Authoritative verifier result has malformed constituent steps; it was not scored"
     if not isinstance(step_results, list):
         return ""

@@ -17,6 +17,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 Harbor collection now accepts the `step_results: null` sentinel
+  emitted for successful single-step trials while retaining fail-closed
+  validation for malformed non-null multi-step result containers.
+
 - Tier 3 eval-dataset generation now parses `SKILL.md` frontmatter as YAML.
   The previous line-based scan captured block-scalar indicators verbatim, so a
   `description: >-` became the literal string `>-` in every generated prompt,

@@ -552,6 +552,35 @@ def test_authoritative_default_aggregate_rejects_malformed_step_entry(
     assert "constituent" in " ".join(result["execution_errors"]).casefold()
 
 
+def test_single_step_harbor_null_step_results_keeps_custom_reward_scoreable(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    reward = {"overall": 0.75, "domain_quality": 0.9}
+    (trial_dir / "result.json").parent.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "nvidia/case-001",
+                "verifier_result": {"rewards": reward},
+                "step_results": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_reward(job_dir, trial_name, reward)
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
+    assert agent["custom_with_skill"] == {"domain_quality": 0.9}
+    assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
+
+
 @pytest.mark.parametrize("invalid_steps", [{}, "malformed-steps"], ids=("mapping", "string"))
 def test_authoritative_default_aggregate_rejects_malformed_step_results_container(
     tmp_path: Path,

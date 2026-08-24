@@ -1452,7 +1452,18 @@ def _standard_reward_metrics(
     return DEFAULT_METRICS if "security" in metric_names else LEGACY_METRICS
 
 
-def _constituent_default_reward_failure(result: dict[str, Any]) -> str:
+def _physical_steps_layout_present(trial_root: Path) -> bool:
+    """Return whether a trial has any physical steps entry, failing closed on I/O errors."""
+    try:
+        (trial_root / "steps").lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path | None = None) -> str:
     """Return a safe failure when a standard step reward cannot support its aggregate."""
     root_verifier = result.get("verifier_result")
     root_rewards = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
@@ -1471,7 +1482,16 @@ def _constituent_default_reward_failure(result: dict[str, Any]) -> str:
         return "Authoritative verifier reward is failed; it was not scored"
 
     step_results = result.get("step_results")
-    if "step_results" in result and not isinstance(step_results, list):
+    # Harbor serializes ``None`` for a successful single-step trial. A physical
+    # steps layout makes that sentinel ambiguous, so retain fail-closed handling.
+    if (
+        step_results is None
+        and "step_results" in result
+        and trial_root is not None
+        and _physical_steps_layout_present(trial_root)
+    ):
+        return "Authoritative verifier result has malformed constituent steps; it was not scored"
+    if step_results is not None and not isinstance(step_results, list):
         return "Authoritative verifier result has malformed constituent steps; it was not scored"
     if not isinstance(step_results, list):
         return ""
@@ -1535,9 +1555,13 @@ def _constituent_default_reward_failure(result: dict[str, Any]) -> str:
     return ""
 
 
-def _merge_constituent_default_reward_failure(data: dict[str, Any], result: dict[str, Any]) -> None:
+def _merge_constituent_default_reward_failure(
+    data: dict[str, Any],
+    result: dict[str, Any],
+    trial_root: Path | None = None,
+) -> None:
     """Make an aggregate unscoreable when one of its standard constituents is invalid."""
-    reason = _constituent_default_reward_failure(result)
+    reason = _constituent_default_reward_failure(result, trial_root)
     if not reason:
         return
     data["evaluation_status"] = "failed"
@@ -1569,7 +1593,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         data = _reward_from_harbor_result(result)
         if not data:
             continue
-        _merge_constituent_default_reward_failure(data, result)
+        _merge_constituent_default_reward_failure(data, result, trial_dir)
         _merge_trial_evaluation_failures(data, trial_dir)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
@@ -1613,7 +1637,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
                 if result_file.exists():
                     result = _read_json(result_file)
                     if isinstance(result, dict):
-                        _merge_constituent_default_reward_failure(data, result)
+                        _merge_constituent_default_reward_failure(data, result, trial_dir)
                         data["_started_at"] = result.get("started_at")
                         if not data.get("entry_id"):
                             entry_id = _entry_id_from_harbor_result(result)
@@ -1642,7 +1666,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         data = _reward_from_harbor_result(result)
         if not data:
             continue
-        _merge_constituent_default_reward_failure(data, result)
+        _merge_constituent_default_reward_failure(data, result, trial_dir)
         _merge_trial_evaluation_failures(data, trial_dir)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
@@ -2297,6 +2321,10 @@ def _authoritative_step_names(trial_root: Path) -> tuple[bool, list[str] | None]
             return True, None
         return False, None
     step_results = result.get("step_results")
+    if step_results is None:
+        # Single-step Harbor trials serialize an explicit null. A physical
+        # steps layout still makes that shape ambiguous, so keep it fail-closed.
+        return (True, None) if steps_layout_present else (False, None)
     if not isinstance(step_results, list) or not step_results:
         return True, None
 

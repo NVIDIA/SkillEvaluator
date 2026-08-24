@@ -559,6 +559,8 @@ def test_complete_ab_run_records_paired_pass_evidence(tmp_path: Path) -> None:
     assert paired["mcnemar_exact"]["p_value"] == 1.0
 
     persisted = json.loads((tmp_path / "results/opencode/pass_at_k_lift.json").read_text(encoding="utf-8"))
+    assert persisted["delta"] == 0.5
+    assert persisted["count_derived_delta"] == 0.5
     assert persisted["paired_comparison"] == paired
 
 

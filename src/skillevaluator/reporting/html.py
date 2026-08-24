@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import pkgutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -163,6 +164,32 @@ def _related_paths(finding: object) -> list[str]:
     return paths
 
 
+def _adaptive_percent(value: object, signed: bool = False) -> str:
+    """Format percentages without rounding narrow nonzero effects to zero or endpoints."""
+    try:
+        percentage = float(value) * 100
+    except (TypeError, ValueError, OverflowError):
+        return "—"
+    if not math.isfinite(percentage):
+        return "—"
+
+    if signed:
+        magnitude = abs(percentage)
+        if magnitude == 0 or magnitude >= 0.1:
+            decimals = 1
+        else:
+            decimals = max(2, min(6, math.ceil(-math.log10(magnitude))))
+        return f"{percentage:+.{decimals}f}%"
+
+    if percentage in {0.0, 100.0}:
+        return f"{percentage:.0f}%"
+    if 0 < percentage < 1 or 99 < percentage < 100:
+        distance_from_endpoint = min(percentage, 100 - percentage)
+        decimals = max(2, min(6, math.ceil(-math.log10(distance_from_endpoint))))
+        return f"{percentage:.{decimals}f}%"
+    return f"{percentage:.0f}%"
+
+
 class PackageLoader(BaseLoader):
     """Custom Jinja2 loader that loads templates from package resources."""
 
@@ -223,6 +250,7 @@ class HTMLReporter(ReporterBase):
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
         environment.filters["related_paths"] = _related_paths
+        environment.filters["adaptive_percent"] = _adaptive_percent
         return environment
 
     @staticmethod

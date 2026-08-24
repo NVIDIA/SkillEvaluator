@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import math
+import time
 
 import pytest
 
 from skillevaluator.tier3.harbor.collector import (
     _compute_lift,
     _condition_execution_summary,
+    _count_derived_pass_rate_delta,
     _mcnemar_exact_p_value,
+    _mcnemar_exact_probability,
     _minimum_attainable_mcnemar_p_value,
     _paired_pass_comparison,
     _pass_rate_delta,
@@ -147,11 +150,48 @@ def test_mcnemar_exact_reports_attainable_resolution(discordant: int, expected: 
     assert _minimum_attainable_mcnemar_p_value(discordant) == expected
 
 
-def test_pass_rate_delta_uses_counts_instead_of_pre_rounded_rates() -> None:
+def test_pass_rate_delta_preserves_legacy_rate_contract_and_exposes_count_correction() -> None:
     with_skill = {"passed_cases": 2, "total_cases": 3, "rate": 0.6667}
     without_skill = {"passed_cases": 1, "total_cases": 3, "rate": 0.3333}
 
-    assert _pass_rate_delta(with_skill, without_skill) == 0.3333
+    assert _pass_rate_delta(with_skill, without_skill) == 0.3334
+    assert _count_derived_pass_rate_delta(with_skill, without_skill) == 0.3333
+
+
+@pytest.mark.parametrize(
+    ("with_skill", "without_skill", "legacy_delta", "count_derived_delta"),
+    [
+        (
+            {"passed_cases": 17, "total_cases": 160, "rate": 0.1062},
+            {"passed_cases": 9, "total_cases": 160, "rate": 0.0563},
+            0.0499,
+            0.05,
+        ),
+        (
+            {"passed_cases": 1, "total_cases": 160, "rate": 0.0063},
+            {"passed_cases": 17, "total_cases": 160, "rate": 0.1062},
+            -0.0999,
+            -0.1,
+        ),
+    ],
+)
+def test_pass_rate_delta_threshold_compatibility(
+    with_skill: dict[str, float | int],
+    without_skill: dict[str, float | int],
+    legacy_delta: float,
+    count_derived_delta: float,
+) -> None:
+    assert _pass_rate_delta(with_skill, without_skill) == legacy_delta
+    assert _count_derived_pass_rate_delta(with_skill, without_skill) == count_derived_delta
+
+
+def test_balanced_large_exact_test_uses_constant_time_symmetric_tail() -> None:
+    started = time.perf_counter()
+
+    probability = _mcnemar_exact_probability(10_000, 10_000)
+
+    assert probability == 1
+    assert time.perf_counter() - started < 2.0
 
 
 def test_paired_pass_comparison_preserves_case_direction_and_exact_test() -> None:
@@ -205,7 +245,7 @@ def test_complete_pairing_delta_matches_count_derived_arm_delta() -> None:
     paired = _paired_pass_comparison(with_skill, without_skill)
 
     assert paired["paired_rate_delta"] == 0.3333
-    assert paired["paired_rate_delta"] == _pass_rate_delta(with_skill, without_skill)
+    assert paired["paired_rate_delta"] == _count_derived_pass_rate_delta(with_skill, without_skill)
 
 
 def test_mcnemar_exact_preserves_machine_readable_value_beyond_float_range() -> None:
@@ -227,6 +267,37 @@ def test_mcnemar_exact_preserves_machine_readable_value_beyond_float_range() -> 
     assert exact["minimum_attainable_p_value_exact"] == exact["p_value_exact"]
 
 
+@pytest.mark.parametrize(
+    ("discordant", "exact_is_serialized"),
+    [(14_285, True), (14_286, False), (15_000, False)],
+)
+def test_large_exact_pairing_respects_integer_string_safety_limit(
+    discordant: int,
+    exact_is_serialized: bool,
+) -> None:
+    with_skill_cases = {f"case-{index}": {"passed": True} for index in range(discordant)}
+    without_skill_cases = {case_id: {"passed": False} for case_id in with_skill_cases}
+
+    paired = _paired_pass_comparison(
+        {"total_cases": discordant, "cases": with_skill_cases},
+        {"total_cases": discordant, "cases": without_skill_cases},
+    )
+    exact = paired["mcnemar_exact"]
+
+    assert exact["p_value_text"] != "0"
+    assert exact["minimum_attainable_p_value_text"] != "0"
+    assert exact["p_value_exact_omitted"] is not exact_is_serialized
+    assert exact["minimum_attainable_p_value_exact_omitted"] is not exact_is_serialized
+    if exact_is_serialized:
+        assert isinstance(exact["p_value_exact"], str)
+        assert isinstance(exact["minimum_attainable_p_value_exact"], str)
+    else:
+        assert exact["p_value_exact"] is None
+        assert exact["p_value_exact_omitted_reason"] == "decimal_digit_limit"
+        assert exact["minimum_attainable_p_value_exact"] is None
+        assert exact["minimum_attainable_p_value_exact_omitted_reason"] == "decimal_digit_limit"
+
+
 def test_paired_pass_comparison_does_not_issue_exact_test_for_partial_pairing() -> None:
     paired = _paired_pass_comparison(
         {"total_cases": 2, "cases": {"shared": {"passed": True}, "with-only": {"passed": True}}},
@@ -235,9 +306,32 @@ def test_paired_pass_comparison_does_not_issue_exact_test_for_partial_pairing() 
 
     assert paired["pairing_status"] == "partial"
     assert paired["paired_cases"] == 1
+    assert paired["with_skill_unpaired_case_count"] == 1
+    assert paired["without_skill_unpaired_case_count"] == 1
     assert paired["with_skill_unpaired_case_ids"] == ["with-only"]
     assert paired["without_skill_unpaired_case_ids"] == ["without-only"]
+    assert paired["with_skill_unpaired_case_ids_truncated"] is False
+    assert paired["without_skill_unpaired_case_ids_truncated"] is False
     assert "mcnemar_exact" not in paired
+
+
+def test_paired_pass_comparison_bounds_unpaired_case_id_diagnostics() -> None:
+    case_count = 2_400
+    with_cases = {f"with-{index:04d}": {"passed": True} for index in range(case_count)}
+    without_cases = {f"without-{index:04d}": {"passed": False} for index in range(case_count)}
+
+    paired = _paired_pass_comparison(
+        {"total_cases": case_count, "cases": with_cases},
+        {"total_cases": case_count, "cases": without_cases},
+    )
+
+    assert paired["pairing_status"] == "unavailable"
+    assert paired["with_skill_unpaired_case_count"] == case_count
+    assert paired["without_skill_unpaired_case_count"] == case_count
+    assert len(paired["with_skill_unpaired_case_ids"]) == 64
+    assert len(paired["without_skill_unpaired_case_ids"]) == 64
+    assert paired["with_skill_unpaired_case_ids_truncated"] is True
+    assert paired["without_skill_unpaired_case_ids_truncated"] is True
 
 
 def test_condition_marks_incomplete_reward_as_unscored() -> None:

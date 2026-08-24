@@ -985,6 +985,85 @@ def test_canonical_payload_enforces_total_serialized_budget() -> None:
     assert len(encoded) <= truncation["payload_budget_bytes"]
 
 
+def test_unpaired_id_artifact_survives_loader_report_budget_and_html(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260825_120000"
+    agent_dir = run_dir / "opencode"
+    case_count = 2_400
+
+    for variant, rate, passed_cases in (("with-skill", 1.0, 1), ("without-skill", 0.0, 0)):
+        summary_path = agent_dir / variant / "summary.json"
+        summary_path.parent.mkdir(parents=True)
+        score = rate
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "scores": dict.fromkeys(DEFAULT_METRICS, score),
+                    "metrics": list(DEFAULT_METRICS),
+                    "num_trials": 1,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                    "overall_score": score,
+                    "pass_at_k": {
+                        "rate": rate,
+                        "passed_cases": passed_cases,
+                        "total_cases": 1,
+                        "attempts_used": 1,
+                        "max_attempts_possible": 1,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    full_with_ids = [f"with-{index:04d}" for index in range(case_count)]
+    full_without_ids = [f"without-{index:04d}" for index in range(case_count)]
+    pass_lift_path = agent_dir / "pass_at_k_lift.json"
+    pass_lift_path.write_text(
+        json.dumps(
+            {
+                "with_skill": 1.0,
+                "without_skill": 0.0,
+                "delta": 1.0,
+                "paired_comparison": {
+                    "pairing_status": "unavailable",
+                    "paired_cases": 0,
+                    "with_skill_unpaired_case_ids": full_with_ids,
+                    "without_skill_unpaired_case_ids": full_without_ids,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert pass_lift_path.stat().st_size < 2 * 1024 * 1024
+
+    result = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    paired = payload["agents"]["opencode"]["pass_at_k"]["lift"]["paired_comparison"]
+    assert payload["agents"]
+    assert payload["pass_at_k"]
+    assert paired["with_skill_unpaired_case_count"] == case_count
+    assert paired["without_skill_unpaired_case_count"] == case_count
+    assert len(paired["with_skill_unpaired_case_ids"]) == 64
+    assert len(paired["without_skill_unpaired_case_ids"]) == 64
+    assert paired["with_skill_unpaired_case_ids_truncated"] is True
+    assert paired["without_skill_unpaired_case_ids_truncated"] is True
+    # The canonical payload intentionally carries both a best-agent projection
+    # and the top-level pass@k projection, so the omission signal counts both
+    # serialized copies that were bounded.
+    assert payload["report_truncation"]["omitted"]["unpaired_case_ids"] == 4 * (case_count - 64)
+    assert len(json.dumps(payload, separators=(",", ":")).encode()) <= 2 * 1024 * 1024
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert "Paired comparison unavailable; exact test not computed." in html
+    assert "Pass@" in html
+
+
 def test_standalone_tier3_persists_the_canonical_feedback_payload(tmp_path: Path) -> None:
     skill = tmp_path / "demo"
     skill.mkdir()
@@ -1240,6 +1319,92 @@ def test_pass_at_k_uncertainty_and_paired_evidence_render() -> None:
     assert "resolution-limited at \N{GREEK SMALL LETTER ALPHA}=0.05" in html
 
 
+def test_pass_at_k_render_preserves_narrow_intervals_and_small_paired_delta() -> None:
+    payload = build_agent_eval_payload(
+        "adaptive-pass-evidence-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 20_000,
+                "scored_attempts": 20_000,
+                "overall_with_skill": 0.5,
+                "overall_without_skill": 0.5,
+                "pass_with_skill": {
+                    "rate": 0.0,
+                    "rate_interval": {"lower": 0.0, "upper": 0.0038},
+                    "passed_cases": 0,
+                    "total_cases": 1_000,
+                },
+                "pass_without_skill": {
+                    "rate": 1.0,
+                    "rate_interval": {"lower": 0.9962, "upper": 1.0},
+                    "passed_cases": 1_000,
+                    "total_cases": 1_000,
+                },
+                "pass_lift": {
+                    "delta": -1.0,
+                    "paired_comparison": {
+                        "pairing_status": "complete",
+                        "paired_cases": 10_000,
+                        "with_skill_only_pass": 1,
+                        "without_skill_only_pass": 0,
+                        "both_pass": 0,
+                        "neither_pass": 9_999,
+                        "discordant_cases": 1,
+                        "paired_rate_delta": 0.0001,
+                    },
+                },
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert "0%\u20130.38%" in html
+    assert "99.62%\u2013100%" in html
+    assert "Paired pass-rate delta: +0.01%" in html
+
+
+def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
+    payload = build_agent_eval_payload(
+        "responsive-pass-evidence-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "overall_with_skill": 1.0,
+                "overall_without_skill": 0.0,
+                "pass_with_skill": {"rate": 1.0, "passed_cases": 1, "total_cases": 1},
+                "pass_without_skill": {"rate": 0.0, "passed_cases": 0, "total_cases": 1},
+                "pass_lift": {"delta": 1.0},
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+    region = re.search(
+        r'<div class="table-scroll" tabindex="0" role="region" '
+        r'aria-label="Pass at K summary table">(?P<table>.*?)</div>',
+        html,
+        re.DOTALL,
+    )
+
+    assert region is not None
+    assert 'class="summary-table pass-at-k-table"' in region.group("table")
+    assert re.search(r"<th>Lift</th>\s*</tr>", region.group("table"))
+    assert ".table-scroll { max-width: 100%; overflow-x: auto;" in html
+    assert ".pass-at-k-table { min-width: 720px; }" in html
+
+
 def test_unavailable_pairing_does_not_render_a_zero_evidence_row() -> None:
     payload = build_agent_eval_payload(
         "unpaired-evidence-demo",
@@ -1267,3 +1432,4 @@ def test_unavailable_pairing_does_not_render_a_zero_evidence_row() -> None:
     html = _render_agent_payload(payload)
 
     assert "Paired cases: 0" not in html
+    assert "Paired comparison unavailable; exact test not computed." in html

@@ -20,7 +20,17 @@ from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config as BotoConfig
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    ConfigParseError,
+    InvalidConfigError,
+    InvalidRegionError,
+    NoCredentialsError,
+    PartialCredentialsError,
+    ProfileNotFound,
+    UnauthorizedSSOTokenError,
+)
 
 from skillevaluator.model_catalog import (
     ModelCatalogError,
@@ -108,9 +118,9 @@ def _catalog_listing_is_authoritative(provider: ProviderConfig) -> bool:
     # Anthropic aliases resolve through its single-model endpoint but are not
     # guaranteed to appear in the unique-ID listing. Bedrock's foundation-model
     # listing excludes other valid InvokeModel resources such as inference profiles.
-    return provider.provider.casefold() in {"openai", "openai-compatible", "nv_build"} and (
-        _is_native_catalog_endpoint(provider)
-    )
+    # OpenAI provisioned models can likewise be usable through Responses without
+    # appearing in /models, so only NVIDIA Build's native listing is authoritative.
+    return provider.provider.casefold() == "nv_build" and _is_native_catalog_endpoint(provider)
 
 
 def credential_probe_disposition(
@@ -128,18 +138,22 @@ def credential_probe_disposition(
         failure_kind = ModelCatalogFailureKind.UNKNOWN
 
     if failure_kind == ModelCatalogFailureKind.AUTHENTICATION:
+        if provider.provider.casefold() == "openai-compatible" and not _is_native_catalog_endpoint(provider):
+            return CredentialProbeDisposition.DEGRADED
         return CredentialProbeDisposition.FATAL
     if failure_kind == ModelCatalogFailureKind.INVALID_CONFIGURATION:
         return CredentialProbeDisposition.FATAL
     if failure_kind == ModelCatalogFailureKind.MODEL_NOT_FOUND:
         return (
             CredentialProbeDisposition.FATAL
-            if _is_native_catalog_endpoint(provider)
+            if provider.provider.casefold() not in {"openai", "openai-compatible"}
+            and _is_native_catalog_endpoint(provider)
             else CredentialProbeDisposition.DEGRADED
         )
     if failure_kind == ModelCatalogFailureKind.AUTHORIZATION:
-        if provider.provider == "bedrock":
-            # ListFoundationModels permission is distinct from InvokeModel.
+        if provider.provider == "bedrock" or provider.provider.casefold() in {"openai", "openai-compatible"}:
+            # ListFoundationModels permission is distinct from InvokeModel. OpenAI
+            # restricted keys can likewise allow Responses while denying Models.
             return CredentialProbeDisposition.DEGRADED
         return (
             CredentialProbeDisposition.FATAL
@@ -371,9 +385,13 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
             http_status = None
         if http_status == 401 or error_code in {
             "ExpiredTokenException",
+            "ExpiredToken",
             "IncompleteSignature",
+            "InvalidAccessKeyId",
             "InvalidClientTokenId",
             "InvalidSignatureException",
+            "MissingAuthenticationToken",
+            "SignatureDoesNotMatch",
             "UnrecognizedClientException",
         }:
             failure_kind = ModelCatalogFailureKind.AUTHENTICATION
@@ -392,6 +410,22 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
             f"Bedrock model catalog request failed: {type(exc).__name__}",
             failure_kind=failure_kind,
             http_status=http_status,
+        )
+    except (NoCredentialsError, UnauthorizedSSOTokenError) as exc:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Bedrock model catalog request failed: {type(exc).__name__}",
+            failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
+        )
+    except (ConfigParseError, InvalidConfigError, InvalidRegionError, PartialCredentialsError, ProfileNotFound) as exc:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Bedrock model catalog request failed: {type(exc).__name__}",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
         )
     except BotoCoreError as exc:
         return ModelProbeResult(

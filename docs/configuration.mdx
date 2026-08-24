@@ -29,11 +29,15 @@ Tiers describe evaluation depth; credentials are a separate axis. This is the co
 
 Before Tier 3 prepares images or stages Harbor tasks, `tier3 evaluate` also
 makes a bounded authenticated catalog request for each distinct agent route
-and for the standard-grading route when that grader is enabled. A definitive
-credential rejection fails immediately. If a custom gateway does not expose
-`/models`, or the catalog is temporarily unavailable, the stage is reported as
-degraded and evaluation continues (including to the real agent runtime
-preflight when that preflight is enabled).
+and for the standard-grading route when that grader's effective model is known.
+A definitive native-provider credential rejection or deterministic Bedrock
+credential/configuration error fails immediately. Catalog permission and
+membership are not authoritative for OpenAI Responses access, and a compatible
+gateway may protect `/models` differently from inference, so those checks are
+reported as degraded and evaluation continues. The same applies when native
+Harbor must resolve at runtime whether a task or step verifier declaration
+supersedes the configured judge fallback. Redacted per-route outcomes are
+retained under `run_config.credential_validation` in `result.json`.
 
 ## Choose an LLM provider
 

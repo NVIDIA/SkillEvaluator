@@ -602,7 +602,9 @@ def _stub_runner(
     model_probe=None,
     task_emitter=None,
     skill_name: str = "demo-skill",
+    provider_name: str = "openai",
     provider_model: str = "gpt-5",
+    provider_base_url: str | None = None,
 ):
     from skillevaluator.tier3.harbor import runner
 
@@ -611,10 +613,10 @@ def _stub_runner(
     evals_file = skill / "evals" / "evals.json"
     evals_file.write_text("{}", encoding="utf-8")
     provider = SimpleNamespace(
-        provider="openai",
+        provider=provider_name,
         model=provider_model,
         api_key="exact-provider-secret",
-        base_url=None,
+        base_url=provider_base_url,
     )
 
     def emit_tasks(_skill, output, **_kwargs):
@@ -689,6 +691,45 @@ def _stub_runner(
     monkeypatch.setattr(runner, "collect_harbor_results", collect or collect_results)
     monkeypatch.setattr(runner, "render_agent_eval_html_report", html_report or write_html)
     return runner, skill
+
+
+def _configure_native_task_source(
+    monkeypatch: pytest.MonkeyPatch,
+    runner,
+    skill: Path,
+    *,
+    grading_mode: str = "default",
+) -> None:
+    native_task = skill / "evals" / "harbor" / "case-1"
+    native_task.mkdir(parents=True)
+    (native_task / "instruction.md").write_text("Run the native case.\n", encoding="utf-8")
+    (native_task / "task.toml").write_text(
+        'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-1"\n\n'
+        '[metadata]\nentry_id = "case-1"\n\n[verifier.env]\n'
+        'LLM_JUDGE_MODEL = "authored-native-judge"\n',
+        encoding="utf-8",
+    )
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: {grading_mode}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: (
+            {
+                "harbor": {"task_source": "native_harbor"},
+                "grading": {"mode": grading_mode},
+            },
+            None,
+        ),
+    )
+
+    def emit_native(_skill, output: Path, **_kwargs):
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
 
 
 @pytest.mark.parametrize("agent_runtime_preflight", [True, False])
@@ -767,22 +808,42 @@ def test_credential_validation_401_stops_before_image_and_task_preparation(
     assert secret not in rendered
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "provider_base_url", "failure_kind", "http_status", "detail"),
+    [
+        ("openai", "https://api.openai.com/v1", "unavailable", None, "model catalog request timed out"),
+        ("openai", "https://api.openai.com/v1", "authorization", 403, "model catalog returned HTTP 403"),
+        ("openai", "https://api.openai.com/v1", None, None, "model requested-model is not listed"),
+        (
+            "openai-compatible",
+            "https://gateway.example/v1",
+            "authentication",
+            401,
+            "model catalog returned HTTP 401",
+        ),
+    ],
+)
 def test_inconclusive_credential_probe_degrades_and_continues(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    provider_name: str,
+    provider_base_url: str,
+    failure_kind: str | None,
+    http_status: int | None,
+    detail: str,
 ) -> None:
     probe_calls: list[Any] = []
     task_calls: list[Path] = []
 
-    def time_out(selected_provider):
+    def inconclusive(selected_provider):
         probe_calls.append(selected_provider)
         return SimpleNamespace(
             ok=False,
             provider=selected_provider.provider,
             model=selected_provider.model,
-            detail="model catalog request timed out",
-            failure_kind="unavailable",
-            http_status=None,
+            detail=detail,
+            failure_kind=failure_kind,
+            http_status=http_status,
         )
 
     def emit_tasks(_skill, output: Path, **_kwargs):
@@ -793,8 +854,11 @@ def test_inconclusive_credential_probe_degrades_and_continues(
     runner, skill = _stub_runner(
         monkeypatch,
         tmp_path,
-        model_probe=time_out,
+        model_probe=inconclusive,
         task_emitter=emit_tasks,
+        provider_name=provider_name,
+        provider_model="requested-model",
+        provider_base_url=provider_base_url,
     )
     reporter = _RecordingReporter()
 
@@ -812,6 +876,12 @@ def test_inconclusive_credential_probe_degrades_and_continues(
     transitions = [(event.stage, event.state) for event in reporter.events]
     assert ("credential-validation", "degraded") in transitions
     assert ("credential-validation", "complete") not in transitions
+    assert transitions[-1] == ("run-finished", "complete")
+    validation = result["run_config"]["credential_validation"]
+    assert validation["status"] == "degraded"
+    assert validation["targets"][0]["status"] == "degraded"
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+    assert persisted["run_config"]["credential_validation"] == validation
 
 
 def test_credential_validation_probes_an_identical_agent_route_once(
@@ -918,6 +988,332 @@ def test_credential_validation_includes_distinct_standard_grading_route(
         ("anthropic", "claude-test"),
         ("openai", "judge-gpt"),
     }
+
+
+def test_missing_native_task_source_stops_before_credential_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def record_probe(selected_provider):
+        probe_calls.append(selected_provider)
+        raise AssertionError("credential probes must not run without the selected task source")
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=record_probe)
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "native_harbor"}}, None),
+    )
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        progress_reporter=reporter,
+    )
+
+    assert result == {"error": ["No native Harbor task source found at evals/harbor."]}
+    assert probe_calls == []
+    transitions = [(event.stage, event.state) for event in reporter.events]
+    assert ("environment-preflight", "complete") in transitions
+    assert ("with-skill-tasks", "failed") in transitions
+    assert not any(stage == "credential-validation" for stage, _state in transitions)
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+def test_native_standard_grading_without_host_override_marks_judge_probe_inconclusive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    grading_mode: str,
+) -> None:
+    probe_calls: list[Any] = []
+    provider_fallback = "unused-provider-fallback"
+
+    def probe(selected_provider):
+        probe_calls.append(selected_provider)
+        if selected_provider.model == provider_fallback:
+            return SimpleNamespace(
+                ok=False,
+                provider=selected_provider.provider,
+                model=selected_provider.model,
+                detail="model catalog returned HTTP 401",
+                failure_kind="authentication",
+                http_status=401,
+            )
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=probe,
+        provider_model=provider_fallback,
+    )
+    _configure_native_task_source(monkeypatch, runner, skill, grading_mode=grading_mode)
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "actual-agent-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        progress_reporter=reporter,
+    )
+
+    assert "error" not in result
+    assert [(call.provider, call.model) for call in probe_calls] == [("openai", "actual-agent-model")]
+    assert ("credential-validation", "degraded") in [(event.stage, event.state) for event in reporter.events]
+    assert result["run_config"]["task_source"] == "native_harbor"
+    assert result["run_config"]["judge"]["catalog_verification"] == "inconclusive"
+    assert result["run_config"]["judge"]["effective_model_source"] == "native_harbor_runtime"
+    assert result["run_config"]["credential_validation"]["status"] == "degraded"
+    judge_target = next(
+        target
+        for target in result["run_config"]["credential_validation"]["targets"]
+        if target["labels"] == ["standard grader"]
+    )
+    assert judge_target == {
+        "labels": ["standard grader"],
+        "provider": "openai",
+        "model": None,
+        "fallback_model": provider_fallback,
+        "status": "inconclusive",
+        "detail": (
+            "native Harbor resolves the effective judge model at runtime; "
+            "task or step verifier env may supersede the configured fallback"
+        ),
+    }
+
+
+def test_auto_with_both_task_sources_uses_evals_json_and_probes_the_standard_judge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=succeed,
+        provider_model="standard-judge-model",
+    )
+    native_task = skill / "evals" / "harbor" / "case-1"
+    native_task.mkdir(parents=True)
+    (native_task / "instruction.md").write_text("Unused native case.\n", encoding="utf-8")
+    (native_task / "task.toml").write_text(
+        'schema_version = "1.3"\n[task]\nname = "nvidia/case-1"\n[metadata]\nentry_id = "case-1"\n',
+        encoding="utf-8",
+    )
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  task_source: auto\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "auto"}}, None),
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "actual-agent-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert result["run_config"]["task_source"] == "evals_json"
+    assert {(call.provider, call.model) for call in probe_calls} == {
+        ("openai", "actual-agent-model"),
+        ("openai", "standard-judge-model"),
+    }
+    assert result["run_config"]["judge"]["catalog_verification"] == "verified"
+
+
+def test_auto_with_native_only_custom_grading_skips_the_standard_judge_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+    (skill / "evals" / "evals.json").unlink()
+    native_task = skill / "evals" / "harbor" / "case-1"
+    native_task.mkdir(parents=True)
+    (native_task / "instruction.md").write_text("Run the native case.\n", encoding="utf-8")
+    (native_task / "task.toml").write_text(
+        'schema_version = "1.3"\n[task]\nname = "nvidia/case-1"\n[metadata]\nentry_id = "case-1"\n',
+        encoding="utf-8",
+    )
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  task_source: auto\ngrading:\n  mode: custom_only\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: (
+            {"harbor": {"task_source": "auto"}, "grading": {"mode": "custom_only"}},
+            None,
+        ),
+    )
+    monkeypatch.setattr(runner, "find_evals_file", lambda _path: None)
+
+    def emit_native(_skill, output: Path, **_kwargs):
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert result["run_config"]["task_source"] == "native_harbor"
+    assert result["run_config"]["judge"] == {"enabled": False}
+    assert len(probe_calls) == 1
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize("override_name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
+def test_native_standard_grading_host_override_is_the_exact_judge_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    grading_mode: str,
+    override_name: str,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=succeed,
+        provider_model="provider-fallback",
+    )
+    _configure_native_task_source(monkeypatch, runner, skill, grading_mode=grading_mode)
+    monkeypatch.setattr(
+        runner,
+        "_provider_environment",
+        lambda _provider: {
+            "OPENAI_API_KEY": "exact-provider-secret",
+            override_name: "host-judge-model",
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "actual-agent-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert {(call.provider, call.model) for call in probe_calls} == {
+        ("openai", "actual-agent-model"),
+        ("openai", "host-judge-model"),
+    }
+    assert result["run_config"]["judge"] == {
+        "enabled": True,
+        "provider": "openai",
+        "model": "host-judge-model",
+        "source": override_name,
+        "override_applied": True,
+        "catalog_verification": "verified",
+    }
+
+
+def test_native_inconclusive_judge_probe_does_not_skip_the_same_route_used_by_an_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    staged: list[Path] = []
+
+    def reject_agent_credential(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=False,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail="model catalog returned HTTP 401",
+            failure_kind="authentication",
+            http_status=401,
+        )
+
+    def emit_native(_skill, output: Path, **_kwargs):
+        staged.append(output)
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=reject_agent_credential,
+        provider_model="shared-route-model",
+    )
+    _configure_native_task_source(monkeypatch, runner, skill)
+    monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "shared-route-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert result.get("error")
+    assert [(call.provider, call.model) for call in probe_calls] == [("openai", "shared-route-model")]
+    assert staged == []
 
 
 def test_distinct_standard_grading_probe_failure_is_redacted_and_stops_staging(

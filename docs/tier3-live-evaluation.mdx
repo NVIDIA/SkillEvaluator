@@ -202,9 +202,14 @@ wrote and how to interpret it.
 `tier3 evaluate` reads the accepted dataset (or native task source), resolves
 each agent's actual provider route and the enabled standard-grading route, and
 makes bounded authenticated model-catalog requests before image preparation or
-task staging. Definitive credential or authoritative model rejection fails
-immediately. Unsupported custom catalogs and transient catalog failures are
-reported as degraded rather than blocking the run.
+task staging. Definitive native-provider authentication, authoritative model
+rejection, and deterministic Bedrock credential/configuration failures stop
+immediately. Non-authoritative OpenAI catalog permission or membership results,
+compatible-gateway catalog authentication, unsupported catalogs, and transient
+failures are reported as degraded rather than blocking the run. Native Harbor
+judge selection is also inconclusive until runtime when no host judge override
+is set. `result.json` retains the redacted target-by-target outcome under
+`run_config.credential_validation`.
 
 SkillEvaluator then builds the Harbor task bundle. Before spending the full
 A/B matrix, a runtime preflight runs one real, bounded smoke task per agent to

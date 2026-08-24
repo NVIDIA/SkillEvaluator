@@ -1074,7 +1074,128 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "model": "legacy-judge-model",
         "source": "LLM_JUDGE_MODEL",
         "override_applied": True,
+        "catalog_verification": "verified",
     }
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize("judge_alias", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
+@pytest.mark.parametrize("judge_scope", ["task", "step"])
+def test_native_runtime_judge_selection_skips_fallback_probe_through_real_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    grading_mode: str,
+    judge_alias: str,
+    judge_scope: str,
+) -> None:
+    skill = tmp_path / "demo"
+    evals = skill / "evals"
+    native_task = evals / "harbor" / "case-001"
+    native_task.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
+    (evals / "evals.json").write_text(
+        '[{"id":"case-001","question":"Run the native case.","files":[]}]\n',
+        encoding="utf-8",
+    )
+    (evals / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: {grading_mode}\n",
+        encoding="utf-8",
+    )
+    if grading_mode == "default_plus_custom":
+        (evals / "grader.py").write_text("def grade(*args, **kwargs):\n    return 1\n", encoding="utf-8")
+    (native_task / "instruction.md").write_text("Run the native case.\n", encoding="utf-8")
+    authored_judge = f'{judge_alias} = "authored-native-judge"\n'
+    judge_config = (
+        f"[verifier]\ntimeout_sec = 180.0\n\n[verifier.env]\n{authored_judge}\n"
+        if judge_scope == "task"
+        else f'[[steps]]\nname = "step-one"\n\n[steps.verifier.env]\n{authored_judge}\n'
+    )
+    (native_task / "task.toml").write_text(
+        'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n'
+        f'[metadata]\nentry_id = "case-001"\n\n{judge_config}[environment]\n',
+        encoding="utf-8",
+    )
+
+    for name in ("LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(runner, "resolve_llm_provider", lambda: _provider("nv_build"))
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: (
+            {"harbor": {"task_source": "native_harbor"}, "grading": {"mode": grading_mode}},
+            None,
+        ),
+    )
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
+
+    probed_models: list[str] = []
+
+    def probe(selected_provider: ProviderConfig) -> runtime_preflight.ModelProbeResult:
+        probed_models.append(selected_provider.model)
+        return runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            f"model {selected_provider.model} is available",
+        )
+
+    staged_tasks: list[Path] = []
+
+    def launch(**kwargs):
+        staged_tasks.append(kwargs["with_skill"] / "case-001")
+        return []
+
+    monkeypatch.setattr(runtime_preflight, "probe_model", probe)
+    monkeypatch.setattr(runner, "_run_agent_pair", launch)
+    monkeypatch.setattr(
+        runner,
+        "collect_harbor_results",
+        lambda **_kwargs: {"execution_status": "complete", "execution_errors": [], "metrics": [], "agents": {}},
+    )
+
+    def render_report(_skill_path: Path, output_dir: Path, **_kwargs) -> Path:
+        report = output_dir / "report.html"
+        report.write_text("<html></html>\n", encoding="utf-8")
+        return report
+
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", render_report)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["opencode"],
+        agent_models={"opencode": "nvidia/nvidia/nemotron-3-nano-30b-a3b"},
+        output_dir=tmp_path / "results",
+        env_mode="docker",
+        grading_mode=grading_mode,
+        skip_baseline=True,
+        keep_harbor_jobs=True,
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert probed_models == ["nvidia/nemotron-3-nano-30b-a3b"]
+    assert result["execution_status"] == "complete"
+    assert result["report_status"] == "complete"
+    assert result["run_config"]["task_source"] == "native_harbor"
+    assert result["run_config"]["judge"]["catalog_verification"] == "inconclusive"
+    assert result["run_config"]["judge"]["effective_model_source"] == "native_harbor_runtime"
+    assert result["run_config"]["credential_validation"]["status"] == "degraded"
+    standard_target = next(
+        target
+        for target in result["run_config"]["credential_validation"]["targets"]
+        if target["labels"] == ["standard grader"]
+    )
+    assert standard_target["status"] == "inconclusive"
+    assert standard_target["model"] is None
+
+    assert len(staged_tasks) == 1
+    staged_config = tomllib.loads((staged_tasks[0] / "task.toml").read_text(encoding="utf-8"))
+    if judge_scope == "task":
+        staged_judge_env = staged_config["verifier"]["env"]
+    else:
+        staged_judge_env = staged_config["steps"][0]["verifier"]["env"]
+    assert staged_judge_env[judge_alias] == "authored-native-judge"
 
 
 def test_custom_only_native_verifier_placeholders_use_task_fallbacks_not_standard_override(

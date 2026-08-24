@@ -1928,6 +1928,23 @@ def _run_harbor_eval_impl(
         return {"error": prereq_errors}
     reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
 
+    # Resolve the effective source before constructing credential-probe targets.
+    # Native Harbor tasks can select the standard-grader judge model at task or
+    # step scope, so the provider fallback is not necessarily the runtime model.
+    evals_exists = find_evals_file(evaluator_skill_path) is not None
+    native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
+    if task_source == "auto":
+        task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
+    if task_source == "evals_json" and not evals_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
+        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
+    if task_source == "native_harbor" and not native_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
+        return {"error": ["No native Harbor task source found at evals/harbor."]}
+    if task_source not in {"evals_json", "native_harbor"}:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
+        return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail="; ".join(runtime_errors)))
@@ -1966,6 +1983,9 @@ def _run_harbor_eval_impl(
         tuple[str, str, str | None, str | None, str | None],
         tuple[ProviderConfig, list[str]],
     ] = {}
+    probe_degraded: list[str] = []
+    credential_validation_targets: list[dict[str, Any]] = []
+    judge_config = _judge_model_config(provider, provider_env, grading_mode)
 
     def add_probe_target(label: str, selected_provider: ProviderConfig) -> None:
         route_key = (
@@ -1985,22 +2005,41 @@ def _run_harbor_eval_impl(
         add_probe_target(agent, runtime_plans[agent].provider)
 
     if grading_mode != "custom_only":
-        judge_model = str(_judge_model_config(provider, provider_env, grading_mode)["model"])
-        litellm_model = str(getattr(provider, "litellm_model", f"{provider.provider}/{provider.model}"))
-        litellm_prefix = litellm_model.partition("/")[0] or provider.provider
-        add_probe_target(
-            "standard grader",
-            ProviderConfig(
-                provider=provider.provider,
-                model=judge_model,
-                api_key=provider.api_key,
-                base_url=provider.base_url,
-                litellm_model=f"{litellm_prefix}/{judge_model}",
-                region=getattr(provider, "region", None),
-                credential_env=getattr(provider, "credential_env", None),
-                base_url_env=getattr(provider, "base_url_env", None),
-            ),
-        )
+        if task_source == "native_harbor" and not bool(judge_config["override_applied"]):
+            detail = (
+                "native Harbor resolves the effective judge model at runtime; "
+                "task or step verifier env may supersede the configured fallback"
+            )
+            probe_degraded.append(f"standard grader: {detail}")
+            judge_config["catalog_verification"] = "inconclusive"
+            judge_config["effective_model_source"] = "native_harbor_runtime"
+            credential_validation_targets.append(
+                {
+                    "labels": ["standard grader"],
+                    "provider": provider.provider,
+                    "model": None,
+                    "fallback_model": provider.model,
+                    "status": "inconclusive",
+                    "detail": detail,
+                }
+            )
+        else:
+            judge_model = str(judge_config["model"])
+            litellm_model = str(getattr(provider, "litellm_model", f"{provider.provider}/{provider.model}"))
+            litellm_prefix = litellm_model.partition("/")[0] or provider.provider
+            add_probe_target(
+                "standard grader",
+                ProviderConfig(
+                    provider=provider.provider,
+                    model=judge_model,
+                    api_key=provider.api_key,
+                    base_url=provider.base_url,
+                    litellm_model=f"{litellm_prefix}/{judge_model}",
+                    region=getattr(provider, "region", None),
+                    credential_env=getattr(provider, "credential_env", None),
+                    base_url_env=getattr(provider, "base_url_env", None),
+                ),
+            )
 
     runtime_secret_values.update(
         selected_provider.api_key for selected_provider, _labels in probe_targets.values() if selected_provider.api_key
@@ -2014,17 +2053,39 @@ def _run_harbor_eval_impl(
         }
 
     probe_errors: list[str] = []
-    probe_degraded: list[str] = []
     for route_key, (selected_provider, selected_labels) in probe_targets.items():
         label = ", ".join(selected_labels)
         try:
             probe = probe_futures[route_key].result()
         except Exception as exc:
-            probe_degraded.append(f"{label}: model catalog probe failed: {type(exc).__name__}")
+            safe_detail = f"model catalog probe failed: {type(exc).__name__}"
+            probe_degraded.append(f"{label}: {safe_detail}")
+            credential_validation_targets.append(
+                {
+                    "labels": list(selected_labels),
+                    "provider": selected_provider.provider,
+                    "model": selected_provider.model,
+                    "status": "degraded",
+                    "detail": safe_detail,
+                }
+            )
+            if "standard grader" in selected_labels:
+                judge_config["catalog_verification"] = "degraded"
             continue
 
         safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
         disposition = credential_probe_disposition(selected_provider, probe)
+        credential_validation_targets.append(
+            {
+                "labels": list(selected_labels),
+                "provider": selected_provider.provider,
+                "model": selected_provider.model,
+                "status": disposition.value,
+                "detail": safe_detail,
+            }
+        )
+        if "standard grader" in selected_labels:
+            judge_config["catalog_verification"] = disposition.value
         if disposition == CredentialProbeDisposition.FATAL:
             probe_errors.append(f"{label} provider verification failed: {safe_detail}")
         elif disposition == CredentialProbeDisposition.DEGRADED:
@@ -2072,20 +2133,6 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
-
-    evals_exists = find_evals_file(evaluator_skill_path) is not None
-    native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
-    if task_source == "auto":
-        task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
-    if task_source == "evals_json" and not evals_exists:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
-        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
-    if task_source == "native_harbor" and not native_exists:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
-        return {"error": ["No native Harbor task source found at evals/harbor."]}
-    if task_source not in {"evals_json", "native_harbor"}:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
-        return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
     try:
@@ -2468,7 +2515,11 @@ def _run_harbor_eval_impl(
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
-        "judge": _judge_model_config(provider, provider_env, grading_mode),
+        "judge": judge_config,
+        "credential_validation": {
+            "status": "degraded" if probe_degraded else "verified",
+            "targets": credential_validation_targets,
+        },
         "task_source": task_source,
         "grading": {"mode": grading_mode},
         "agents": model_resolution,

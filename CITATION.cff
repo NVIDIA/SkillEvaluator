@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use SkillEvaluator in academic or technical work, please cite this software."
 title: "SkillEvaluator"
 type: software
-version: "0.2.0"
+version: "0.2.1"
 authors:
   - name: "NVIDIA Corporation"
 license: Apache-2.0

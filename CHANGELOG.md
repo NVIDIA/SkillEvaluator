@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.2.1 - 2026-08-24
+
 ### Added
 
 - Added a public benchmark publication gate, regression coverage, and a
@@ -14,6 +16,12 @@ All notable changes to SkillEvaluator are documented in this file.
 - Unified Tier 3 scoring around the canonical five dimensions, persisted an
   immutable dataset-truth snapshot with provenance metadata, and redesigned
   `BENCHMARK.md` as a decision-first publication card.
+- Updated public OpenAI / Anthropic / Bedrock chat defaults to pinned frontier
+  models (`gpt-5.6-sol`, `claude-opus-5`, `us.anthropic.claude-opus-5`),
+  centralized in `provider_config`, and documented `gpt-5.4-mini` as the
+  lower-cost OpenAI `SKILL_EVAL_LLM_MODEL` alternative. Raised
+  dimension/insights judge token budgets to 4096 and widened the gpt-5\*
+  temperature guard to bare model IDs.
 
 ### Fixed
 
@@ -29,39 +37,6 @@ All notable changes to SkillEvaluator are documented in this file.
 - GitHub Actions pull request reports now link source targets to the checked-out
   repository revision instead of the synthetic `<number>/merge` ref, preventing
   broken or cross-repository links.
-
-## 0.2.0 - 2026-08-18
-
-### Security
-
-- Secure Docker exec redaction now ignores environment values shorter than eight
-  characters, matching the exact secret length floor used elsewhere. Short
-  flags such as `CLAUDE_CODE_DISABLE_POLICY_SKILLS=1` no longer rewrite digits
-  in `docker exec` output, which had broken NVIDIA Build bridge loopback
-  origins during Tier 3 preflight.
-
-### Changed
-
-- Updated public OpenAI / Anthropic / Bedrock chat defaults to pinned frontier
-  models (`gpt-5.6-sol`, `claude-opus-5`, `us.anthropic.claude-opus-5`),
-  centralized in `provider_config`, and documented `gpt-5.4-mini` as the
-  lower-cost OpenAI `SKILL_EVAL_LLM_MODEL` alternative. Raised
-  dimension/insights judge token budgets to 4096 and widened the gpt-5\*
-  temperature guard to bare model IDs.
-- Added explicit `--block-on-dedup` / `--no-block-on-dedup` and
-  `--block-on-agent-eval` / `--no-block-on-agent-eval` controls with
-  backward-compatible defaults, Tier 3 source preflight, and consistent gating
-  metadata across CLI, JSON, Markdown, and HTML reports.
-- Reduced pull-request runner use for changes confined to `docs/**` and
-  `fern/**`: DCO, Gitleaks, and pinned Fern validation still run, while mixed
-  and non-docs changes retain the complete Linux, macOS, Windows, packaging,
-  and security matrix. Superseded pull-request CI and security runs are
-  cancelled so they do not consume runners after a newer commit is pushed.
-  Path classification executes from the pull request base revision so a
-  change cannot weaken its own CI routing.
-
-### Fixed
-
 - Tier 3 LLM insights now receive explicit labels and bounded expected-behavior
   context for `expected_skill: null` negative controls, and the judge is
   instructed not to flag unrelated successes without invocation or
@@ -88,6 +63,37 @@ All notable changes to SkillEvaluator are documented in this file.
   intent, README guidance, or exclusivity from prose;
   use `rubric-eval` for semantic documentation judgments and Tier 3 for
   observed agent behavior.
+
+## 0.2.0 - 2026-08-18
+
+### Security
+
+- Secure Docker exec redaction now ignores environment values shorter than eight
+  characters, matching the exact secret length floor used elsewhere. Short
+  flags such as `CLAUDE_CODE_DISABLE_POLICY_SKILLS=1` no longer rewrite digits
+  in `docker exec` output, which had broken NVIDIA Build bridge loopback
+  origins during Tier 3 preflight.
+
+### Changed
+
+- Added explicit `--block-on-dedup` / `--no-block-on-dedup` and
+  `--block-on-agent-eval` / `--no-block-on-agent-eval` controls with
+  backward-compatible defaults, Tier 3 source preflight, and consistent gating
+  metadata across CLI, JSON, Markdown, and HTML reports.
+- Reduced pull-request runner use for changes confined to `docs/**` and
+  `fern/**`: DCO, Gitleaks, and pinned Fern validation still run, while mixed
+  and non-docs changes retain the complete Linux, macOS, Windows, packaging,
+  and security matrix. Superseded pull-request CI and security runs are
+  cancelled so they do not consume runners after a newer commit is pushed.
+  Path classification executes from the pull request base revision so a
+  change cannot weaken its own CI routing.
+
+### Fixed
+
+- Quality scoring now uses boundary-aware and context-aware matching for XML tags,
+  reserved names, MCP guidance, README references, time references, exclusivity
+  language, instruction action verbs, and nested Markdown links, avoiding
+  incidental-word score changes.
 - Tier 3 generated tasks now stage only an entry's declared `files`, preventing
   undeclared fixtures from the shared `evals/files/` directory from appearing
   in that task's `/workspace/input/`, while preserving copy-all behavior for

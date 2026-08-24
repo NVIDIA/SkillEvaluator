@@ -20,12 +20,20 @@ Tiers describe evaluation depth; credentials are a separate axis. This is the co
 | --- | --- |
 | `validate --no-dedup` (all deterministic checks: schema, security scanners including secret detection, PII, license, code-integrity, unicode, quality, lint) | `rubric-eval` — LLM-as-judge scoring (chat LLM) |
 | `quality-check`, `security-scan`, `pii-scan`, `lint-scripts` | `validate --llm` / `security-scan --llm` — deeper LLM security analysis |
-| `doctor`, `health-check` (offline readiness probes; missing credentials are reported as not ready) | `--llm-verify` on `validate`, `security-scan`, `pii-scan` — LLM false-positive suppression |
+| `doctor`, `health-check` (offline readiness probes by default; missing credentials are reported as not ready) | `--llm-verify` on `validate`, `security-scan`, `pii-scan` — LLM false-positive suppression |
 | | All Tier 2 commands — embeddings API; `context-optimization-check` and `dedup-scan` also use a chat LLM (`similarity-check` is embeddings-only). A local OpenAI-compatible server works too — see [Fully local setup](#fully-local-setup) |
 | Tier 3 scaffolding and inspection: `create-eval-dataset --no-llm`, `init-custom-grader`, `init-harbor-task`, `tier3 validate`, `view`, `harbor-view`, and `compare` | Tier 3 LLM dataset generation needs a provider key; `tier3 evaluate` needs a provider key plus a credential the selected live agent can use — with NVIDIA Build in `--env-mode docker` or `local`, one `NVIDIA_API_KEY` covers both roles |
-| | `models` — lists the selected provider's authenticated model catalog |
+| | `models` and `doctor --verify-models` — authenticated provider-catalog checks |
 
 `validate` without `--no-dedup` stays usable keyless: the Tier 2 dedup pass skips gracefully when no embedding provider is configured.
+
+Before Tier 3 prepares images or stages Harbor tasks, `tier3 evaluate` also
+makes a bounded authenticated catalog request for each distinct agent route
+and for the standard-grading route when that grader is enabled. A definitive
+credential rejection fails immediately. If a custom gateway does not expose
+`/models`, or the catalog is temporarily unavailable, the stage is reported as
+degraded and evaluation continues (including to the real agent runtime
+preflight when that preflight is enabled).
 
 ## Choose an LLM provider
 

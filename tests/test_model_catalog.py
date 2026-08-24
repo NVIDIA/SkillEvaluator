@@ -19,6 +19,7 @@ from skillevaluator import model_catalog
 from skillevaluator.model_catalog import (
     ModelCatalogError,
     ModelRecord,
+    fetch_anthropic_model_record,
     fetch_model_records,
     select_catalog_models,
 )
@@ -110,6 +111,27 @@ def test_fetch_model_records_uses_anthropic_native_headers(monkeypatch) -> None:
     assert captured["headers"]["X-api-key"] == "top-secret-key"
     assert captured["headers"]["Anthropic-version"] == "2023-06-01"
     assert "Authorization" not in captured["headers"]
+
+
+def test_fetch_anthropic_model_record_encodes_alias_as_one_path_segment(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, *, timeout):
+        captured.update(url=request.full_url, headers=dict(request.header_items()), timeout=timeout)
+        return _Response({"id": "claude-canonical-20260824", "display_name": "Claude"})
+
+    monkeypatch.setattr(model_catalog, "urlopen", fake_urlopen)
+
+    record = fetch_anthropic_model_record(
+        _provider("anthropic"),
+        "claude/alias",
+        timeout_seconds=4.5,
+    )
+
+    assert record == ModelRecord("claude-canonical-20260824")
+    assert captured["url"] == "https://api.anthropic.com/v1/models/claude%2Falias"
+    assert captured["timeout"] == 4.5
+    assert captured["headers"]["X-api-key"] == "top-secret-key"
 
 
 def test_fetch_model_records_follows_bounded_anthropic_cursor_pages(monkeypatch) -> None:
@@ -459,8 +481,9 @@ def test_bedrock_catalog_defers_to_existing_doctor_without_network(monkeypatch) 
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not be called")),
     )
 
-    with pytest.raises(ModelCatalogError, match=r"doctor --verify-models"):
+    with pytest.raises(ModelCatalogError, match=r"doctor --verify-models") as caught:
         fetch_model_records(_provider("bedrock", api_key=None))
+    assert getattr(caught.value, "kind", None) == "unsupported"
 
 
 def test_fetch_normalizes_deduplicates_and_skips_unsafe_records(monkeypatch) -> None:
@@ -511,6 +534,41 @@ def test_fetch_never_exposes_http_body_reason_url_or_key(monkeypatch) -> None:
     assert all(secret not in message for secret in ("top-secret-key", "secret-path", "query-secret", "password"))
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_kind"),
+    [
+        (401, "authentication"),
+        (403, "authorization"),
+        (404, "unsupported"),
+        (405, "unsupported"),
+        (408, "unavailable"),
+        (429, "unavailable"),
+        (500, "unavailable"),
+        (418, "other_http"),
+    ],
+)
+def test_fetch_classifies_http_failures_without_exposing_response(
+    monkeypatch,
+    status: int,
+    expected_kind: str,
+) -> None:
+    error = HTTPError(
+        "https://example.test/private-path",
+        status,
+        "reason contains top-secret-key",
+        {},
+        io.BytesIO(b"body contains top-secret-key"),
+    )
+    monkeypatch.setattr(model_catalog, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+
+    with pytest.raises(ModelCatalogError) as caught:
+        fetch_model_records(_provider("openai"))
+
+    assert getattr(caught.value, "kind", None) == expected_kind
+    assert getattr(caught.value, "http_status", None) == status
+    assert "top-secret-key" not in str(caught.value)
+
+
 def test_fetch_redacts_transport_reason(monkeypatch) -> None:
     monkeypatch.setattr(
         model_catalog,
@@ -522,6 +580,7 @@ def test_fetch_redacts_transport_reason(monkeypatch) -> None:
         fetch_model_records(_provider("nv_build"))
 
     assert str(caught.value) == "model catalog request failed: URLError"
+    assert getattr(caught.value, "kind", None) == "unavailable"
 
 
 @pytest.mark.parametrize(
@@ -552,34 +611,37 @@ def test_fetch_redacts_low_level_http_protocol_failures(monkeypatch, failure: Ex
 
 def test_fetch_rejects_oversized_and_invalid_json_responses(monkeypatch) -> None:
     monkeypatch.setattr(model_catalog, "urlopen", lambda *_args, **_kwargs: _Response(b"x" * (2 * 1024 * 1024 + 1)))
-    with pytest.raises(ModelCatalogError, match="safe size limit"):
+    with pytest.raises(ModelCatalogError, match="safe size limit") as oversized:
         fetch_model_records(_provider("openai"))
+    assert getattr(oversized.value, "kind", None) == "invalid_response"
 
     monkeypatch.setattr(model_catalog, "urlopen", lambda *_args, **_kwargs: _Response(b"not-json"))
-    with pytest.raises(ModelCatalogError, match="invalid JSON"):
+    with pytest.raises(ModelCatalogError, match="invalid JSON") as invalid_json:
         fetch_model_records(_provider("openai"))
+    assert getattr(invalid_json.value, "kind", None) == "invalid_response"
 
 
 @pytest.mark.parametrize(
-    "base_url",
+    ("base_url", "expected_kind"),
     [
-        "http://example.test/v1",
-        "http://192.168.1.2/v1",
-        "http://169.254.1.1/v1",
-        "http://0.0.0.0/v1",
-        "file:///tmp/catalog",
-        "https://user:password@example.test/v1",
-        "https://example.test/v1?token=secret",
-        "https://example.test/v1#fragment",
-        "https://example.test\\@evil.test/v1",
-        " https://example.test/v1",
-        "https://example.test/v1\n",
-        "https://example.test:invalid/v1",
+        ("http://example.test/v1", "unsupported"),
+        ("http://192.168.1.2/v1", "unsupported"),
+        ("http://169.254.1.1/v1", "unsupported"),
+        ("http://0.0.0.0/v1", "unsupported"),
+        ("file:///tmp/catalog", "invalid_configuration"),
+        ("https://user:password@example.test/v1", "invalid_configuration"),
+        ("https://example.test/v1?token=secret", "invalid_configuration"),
+        ("https://example.test/v1#fragment", "invalid_configuration"),
+        ("https://example.test\\@evil.test/v1", "invalid_configuration"),
+        (" https://example.test/v1", "invalid_configuration"),
+        ("https://example.test/v1\n", "invalid_configuration"),
+        ("https://example.test:invalid/v1", "invalid_configuration"),
     ],
 )
-def test_catalog_rejects_unsafe_base_urls(base_url: str) -> None:
-    with pytest.raises(ModelCatalogError, match="model catalog base URL"):
+def test_catalog_rejects_unsafe_base_urls(base_url: str, expected_kind: str) -> None:
+    with pytest.raises(ModelCatalogError, match="model catalog base URL") as caught:
         fetch_model_records(_provider("openai-compatible", base_url=base_url))
+    assert getattr(caught.value, "kind", None) == expected_kind
 
 
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])

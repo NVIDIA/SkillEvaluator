@@ -18,7 +18,7 @@ import pytest
 from harbor.utils.env import resolve_env_vars
 
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
-from skillevaluator.tier3.harbor import runner
+from skillevaluator.tier3.harbor import runner, runtime_preflight
 from skillevaluator.tier3.harbor.adapter import _verifier_env_vars
 
 
@@ -1007,6 +1007,16 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     monkeypatch.setattr(runner, "generate_harbor_tasks", emit)
     monkeypatch.setattr(runner, "_run_agent_pair", launch)
     monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            f"model {selected_provider.model} is available",
+        ),
+    )
+    monkeypatch.setattr(
         runner,
         "collect_harbor_results",
         lambda **_kwargs: {"execution_status": "complete", "execution_errors": [], "metrics": [], "agents": {}},
@@ -1115,6 +1125,16 @@ def test_custom_only_native_verifier_placeholders_use_task_fallbacks_not_standar
 
     monkeypatch.setattr(runner, "_run_agent_pair", launch)
     monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            f"model {selected_provider.model} is available",
+        ),
+    )
+    monkeypatch.setattr(
         runner,
         "collect_harbor_results",
         lambda **_kwargs: {"execution_status": "complete", "execution_errors": [], "metrics": [], "agents": {}},
@@ -1170,6 +1190,16 @@ def test_run_harbor_eval_rejects_provenance_key_inside_skill_before_creation(
     )
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: skill / "evals" / "evals.json")
     monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            f"model {selected_provider.model} is available",
+        ),
+    )
 
     result = runner.run_harbor_eval(
         skill,

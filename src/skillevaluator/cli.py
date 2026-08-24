@@ -2025,7 +2025,11 @@ def models_command(limit: int, as_json: bool) -> None:
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
-@click.option("--verify-models", is_flag=True, help="Show the configured public provider model.")
+@click.option(
+    "--verify-models",
+    is_flag=True,
+    help="Verify resolved agent models with a live authenticated provider catalog request.",
+)
 def doctor(agents: str, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor

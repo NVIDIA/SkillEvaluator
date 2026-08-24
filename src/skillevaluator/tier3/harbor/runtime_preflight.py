@@ -6,16 +6,28 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from queue import Empty, Queue
+from threading import BoundedSemaphore, Thread
+from time import monotonic
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import boto3
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
-from skillevaluator.model_catalog import ModelCatalogError, fetch_model_records
+from skillevaluator.model_catalog import (
+    ModelCatalogError,
+    ModelCatalogFailureKind,
+    fetch_anthropic_model_record,
+    fetch_model_records,
+)
 from skillevaluator.tier3.harbor.progress import redact_progress_detail
 from skillevaluator.tier3.harbor.runner import _nvidia_build_key_handoff, build_harbor_run_command
 
@@ -44,6 +56,104 @@ class ModelProbeResult:
     provider: str
     model: str
     detail: str
+    failure_kind: ModelCatalogFailureKind | None = None
+    http_status: int | None = None
+
+
+class CredentialProbeDisposition(StrEnum):
+    """How Tier 3 should act on a model-catalog credential probe."""
+
+    VERIFIED = "verified"
+    FATAL = "fatal"
+    DEGRADED = "degraded"
+
+
+_BEDROCK_PROBE_SLOT = BoundedSemaphore(4)
+
+
+def _is_native_catalog_endpoint(provider: ProviderConfig) -> bool:
+    """Return whether catalog HTTP status has the provider's native meaning."""
+    provider_name = provider.provider.casefold()
+    if provider_name == "anthropic" and not provider.base_url:
+        return True
+    if not isinstance(provider.base_url, str) or provider.base_url != provider.base_url.strip():
+        return False
+    if "\\" in provider.base_url or any(character in provider.base_url for character in ("?", "#", ";")):
+        return False
+    try:
+        endpoint = urlsplit(provider.base_url)
+        port = endpoint.port
+    except (TypeError, ValueError):
+        return False
+    if (
+        endpoint.scheme.casefold() != "https"
+        or endpoint.hostname is None
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or port not in {None, 443}
+    ):
+        return False
+
+    if provider_name in {"openai", "openai-compatible"}:
+        return endpoint.hostname.casefold() == "api.openai.com" and endpoint.path in {"/v1", "/v1/"}
+    if provider_name == "nv_build":
+        return endpoint.hostname.casefold() == "integrate.api.nvidia.com" and endpoint.path in {"/v1", "/v1/"}
+    if provider_name == "anthropic":
+        return endpoint.hostname.casefold() == "api.anthropic.com" and endpoint.path in {"", "/", "/v1", "/v1/"}
+    return False
+
+
+def _catalog_listing_is_authoritative(provider: ProviderConfig) -> bool:
+    """Return whether absence from the listing proves the model is unusable."""
+    # Anthropic aliases resolve through its single-model endpoint but are not
+    # guaranteed to appear in the unique-ID listing. Bedrock's foundation-model
+    # listing excludes other valid InvokeModel resources such as inference profiles.
+    return provider.provider.casefold() in {"openai", "openai-compatible", "nv_build"} and (
+        _is_native_catalog_endpoint(provider)
+    )
+
+
+def credential_probe_disposition(
+    provider: ProviderConfig,
+    probe: ModelProbeResult,
+) -> CredentialProbeDisposition:
+    """Classify a live catalog probe without rejecting compatible custom gateways."""
+    if probe.ok:
+        return CredentialProbeDisposition.VERIFIED
+
+    raw_kind = getattr(probe, "failure_kind", None)
+    try:
+        failure_kind = ModelCatalogFailureKind(raw_kind) if raw_kind is not None else None
+    except (TypeError, ValueError):
+        failure_kind = ModelCatalogFailureKind.UNKNOWN
+
+    if failure_kind == ModelCatalogFailureKind.AUTHENTICATION:
+        return CredentialProbeDisposition.FATAL
+    if failure_kind == ModelCatalogFailureKind.INVALID_CONFIGURATION:
+        return CredentialProbeDisposition.FATAL
+    if failure_kind == ModelCatalogFailureKind.MODEL_NOT_FOUND:
+        return (
+            CredentialProbeDisposition.FATAL
+            if _is_native_catalog_endpoint(provider)
+            else CredentialProbeDisposition.DEGRADED
+        )
+    if failure_kind == ModelCatalogFailureKind.AUTHORIZATION:
+        if provider.provider == "bedrock":
+            # ListFoundationModels permission is distinct from InvokeModel.
+            return CredentialProbeDisposition.DEGRADED
+        return (
+            CredentialProbeDisposition.FATAL
+            if _is_native_catalog_endpoint(provider)
+            else CredentialProbeDisposition.DEGRADED
+        )
+    if failure_kind is None:
+        # ``probe_model`` reached the catalog but did not find the selected model.
+        return (
+            CredentialProbeDisposition.FATAL
+            if _catalog_listing_is_authoritative(provider)
+            else CredentialProbeDisposition.DEGRADED
+        )
+    return CredentialProbeDisposition.DEGRADED
 
 
 def _first_task_name(dataset: Path) -> str | None:
@@ -234,38 +344,198 @@ def validate_harbor_agent_only_job_result(
     return True, ""
 
 
+def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) -> ModelProbeResult:
+    """Run one Bedrock catalog request inside the outer deadline worker."""
+    try:
+        request_config = BotoConfig(
+            connect_timeout=timeout_seconds,
+            read_timeout=timeout_seconds,
+            retries={"max_attempts": 0},
+        )
+        response = (
+            boto3.session.Session()
+            .client(
+                "bedrock",
+                region_name=provider.region or "us-west-2",
+                config=request_config,
+            )
+            .list_foundation_models()
+        )
+    except ClientError as exc:
+        response = exc.response if isinstance(exc.response, dict) else {}
+        error = response.get("Error") if isinstance(response.get("Error"), dict) else {}
+        metadata = response.get("ResponseMetadata") if isinstance(response.get("ResponseMetadata"), dict) else {}
+        error_code = str(error.get("Code") or "")
+        http_status = metadata.get("HTTPStatusCode")
+        if not isinstance(http_status, int) or isinstance(http_status, bool):
+            http_status = None
+        if http_status == 401 or error_code in {
+            "ExpiredTokenException",
+            "IncompleteSignature",
+            "InvalidClientTokenId",
+            "InvalidSignatureException",
+            "UnrecognizedClientException",
+        }:
+            failure_kind = ModelCatalogFailureKind.AUTHENTICATION
+        elif error_code in {"AccessDenied", "AccessDeniedException"}:
+            failure_kind = ModelCatalogFailureKind.AUTHORIZATION
+        elif error_code in {"ServiceUnavailable", "ServiceUnavailableException", "ThrottlingException"} or (
+            isinstance(http_status, int) and (http_status == 429 or http_status >= 500)
+        ):
+            failure_kind = ModelCatalogFailureKind.UNAVAILABLE
+        else:
+            failure_kind = ModelCatalogFailureKind.UNKNOWN
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Bedrock model catalog request failed: {type(exc).__name__}",
+            failure_kind=failure_kind,
+            http_status=http_status,
+        )
+    except BotoCoreError as exc:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Bedrock model catalog request failed: {type(exc).__name__}",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+    summaries = response.get("modelSummaries") if isinstance(response, dict) else None
+    available = {
+        str(item["modelId"])
+        for item in summaries or []
+        if isinstance(item, dict) and isinstance(item.get("modelId"), str)
+    }
+    aliases = {provider.model}
+    prefix, separator, unprefixed = provider.model.partition(".")
+    if separator and prefix in {"apac", "eu", "global", "us"}:
+        aliases.add(unprefixed)
+    if aliases.isdisjoint(available):
+        return ModelProbeResult(False, provider.provider, provider.model, f"model {provider.model} is not listed")
+    return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")
+
+
+def _probe_bedrock_model_with_deadline(
+    provider: ProviderConfig,
+    *,
+    timeout_seconds: float,
+) -> ModelProbeResult:
+    """Bound session creation, credential providers, retries, and request I/O."""
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "model catalog timeout must be a positive number",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    result_queue: Queue[ModelProbeResult] = Queue(maxsize=1)
+    deadline = monotonic() + timeout_seconds
+    if not _BEDROCK_PROBE_SLOT.acquire(timeout=timeout_seconds):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Bedrock model catalog request timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+    def run_probe() -> None:
+        try:
+            try:
+                result = _probe_bedrock_model(provider, timeout_seconds=remaining)
+            except Exception as exc:
+                result = ModelProbeResult(
+                    False,
+                    provider.provider,
+                    provider.model,
+                    f"Bedrock model catalog request failed: {type(exc).__name__}",
+                    failure_kind=ModelCatalogFailureKind.UNKNOWN,
+                )
+            result_queue.put_nowait(result)
+        finally:
+            _BEDROCK_PROBE_SLOT.release()
+
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        _BEDROCK_PROBE_SLOT.release()
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Bedrock model catalog request timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+    Thread(target=run_probe, name="bedrock-model-catalog-probe", daemon=True).start()
+    try:
+        return result_queue.get(timeout=remaining)
+    except Empty:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Bedrock model catalog request timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+
 def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> ModelProbeResult:
     """Verify that the selected provider catalog lists the requested model."""
     if provider.provider == "bedrock":
-        try:
-            response = boto3.client("bedrock", region_name=provider.region or "us-west-2").list_foundation_models()
-        except (BotoCoreError, ClientError) as exc:
-            return ModelProbeResult(
-                False,
-                provider.provider,
-                provider.model,
-                f"Bedrock model catalog request failed: {type(exc).__name__}",
-            )
-        summaries = response.get("modelSummaries") if isinstance(response, dict) else None
-        available = {
-            str(item["modelId"])
-            for item in summaries or []
-            if isinstance(item, dict) and isinstance(item.get("modelId"), str)
-        }
-        aliases = {provider.model}
-        prefix, separator, unprefixed = provider.model.partition(".")
-        if separator and prefix in {"apac", "eu", "global", "us"}:
-            aliases.add(unprefixed)
-        if aliases.isdisjoint(available):
-            return ModelProbeResult(False, provider.provider, provider.model, f"model {provider.model} is not listed")
-        return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")
+        return _probe_bedrock_model_with_deadline(provider, timeout_seconds=timeout_seconds)
 
     try:
         records = fetch_model_records(provider, timeout_seconds=timeout_seconds)
     except ModelCatalogError as exc:
-        return ModelProbeResult(False, provider.provider, provider.model, str(exc))
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            str(exc),
+            failure_kind=exc.kind,
+            http_status=exc.http_status,
+        )
     available = {record.id for record in records}
     if provider.model not in available:
+        if provider.provider == "anthropic" and _is_native_catalog_endpoint(provider):
+            try:
+                resolved = fetch_anthropic_model_record(
+                    provider,
+                    provider.model,
+                    timeout_seconds=timeout_seconds,
+                )
+            except ModelCatalogError as exc:
+                if exc.http_status == 404:
+                    return ModelProbeResult(
+                        False,
+                        provider.provider,
+                        provider.model,
+                        f"model {provider.model} is not available",
+                        failure_kind=ModelCatalogFailureKind.MODEL_NOT_FOUND,
+                        http_status=404,
+                    )
+                return ModelProbeResult(
+                    False,
+                    provider.provider,
+                    provider.model,
+                    str(exc),
+                    failure_kind=exc.kind,
+                    http_status=exc.http_status,
+                )
+            return ModelProbeResult(
+                True,
+                provider.provider,
+                provider.model,
+                f"model {provider.model} resolves to {resolved.id}",
+            )
         return ModelProbeResult(False, provider.provider, provider.model, f"model {provider.model} is not listed")
     return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")
 

@@ -599,6 +599,7 @@ def _stub_runner(
     html_report=None,
     environment_check=None,
     credential_check=None,
+    model_probe=None,
     task_emitter=None,
     skill_name: str = "demo-skill",
     provider_model: str = "gpt-5",
@@ -660,6 +661,22 @@ def _stub_runner(
 
     monkeypatch.setattr(
         runtime_preflight,
+        "probe_model",
+        model_probe
+        or (
+            lambda selected_provider: SimpleNamespace(
+                ok=True,
+                provider=selected_provider.provider,
+                model=selected_provider.model,
+                detail=f"model {selected_provider.model} is available",
+                failure_kind=None,
+                http_status=None,
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        runtime_preflight,
         "run_agent_runtime_preflight",
         lambda **kwargs: runtime_preflight.PreflightResult(
             True,
@@ -672,6 +689,338 @@ def _stub_runner(
     monkeypatch.setattr(runner, "collect_harbor_results", collect or collect_results)
     monkeypatch.setattr(runner, "render_agent_eval_html_report", html_report or write_html)
     return runner, skill
+
+
+@pytest.mark.parametrize("agent_runtime_preflight", [True, False])
+def test_credential_validation_401_stops_before_image_and_task_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_runtime_preflight: bool,
+) -> None:
+    secret = "exact-provider-secret"
+    probe_calls: list[Any] = []
+    image_calls: list[Path] = []
+    task_calls: list[Path] = []
+
+    def reject_credential(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=False,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model catalog returned HTTP 401; rejected {secret}",
+            failure_kind="authentication",
+            http_status=401,
+        )
+
+    def build_image(skill_path: Path, *_args, **_kwargs) -> str:
+        image_calls.append(skill_path)
+        return "skillevaluator-test-image"
+
+    def emit_tasks(_skill, output: Path, **_kwargs):
+        task_calls.append(output)
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=reject_credential,
+        task_emitter=emit_tasks,
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: (
+            {
+                "harbor": {
+                    "task_source": "evals_json",
+                    "base_image_mode": "reuse",
+                    "n_attempts": 1,
+                    "n_concurrent": 1,
+                    "max_agents": 1,
+                }
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(runner, "build_eval_base_image", build_image)
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=agent_runtime_preflight,
+        progress_reporter=reporter,
+    )
+
+    assert probe_calls and probe_calls[0].provider == "openai"
+    assert result.get("error")
+    assert "HTTP 401" in json.dumps(result)
+    assert image_calls == []
+    assert task_calls == []
+    transitions = [(event.stage, event.state) for event in reporter.events]
+    assert ("credential-validation", "failed") in transitions
+    assert ("credential-validation", "complete") not in transitions
+    rendered = json.dumps(result) + json.dumps([(event.stage, event.state, event.detail) for event in reporter.events])
+    assert secret not in rendered
+
+
+def test_inconclusive_credential_probe_degrades_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    task_calls: list[Path] = []
+
+    def time_out(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=False,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail="model catalog request timed out",
+            failure_kind="unavailable",
+            http_status=None,
+        )
+
+    def emit_tasks(_skill, output: Path, **_kwargs):
+        task_calls.append(output)
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=time_out,
+        task_emitter=emit_tasks,
+    )
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        progress_reporter=reporter,
+    )
+
+    assert "error" not in result
+    assert len(probe_calls) == 1
+    assert task_calls
+    transitions = [(event.stage, event.state) for event in reporter.events]
+    assert ("credential-validation", "degraded") in transitions
+    assert ("credential-validation", "complete") not in transitions
+
+
+def test_credential_validation_probes_an_identical_agent_route_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "opencode"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert len(probe_calls) == 1
+    assert probe_calls[0].provider == "openai"
+
+
+def test_credential_validation_probes_each_distinct_agent_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert {probe.provider for probe in probe_calls} == {"openai", "anthropic"}
+
+
+def test_credential_validation_includes_distinct_standard_grading_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+    monkeypatch.setattr(
+        runner,
+        "_provider_environment",
+        lambda _provider: {
+            "OPENAI_API_KEY": "exact-provider-secret",
+            "LLM_JUDGE_MODEL": "judge-gpt",
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert {(probe.provider, probe.model) for probe in probe_calls} == {
+        ("anthropic", "claude-test"),
+        ("openai", "judge-gpt"),
+    }
+
+
+def test_distinct_standard_grading_probe_failure_is_redacted_and_stops_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    evaluator_secret = "evaluator-only-provider-secret"
+    task_calls: list[Path] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def probe(selected_provider):
+        if selected_provider.provider == "openai":
+            return SimpleNamespace(
+                ok=False,
+                provider=selected_provider.provider,
+                model=selected_provider.model,
+                detail=f"model catalog returned HTTP 401; rejected {evaluator_secret}",
+                failure_kind="authentication",
+                http_status=401,
+            )
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    def emit_tasks(_skill, output: Path, **_kwargs):
+        task_calls.append(output)
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=probe,
+        task_emitter=emit_tasks,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_provider_environment",
+        lambda _provider: {"OPENAI_API_KEY": evaluator_secret},
+    )
+    monkeypatch.setattr(
+        runner,
+        "resolve_llm_provider",
+        lambda: SimpleNamespace(
+            provider="openai",
+            model="gpt-5",
+            api_key=evaluator_secret,
+            base_url=None,
+        ),
+    )
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        progress_reporter=reporter,
+    )
+
+    rendered = json.dumps(result) + json.dumps([event.detail for event in reporter.events])
+    assert result.get("error")
+    assert "HTTP 401" in rendered
+    assert evaluator_secret not in rendered
+    assert task_calls == []
+
+
+def test_custom_only_credential_validation_skips_unused_evaluator_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        grading_mode="custom_only",
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert [(probe.provider, probe.model) for probe in probe_calls] == [("anthropic", "claude-test")]
 
 
 def test_default_run_cleans_transient_harbor_artifacts(
@@ -1282,6 +1631,18 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(runner, "_harbor_subprocess_environment", lambda **_kwargs: {})
     from skillevaluator.tier3.harbor import runtime_preflight
 
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        ),
+    )
     monkeypatch.setattr(
         runtime_preflight,
         "run_agent_runtime_preflight",

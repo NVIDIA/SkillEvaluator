@@ -1949,10 +1949,115 @@ def _run_harbor_eval_impl(
         for agent in agents
         if (import_path := _nvidia_build_agent_import_path(provider, agent, env_mode)) is not None
     }
-    reporter.set_secret_values(
-        set().union(*(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values()))
+    runtime_secret_values = set().union(
+        *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )
-    reporter.emit(ProgressEvent(stage="credential-validation", state="complete", detail="credentials validated"))
+
+    # Probe each exact agent route before reserving output space, building images,
+    # or staging tasks. The runtime-preflight module imports runner helpers, so
+    # this import must remain lazy to avoid a module cycle.
+    from skillevaluator.tier3.harbor.runtime_preflight import (
+        CredentialProbeDisposition,
+        credential_probe_disposition,
+        probe_model,
+    )
+
+    probe_targets: dict[
+        tuple[str, str, str | None, str | None, str | None],
+        tuple[ProviderConfig, list[str]],
+    ] = {}
+
+    def add_probe_target(label: str, selected_provider: ProviderConfig) -> None:
+        route_key = (
+            selected_provider.provider,
+            selected_provider.model,
+            selected_provider.api_key,
+            selected_provider.base_url,
+            selected_provider.region,
+        )
+        target = probe_targets.get(route_key)
+        if target is None:
+            probe_targets[route_key] = (selected_provider, [label])
+        else:
+            target[1].append(label)
+
+    for agent in agents:
+        add_probe_target(agent, runtime_plans[agent].provider)
+
+    if grading_mode != "custom_only":
+        judge_model = str(_judge_model_config(provider, provider_env, grading_mode)["model"])
+        litellm_model = str(getattr(provider, "litellm_model", f"{provider.provider}/{provider.model}"))
+        litellm_prefix = litellm_model.partition("/")[0] or provider.provider
+        add_probe_target(
+            "standard grader",
+            ProviderConfig(
+                provider=provider.provider,
+                model=judge_model,
+                api_key=provider.api_key,
+                base_url=provider.base_url,
+                litellm_model=f"{litellm_prefix}/{judge_model}",
+                region=getattr(provider, "region", None),
+                credential_env=getattr(provider, "credential_env", None),
+                base_url_env=getattr(provider, "base_url_env", None),
+            ),
+        )
+
+    runtime_secret_values.update(
+        selected_provider.api_key for selected_provider, _labels in probe_targets.values() if selected_provider.api_key
+    )
+    reporter.set_secret_values(runtime_secret_values)
+
+    with ThreadPoolExecutor(max_workers=min(len(probe_targets), 4)) as probe_pool:
+        probe_futures = {
+            route_key: probe_pool.submit(probe_model, selected_provider)
+            for route_key, (selected_provider, _labels) in probe_targets.items()
+        }
+
+    probe_errors: list[str] = []
+    probe_degraded: list[str] = []
+    for route_key, (selected_provider, selected_labels) in probe_targets.items():
+        label = ", ".join(selected_labels)
+        try:
+            probe = probe_futures[route_key].result()
+        except Exception as exc:
+            probe_degraded.append(f"{label}: model catalog probe failed: {type(exc).__name__}")
+            continue
+
+        safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
+        disposition = credential_probe_disposition(selected_provider, probe)
+        if disposition == CredentialProbeDisposition.FATAL:
+            probe_errors.append(f"{label} provider verification failed: {safe_detail}")
+        elif disposition == CredentialProbeDisposition.DEGRADED:
+            probe_degraded.append(f"{label}: {safe_detail}")
+
+    if probe_errors:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="failed",
+                detail="; ".join(probe_errors),
+            )
+        )
+        return {"error": probe_errors}
+    if probe_degraded:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="degraded",
+                detail=(
+                    "credential configuration resolved; live catalog verification inconclusive: "
+                    f"{'; '.join(probe_degraded)}; continuing to evaluation"
+                ),
+            )
+        )
+    else:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="complete",
+                detail="credentials and selected models verified",
+            )
+        )
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)

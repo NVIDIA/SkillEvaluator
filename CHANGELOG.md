@@ -17,6 +17,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 now exercises each resolved agent route and the enabled standard-
+  grading route against its provider's model catalog before image preparation
+  or task staging. Definitive authentication failures stop immediately with a
+  redacted diagnostic, while transient or unsupported catalog checks continue
+  to evaluation (and to runtime preflight when enabled) instead of rejecting
+  compatible custom gateways
+  ([#71](https://github.com/NVIDIA/SkillEvaluator/issues/71)).
 - Tier 3 eval-dataset generation now parses `SKILL.md` frontmatter as YAML.
   The previous line-based scan captured block-scalar indicators verbatim, so a
   `description: >-` became the literal string `>-` in every generated prompt,

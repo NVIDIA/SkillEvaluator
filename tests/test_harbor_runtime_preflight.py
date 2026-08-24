@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Barrier, Event, Lock, Thread
+from threading import enumerate as enumerate_threads
 from unittest.mock import Mock
 
 import pytest
@@ -612,7 +617,13 @@ def test_model_probe_reports_safe_shared_catalog_error(monkeypatch) -> None:
     monkeypatch.setattr(
         runtime_preflight,
         "fetch_model_records",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModelCatalogError("model catalog returned HTTP 401")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ModelCatalogError(
+                "model catalog returned HTTP 401",
+                kind="authentication",
+                http_status=401,
+            )
+        ),
     )
     provider = ProviderConfig(
         provider="openai",
@@ -627,6 +638,236 @@ def test_model_probe_reports_safe_shared_catalog_error(monkeypatch) -> None:
     assert result.ok is False
     assert "HTTP 401" in result.detail
     assert "secret-key" not in result.detail
+    assert getattr(result, "failure_kind", None) == "authentication"
+    assert getattr(result, "http_status", None) == 401
+
+
+def test_anthropic_model_probe_resolves_alias_omitted_from_listing(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: (ModelRecord("claude-canonical-20260824"),),
+    )
+
+    def resolve_alias(provider, model_id, *, timeout_seconds):
+        captured.update(provider=provider, model_id=model_id, timeout_seconds=timeout_seconds)
+        return ModelRecord("claude-canonical-20260824")
+
+    monkeypatch.setattr(runtime_preflight, "fetch_anthropic_model_record", resolve_alias)
+    provider = ProviderConfig(
+        provider="anthropic",
+        model="claude-stable-alias",
+        api_key="secret-key",
+        base_url=None,
+        litellm_model="anthropic/claude-stable-alias",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=4.5)
+
+    assert result.ok is True
+    assert result.model == "claude-stable-alias"
+    assert "claude-canonical-20260824" in result.detail
+    assert captured == {"provider": provider, "model_id": "claude-stable-alias", "timeout_seconds": 4.5}
+
+
+def test_anthropic_model_probe_treats_native_single_model_404_as_fatal(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: (ModelRecord("different-model"),),
+    )
+    monkeypatch.setattr(
+        runtime_preflight,
+        "fetch_anthropic_model_record",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ModelCatalogError(
+                "model catalog returned HTTP 404",
+                kind="unsupported",
+                http_status=404,
+            )
+        ),
+    )
+    provider = ProviderConfig(
+        provider="anthropic",
+        model="missing-model",
+        api_key="secret-key",
+        base_url="https://api.anthropic.com:443",
+        litellm_model="anthropic/missing-model",
+    )
+
+    result = runtime_preflight.probe_model(provider)
+
+    assert result.ok is False
+    assert result.failure_kind == "model_not_found"
+    assert result.http_status == 404
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+
+
+@pytest.mark.parametrize(
+    ("provider", "probe", "expected"),
+    [
+        (
+            ProviderConfig("openai", "gpt-test", "key", "https://api.openai.com/v1", "openai/gpt-test"),
+            {"ok": True, "failure_kind": None, "http_status": None},
+            "verified",
+        ),
+        (
+            ProviderConfig("openai", "gpt-test", "key", "https://api.openai.com/v1", "openai/gpt-test"),
+            {"ok": False, "failure_kind": "authentication", "http_status": 401},
+            "fatal",
+        ),
+        (
+            ProviderConfig(
+                "openai-compatible",
+                "gpt-test",
+                "key",
+                "https://gateway.example/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": False, "failure_kind": "authentication", "http_status": 401},
+            "fatal",
+        ),
+        (
+            ProviderConfig("openai", "gpt-test", "key", "https://api.openai.com/v1", "openai/gpt-test"),
+            {"ok": False, "failure_kind": "authorization", "http_status": 403},
+            "fatal",
+        ),
+        (
+            ProviderConfig("openai", "gpt-test", "key", "https://gateway.example/v1", "openai/gpt-test"),
+            {"ok": False, "failure_kind": "authorization", "http_status": 403},
+            "degraded",
+        ),
+        (
+            ProviderConfig(
+                "openai-compatible",
+                "gpt-test",
+                "key",
+                "https://api.openai.com/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": False, "failure_kind": "authorization", "http_status": 403},
+            "fatal",
+        ),
+        (
+            ProviderConfig("bedrock", "model", None, None, "bedrock/model", region="us-west-2"),
+            {"ok": False, "failure_kind": "authorization", "http_status": 403},
+            "degraded",
+        ),
+        (
+            ProviderConfig("anthropic", "claude-test", "key", None, "anthropic/claude-test"),
+            {"ok": False, "failure_kind": None, "http_status": None},
+            "degraded",
+        ),
+        (
+            ProviderConfig(
+                "openai-compatible",
+                "gpt-test",
+                "key",
+                "https://gateway.example/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": False, "failure_kind": None, "http_status": None},
+            "degraded",
+        ),
+        (
+            ProviderConfig("openai", "gpt-test", "key", "https://api.openai.com/v1", "openai/gpt-test"),
+            {"ok": False, "failure_kind": "unavailable", "http_status": 429},
+            "degraded",
+        ),
+        (
+            ProviderConfig(
+                "openai-compatible",
+                "gpt-test",
+                "key",
+                "https://gateway.example/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": False, "failure_kind": "invalid_configuration", "http_status": None},
+            "fatal",
+        ),
+        (
+            ProviderConfig(
+                "openai-compatible",
+                "gpt-test",
+                "key",
+                "http://your-server:8000/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": False, "failure_kind": "unsupported", "http_status": None},
+            "degraded",
+        ),
+        (
+            ProviderConfig(
+                "openai",
+                "gpt-test",
+                "key",
+                "https://api.openai.com:443/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": False, "failure_kind": "authorization", "http_status": 403},
+            "fatal",
+        ),
+        (
+            ProviderConfig(
+                "anthropic",
+                "claude-alias",
+                "key",
+                "https://api.anthropic.com",
+                "anthropic/claude-alias",
+            ),
+            {"ok": False, "failure_kind": None, "http_status": None},
+            "degraded",
+        ),
+        (
+            ProviderConfig(
+                "anthropic",
+                "claude-alias",
+                "key",
+                "https://api.anthropic.com:443/v1",
+                "anthropic/claude-alias",
+            ),
+            {"ok": False, "failure_kind": "authorization", "http_status": 403},
+            "fatal",
+        ),
+        (
+            ProviderConfig(
+                "openai",
+                "gpt-test",
+                "key",
+                "https://api.openai.com:443/v1/",
+                "openai/gpt-test",
+            ),
+            {"ok": False, "failure_kind": None, "http_status": None},
+            "fatal",
+        ),
+        (
+            ProviderConfig(
+                "bedrock",
+                "application-inference-profile/model-id",
+                None,
+                None,
+                "bedrock/application-inference-profile/model-id",
+                region="us-west-2",
+            ),
+            {"ok": False, "failure_kind": None, "http_status": None},
+            "degraded",
+        ),
+    ],
+)
+def test_credential_probe_disposition_is_endpoint_aware(provider, probe: dict[str, object], expected: str) -> None:
+    result = type(
+        "Probe",
+        (),
+        {
+            **probe,
+            "provider": provider.provider,
+            "model": provider.model,
+            "detail": "safe detail",
+        },
+    )()
+
+    assert runtime_preflight.credential_probe_disposition(provider, result) == expected
 
 
 def test_model_probe_rejects_non_http_catalog_url() -> None:
@@ -651,11 +892,62 @@ def test_model_probe_checks_bedrock_foundation_catalog(monkeypatch) -> None:
         def list_foundation_models(self):
             return {"modelSummaries": [{"modelId": "anthropic.claude-sonnet-test-v1:0"}]}
 
-    def client(service, **kwargs):
-        captured.update({"service": service, **kwargs})
-        return Bedrock()
+    class Session:
+        def client(self, service, **kwargs):
+            captured.update({"service": service, **kwargs})
+            return Bedrock()
 
-    monkeypatch.setattr(runtime_preflight.boto3, "client", client)
+    monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
+    provider = ProviderConfig(
+        provider="bedrock",
+        model="us.anthropic.claude-sonnet-test-v1:0",
+        api_key=None,
+        base_url=None,
+        litellm_model="bedrock/us.anthropic.claude-sonnet-test-v1:0",
+        region="us-west-2",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=4.5)
+
+    assert result.ok is True
+    assert captured["service"] == "bedrock"
+    assert captured["region_name"] == "us-west-2"
+    request_config = captured["config"]
+    assert request_config.connect_timeout == pytest.approx(4.5, rel=1e-3)
+    assert request_config.read_timeout == pytest.approx(4.5, rel=1e-3)
+    assert request_config.retries == {"max_attempts": 0}
+
+
+@pytest.mark.parametrize(
+    ("error_code", "http_status", "expected_kind"),
+    [
+        ("UnexpectedAuthCode", 401, "authentication"),
+        ("InvalidClientTokenId", 400, "authentication"),
+        ("AccessDeniedException", 403, "authorization"),
+        ("ThrottlingException", 429, "unavailable"),
+    ],
+)
+def test_bedrock_model_probe_classifies_client_errors(
+    monkeypatch,
+    error_code: str,
+    http_status: int,
+    expected_kind: str,
+) -> None:
+    class Bedrock:
+        def list_foundation_models(self):
+            raise runtime_preflight.ClientError(
+                {
+                    "Error": {"Code": error_code, "Message": "must stay private"},
+                    "ResponseMetadata": {"HTTPStatusCode": http_status},
+                },
+                "ListFoundationModels",
+            )
+
+    class Session:
+        def client(self, *_args, **_kwargs):
+            return Bedrock()
+
+    monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
     provider = ProviderConfig(
         provider="bedrock",
         model="us.anthropic.claude-sonnet-test-v1:0",
@@ -667,8 +959,129 @@ def test_model_probe_checks_bedrock_foundation_catalog(monkeypatch) -> None:
 
     result = runtime_preflight.probe_model(provider)
 
-    assert result.ok is True
-    assert captured == {"service": "bedrock", "region_name": "us-west-2"}
+    assert result.ok is False
+    assert result.failure_kind == expected_kind
+    assert result.http_status == http_status
+    assert "must stay private" not in result.detail
+
+
+def test_bedrock_model_probe_uses_a_fresh_session_per_route(monkeypatch) -> None:
+    sessions: list[object] = []
+
+    class Bedrock:
+        def list_foundation_models(self):
+            return {"modelSummaries": []}
+
+    class Session:
+        def __init__(self):
+            sessions.append(self)
+
+        def client(self, *_args, **_kwargs):
+            return Bedrock()
+
+    monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
+    first = ProviderConfig("bedrock", "model-a", None, None, "bedrock/model-a", region="us-west-2")
+    second = ProviderConfig("bedrock", "model-b", None, None, "bedrock/model-b", region="us-west-2")
+
+    runtime_preflight.probe_model(first)
+    runtime_preflight.probe_model(second)
+
+    assert len(sessions) == 2
+    assert sessions[0] is not sessions[1]
+
+
+def test_bedrock_model_probe_allows_distinct_routes_to_overlap(monkeypatch) -> None:
+    rendezvous = Barrier(2)
+    counter_lock = Lock()
+    active = 0
+    max_active = 0
+
+    class Bedrock:
+        def list_foundation_models(self):
+            nonlocal active, max_active
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                rendezvous.wait(timeout=0.5)
+                return {"modelSummaries": []}
+            finally:
+                with counter_lock:
+                    active -= 1
+
+    class Session:
+        def client(self, *_args, **_kwargs):
+            return Bedrock()
+
+    monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
+    providers = [
+        ProviderConfig("bedrock", "model-a", None, None, "bedrock/model-a", region="us-west-2"),
+        ProviderConfig("bedrock", "model-b", None, None, "bedrock/model-b", region="us-west-2"),
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(runtime_preflight.probe_model, providers))
+
+    assert max_active == 2
+    assert all(result.failure_kind is None and "not listed" in result.detail for result in results)
+
+
+def test_bedrock_model_probe_deadline_covers_blocked_credential_provider(monkeypatch) -> None:
+    release = Event()
+    existing_threads = {id(thread) for thread in enumerate_threads()}
+
+    class Session:
+        def __init__(self):
+            release.wait(timeout=1)
+
+        def client(self, *_args, **_kwargs):
+            raise AssertionError("client creation must remain inside the deadline worker")
+
+    monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
+    provider = ProviderConfig("bedrock", "model", None, None, "bedrock/model", region="us-west-2")
+    started = time.monotonic()
+    try:
+        result = runtime_preflight.probe_model(provider, timeout_seconds=0.02)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        for thread in enumerate_threads():
+            if id(thread) not in existing_threads and thread.name == "bedrock-model-catalog-probe":
+                thread.join(timeout=0.2)
+
+    assert result.ok is False
+    assert result.failure_kind == "unavailable"
+    assert "timed out" in result.detail
+    assert elapsed < 0.15
+
+
+def test_bedrock_model_probe_deadline_caps_blocked_workers(monkeypatch) -> None:
+    release = Event()
+    existing_threads = {id(thread) for thread in enumerate_threads()}
+
+    class Session:
+        def __init__(self):
+            release.wait(timeout=1)
+
+        def client(self, *_args, **_kwargs):
+            raise AssertionError("client creation must remain inside the deadline worker")
+
+    monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
+    provider = ProviderConfig("bedrock", "model", None, None, "bedrock/model", region="us-west-2")
+    try:
+        results = [runtime_preflight.probe_model(provider, timeout_seconds=0.005) for _ in range(10)]
+        probe_threads = [
+            thread
+            for thread in enumerate_threads()
+            if id(thread) not in existing_threads and thread.name == "bedrock-model-catalog-probe"
+        ]
+    finally:
+        release.set()
+
+    assert all(result.failure_kind == "unavailable" and "timed out" in result.detail for result in results)
+    assert len(probe_threads) == 4
+    for thread in probe_threads:
+        thread.join(timeout=0.2)
 
 
 def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path) -> None:
@@ -704,6 +1117,16 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
     monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
     monkeypatch.setattr(runner, "generate_harbor_tasks", emit)
     monkeypatch.setattr(runner, "_run_agent_pair", full_matrix)
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            f"model {selected_provider.model} is available",
+        ),
+    )
 
     def fail_preflight(**kwargs):
         preflight_run_env.update(kwargs["run_env"])
@@ -737,3 +1160,70 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
     assert result["harbor_jobs_retention_reason"] == "not_retained"
     assert not (Path(result["run_dir"]) / "_harbor-jobs").exists()
     assert not (Path(result["run_dir"]) / "_harbor-tasks").exists()
+
+
+def test_live_catalog_401_stops_before_task_staging_without_exposing_secret(monkeypatch, tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    requests: list[str] = []
+    secret = "loopback-provider-secret"
+
+    class RejectingCatalog(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": f"rejected {secret}"}).encode())
+
+        def log_message(self, *_args) -> None:
+            return None
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), RejectingCatalog) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            skill = tmp_path / "demo"
+            (skill / "evals").mkdir(parents=True)
+            (skill / "evals" / "evals.json").write_text("[]\n", encoding="utf-8")
+            provider = ProviderConfig(
+                provider="openai-compatible",
+                model="requested-model",
+                api_key=secret,
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                litellm_model="openai/requested-model",
+            )
+            staged: list[Path] = []
+
+            monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
+            monkeypatch.setattr(
+                runner,
+                "load_evals_config",
+                lambda _path: ({"harbor": {"task_source": "evals_json"}}, None),
+            )
+            monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
+
+            def emit(_skill, target, **_kwargs):
+                staged.append(target)
+                return []
+
+            monkeypatch.setattr(runner, "generate_harbor_tasks", emit)
+
+            result = runner.run_harbor_eval(
+                skill,
+                ["opencode"],
+                output_dir=tmp_path / "results",
+                env_mode="docker",
+                agent_runtime_preflight=False,
+            )
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+    rendered = json.dumps(result)
+    assert result.get("error")
+    assert "HTTP 401" in rendered
+    assert secret not in rendered
+    assert staged == []
+    assert requests == ["/v1/models"]
+    assert not (tmp_path / "results").exists()

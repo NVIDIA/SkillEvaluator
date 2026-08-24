@@ -4,6 +4,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Tier 3 accuracy and custom goal judges now retry one malformed (including
+  empty) or schema-invalid response with a 4096-token output budget before
+  failing closed, preventing a transient formatting error from making an otherwise
+  successful trial and its full comparison arm unscoreable. Generated and
+  injected Harbor verifier configs now reserve 600 seconds for six sequential
+  direct provider attempts plus fail-closed artifact writes. Explicit native
+  task timeouts remain owner-controlled and are not rewritten
+  ([#70](https://github.com/NVIDIA/SkillEvaluator/issues/70)).
+
 ## 0.2.1 - 2026-08-24
 
 ### Added

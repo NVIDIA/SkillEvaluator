@@ -432,6 +432,8 @@ def test_template_behavior_judge_matches_eval_core(monkeypatch, responses):
 
 def test_template_behavior_judge_max_tokens_matches_eval_core_constant():
     assert eval_template.BEHAVIOR_JUDGE_MAX_TOKENS == llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS
+    assert eval_template.BEHAVIOR_JUDGE_MAX_TOKENS == eval_template.STRUCTURED_JUDGE_MAX_TOKENS
+    assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS == llm_judge.STRUCTURED_JUDGE_MAX_TOKENS
     assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS >= 4096
 
 

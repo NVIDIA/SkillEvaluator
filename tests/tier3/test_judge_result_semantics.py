@@ -10,6 +10,7 @@ import json
 import math
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -25,6 +26,18 @@ _CRITERIA = {
     "TASK_ADDRESSED": True,
     "ACTIONABLE": False,
 }
+VALID_ACCURACY_RESPONSE = json.dumps(
+    {"criteria": _CRITERIA, "score": 0.6, "reason": "valid retry"}
+)
+VALID_GOAL_RESPONSE = json.dumps(
+    {
+        "user_goal": "complete the task",
+        "end_state": "task completed",
+        "achieved": True,
+        "score": 1.0,
+        "reason": "valid retry",
+    }
+)
 
 
 def _load_template_module() -> ModuleType:
@@ -51,11 +64,265 @@ def _pair_script(responses: list[tuple[str | None, str | None]], calls: list[str
     return fake_call
 
 
+def _recorded_pair_script(
+    responses: list[tuple[str | None, str | None]],
+    calls: list[dict[str, Any]],
+):
+    def fake_call(prompt: str, **kwargs: Any):
+        calls.append({"prompt": prompt, "kwargs": kwargs})
+        return responses[min(len(calls) - 1, len(responses) - 1)]
+
+    return fake_call
+
+
+def _patch_goal_script(
+    module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[tuple[str | None, str | None, dict[str, str]]],
+    calls: list[dict[str, Any]],
+) -> None:
+    def fake_call(prompt: str, **kwargs: Any):
+        calls.append({"prompt": prompt, "kwargs": kwargs})
+        content, error, provenance = responses[min(len(calls) - 1, len(responses) - 1)]
+        if module is llm_judge:
+            return content, error
+        return content, error, provenance
+
+    if module is llm_judge:
+        monkeypatch.setattr(module, "call_public_llm", fake_call)
+    else:
+        monkeypatch.setattr(module, "_ragas_goal_accuracy_enabled", lambda: False)
+        monkeypatch.setattr(module, "_call_public_llm_with_provenance", fake_call)
+
+
 def _assert_error_result(result: dict) -> None:
     assert result["score"] is None
     assert result["status"] == "error"
     assert isinstance(result["reason"], str)
     assert 0 < len(result["reason"]) <= 512
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        pytest.param("not-json", id="malformed"),
+        pytest.param(
+            json.dumps({"criteria": {**_CRITERIA, "ACTIONABLE": "true"}, "score": 0.6}),
+            id="schema-invalid",
+        ),
+    ],
+)
+def test_accuracy_retries_invalid_response_once_and_recovers(
+    judge_module,
+    monkeypatch,
+    invalid: str,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _recorded_pair_script([(invalid, None), (VALID_ACCURACY_RESPONSE, None)], calls),
+    )
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert result["score"] == 0.6
+    assert result["criteria"] == _CRITERIA
+    assert [call["kwargs"]["max_tokens"] for call in calls] == [4096, 4096]
+    assert "previous reply could not be parsed or validated" in calls[1]["prompt"]
+
+
+def test_accuracy_invalid_twice_errors_after_exactly_one_retry(judge_module, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _recorded_pair_script([("not-json", None), ("still-not-json", None)], calls),
+    )
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 2
+    _assert_error_result(result)
+    assert "after retry" in result["reason"]
+    assert "not-json" not in result["reason"]
+
+
+def test_accuracy_initial_provider_error_does_not_retry(judge_module, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _recorded_pair_script([(None, "provider unavailable")], calls),
+    )
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 1
+    _assert_error_result(result)
+    assert result["reason"].startswith("LLM judge error:")
+
+
+def test_accuracy_retry_provider_error_is_bounded_and_redacted(judge_module, monkeypatch) -> None:
+    credential = "dummy-accuracy-retry-secret-DO-NOT-RETAIN"
+    monkeypatch.setenv("OPENAI_API_KEY", credential)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _recorded_pair_script(
+            [
+                ("not-json", None),
+                (None, f"retry failed with {credential} " + ("x" * 1000)),
+            ],
+            calls,
+        ),
+    )
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 2
+    _assert_error_result(result)
+    assert result["reason"].startswith("LLM judge retry error:")
+    assert credential not in result["reason"]
+    assert "[REDACTED]" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        pytest.param("not-json", id="malformed"),
+        pytest.param('{"achieved": "true", "score": 1.0}', id="schema-invalid"),
+    ],
+)
+def test_goal_retries_invalid_response_once_and_recovers(
+    judge_module,
+    monkeypatch,
+    invalid: str,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    _patch_goal_script(
+        judge_module,
+        monkeypatch,
+        [
+            (invalid, None, {"provider": "first-provider", "model": "first-model"}),
+            (
+                VALID_GOAL_RESPONSE,
+                None,
+                {"provider": "retry-provider", "model": "retry-model"},
+            ),
+        ],
+        calls,
+    )
+
+    result = judge_module.judge_goal_accuracy("question", "ground truth", "agent response")
+
+    assert result["score"] == 1.0
+    assert result["user_goal"] == "complete the task"
+    assert [call["kwargs"]["max_tokens"] for call in calls] == [4096, 4096]
+    assert "previous reply could not be parsed or validated" in calls[1]["prompt"]
+    if judge_module is eval_template:
+        assert result["provider"] == "retry-provider"
+        assert result["model"] == "retry-model"
+
+
+def test_goal_invalid_twice_errors_after_exactly_one_retry(judge_module, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    _patch_goal_script(
+        judge_module,
+        monkeypatch,
+        [
+            ("not-json", None, {"provider": "first-provider", "model": "first-model"}),
+            ("still-not-json", None, {"provider": "retry-provider", "model": "retry-model"}),
+        ],
+        calls,
+    )
+
+    result = judge_module.judge_goal_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 2
+    _assert_error_result(result)
+    assert "after retry" in result["reason"]
+    assert "not-json" not in result["reason"]
+    if judge_module is eval_template:
+        assert result["provider"] == "retry-provider"
+        assert result["model"] == "retry-model"
+
+
+def test_goal_initial_provider_error_does_not_retry(judge_module, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    _patch_goal_script(
+        judge_module,
+        monkeypatch,
+        [(None, "provider unavailable", {"provider": "first-provider", "model": "first-model"})],
+        calls,
+    )
+
+    result = judge_module.judge_goal_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 1
+    _assert_error_result(result)
+    assert result["reason"].startswith("LLM judge error:")
+
+
+def test_goal_retry_provider_error_is_bounded_redacted_and_uses_retry_provenance(
+    judge_module,
+    monkeypatch,
+) -> None:
+    credential = "dummy-goal-retry-secret-DO-NOT-RETAIN"
+    monkeypatch.setenv("OPENAI_API_KEY", credential)
+    calls: list[dict[str, Any]] = []
+    _patch_goal_script(
+        judge_module,
+        monkeypatch,
+        [
+            ("not-json", None, {"provider": "first-provider", "model": "first-model"}),
+            (
+                None,
+                f"retry failed with {credential} " + ("x" * 1000),
+                {"provider": "retry-provider", "model": "retry-model"},
+            ),
+        ],
+        calls,
+    )
+
+    result = judge_module.judge_goal_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 2
+    _assert_error_result(result)
+    assert result["reason"].startswith("LLM judge retry error:")
+    assert credential not in result["reason"]
+    assert "[REDACTED]" in result["reason"]
+    if judge_module is eval_template:
+        assert result["provider"] == "retry-provider"
+        assert result["model"] == "retry-model"
+
+
+@pytest.mark.parametrize(
+    ("judge_name", "response"),
+    [
+        pytest.param("judge_accuracy", VALID_ACCURACY_RESPONSE, id="accuracy"),
+        pytest.param("judge_goal_accuracy", VALID_GOAL_RESPONSE, id="goal-accuracy"),
+    ],
+)
+def test_shared_structured_judge_keeps_explicit_max_tokens_override(
+    monkeypatch,
+    judge_name: str,
+    response: str,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        llm_judge,
+        "call_public_llm",
+        _recorded_pair_script([(response, None)], calls),
+    )
+
+    judge = getattr(llm_judge, judge_name)
+    result = judge("question", "ground truth", "agent response", max_tokens=2048)
+
+    assert result["score"] is not None
+    assert len(calls) == 1
+    assert calls[0]["kwargs"] == {"max_tokens": 2048}
 
 
 def test_judge_error_reserved_fields_cannot_be_overridden(judge_module) -> None:

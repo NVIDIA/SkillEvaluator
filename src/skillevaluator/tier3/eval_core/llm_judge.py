@@ -17,6 +17,7 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
+from skillevaluator.inference.types import EmptyLLMResponseError
 from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
 
 logger = logging.getLogger(__name__)
@@ -237,6 +238,8 @@ def call_public_llm(
             temperature=temperature,
         )
         return client.completions("You are a precise evaluation judge.", prompt), None
+    except EmptyLLMResponseError:
+        return "", None
     except Exception as exc:
         detail = f"Public provider call failed: {exc}"
         return None, _redact_configured_credentials(detail, (api_key,))
@@ -562,6 +565,44 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
             return []
 
 
+STRUCTURED_JUDGE_MAX_TOKENS = 4096
+
+_JUDGE_RETRY_REMINDER = (
+    "\n\nIMPORTANT: Your previous reply could not be parsed or validated. Respond with ONLY the "
+    "minified JSON object on a single line -- no markdown fences, no prose, and keep explanations brief."
+)
+
+
+def _call_validated_json_judge(
+    prompt: str,
+    validate: Any,
+    call: Any,
+    extract: Any,
+    **call_kwargs: Any,
+) -> tuple[Any, str | None, dict[str, Any]]:
+    call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
+
+    def invoke(call_prompt: str) -> tuple[Any, str | None, dict[str, Any], str | None]:
+        content, error, *metadata = call(call_prompt, **call_kwargs)
+        provenance = metadata[0] if metadata and isinstance(metadata[0], dict) else {}
+        parsed = extract(content) if content else None
+        validation_error = validate(parsed) if not error else None
+        return parsed, error, provenance, validation_error
+
+    parsed, error, provenance, validation_error = invoke(prompt)
+    if error:
+        return None, f"LLM judge error: {error}", provenance
+    if validation_error is None:
+        return parsed, None, provenance
+
+    parsed, error, provenance, validation_error = invoke(prompt + _JUDGE_RETRY_REMINDER)
+    if error:
+        return None, f"LLM judge retry error: {error}", provenance
+    if validation_error is not None:
+        return None, f"{validation_error} after retry", provenance
+    return parsed, None, provenance
+
+
 # ---------------------------------------------------------------------------
 # Accuracy judge (5-criterion)
 # ---------------------------------------------------------------------------
@@ -612,6 +653,18 @@ def _valid_accuracy_criteria(value: Any) -> bool:
     )
 
 
+def _accuracy_payload_error(parsed: Any) -> str | None:
+    if not isinstance(parsed, dict):
+        return "Judge response was not a valid JSON object"
+    criteria = parsed.get("criteria")
+    criteria_valid = _valid_accuracy_criteria(criteria)
+    if "criteria" in parsed and not criteria_valid:
+        return "Judge response contained invalid accuracy criteria"
+    if _finite_score(parsed.get("score")) is None and not criteria_valid:
+        return "Judge response contained no valid accuracy score or complete criteria"
+    return None
+
+
 def judge_accuracy(
     question: str,
     ground_truth: str,
@@ -628,23 +681,23 @@ def judge_accuracy(
         agent_text=agent_text,
     )
 
-    content, error = call_public_llm(prompt, **kwargs)
+    parsed, error, _provenance = _call_validated_json_judge(
+        prompt,
+        _accuracy_payload_error,
+        call_public_llm,
+        _extract_json,
+        **kwargs,
+    )
     if error:
-        return _judge_error(f"LLM judge error: {error}")
+        return _judge_error(error)
 
-    parsed = _extract_json(content) if content else None
-    if not isinstance(parsed, dict):
-        return _judge_error("Judge response was not a valid JSON object")
-
+    assert isinstance(parsed, dict)
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
-    if "criteria" in parsed and not criteria_valid:
-        return _judge_error("Judge response contained invalid accuracy criteria")
 
     score = _finite_score(parsed.get("score"))
     if score is None:
-        if not criteria_valid:
-            return _judge_error("Judge response contained no valid accuracy score or complete criteria")
+        assert criteria_valid
         yes_count = sum(1 for v in criteria.values() if v is True)
         score = yes_count / 5.0
 
@@ -685,6 +738,16 @@ Respond with ONLY a JSON object:
 "achieved": true/false, "score": 1.0 or 0.0, "reason": "<brief explanation>"}}"""
 
 
+def _goal_payload_error(parsed: Any) -> str | None:
+    if not isinstance(parsed, dict):
+        return "Judge response was not a valid JSON object"
+    if not isinstance(parsed.get("achieved"), bool):
+        return "Judge response contained an invalid achieved value"
+    if "score" in parsed and _finite_score(parsed["score"]) is None:
+        return "Judge response contained an invalid goal score"
+    return None
+
+
 def judge_goal_accuracy(
     question: str,
     ground_truth: str,
@@ -703,23 +766,24 @@ def judge_goal_accuracy(
         agent_text=agent_text,
     )
 
-    content, error = call_public_llm(prompt, **kwargs)
+    parsed, error, _provenance = _call_validated_json_judge(
+        prompt,
+        _goal_payload_error,
+        call_public_llm,
+        _extract_json,
+        **kwargs,
+    )
     if error:
-        return _judge_error(f"LLM judge error: {error}")
+        return _judge_error(error)
 
-    parsed = _extract_json(content) if content else None
-    if not isinstance(parsed, dict):
-        return _judge_error("Judge response was not a valid JSON object")
-
+    assert isinstance(parsed, dict)
     achieved = parsed.get("achieved")
-    if not isinstance(achieved, bool):
-        return _judge_error("Judge response contained an invalid achieved value")
+    assert isinstance(achieved, bool)
 
     score = 1.0 if achieved else 0.0
     if "score" in parsed:
         score = _finite_score(parsed["score"])
-        if score is None:
-            return _judge_error("Judge response contained an invalid goal score")
+        assert score is not None
 
     return {
         "score": score,
@@ -768,7 +832,7 @@ def _compact_behavior_conversation(conversation_text: str, limit: int = 8000) ->
 # reasoning tokens before emitting the per-behavior results array; the old 1024
 # cap was observed live to truncate behavior_check output to EMPTY content
 # (finish_reason="length", reasoning_tokens=1024).
-BEHAVIOR_JUDGE_MAX_TOKENS = 4096
+BEHAVIOR_JUDGE_MAX_TOKENS = STRUCTURED_JUDGE_MAX_TOKENS
 
 _BEHAVIOR_RETRY_REMINDER = (
     "\n\nIMPORTANT: Your previous reply could not be parsed. Respond with ONLY the "

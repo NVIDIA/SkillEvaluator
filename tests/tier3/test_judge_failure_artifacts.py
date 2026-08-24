@@ -193,6 +193,122 @@ def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
     assert overall_score(numeric) == 0.5
 
 
+def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier(tmp_path)
+    monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: False)
+    pair_calls: list[tuple[str, dict]] = []
+    goal_calls: list[tuple[str, dict]] = []
+    pair_responses = [
+        ("not-json", None),
+        (
+            json.dumps(
+                {
+                    "criteria": {
+                        "SKILL_IDENTIFIED": True,
+                        "ACTION_CORRECT": True,
+                        "FACTUALLY_ACCURATE": True,
+                        "TASK_ADDRESSED": True,
+                        "ACTIONABLE": True,
+                    },
+                    "score": 1.0,
+                    "reason": "accuracy recovered",
+                }
+            ),
+            None,
+        ),
+        (json.dumps({"results": [{"step": 1, "passed": True}], "score": 1.0}), None),
+    ]
+    goal_responses = [
+        ("not-json", None, {"provider": "nv_build", "model": "first-model"}),
+        (
+            json.dumps({"achieved": True, "score": 1.0, "reason": "goal recovered"}),
+            None,
+            {"provider": "nv_build", "model": "retry-model"},
+        ),
+    ]
+
+    def pair_call(prompt: str, **kwargs):
+        pair_calls.append((prompt, kwargs))
+        return pair_responses[len(pair_calls) - 1]
+
+    def goal_call(prompt: str, **kwargs):
+        goal_calls.append((prompt, kwargs))
+        return goal_responses[len(goal_calls) - 1]
+
+    monkeypatch.setattr(verifier, "call_public_llm", pair_call)
+    monkeypatch.setattr(verifier, "_call_public_llm_with_provenance", goal_call)
+
+    verifier.main()
+
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
+    assert "evaluation_status" not in rich
+    assert "evaluation_errors" not in rich
+    assert rich["details"]["accuracy"]["score"] == 1.0
+    assert rich["details"]["goal_accuracy"]["score"] == 1.0
+    assert rich["details"]["goal_accuracy"]["model"] == "retry-model"
+    assert numeric["accuracy"] == numeric["goal_accuracy"] == numeric["behavior_check"] == 1.0
+    assert [kwargs["max_tokens"] for _, kwargs in pair_calls] == [4096, 4096, 4096]
+    assert [kwargs["max_tokens"] for _, kwargs in goal_calls] == [4096, 4096]
+    assert "previous reply could not be parsed or validated" in pair_calls[1][0]
+    assert "previous reply could not be parsed or validated" in goal_calls[1][0]
+
+
+def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier(tmp_path)
+    credential = "dummy-verifier-retry-secret-DO-NOT-RETAIN"
+    monkeypatch.setenv("NVIDIA_API_KEY", credential)
+    monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: False)
+    pair_calls: list[tuple[str, dict]] = []
+    pair_responses = [
+        (f"not-json containing {credential}", None),
+        (f"still-not-json containing {credential}", None),
+        (json.dumps({"results": [{"step": 1, "passed": True}], "score": 1.0}), None),
+    ]
+    goal_calls: list[tuple[str, dict]] = []
+
+    def pair_call(prompt: str, **kwargs):
+        pair_calls.append((prompt, kwargs))
+        return pair_responses[len(pair_calls) - 1]
+
+    def goal_call(prompt: str, **kwargs):
+        goal_calls.append((prompt, kwargs))
+        return (
+            json.dumps({"achieved": True, "score": 1.0, "reason": "goal valid"}),
+            None,
+            {"provider": "nv_build", "model": "goal-model"},
+        )
+
+    monkeypatch.setattr(verifier, "call_public_llm", pair_call)
+    monkeypatch.setattr(verifier, "_call_public_llm_with_provenance", goal_call)
+
+    with pytest.raises(SystemExit) as exc_info:
+        verifier.main()
+
+    assert exc_info.value.code == 1
+    assert len(pair_calls) == 3
+    accuracy_attempts = [call for call in pair_calls if "SKILL_IDENTIFIED" in call[0]]
+    assert len(accuracy_attempts) == 2
+    assert [kwargs["max_tokens"] for _, kwargs in accuracy_attempts] == [4096, 4096]
+    assert len(goal_calls) == 1
+    assert "previous reply could not be parsed or validated" in pair_calls[1][0]
+    assert "previous reply could not be parsed or validated" not in pair_calls[2][0]
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
+    assert rich["evaluation_status"] == "failed"
+    assert rich["accuracy"] is None
+    assert rich["details"]["accuracy"]["status"] == "error"
+    assert len(rich["evaluation_errors"]["accuracy"]) <= 512
+    assert credential not in json.dumps(rich)
+    assert "accuracy" not in numeric
+
+
 def test_verifier_main_keeps_documented_neutral_judge_skips_scoreable(
     tmp_path: Path,
 ) -> None:

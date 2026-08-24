@@ -122,12 +122,23 @@ def test_collect_persists_target_invocation_for_both_single_step_variants(tmp_pa
     jobs_dir = tmp_path / "jobs"
     for variant, observed_skill in (("with", "demo"), ("without", "unrelated")):
         trial_name = f"case-{variant}_attempt001"
-        _write_trial(
+        trial_dir = _write_trial(
             jobs_dir,
             variant=variant,
             trial_name=trial_name,
             reward=dict(STANDARD_REWARD),
             trajectory=_trajectory(skill=observed_skill),
+        )
+        (trial_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "trial_name": trial_name,
+                    "task_name": f"case-{variant}",
+                    "verifier_result": {"rewards": dict(STANDARD_REWARD)},
+                    "step_results": None,
+                }
+            ),
+            encoding="utf-8",
         )
         _write_job_result(jobs_dir / f"demo-opencode-{variant}", [trial_name])
 
@@ -145,7 +156,7 @@ def test_collect_persists_target_invocation_for_both_single_step_variants(tmp_pa
     assert result["agents"]["opencode"]["without_skill"]["skill_execution"] == 0.4
     for variant, trial_name in (("with-skill", "case-with_attempt001"), ("without-skill", "case-without_attempt001")):
         trial_dir = tmp_path / "results" / "opencode" / variant / "trials" / trial_name
-        assert {path.name for path in trial_dir.iterdir()} == {"reward.json", "trajectory.json"}
+        assert {path.name for path in trial_dir.iterdir()} == {"result.json", "reward.json", "trajectory.json"}
 
 
 def test_collect_redacts_successful_standard_reward_without_diagnostic_truncation(tmp_path: Path) -> None:
@@ -309,8 +320,8 @@ def test_collect_derives_authoritative_multistep_invocation_for_both_variants(
 
 @pytest.mark.parametrize(
     "trial_result",
-    [None, "{not-json", "{}"],
-    ids=("missing-result", "malformed-result", "no-step-results"),
+    [None, "{not-json", "{}", '{"step_results": null}'],
+    ids=("missing-result", "malformed-result", "no-step-results", "null-with-steps-layout"),
 )
 def test_collect_does_not_certify_root_non_invocation_when_step_layout_is_ambiguous(
     tmp_path: Path,
@@ -337,6 +348,41 @@ def test_collect_does_not_certify_root_non_invocation_when_step_layout_is_ambigu
     persisted = _persisted_reward(tmp_path, "with", trial_name)
     assert "skill_invoked" not in persisted
     assert "invocation_evidence_source" not in persisted
+
+
+def test_collect_rejects_null_step_results_with_a_physical_steps_layout(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "null-with-steps_attempt001"
+    trial_dir = _write_trial(
+        jobs_dir,
+        variant="with",
+        trial_name=trial_name,
+        reward=dict(STANDARD_REWARD),
+        trajectory=_trajectory(skill="demo"),
+    )
+    step_agent_dir = trial_dir / "steps" / "unexpected" / "agent"
+    step_agent_dir.mkdir(parents=True)
+    (step_agent_dir / "trajectory.json").write_text(json.dumps(_trajectory(skill="demo")), encoding="utf-8")
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "null-with-steps",
+                "verifier_result": {"rewards": dict(STANDARD_REWARD)},
+                "step_results": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_job_result(jobs_dir / "demo-opencode-with", [trial_name])
+
+    result = _collect(tmp_path)
+
+    condition = result["agents"]["opencode"]["conditions"]["with_skill"]
+    assert result["execution_status"] == "failed"
+    assert condition["execution_status"] == "failed"
+    assert condition["scored_attempts"] == 0
+    assert "constituent" in " ".join(condition["execution_errors"]).casefold()
 
 
 def test_collect_replaces_spoofed_standard_evidence_and_leaves_unreadable_unknown(tmp_path: Path) -> None:

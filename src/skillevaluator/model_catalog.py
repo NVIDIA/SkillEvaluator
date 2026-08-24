@@ -342,7 +342,7 @@ class CatalogModel:
 
 
 def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -> tuple[ModelRecord, ...]:
-    """Fetch and normalize the selected provider's authenticated ``/models`` catalog."""
+    """Fetch and normalize the selected provider's ``/models`` catalog."""
     _validate_timeout(timeout_seconds)
     url, headers = _request_settings(config)
     records: list[ModelRecord] = []

@@ -129,6 +129,14 @@ def credential_probe_disposition(
 ) -> CredentialProbeDisposition:
     """Classify a live catalog probe without rejecting compatible custom gateways."""
     if probe.ok:
+        provider_name = provider.provider.casefold()
+        if provider_name == "bedrock":
+            # A successful AWS catalog request was signed and authenticated.
+            return CredentialProbeDisposition.VERIFIED
+        if provider_name == "nv_build" or not _is_native_catalog_endpoint(provider):
+            # NVIDIA Build and compatible gateways may expose a public catalog,
+            # so listing a model does not prove that inference credentials work.
+            return CredentialProbeDisposition.DEGRADED
         return CredentialProbeDisposition.VERIFIED
 
     raw_kind = getattr(probe, "failure_kind", None)
@@ -395,6 +403,8 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
             "UnrecognizedClientException",
         }:
             failure_kind = ModelCatalogFailureKind.AUTHENTICATION
+        elif error_code == "RequestExpired":
+            failure_kind = ModelCatalogFailureKind.INVALID_CONFIGURATION
         elif error_code in {"AccessDenied", "AccessDeniedException"}:
             failure_kind = ModelCatalogFailureKind.AUTHORIZATION
         elif error_code in {"ServiceUnavailable", "ServiceUnavailableException", "ThrottlingException"} or (
@@ -522,10 +532,24 @@ def _probe_bedrock_model_with_deadline(
 
 
 def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> ModelProbeResult:
-    """Verify that the selected provider catalog lists the requested model."""
+    """Check the selected model against the provider catalog within one deadline."""
     if provider.provider == "bedrock":
         return _probe_bedrock_model_with_deadline(provider, timeout_seconds=timeout_seconds)
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "model catalog timeout must be a positive number",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
 
+    deadline = monotonic() + timeout_seconds
     try:
         records = fetch_model_records(provider, timeout_seconds=timeout_seconds)
     except ModelCatalogError as exc:
@@ -540,11 +564,20 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
     available = {record.id for record in records}
     if provider.model not in available:
         if provider.provider == "anthropic" and _is_native_catalog_endpoint(provider):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return ModelProbeResult(
+                    False,
+                    provider.provider,
+                    provider.model,
+                    "model catalog request timed out",
+                    failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+                )
             try:
                 resolved = fetch_anthropic_model_record(
                     provider,
                     provider.model,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=remaining,
                 )
             except ModelCatalogError as exc:
                 if exc.http_status == 404:

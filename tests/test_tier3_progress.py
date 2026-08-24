@@ -612,11 +612,14 @@ def _stub_runner(
     (skill / "evals").mkdir(parents=True)
     evals_file = skill / "evals" / "evals.json"
     evals_file.write_text("{}", encoding="utf-8")
+    resolved_base_url = provider_base_url
+    if resolved_base_url is None and provider_name == "openai":
+        resolved_base_url = "https://api.openai.com/v1"
     provider = SimpleNamespace(
         provider=provider_name,
         model=provider_model,
         api_key="exact-provider-secret",
-        base_url=provider_base_url,
+        base_url=resolved_base_url,
     )
 
     def emit_tasks(_skill, output, **_kwargs):
@@ -1818,7 +1821,13 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     def fail_staging(*_args, **_kwargs):
         raise ValueError("invalid task")
 
-    runner, skill = _stub_runner(monkeypatch, tmp_path, task_emitter=fail_staging)
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        task_emitter=fail_staging,
+        provider_name="openai-compatible",
+        provider_base_url="https://gateway.example/v1",
+    )
 
     result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
 
@@ -1827,6 +1836,20 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     assert not (run_dir / "_harbor-jobs").exists()
     assert not (run_dir / "_harbor-tasks").exists()
     assert result["harbor_jobs_retained"] is False
+    assert result["run_config"]["credential_validation"]["status"] == "degraded"
+    assert result["run_config"]["credential_validation"]["targets"] == [
+        {
+            "labels": ["codex", "standard grader"],
+            "provider": "openai-compatible",
+            "model": "gpt-5",
+            "status": "degraded",
+            "detail": "model catalog access does not verify runtime credentials for this endpoint",
+        }
+    ]
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+    assert persisted["run_config"] == result["run_config"]
+    run_config_path = run_dir / "run_config.json"
+    assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]
 
 
 @pytest.mark.parametrize("failure_arm", ["with-skill", "baseline"])
@@ -1989,7 +2012,12 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(
         runner,
         "resolve_llm_provider",
-        lambda: SimpleNamespace(provider="openai", model="gpt-5", api_key="sk-test-secret", base_url=None),
+        lambda: SimpleNamespace(
+            provider="openai",
+            model="gpt-5",
+            api_key="sk-test-secret",
+            base_url="https://api.openai.com/v1",
+        ),
     )
     monkeypatch.setattr(
         runner,

@@ -529,7 +529,9 @@ def test_doctor_verify_models_help_describes_live_catalog_probe(args: list[str])
 
     assert result.exit_code == 0
     assert "--verify-models" in result.output
-    assert "live authenticated provider catalog" in " ".join(result.output.split()).lower()
+    normalized_output = " ".join(result.output.split()).lower()
+    assert "catalog reachability" in normalized_output
+    assert "authenticated" not in normalized_output
 
 
 def test_removed_benchmark_authoring_command_is_unavailable() -> None:

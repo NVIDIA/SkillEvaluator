@@ -20,6 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
+from skillevaluator.model_catalog import ModelCatalogFailureKind
 from skillevaluator.provider_config import ProviderConfig, resolve_llm_provider
 from skillevaluator.tier3 import commands as tier3_commands
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
@@ -484,7 +485,7 @@ def test_doctor_build_codex_ignores_native_pair_and_accepts_build_model(monkeypa
     assert "pass" in result.output
 
 
-def test_doctor_verify_models_probes_the_resolved_agent_provider(monkeypatch) -> None:
+def test_doctor_verify_models_warns_when_catalog_success_does_not_verify_credentials(monkeypatch) -> None:
     from skillevaluator.tier3.harbor import runtime_preflight
 
     provider = ProviderConfig(
@@ -512,10 +513,58 @@ def test_doctor_verify_models_probes_the_resolved_agent_provider(monkeypatch) ->
     )
 
     assert result.exit_code == 0
+    assert "warn" in result.output
+    assert "does not verify runtime credentials" in " ".join(result.output.split()).lower()
     probe.assert_called_once()
     probed_provider = probe.call_args.args[0]
     assert probed_provider.provider == "nv_build"
     assert probed_provider.model == "meta/llama-3.1-8b-instruct"
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "http_status", "expected_status", "expected_exit_code"),
+    [
+        (ModelCatalogFailureKind.AUTHORIZATION, 403, "warn", 0),
+        (ModelCatalogFailureKind.AUTHENTICATION, 401, "fail", 1),
+    ],
+)
+def test_doctor_verify_models_uses_probe_disposition_for_catalog_failures(
+    monkeypatch,
+    failure_kind: ModelCatalogFailureKind,
+    http_status: int,
+    expected_status: str,
+    expected_exit_code: int,
+) -> None:
+    from skillevaluator.tier3.harbor import runtime_preflight
+
+    provider = ProviderConfig(
+        provider="openai",
+        model="gpt-test",
+        api_key="openai-key",
+        base_url="https://api.openai.com/v1",
+        litellm_model="openai/gpt-test",
+    )
+    probe = Mock(
+        return_value=ModelProbeResult(
+            False,
+            "openai",
+            "gpt-test",
+            f"model catalog returned HTTP {http_status}",
+            failure_kind=failure_kind,
+            http_status=http_status,
+        )
+    )
+    monkeypatch.setattr(tier3_commands, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(tier3_commands, "_check_prerequisites", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime_preflight, "probe_model", probe)
+
+    result = CliRunner().invoke(
+        cli,
+        ["doctor", "--agents", "codex", "--env-mode", "docker", "--verify-models"],
+    )
+
+    assert result.exit_code == expected_exit_code
+    assert expected_status in result.output
 
 
 def test_doctor_reports_missing_independent_cross_provider_credential(monkeypatch) -> None:

@@ -2075,6 +2075,8 @@ def _run_harbor_eval_impl(
 
         safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
         disposition = credential_probe_disposition(selected_provider, probe)
+        if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
+            safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
         credential_validation_targets.append(
             {
                 "labels": list(selected_labels),
@@ -2119,6 +2121,27 @@ def _run_harbor_eval_impl(
                 detail="credentials and selected models verified",
             )
         )
+    run_config = {
+        "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
+        "harbor": {
+            "environment": {"value": env_mode, "source": env_mode_source},
+            "n_attempts": n_attempts,
+            "stop_on_pass": bool(stop_on_pass),
+            "n_concurrent": n_concurrent,
+            "timeout_multiplier": timeout_multiplier,
+            "base_image_mode": base_image_mode,
+            "jobs_retained": keep_harbor_jobs,
+        },
+        "provider": {"name": provider.provider, "model": provider.model},
+        "judge": judge_config,
+        "credential_validation": {
+            "status": "degraded" if probe_degraded else "verified",
+            "targets": credential_validation_targets,
+        },
+        "task_source": task_source,
+        "grading": {"mode": grading_mode},
+        "agents": model_resolution,
+    }
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
@@ -2178,6 +2201,29 @@ def _run_harbor_eval_impl(
                 ),
             )
         )
+
+    def _persist_pre_execution_failure(errors: list[str]) -> dict[str, Any]:
+        """Retain redacted probe provenance for failures after run reservation."""
+        failed_result: dict[str, Any] = {
+            "skill_name": skill_path.name,
+            "execution_status": "failed",
+            "execution_errors": errors,
+            "error": errors,
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "harbor_jobs_dir": str(jobs_dir),
+            "harbor_jobs_retained": jobs_dir.is_dir(),
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+            "result_path": str(result_path),
+            "agents": {},
+            "run_config": run_config,
+        }
+        write_output_file_atomically(
+            run_dir / "run_config.json",
+            json.dumps(run_config, indent=2).encode("utf-8"),
+        )
+        write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
+        return failed_result
 
     reservation_identity: tuple[int, int] | None = None
     try:
@@ -2304,7 +2350,7 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="skipped", detail="baseline disabled"))
     except (OSError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
-        return {"error": [str(exc)], "run_dir": str(run_dir)}
+        return _persist_pre_execution_failure([str(exc)])
 
     task_names = expected_task_names or []
     expected_trials = len(task_names) * n_attempts
@@ -2372,20 +2418,7 @@ def _run_harbor_eval_impl(
         if preflight_errors:
             detail = "; ".join(preflight_errors)
             reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="failed", detail=detail))
-            failed_result: dict[str, Any] = {
-                "skill_name": skill_path.name,
-                "execution_status": "failed",
-                "execution_errors": preflight_errors,
-                "error": preflight_errors,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "harbor_jobs_dir": str(jobs_dir),
-                "harbor_jobs_retained": True,
-                "duration_seconds": round(time.monotonic() - started_at, 3),
-                "result_path": str(result_path),
-                "agents": {},
-            }
-            write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
+            failed_result = _persist_pre_execution_failure(preflight_errors)
             _emit_run_finished("failed", "agent runtime preflight failed")
             return failed_result
         reporter.emit(
@@ -2503,27 +2536,6 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
-    run_config = {
-        "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
-        "harbor": {
-            "environment": {"value": env_mode, "source": env_mode_source},
-            "n_attempts": n_attempts,
-            "stop_on_pass": bool(stop_on_pass),
-            "n_concurrent": n_concurrent,
-            "timeout_multiplier": timeout_multiplier,
-            "base_image_mode": base_image_mode,
-            "jobs_retained": keep_harbor_jobs,
-        },
-        "provider": {"name": provider.provider, "model": provider.model},
-        "judge": judge_config,
-        "credential_validation": {
-            "status": "degraded" if probe_degraded else "verified",
-            "targets": credential_validation_targets,
-        },
-        "task_source": task_source,
-        "grading": {"mode": grading_mode},
-        "agents": model_resolution,
-    }
     dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
     results.update(
         {

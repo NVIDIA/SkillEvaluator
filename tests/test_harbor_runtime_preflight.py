@@ -678,7 +678,88 @@ def test_anthropic_model_probe_resolves_alias_omitted_from_listing(monkeypatch) 
     assert result.ok is True
     assert result.model == "claude-stable-alias"
     assert "claude-canonical-20260824" in result.detail
-    assert captured == {"provider": provider, "model_id": "claude-stable-alias", "timeout_seconds": 4.5}
+    assert captured["provider"] == provider
+    assert captured["model_id"] == "claude-stable-alias"
+    assert 0 < float(captured["timeout_seconds"]) <= 4.5
+
+
+def test_anthropic_alias_lookup_uses_remaining_catalog_probe_deadline(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    clock = iter((100.0, 100.06))
+    monkeypatch.setattr(runtime_preflight, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: (ModelRecord("claude-canonical-20260824"),),
+    )
+
+    def resolve_alias(provider, model_id, *, timeout_seconds):
+        captured.update(provider=provider, model_id=model_id, timeout_seconds=timeout_seconds)
+        return ModelRecord("claude-canonical-20260824")
+
+    monkeypatch.setattr(runtime_preflight, "fetch_anthropic_model_record", resolve_alias)
+    provider = ProviderConfig(
+        provider="anthropic",
+        model="claude-stable-alias",
+        api_key="secret-key",
+        base_url=None,
+        litellm_model="anthropic/claude-stable-alias",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=0.1)
+
+    assert result.ok is True
+    assert captured["timeout_seconds"] == pytest.approx(0.04)
+
+
+def test_anthropic_alias_lookup_stops_when_catalog_probe_deadline_is_exhausted(monkeypatch) -> None:
+    clock = iter((100.0, 100.1))
+    monkeypatch.setattr(runtime_preflight, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: (ModelRecord("claude-canonical-20260824"),),
+    )
+    monkeypatch.setattr(
+        runtime_preflight,
+        "fetch_anthropic_model_record",
+        lambda *_args, **_kwargs: pytest.fail("alias lookup must not start after the shared deadline"),
+    )
+    provider = ProviderConfig(
+        provider="anthropic",
+        model="claude-stable-alias",
+        api_key="secret-key",
+        base_url=None,
+        litellm_model="anthropic/claude-stable-alias",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=0.1)
+
+    assert result.ok is False
+    assert result.failure_kind == "unavailable"
+    assert "timed out" in result.detail
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, True, float("nan")])
+def test_http_catalog_probe_rejects_invalid_shared_deadline(monkeypatch, timeout_seconds) -> None:
+    monkeypatch.setattr(
+        runtime_preflight,
+        "fetch_model_records",
+        lambda *_args, **_kwargs: pytest.fail("invalid timeout must fail before catalog I/O"),
+    )
+    provider = ProviderConfig(
+        provider="openai",
+        model="gpt-test",
+        api_key="secret-key",
+        base_url="https://api.openai.com/v1",
+        litellm_model="openai/gpt-test",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=timeout_seconds)
+
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert "positive number" in result.detail
 
 
 def test_anthropic_model_probe_treats_native_single_model_404_as_fatal(monkeypatch) -> None:
@@ -720,6 +801,39 @@ def test_anthropic_model_probe_treats_native_single_model_404_as_fatal(monkeypat
         (
             ProviderConfig("openai", "gpt-test", "key", "https://api.openai.com/v1", "openai/gpt-test"),
             {"ok": True, "failure_kind": None, "http_status": None},
+            "verified",
+        ),
+        (
+            ProviderConfig(
+                "nv_build",
+                "nvidia/model",
+                "invalid-key",
+                "https://integrate.api.nvidia.com/v1",
+                "openai/nvidia/model",
+            ),
+            {"ok": True, "failure_kind": None, "http_status": 200},
+            "degraded",
+        ),
+        (
+            ProviderConfig(
+                "openai-compatible",
+                "gpt-test",
+                "invalid-key",
+                "https://gateway.example/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": True, "failure_kind": None, "http_status": 200},
+            "degraded",
+        ),
+        (
+            ProviderConfig(
+                "openai-compatible",
+                "gpt-test",
+                "key",
+                "https://api.openai.com/v1",
+                "openai/gpt-test",
+            ),
+            {"ok": True, "failure_kind": None, "http_status": 200},
             "verified",
         ),
         (
@@ -1014,6 +1128,7 @@ def test_model_probe_checks_bedrock_foundation_catalog(monkeypatch) -> None:
         ("InvalidAccessKeyId", 403, "authentication", "fatal"),
         ("ExpiredToken", 403, "authentication", "fatal"),
         ("MissingAuthenticationToken", 403, "authentication", "fatal"),
+        ("RequestExpired", 400, "invalid_configuration", "fatal"),
         ("AccessDeniedException", 403, "authorization", "degraded"),
         ("ThrottlingException", 429, "unavailable", "degraded"),
         ("InternalServerException", 500, "unavailable", "degraded"),
@@ -1346,6 +1461,16 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
     assert result["harbor_jobs_retention_reason"] == "not_retained"
     assert not (Path(result["run_dir"]) / "_harbor-jobs").exists()
     assert not (Path(result["run_dir"]) / "_harbor-tasks").exists()
+    assert result["run_config"]["credential_validation"]["status"] == "degraded"
+    validation_targets = result["run_config"]["credential_validation"]["targets"]
+    assert {target["status"] for target in validation_targets} == {"degraded"}
+    assert {target["detail"] for target in validation_targets} == {
+        "model catalog access does not verify runtime credentials for this endpoint"
+    }
+    persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    assert persisted["run_config"] == result["run_config"]
+    run_config_path = Path(result["run_dir"]) / "run_config.json"
+    assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]
 
 
 def test_live_custom_catalog_401_is_inconclusive_without_exposing_secret() -> None:

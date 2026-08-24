@@ -786,21 +786,39 @@ def doctor(
         if provider is None or not runtime_plans:
             rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
-            from skillevaluator.tier3.harbor.runtime_preflight import probe_model
+            from skillevaluator.tier3.harbor.runtime_preflight import (
+                CredentialProbeDisposition,
+                credential_probe_disposition,
+                probe_model,
+            )
 
             for agent in agent_list:
-                probe = probe_model(runtime_plans[agent].provider)
-                rows.append((f"{agent} model", "pass" if probe.ok else "fail", probe.detail))
+                selected_provider = runtime_plans[agent].provider
+                probe = probe_model(selected_provider)
+                disposition = credential_probe_disposition(selected_provider, probe)
+                if disposition == CredentialProbeDisposition.FATAL:
+                    status = "fail"
+                    detail = probe.detail
+                elif disposition == CredentialProbeDisposition.DEGRADED:
+                    status = "warn"
+                    detail = probe.detail
+                    if probe.ok:
+                        detail = f"{detail}; catalog access does not verify runtime credentials for this endpoint"
+                else:
+                    status = "pass"
+                    detail = probe.detail
+                rows.append((f"{agent} model", status, detail))
 
     table = Table(title="SkillEvaluator Doctor", box=SIMPLE, show_edge=False)
     table.add_column("Check", style="bold")
     table.add_column("Status")
     table.add_column("Details")
+    status_styles = {"pass": "green", "warn": "yellow", "fail": "red"}
     for name, status, detail in rows:
-        style = "green" if status == "pass" else "red"
+        style = status_styles[status]
         table.add_row(name, f"[{style}]{status}[/{style}]", detail)
     console.print(table)
-    return 0 if all(row[1] == "pass" for row in rows) else 1
+    return 1 if any(row[1] == "fail" for row in rows) else 0
 
 
 def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_contract: bool) -> int:

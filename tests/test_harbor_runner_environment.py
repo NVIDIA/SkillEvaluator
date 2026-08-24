@@ -1074,7 +1074,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "model": "legacy-judge-model",
         "source": "LLM_JUDGE_MODEL",
         "override_applied": True,
-        "catalog_verification": "verified",
+        "catalog_verification": "degraded",
     }
 
 

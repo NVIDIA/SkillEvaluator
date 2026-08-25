@@ -114,8 +114,13 @@ def test_native_environment_is_forwarded_to_harbor() -> None:
     )
 
     assert command[1] == "run"
-    assert command[command.index("--env") + 1] == "e2b"
+    assert "--agent-import-path" not in command
     assert "--environment-import-path" not in command
+    assert "-a" not in command
+    assert command.count("--agent") == 1
+    assert command[command.index("--agent") + 1] == "codex"
+    assert command.count("--env") == 1
+    assert command[command.index("--env") + 1] == "e2b"
 
 
 def test_judge_model_overrides_are_forwarded_only_as_harbor_verifier_env() -> None:
@@ -174,9 +179,13 @@ def test_docker_bridge_command_combines_custom_agent_and_secure_environment() ->
         agent_import_path=import_path,
     )
 
-    assert command[command.index("--agent-import-path") + 1] == import_path
+    assert "--agent-import-path" not in command
+    assert "--environment-import-path" not in command
     assert "-a" not in command
-    assert "--environment-import-path" in command
+    assert command[command.index("--agent") + 1] == import_path
+    assert command[command.index("--env") + 1] == (
+        "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureDockerEnvironment"
+    )
 
 
 def test_local_bridge_command_uses_custom_agent_import_path() -> None:
@@ -190,9 +199,13 @@ def test_local_bridge_command_uses_custom_agent_import_path() -> None:
         agent_import_path=import_path,
     )
 
-    assert command[command.index("--agent-import-path") + 1] == import_path
-    assert "--environment-import-path" in command
+    assert "--agent-import-path" not in command
+    assert "--environment-import-path" not in command
     assert "-a" not in command
+    assert command[command.index("--agent") + 1] == import_path
+    assert command[command.index("--env") + 1] == (
+        "skillevaluator.tier3.harbor.local_environment:SkillEvaluatorLocalEnvironment"
+    )
 
 
 def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:

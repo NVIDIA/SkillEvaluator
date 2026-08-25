@@ -27,7 +27,7 @@ HARBOR_ENVIRONMENTS = (
     "use-computer",
     # Not a Harbor-native backend: SkillEvaluator's host execution mode, run
     # under an OS sandbox (bubblewrap on Linux, Seatbelt on macOS). Dispatched
-    # via --environment-import-path, not Harbor's --env.
+    # by passing its custom import path through Harbor's unified --env flag.
     "local",
 )
 HARBOR_ENV_MODES = frozenset(HARBOR_ENVIRONMENTS)

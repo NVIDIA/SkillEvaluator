@@ -149,10 +149,11 @@ def test_nvidia_build_docker_command_uses_secure_environment_and_bridge() -> Non
         agent_import_path=agent_import_path,
     )
 
-    assert command[command.index("--agent-import-path") + 1] == agent_import_path
-    assert command[command.index("--environment-import-path") + 1] == runner.SECURE_DOCKER_ENV_IMPORT_PATH
+    assert "--agent-import-path" not in command
+    assert "--environment-import-path" not in command
     assert "-a" not in command
-    assert "--env" not in command
+    assert command[command.index("--agent") + 1] == agent_import_path
+    assert command[command.index("--env") + 1] == runner.SECURE_DOCKER_ENV_IMPORT_PATH
 
 
 def test_secure_docker_exec_cleans_remote_handoff_when_streaming_reports_failure(

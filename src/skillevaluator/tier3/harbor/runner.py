@@ -322,7 +322,7 @@ def _harbor_bin() -> str:
 
 
 def _harbor_supports_yes() -> bool:
-    """Harbor 0.13.2, the supported Tier 3 dependency, accepts ``--yes``."""
+    """The supported Harbor CLI accepts ``--yes`` for non-interactive runs."""
     return True
 
 
@@ -402,19 +402,18 @@ def build_harbor_run_command(
     ]
     if env_mode == ENV_MODE_LOCAL:
         # Local mode is a custom SkillEvaluator environment + agent wrappers,
-        # dispatched via import paths (not Harbor's --env), with sandbox knobs
-        # passed as environment-kwargs (--ek). Harbor's create_agent_from_config
-        # prefers the agent NAME when both -a and --agent-import-path are set, so
-        # local mode passes ONLY --agent-import-path (its wrapper skips the
-        # Debian apt-get bootstrap the stock agent runs) and never -a.
+        # dispatched as import paths through Harbor's unified --agent/--env
+        # flags, with sandbox knobs passed as environment-kwargs (--ek). The
+        # custom agent wrapper skips the Debian apt-get bootstrap used by the
+        # stock agent.
         from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS, LOCAL_ENV_IMPORT_PATH, local_sandbox
         from skillevaluator.tier3.harbor.local_runtime import default_runtime_root
 
         agent_import_path = agent_import_path or LOCAL_AGENT_IMPORT_PATHS.get(agent)
         if not agent_import_path:
             raise ValueError(f"--env-mode local does not support agent: {agent}")
-        command.extend(["--agent-import-path", agent_import_path])
-        command.extend(["--environment-import-path", LOCAL_ENV_IMPORT_PATH])
+        command.extend(["--agent", agent_import_path])
+        command.extend(["--env", LOCAL_ENV_IMPORT_PATH])
         command.extend(["--ek", f"runtime_root={default_runtime_root()}"])
         command.extend(["--ek", f"runtime_agent={agent}"])
         command.extend(["--ek", f"sandbox_mode={local_sandbox.resolve_mode(None)}"])
@@ -438,12 +437,12 @@ def build_harbor_run_command(
         )
     elif env_mode == "docker":
         if agent_import_path:
-            command.extend(["--agent-import-path", agent_import_path])
+            command.extend(["--agent", agent_import_path])
         else:
-            command.extend(["-a", agent])
-        command.extend(["--environment-import-path", SECURE_DOCKER_ENV_IMPORT_PATH])
+            command.extend(["--agent", agent])
+        command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
-        command.extend(["-a", agent, "--env", env_mode])
+        command.extend(["--agent", agent, "--env", env_mode])
     if jobs_dir is not None:
         command.extend(["--jobs-dir", str(jobs_dir)])
     if disable_verification:

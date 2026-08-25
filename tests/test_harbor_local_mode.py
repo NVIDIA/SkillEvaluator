@@ -48,6 +48,7 @@ from skillevaluator.tier3.harbor.runner import (
     _local_agent_credentials,
     build_harbor_run_command,
 )
+from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
 
 _NATIVE_WINDOWS_LOCAL_REASON = "native Windows local mode requires WSL2; these checks exercise the POSIX backend"
 
@@ -109,18 +110,16 @@ def test_local_is_a_registered_env_mode() -> None:
     assert "local" in HARBOR_ENV_MODES
 
 
-def test_build_command_uses_import_paths_not_env_flag() -> None:
+def test_build_command_uses_unified_flags_for_local_imports() -> None:
     cmd = build_harbor_run_command(dataset_path="/tmp/ds", agent="opencode", job_name="j", env_mode="local")
     joined = " ".join(cmd)
-    assert "--environment-import-path" in cmd
-    assert LOCAL_ENV_IMPORT_PATH in cmd
-    assert "--agent-import-path" in cmd
-    assert LOCAL_AGENT_IMPORT_PATHS["opencode"] in cmd
-    # local mode must NOT pass Harbor's --env, and must NOT pass -a: harbor's
-    # create_agent_from_config prefers the agent NAME over the import path when
-    # both are set, which would run the stock (apt-get bootstrapping) agent.
-    assert "--env" not in cmd
+    assert "--agent-import-path" not in cmd
+    assert "--environment-import-path" not in cmd
     assert "-a" not in cmd
+    assert cmd.count("--agent") == 1
+    assert cmd[cmd.index("--agent") + 1] == LOCAL_AGENT_IMPORT_PATHS["opencode"]
+    assert cmd.count("--env") == 1
+    assert cmd[cmd.index("--env") + 1] == LOCAL_ENV_IMPORT_PATH
     assert "sandbox_mode=require" in joined
     assert "allow_net=true" in joined  # egress on by default for the live agent
     assert "runtime_agent=opencode" in joined
@@ -137,12 +136,16 @@ def test_build_command_wires_strict_read_policy(monkeypatch: pytest.MonkeyPatch)
 
 def test_build_command_docker_mode_uses_secure_import_path() -> None:
     cmd = build_harbor_run_command(dataset_path="/tmp/ds", agent="codex", job_name="j", env_mode="docker")
-    assert "-a" in cmd and cmd[cmd.index("-a") + 1] == "codex"
-    assert "--env" not in cmd
-    assert "--environment-import-path" in cmd
+    assert "--agent-import-path" not in cmd
+    assert "--environment-import-path" not in cmd
+    assert "-a" not in cmd
+    assert cmd.count("--agent") == 1
+    assert cmd[cmd.index("--agent") + 1] == "codex"
+    assert cmd.count("--env") == 1
+    assert cmd[cmd.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 
 
-def test_docker_bridge_command_uses_custom_agent_import_without_native_agent_flag() -> None:
+def test_docker_bridge_command_uses_unified_flags_for_custom_agent_and_secure_environment() -> None:
     import_path = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"
 
     cmd = build_harbor_run_command(
@@ -153,11 +156,13 @@ def test_docker_bridge_command_uses_custom_agent_import_without_native_agent_fla
         agent_import_path=import_path,
     )
 
-    assert "--env" not in cmd
-    assert "--environment-import-path" in cmd
-    assert "--agent-import-path" in cmd
-    assert cmd[cmd.index("--agent-import-path") + 1] == import_path
+    assert "--agent-import-path" not in cmd
+    assert "--environment-import-path" not in cmd
     assert "-a" not in cmd
+    assert cmd.count("--agent") == 1
+    assert cmd[cmd.index("--agent") + 1] == import_path
+    assert cmd.count("--env") == 1
+    assert cmd[cmd.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 
 
 def test_nvidia_build_bridge_agents_are_not_local_mode_agents() -> None:
@@ -167,6 +172,67 @@ def test_nvidia_build_bridge_agents_are_not_local_mode_agents() -> None:
     }
     assert "codex" in LOCAL_AGENT_IMPORT_PATHS
     assert LOCAL_AGENT_IMPORT_PATHS["codex"] != NVIDIA_BUILD_AGENT_IMPORT_PATHS["codex"]
+
+
+def test_harbor_unified_specs_import_non_abstract_skill_evaluator_classes(tmp_path: Path) -> None:
+    import inspect
+
+    from harbor.agents.factory import AgentFactory
+    from harbor.cli.utils import resolve_environment_spec
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
+    from harbor.models.trial.config import AgentConfig, EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    agent_specs = {
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode": (
+            "SkillEvaluatorLocalClaudeCode"
+        ),
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex": "SkillEvaluatorLocalCodex",
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode": "SkillEvaluatorLocalOpenCode",
+    }
+    for import_path, expected_class_name in agent_specs.items():
+        agent = AgentFactory.create_agent_from_config(
+            AgentConfig(name=import_path, model_name="openai/gpt-4.1-mini"),
+            logs_dir=tmp_path / "agent-logs",
+        )
+
+        assert agent.__class__.__name__ == expected_class_name
+        assert not inspect.isabstract(agent.__class__)
+
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    (environment_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    environment_specs = {
+        LOCAL_ENV_IMPORT_PATH: (
+            "SkillEvaluatorLocalEnvironment",
+            {
+                "runtime_agent": "codex",
+                "runtime_root": str(tmp_path / "runtime"),
+                "sandbox_mode": "off",
+            },
+        ),
+        SECURE_DOCKER_ENV_IMPORT_PATH: ("SkillEvaluatorSecureDockerEnvironment", {}),
+    }
+    for index, (import_path, (expected_class_name, kwargs)) in enumerate(environment_specs.items()):
+        environment_type, resolved_import_path = resolve_environment_spec(import_path)
+        assert environment_type is None
+        assert resolved_import_path == import_path
+        environment = EnvironmentFactory.create_environment_from_config(
+            EnvironmentConfig(
+                type=environment_type,
+                import_path=resolved_import_path,
+                kwargs=kwargs,
+            ),
+            environment_dir=environment_dir,
+            environment_name="unified-import-smoke",
+            session_id=f"unified-import-smoke-{index}",
+            trial_paths=TrialPaths(tmp_path / f"trial-{index}"),
+            task_env_config=TaskEnvironmentConfig(),
+        )
+
+        assert environment.__class__.__name__ == expected_class_name
+        assert not inspect.isabstract(environment.__class__)
 
 
 def test_local_claude_uses_managed_permissions_and_trial_temp_dir(

@@ -70,8 +70,10 @@ def test_docker_command_uses_secure_environment_import_path() -> None:
         env_mode="docker",
     )
 
-    assert "--env" not in command
-    assert command[command.index("--environment-import-path") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
+    assert "--agent-import-path" not in command
+    assert "--environment-import-path" not in command
+    assert command[command.index("--agent") + 1] == "opencode"
+    assert command[command.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 
 
 def test_exec_uses_name_only_argv_and_subprocess_override(tmp_path: Path) -> None:

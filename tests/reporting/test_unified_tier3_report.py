@@ -28,7 +28,7 @@ from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.html import PackageLoader, _compact_json
-from skillevaluator.tier3.harbor.collector import _wilson_score_interval
+from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
 
@@ -1318,6 +1318,54 @@ def test_pass_at_k_uncertainty_and_paired_evidence_render() -> None:
     assert "Exact McNemar p=1" in html
     assert "Minimum attainable p with 1 observed discordant pair:" in html
     assert "resolution-limited at \N{GREEK SMALL LETTER ALPHA}=0.05" in html
+
+
+def test_pass_at_k_render_preserves_exact_subnormal_mcnemar_probability() -> None:
+    pair_count = 1_086
+    case_ids = [f"case-{index}" for index in range(pair_count)]
+    with_skill_cases = {case_id: {"passed": index < 1_085} for index, case_id in enumerate(case_ids)}
+    without_skill_cases = {case_id: {"passed": index == 1_085} for index, case_id in enumerate(case_ids)}
+    paired = _paired_pass_comparison(
+        {"total_cases": pair_count, "cases": with_skill_cases},
+        {"total_cases": pair_count, "cases": without_skill_cases},
+    )
+
+    payload = build_agent_eval_payload(
+        "subnormal-mcnemar-probability-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": pair_count * 2,
+                "scored_attempts": pair_count * 2,
+                "overall_with_skill": 1.0,
+                "overall_without_skill": 0.0,
+                "pass_with_skill": {
+                    "rate": 1_085 / pair_count,
+                    "passed_cases": 1_085,
+                    "total_cases": pair_count,
+                },
+                "pass_without_skill": {
+                    "rate": 1 / pair_count,
+                    "passed_cases": 1,
+                    "total_cases": pair_count,
+                },
+                "pass_lift": {
+                    "delta": 1_084 / pair_count,
+                    "paired_comparison": paired,
+                },
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert paired["mcnemar_exact"]["p_value_text"] == "2.622311314e-324"
+    assert "Exact McNemar p=2.622311314e-324." in html
+    assert "4.940656458e-324" not in html
 
 
 def test_pass_at_k_render_preserves_narrow_intervals_and_small_paired_delta() -> None:

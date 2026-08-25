@@ -1998,7 +1998,9 @@ def _probability_float(probability: Fraction) -> float | None:
 def _probability_text(probability: Fraction) -> str:
     """Return a bounded nonzero decimal representation for an exact probability."""
     approximate = _probability_float(probability)
-    if approximate is not None:
+    # Positive subnormal floats have too few significant bits for the requested
+    # decimal precision, so format them from the exact ratio below as well.
+    if approximate is not None and (probability == 0 or approximate >= sys.float_info.min):
         return format(approximate, ".10g")
 
     # ``Decimal(numerator) / Decimal(denominator)`` both scales with the full

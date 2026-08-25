@@ -184,6 +184,49 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
     assert run_kwargs["env"] == {"NVIDIA_API_KEY": "secret"}
 
 
+def test_runtime_preflight_hands_nvidia_build_key_only_over_stdin(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    secret = "nvidia-real-secret-value-for-test"
+
+    monkeypatch.setattr(
+        runtime_preflight,
+        "build_harbor_run_command",
+        lambda **_kwargs: ["harbor", "run", "--safe"],
+    )
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["run_kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runtime_preflight.subprocess, "run", run)
+    monkeypatch.setattr(
+        runtime_preflight,
+        "validate_harbor_agent_only_job_result",
+        lambda *_args, **_kwargs: (True, "ok"),
+    )
+
+    result = runtime_preflight.run_agent_runtime_preflight(
+        dataset=_dataset(tmp_path),
+        agent="opencode",
+        model="nvidia/model",
+        env_mode="docker",
+        jobs_dir=tmp_path / "jobs",
+        run_env={"SKILL_EVAL_LLM_PROVIDER": "nv_build", "NVIDIA_API_KEY": secret},
+    )
+
+    assert result.ok is True
+    run_kwargs = captured["run_kwargs"]
+    assert isinstance(run_kwargs, dict)
+    assert run_kwargs["input"] == secret
+    environment = run_kwargs["env"]
+    assert isinstance(environment, dict)
+    assert secret not in environment.values()
+    assert environment["NVIDIA_API_KEY"] == "skillevaluator-stdin-backed-nvidia-key"
+    assert environment["SKILLEVALUATOR_NVIDIA_API_KEY_STDIN"] == "1"
+    assert "SKILLEVALUATOR_NVIDIA_API_KEY_FILE" not in environment
+
+
 def test_runtime_preflight_accepts_harbor_0132_unscored_agent_success(monkeypatch, tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     _write_harbor_0132_unscored_result(jobs_dir)
@@ -563,8 +606,11 @@ def test_runtime_preflight_reports_agent_start_failure(monkeypatch, tmp_path: Pa
 
 def test_runtime_preflight_timeout_is_bounded(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(runtime_preflight, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
+    secret = "nvidia-real-secret-value-for-test"
 
-    def timeout(*_args, **_kwargs):
+    def timeout(*_args, **kwargs):
+        assert kwargs["input"] == secret
+        assert secret not in kwargs["env"].values()
         raise subprocess.TimeoutExpired(["harbor", "run"], timeout=30)
 
     monkeypatch.setattr(runtime_preflight.subprocess, "run", timeout)
@@ -575,12 +621,13 @@ def test_runtime_preflight_timeout_is_bounded(monkeypatch, tmp_path: Path) -> No
         model="nvidia/model",
         env_mode="docker",
         jobs_dir=tmp_path / "jobs",
-        run_env={},
+        run_env={"SKILL_EVAL_LLM_PROVIDER": "nv_build", "NVIDIA_API_KEY": secret},
         timeout_seconds=30,
     )
 
     assert result.ok is False
     assert "timed out after 30s" in result.detail
+    assert secret not in result.detail
 
 
 def test_runtime_preflight_rejects_empty_task_tree(tmp_path: Path) -> None:

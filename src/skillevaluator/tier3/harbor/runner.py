@@ -16,10 +16,10 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -70,6 +70,12 @@ from skillevaluator.tier3.harbor.report_data import (
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_KEY_STDIN_ENV as _NVIDIA_BUILD_KEY_STDIN_ENV,
+)
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_STDIN_SENTINEL as _NVIDIA_BUILD_STDIN_SENTINEL,
+)
 from skillevaluator.tier3.output_provenance import (
     mark_generated_output_root,
     remove_generated_output_root_if_owned,
@@ -327,33 +333,34 @@ def format_harbor_view_command(jobs_dir: Path | str, *, multiline: bool = False)
     return f"{command} {path}" if not multiline else f"{command} \\\n  {path}"
 
 
-@contextmanager
+@dataclass(frozen=True)
+class _NvidiaBuildKeyHandoff:
+    """Sanitized child environment plus an optional stdin credential payload."""
+
+    subprocess_env: dict[str, str] = field(repr=False)
+    stdin_text: str | None = field(default=None, repr=False, compare=False)
+
+
 def _nvidia_build_key_handoff(
     run_env: Mapping[str, str],
     *,
     env_mode: str,
-) -> Iterator[dict[str, str]]:
-    """Replace the host Build key with a temporary file-backed sentinel."""
+) -> _NvidiaBuildKeyHandoff:
+    """Replace the host Build key with a stdin-backed sentinel."""
     subprocess_env = dict(run_env)
-    key_handoff: tempfile.TemporaryDirectory[str] | None = None
+    subprocess_env.pop(_NVIDIA_BUILD_KEY_FILE_ENV, None)
+    subprocess_env.pop(_NVIDIA_BUILD_KEY_STDIN_ENV, None)
     api_key = subprocess_env.get("NVIDIA_API_KEY", "")
     if (
         env_mode == "docker"
         and subprocess_env.get("SKILL_EVAL_LLM_PROVIDER") == "nv_build"
         and api_key
-        and api_key != _NVIDIA_BUILD_FILE_SENTINEL
+        and api_key not in {_NVIDIA_BUILD_FILE_SENTINEL, _NVIDIA_BUILD_STDIN_SENTINEL}
     ):
-        key_handoff = tempfile.TemporaryDirectory(prefix="skillevaluator-nvidia-build-host-")
-        key_file = Path(key_handoff.name) / "nvidia-api-key"
-        key_file.write_text(api_key, encoding="utf-8")
-        key_file.chmod(0o600)
-        subprocess_env["NVIDIA_API_KEY"] = _NVIDIA_BUILD_FILE_SENTINEL
-        subprocess_env[_NVIDIA_BUILD_KEY_FILE_ENV] = str(key_file)
-    try:
-        yield subprocess_env
-    finally:
-        if key_handoff is not None:
-            key_handoff.cleanup()
+        subprocess_env["NVIDIA_API_KEY"] = _NVIDIA_BUILD_STDIN_SENTINEL
+        subprocess_env[_NVIDIA_BUILD_KEY_STDIN_ENV] = "1"
+        return _NvidiaBuildKeyHandoff(subprocess_env, api_key)
+    return _NvidiaBuildKeyHandoff(subprocess_env)
 
 
 def build_harbor_run_command(
@@ -1259,15 +1266,16 @@ def _run_harbor(
         verifier_env=verifier_env,
     )
     try:
-        with _nvidia_build_key_handoff(run_env, env_mode=env_mode) as subprocess_env:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                env=subprocess_env,
-                timeout=7200,
-                check=False,
-            )
+        handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            input=handoff.stdin_text,
+            env=handoff.subprocess_env,
+            timeout=7200,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if result.returncode == 0:

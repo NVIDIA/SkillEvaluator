@@ -44,6 +44,7 @@ PACKAGED_NVIDIA_BUILD_RUNTIME_FILES = {
     "skillevaluator/tier3/harbor/local_agents.py",
     "skillevaluator/tier3/harbor/nvidia_build_bridge.py",
     "skillevaluator/tier3/harbor/secure_docker_environment.py",
+    "skillevaluator/tier3/harbor/sensitive_stdin.py",
 }
 SOURCE_SCAN_EXCLUDED_DIRS = {
     ".git",

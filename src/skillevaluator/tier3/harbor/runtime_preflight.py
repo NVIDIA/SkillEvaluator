@@ -1384,15 +1384,16 @@ def run_agent_runtime_preflight(
         agent_import_path=agent_import_path,
     )
     try:
-        with _nvidia_build_key_handoff(run_env, env_mode=env_mode) as subprocess_env:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                env=subprocess_env,
-                timeout=timeout_seconds,
-                check=False,
-            )
+        handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            input=handoff.stdin_text,
+            env=handoff.subprocess_env,
+            timeout=timeout_seconds,
+            check=False,
+        )
     except subprocess.TimeoutExpired:
         return PreflightResult(
             False,

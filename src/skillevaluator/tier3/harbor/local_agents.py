@@ -14,12 +14,13 @@ import secrets
 import shlex
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.opencode import OpenCode
@@ -30,6 +31,10 @@ from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     RunningBridge,
     start_in_process_bridge,
 )
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_STDIN_SENTINEL,
+    read_nvidia_build_key_from_stdin,
+)
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
@@ -39,6 +44,8 @@ _CODEX_MODEL_ARG_RE = re.compile(r"(?P<prefix>(?:^|\s)--model(?:=|\s+))(?P<model
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _NVIDIA_BUILD_BRIDGE_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _NVIDIA_BUILD_BRIDGE_HOST = "127.0.0.1"
+_NVIDIA_BUILD_BRIDGE_API_KEY_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY"
+_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN"
 _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 
@@ -343,6 +350,14 @@ class _NvidiaBuildBridgeAgent:
     def _rewrite_bridge_client_command(self, command: str) -> str:
         return command
 
+    @staticmethod
+    def _sensitive_exec(environment: BaseEnvironment) -> Callable[..., Awaitable[Any]]:
+        """Require a transport that keeps sensitive values out of host argv and logs."""
+        sensitive_exec = getattr(environment, "exec_with_sensitive_env", None)
+        if not callable(sensitive_exec):
+            raise RuntimeError("NVIDIA Build bridge requires an environment with protected sensitive-value transport")
+        return sensitive_exec
+
     async def _prepare_bridge_client(self, environment: BaseEnvironment) -> None:
         """Perform optional agent-specific setup after the bridge is healthy."""
 
@@ -364,6 +379,9 @@ class _NvidiaBuildBridgeAgent:
 
     @staticmethod
     def _resolve_bridge_api_key() -> str:
+        api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+        if api_key == NVIDIA_BUILD_STDIN_SENTINEL:
+            return read_nvidia_build_key_from_stdin()
         host_key_file = os.environ.get(_NVIDIA_BUILD_HOST_KEY_FILE_ENV, "").strip()
         if host_key_file:
             try:
@@ -373,7 +391,6 @@ class _NvidiaBuildBridgeAgent:
             if not api_key:
                 raise RuntimeError("NVIDIA Build bridge key handoff file is empty")
             return api_key
-        api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
         if api_key == _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY:
             raise RuntimeError(
                 f"NVIDIA Build bridge requires {_NVIDIA_BUILD_HOST_KEY_FILE_ENV} for file-backed credentials"
@@ -428,6 +445,7 @@ class _NvidiaBuildBridgeAgent:
         return str(client_token)
 
     async def _start_bridge(self, environment: BaseEnvironment) -> None:
+        sensitive_exec = self._sensitive_exec(environment)
         api_key = self._resolve_bridge_api_key()
         model_name = str(self.model_name or "").strip()
         if not model_name:
@@ -447,23 +465,28 @@ class _NvidiaBuildBridgeAgent:
                 Path(__file__).with_name("nvidia_build_bridge.py"), self._BRIDGE_SCRIPT.as_posix()
             )
 
-            # Harbor's Docker executor renders values supplied through
-            # ``env=`` in the host-side ``docker compose exec`` argv. Hand the
-            # credential over as a mode-0600 file in container-only /tmp
-            # instead, then let the bridge consume and unlink it before
-            # accepting requests.
-            with tempfile.TemporaryDirectory(prefix="skillevaluator-nvidia-build-") as temp_dir:
-                key_fd, key_path = tempfile.mkstemp(prefix="nvidia-api-key-", dir=temp_dir, text=True)
-                with os.fdopen(key_fd, "w", encoding="utf-8") as host_key_stream:
-                    host_key_stream.write(api_key)
-                host_key_file = Path(key_path)
-
-                token_fd, token_path = tempfile.mkstemp(prefix="nvidia-client-token-", dir=temp_dir, text=True)
-                with os.fdopen(token_fd, "w", encoding="utf-8") as host_token_stream:
-                    host_token_stream.write(client_token)
-                host_client_token_file = Path(token_path)
-                await environment.upload_file(host_key_file, key_file.as_posix())
-                await environment.upload_file(host_client_token_file, client_token_file.as_posix())
+            # The selected secure Docker environment streams ``env=`` values
+            # over Compose stdin. Materialize both secrets only inside the
+            # not-yet-exposed task container, then discard the transient names.
+            # Do not route this through BaseInstalledAgent._exec: Harbor 0.13.2
+            # attaches that helper's raw ``env`` mapping to DEBUG LogRecords,
+            # which structured/custom handlers may serialize.
+            handoff_result = await sensitive_exec(
+                command=(
+                    "set -eu; umask 077; "
+                    f"printf '%s' \"${{{_NVIDIA_BUILD_BRIDGE_API_KEY_ENV}}}\" > "
+                    f"{shlex.quote(key_file.as_posix())}; "
+                    f"printf '%s' \"${{{_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV}}}\" > "
+                    f"{shlex.quote(client_token_file.as_posix())}; "
+                    f"unset {_NVIDIA_BUILD_BRIDGE_API_KEY_ENV} {_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV}"
+                ),
+                env={
+                    _NVIDIA_BUILD_BRIDGE_API_KEY_ENV: api_key,
+                    _NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV: client_token,
+                },
+                user="root",
+            )
+            self._require_success(handoff_result, "secret handoff")
 
             start_result = await self._bridge_raw_exec(
                 environment,
@@ -565,17 +588,27 @@ class _NvidiaBuildBridgeAgent:
         client_env = getattr(self, "_nvidia_build_bridge_client_env", None)
         if client_env is None:
             return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
+        sensitive_exec = self._sensitive_exec(environment)
         routed_env = dict(env or {})
+        routed_env.update(getattr(self, "_extra_env", {}) or {})
         routed_env.update(client_env)
         routed_env.pop("NVIDIA_API_KEY", None)
         routed_command = self._rewrite_bridge_client_command(command)
-        return await super().exec_as_agent(
-            environment,
-            command=f"env -u NVIDIA_API_KEY bash -c {shlex.quote(routed_command)}",
+        # Harbor 0.13.2 attaches BaseInstalledAgent._exec's merged env to DEBUG
+        # LogRecords, which structured/custom handlers may serialize.
+        # Call the selected secure environment directly so its stdin transport
+        # can protect the per-trial bridge capability as well.
+        result = await sensitive_exec(
+            command=(f"env -u NVIDIA_API_KEY bash -o pipefail -c {shlex.quote(routed_command)}"),
             env=routed_env,
             cwd=cwd,
             timeout_sec=timeout_sec,
         )
+        if result.return_code != 0:
+            raise NonZeroAgentExitCodeError(
+                f"NVIDIA Build bridge client command failed with exit code {result.return_code}"
+            )
+        return result
 
     async def run(self, instruction, environment: BaseEnvironment, context) -> None:  # type: ignore[no-untyped-def]
         self._nvidia_build_bridge_started = False

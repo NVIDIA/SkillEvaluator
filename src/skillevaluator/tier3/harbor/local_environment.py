@@ -589,6 +589,23 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         finally:
             self._active_processes.pop(proc, None)
 
+    async def exec_with_sensitive_env(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        """Execute with values delivered through the existing stdin-only bootstrap."""
+        return await self.exec(
+            command=command,
+            cwd=cwd,
+            env=env,
+            timeout_sec=timeout_sec,
+            user=user,
+        )
+
     @staticmethod
     async def _terminate_process_tree(
         proc: asyncio.subprocess.Process,

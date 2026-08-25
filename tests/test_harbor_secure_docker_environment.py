@@ -217,6 +217,55 @@ def test_compose_check_false_redacts_success_output(
     assert result.stderr == "stderr [REDACTED]"
 
 
+def test_compose_stdin_handoff_redacts_secret_without_argv_or_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = object.__new__(SkillEvaluatorDockerEnvironment)
+    environment.session_id = "secure-stdin-test"
+    environment.environment_name = "secure-stdin-test"
+    environment.environment_dir = tmp_path
+    environment._resources_compose_path = None
+    environment._mounts_compose_path = None
+    environment._use_prebuilt = True
+    environment._is_windows_container = False
+    environment.extra_docker_compose_paths = []
+    environment._network_policy = SimpleNamespace(network_mode="public")
+    environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
+    captured: dict[str, object] = {}
+
+    class Process:
+        returncode = 9
+
+        async def communicate(self, input_bytes: bytes | None = None) -> tuple[bytes, None]:
+            captured["input"] = input_bytes
+            return f"failure included {_SENTINEL}".encode(), None
+
+    async def create_subprocess(*args: object, **kwargs: object) -> Process:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        captured["stdin"] = kwargs["stdin"]
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(
+            environment._run_docker_compose_command(
+                ["exec", "-T", "main", "true"],
+                stdin_bytes=b"private-stream-payload",
+                redact_values={_SENTINEL},
+            )
+        )
+
+    assert captured["input"] == b"private-stream-payload"
+    assert captured["stdin"] is asyncio.subprocess.PIPE
+    assert _SENTINEL not in " ".join(str(arg) for arg in captured["args"])
+    assert _SENTINEL not in captured["env"].values()
+    assert _SENTINEL not in str(caught.value)
+    assert "[REDACTED]" in str(caught.value)
+
+
 def test_redact_ignores_short_env_values_that_would_corrupt_loopback_origins() -> None:
     from skillevaluator.tier3.harbor.secure_docker_environment import _redact
 
@@ -809,7 +858,7 @@ def test_real_docker_interrupted_exec_stops_task_container_only(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_exec_client)
 
     normal_result = asyncio.run(
-        environment.exec(
+        environment.exec_with_sensitive_env(
             "printf 'normal-output\\n'; printf 'normal-error\\n' >&2; "
             "printf 'control-token=%s\\n' \"${SKILLEVALUATOR_EXEC_TOKEN-unset}\"; exit 7",
             env={"NVIDIA_API_KEY": credential},

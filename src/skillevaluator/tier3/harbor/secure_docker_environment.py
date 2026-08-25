@@ -32,7 +32,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 import yaml
 from harbor.environments.base import (
@@ -44,7 +44,11 @@ from harbor.environments.base import (
 )
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
 
-from skillevaluator.tier3.harbor.secure_copy import copy_file_secure, copytree_secure
+from skillevaluator.tier3.harbor.secure_copy import (
+    _absolute_lexical,
+    copy_file_secure,
+    copytree_secure,
+)
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_KEY_STDIN_ENV,
     NVIDIA_BUILD_STDIN_SENTINEL,
@@ -81,17 +85,22 @@ _MAX_COMPOSE_MODEL_BYTES = 8 * 1024 * 1024
 _MAX_COMPOSE_MODEL_NODES = 100_000
 _MAX_COMPOSE_MODEL_DEPTH = 128
 _WINDOWS_TRANSFER_IDLE_TIMEOUT_SECONDS = 300.0
-_WINDOWS_TRANSFER_POLL_SECONDS = 0.1
+_WINDOWS_TRANSFER_TOTAL_TIMEOUT_SECONDS = 1800.0
+_WINDOWS_TRANSFER_POLL_SECONDS = 0.05
 _WINDOWS_TRANSFER_STDERR_MAX_BYTES = 1024 * 1024
 _WINDOWS_TAR_MAX_MEMBERS = 100_000
+_WINDOWS_TAR_MAX_FILESYSTEM_ENTRIES = 100_000
 _WINDOWS_TAR_MAX_PATH_BYTES = 8 * 1024 * 1024
+_WINDOWS_TAR_MAX_PATH_COMPONENTS = 1_000_000
 _WINDOWS_TAR_MAX_DEPTH = 128
 _WINDOWS_TAR_MAX_EXTENSION_BYTES = 1024 * 1024
 _WINDOWS_TAR_MAX_TOTAL_EXTENSION_BYTES = 8 * 1024 * 1024
-_WINDOWS_TAR_DISK_RESERVE_BYTES = 512 * 1024 * 1024
+_WINDOWS_ARTIFACT_DISK_RESERVE_BYTES = 512 * 1024 * 1024
+_WINDOWS_ARTIFACT_ENTRY_DISK_BYTES = 64 * 1024
+_WINDOWS_ARTIFACT_INODE_RESERVE = 1024
 _TAR_BLOCK_BYTES = 512
 _WINDOWS_RESERVED_NAME_RE = re.compile(
-    r"(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])",
+    r"(?:con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])",
     re.IGNORECASE,
 )
 _REDACTION_LABEL = "[REDACTED]"
@@ -147,6 +156,14 @@ _RAW_LIFECYCLE_DEADLINE: contextvars.ContextVar[float | None] = contextvars.Cont
 
 class _ComposeCommandTimeout(Exception):
     """Internal marker that cannot collide with callback exception types."""
+
+
+class _WindowsTransferDiskBudgetExceeded(Exception):
+    """Internal marker for untrusted transfer spool exhaustion."""
+
+
+class _WindowsTransferTotalTimeout(Exception):
+    """Internal marker for a transfer that keeps making progress forever."""
 
 
 class _ComposeModelLoader(yaml.SafeLoader):
@@ -736,6 +753,23 @@ def _render_environment_script(environment: Mapping[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _split_windows_container_file_source(source_path: str) -> tuple[str, str]:
+    """Split a container file path while preserving drive-root semantics."""
+    normalized = source_path.replace("\\", "/")
+    if not normalized or "\x00" in normalized or normalized.endswith("/"):
+        raise RuntimeError("requested Windows container download path is invalid")
+    parent, separator, name = normalized.rpartition("/")
+    if not name or name in {".", ".."}:
+        raise RuntimeError("requested Windows container download path is invalid")
+    if not separator:
+        parent = "."
+    elif not parent:
+        parent = "/"
+    elif re.fullmatch(r"[A-Za-z]:", parent):
+        parent += "/"
+    return parent, name
+
+
 @dataclass(frozen=True, slots=True)
 class _ValidatedTarMember:
     canonical_parts: tuple[str, ...]
@@ -743,11 +777,28 @@ class _ValidatedTarMember:
     size: int
 
 
+@dataclass(frozen=True, slots=True)
+class _WindowsArtifactUsage:
+    file_bytes: int
+    entries: int
+
+    @property
+    def estimated_disk_bytes(self) -> int:
+        return self.file_bytes + self.entries * _WINDOWS_ARTIFACT_ENTRY_DISK_BYTES
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowsFilesystemReserve:
+    identity: int
+    minimum_free_bytes: int
+
+
 def _prescan_uncompressed_tar_archive(archive_path: Path) -> None:
     """Bound tar metadata before ``tarfile`` is allowed to allocate it."""
     extension_types = {
         tarfile.XHDTYPE,
         tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
         tarfile.GNUTYPE_LONGNAME,
         tarfile.GNUTYPE_LONGLINK,
     }
@@ -782,6 +833,10 @@ def _prescan_uncompressed_tar_archive(archive_path: Path) -> None:
             if raw_members > _WINDOWS_TAR_MAX_MEMBERS:
                 raise ValueError
             if member.size < 0 or member.type == tarfile.GNUTYPE_SPARSE:
+                raise ValueError
+            # Global PAX state is copied into every later TarInfo by the
+            # stdlib parser, creating multiplicative CPU and memory cost.
+            if member.type == tarfile.XGLTYPE:
                 raise ValueError
             if member.type in extension_types:
                 if member.size > _WINDOWS_TAR_MAX_EXTENSION_BYTES:
@@ -847,7 +902,149 @@ def _validated_windows_tar_member(
     return _ValidatedTarMember(tuple(canonical_parts), kind, filtered.size)
 
 
-def _extract_regular_tar_archive(archive_path: Path, target_dir: Path | str) -> None:
+def _windows_existing_ancestor(path: Path) -> Path:
+    """Return the canonical nearest existing ancestor of a host path."""
+    probe = _absolute_lexical(path)
+    while True:
+        try:
+            probe.lstat()
+            return probe
+        except FileNotFoundError:
+            parent = probe.parent
+            if parent == probe:
+                raise
+            probe = parent
+
+
+def _windows_artifact_disk_budget(path: Path) -> tuple[int, int]:
+    """Return the current free bytes and an adaptive initial byte budget."""
+    free_bytes = shutil.disk_usage(_windows_existing_ancestor(path)).free
+    # A reserve must not ratchet downward as spool, extraction, and publication
+    # consume one filesystem. Callers snapshot this adaptive initial value and
+    # reuse it for the operation.
+    reserve_bytes = min(
+        _WINDOWS_ARTIFACT_DISK_RESERVE_BYTES,
+        max(64 * 1024 * 1024, free_bytes // 20),
+    )
+    return free_bytes, max(0, free_bytes - reserve_bytes)
+
+
+def _windows_artifact_filesystem_reserve(path: Path) -> _WindowsFilesystemReserve:
+    """Snapshot one filesystem's minimum free headroom for an operation."""
+    probe = _windows_existing_ancestor(path)
+    free_bytes, budget_bytes = _windows_artifact_disk_budget(probe)
+    return _WindowsFilesystemReserve(
+        identity=probe.stat().st_dev,
+        minimum_free_bytes=free_bytes - budget_bytes,
+    )
+
+
+def _windows_artifact_inode_budget(path: Path) -> int | None:
+    """Return a headroom-preserving inode budget when the host exposes one."""
+    statvfs = getattr(os, "statvfs", None)
+    if statvfs is None:
+        return None
+    filesystem = statvfs(_windows_existing_ancestor(path))
+    if filesystem.f_files <= 0 or filesystem.f_favail < 0:
+        return None
+    reserve = min(_WINDOWS_ARTIFACT_INODE_RESERVE, filesystem.f_favail)
+    return max(0, filesystem.f_favail - reserve)
+
+
+def _require_windows_artifact_resources(
+    path: Path,
+    required_bytes: int,
+    *,
+    required_entries: int,
+    minimum_free_bytes: int | None = None,
+    purpose: str,
+) -> None:
+    """Fail before mutation when a filesystem cannot retain headroom."""
+    _free_bytes, budget_bytes = _windows_artifact_disk_budget(path)
+    if minimum_free_bytes is not None:
+        budget_bytes = max(0, _free_bytes - minimum_free_bytes)
+    if required_bytes > budget_bytes:
+        raise RuntimeError(f"insufficient disk space for secure Windows container {purpose}")
+    inode_budget = _windows_artifact_inode_budget(path)
+    if inode_budget is not None and required_entries > inode_budget:
+        raise RuntimeError(f"insufficient filesystem entries for secure Windows container {purpose}")
+
+
+def _existing_windows_target_usage(path: Path, *, kind: str) -> _WindowsArtifactUsage:
+    """Conservatively estimate transactional copies of an existing target."""
+    try:
+        root = path.lstat()
+    except FileNotFoundError:
+        return _WindowsArtifactUsage(file_bytes=0, entries=0)
+    except OSError:
+        raise RuntimeError("requested Windows container download target is unsafe") from None
+
+    try:
+        if stat_is_link_or_reparse(root):
+            raise ValueError
+        if kind == "file":
+            if not stat.S_ISREG(root.st_mode) or root.st_nlink != 1:
+                raise ValueError
+            return _WindowsArtifactUsage(file_bytes=root.st_size, entries=1)
+        if kind != "directory" or not stat.S_ISDIR(root.st_mode):
+            raise ValueError
+
+        root_device = root.st_dev
+        entry_count = 1
+        file_bytes = 0
+        pending = [path]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as children:
+                for child in children:
+                    metadata = child.stat(follow_symlinks=False)
+                    entry_count += 1
+                    if entry_count > _WINDOWS_TAR_MAX_FILESYSTEM_ENTRIES:
+                        raise ValueError
+                    if stat_is_link_or_reparse(metadata) or metadata.st_dev != root_device:
+                        raise ValueError
+                    child_path = Path(child.path)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        pending.append(child_path)
+                    elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                        file_bytes += metadata.st_size
+                    else:
+                        raise ValueError
+        return _WindowsArtifactUsage(file_bytes=file_bytes, entries=entry_count)
+    except (OSError, ValueError):
+        raise RuntimeError("requested Windows container download target is unsafe") from None
+
+
+def _missing_windows_target_parent_usage(path: Path) -> _WindowsArtifactUsage:
+    """Validate destination ancestors and charge parents that must be created."""
+    missing_entries = 0
+    probe = _absolute_lexical(path).parent
+    while True:
+        try:
+            metadata = probe.lstat()
+        except FileNotFoundError:
+            missing_entries += 1
+            parent = probe.parent
+            if parent == probe:
+                raise RuntimeError("requested Windows container download target is unsafe") from None
+            probe = parent
+            continue
+        except OSError:
+            raise RuntimeError("requested Windows container download target is unsafe") from None
+        if stat_is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("requested Windows container download target is unsafe")
+        parent = probe.parent
+        if parent == probe:
+            return _WindowsArtifactUsage(file_bytes=0, entries=missing_entries)
+        probe = parent
+
+
+def _extract_regular_tar_archive(
+    archive_path: Path,
+    target_dir: Path | str,
+    *,
+    minimum_free_bytes: int | None = None,
+) -> _WindowsArtifactUsage:
     """Validate a disk-backed container archive, then extract it privately."""
     target = Path(target_dir)
     try:
@@ -865,8 +1062,8 @@ def _extract_regular_tar_archive(archive_path: Path, target_dir: Path | str) -> 
 
         manifest: list[_ValidatedTarMember] = []
         member_kinds: dict[tuple[str, ...], str] = {}
-        required_directories: set[tuple[str, ...]] = set()
         path_bytes = 0
+        path_components = 0
         total_file_bytes = 0
         with tarfile.open(archive_path, mode="r:", errorlevel=2) as archive:
             for member in archive:
@@ -875,30 +1072,60 @@ def _extract_regular_tar_archive(archive_path: Path, target_dir: Path | str) -> 
                 if validated is None:
                     continue
                 path_bytes += sum(len(part.encode("utf-8")) for part in validated.canonical_parts)
-                if len(manifest) >= _WINDOWS_TAR_MAX_MEMBERS or path_bytes > _WINDOWS_TAR_MAX_PATH_BYTES:
+                path_components += len(validated.canonical_parts)
+                if (
+                    len(manifest) >= _WINDOWS_TAR_MAX_MEMBERS
+                    or path_bytes > _WINDOWS_TAR_MAX_PATH_BYTES
+                    or path_components > _WINDOWS_TAR_MAX_PATH_COMPONENTS
+                ):
                     raise ValueError
                 key = validated.canonical_parts
                 if key in member_kinds:
                     raise ValueError
-                for depth in range(1, len(key)):
-                    prefix = key[:depth]
-                    if member_kinds.get(prefix) == "file":
-                        raise ValueError
-                    required_directories.add(prefix)
                 if validated.kind == "file":
-                    if key in required_directories:
-                        raise ValueError
                     total_file_bytes += validated.size
                 member_kinds[key] = validated.kind
                 manifest.append(validated)
 
-        free_bytes = shutil.disk_usage(target).free
-        reserve_bytes = min(
-            _WINDOWS_TAR_DISK_RESERVE_BYTES,
-            max(64 * 1024 * 1024, free_bytes // 20),
-        )
-        if total_file_bytes > max(0, free_bytes - reserve_bytes):
+        ordered_keys = sorted(member_kinds)
+        for index, key in enumerate(ordered_keys[:-1]):
+            following = ordered_keys[index + 1]
+            if (
+                member_kinds[key] == "file"
+                and len(following) > len(key)
+                and following[: len(key)] == key
+            ):
+                raise ValueError
+
+        # Count implicit parent directories without retaining every prefix.
+        # Adjacent sorted paths share all prefixes that could already exist.
+        filesystem_entries = 1  # private extraction/publication root
+        previous_key: tuple[str, ...] = ()
+        for key in ordered_keys:
+            common_depth = 0
+            for left, right in zip(previous_key, key, strict=False):
+                if left != right:
+                    break
+                common_depth += 1
+            directory_depth = len(key) if member_kinds[key] == "directory" else len(key) - 1
+            filesystem_entries += max(0, directory_depth - common_depth)
+            if member_kinds[key] == "file":
+                filesystem_entries += 1
+            previous_key = key
+
+        if filesystem_entries > _WINDOWS_TAR_MAX_FILESYSTEM_ENTRIES:
             raise ValueError
+        usage = _WindowsArtifactUsage(
+            file_bytes=total_file_bytes,
+            entries=filesystem_entries,
+        )
+        _require_windows_artifact_resources(
+            target,
+            usage.estimated_disk_bytes,
+            required_entries=usage.entries,
+            minimum_free_bytes=minimum_free_bytes,
+            purpose="archive extraction",
+        )
 
         extracted_index = 0
         with tarfile.open(archive_path, mode="r|", errorlevel=2) as archive:
@@ -925,6 +1152,7 @@ def _extract_regular_tar_archive(archive_path: Path, target_dir: Path | str) -> 
             or not os.path.samestat(archive_metadata, observed_archive)
         ):
             raise ValueError
+        return usage
     except (OSError, tarfile.TarError, UnicodeError, ValueError):
         raise RuntimeError("unsafe Windows container download archive") from None
 
@@ -1966,19 +2194,19 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         excluded_names, excluded_values = self._main_only_compose_environment()
 
         if service == MAIN_SERVICE_NAME and self._is_windows_container:
+            target = Path(target_path)
+            parent_usage = _missing_windows_target_parent_usage(target)
+            final_reserve = _windows_artifact_filesystem_reserve(target.parent)
             with tempfile.TemporaryDirectory() as temporary_directory:
-                normalized_source = source_path.replace("\\", "/")
-                declared_source = PurePosixPath(normalized_source)
-                if not declared_source.name or declared_source.name in {".", ".."}:
-                    raise RuntimeError("requested Windows container download path is invalid")
+                source_parent, source_name = _split_windows_container_file_source(source_path)
                 await self._secure_windows_download_dir(
-                    str(declared_source.parent),
+                    source_parent,
                     temporary_directory,
                     excluded_names=excluded_names,
                     excluded_values=excluded_values,
-                    archive_members=(declared_source.name,),
+                    archive_members=(source_name,),
                 )
-                downloaded = Path(temporary_directory) / declared_source.name
+                downloaded = Path(temporary_directory) / source_name
                 try:
                     downloaded_metadata = downloaded.lstat()
                 except OSError:
@@ -1989,10 +2217,32 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                     or downloaded_metadata.st_nlink != 1
                 ):
                     raise RuntimeError("requested Windows container download was not a regular file")
+                source_usage = _WindowsArtifactUsage(
+                    file_bytes=downloaded_metadata.st_size,
+                    entries=1,
+                )
+                existing_target_usage = _existing_windows_target_usage(
+                    target,
+                    kind="file",
+                )
+                required_entries = (
+                    source_usage.entries
+                    + existing_target_usage.entries
+                    + parent_usage.entries
+                )
+                _require_windows_artifact_resources(
+                    target.parent,
+                    source_usage.estimated_disk_bytes
+                    + existing_target_usage.estimated_disk_bytes
+                    + parent_usage.estimated_disk_bytes,
+                    required_entries=required_entries,
+                    minimum_free_bytes=final_reserve.minimum_free_bytes,
+                    purpose="file publication",
+                )
                 try:
                     copy_file_secure(
                         downloaded,
-                        Path(target_path),
+                        target,
                         allowed_root=downloaded.parent,
                     )
                 except (OSError, ValueError):
@@ -2075,38 +2325,76 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         protected_values: set[str],
         output_path: Path,
         idle_timeout_sec: float = _WINDOWS_TRANSFER_IDLE_TIMEOUT_SECONDS,
+        total_timeout_sec: float = _WINDOWS_TRANSFER_TOTAL_TIMEOUT_SECONDS,
+        minimum_free_bytes: int | None = None,
     ) -> None:
-        """Stream untrusted transfer output to disk with idle and cleanup bounds."""
+        """Stream untrusted output to disk with size, idle, and total bounds."""
         if not math.isfinite(idle_timeout_sec) or idle_timeout_sec <= 0:
             raise ValueError("idle_timeout_sec must be a positive finite value")
+        if not math.isfinite(total_timeout_sec) or total_timeout_sec <= 0:
+            raise ValueError("total_timeout_sec must be a positive finite value")
+        if minimum_free_bytes is not None and minimum_free_bytes < 0:
+            raise ValueError("minimum_free_bytes must not be negative")
         executable = shutil.which(command[0], path=process_environment.get("PATH"))
         if executable is None:
             raise RuntimeError(f"required host transfer executable {command[0]!r} was not found")
+        initial_free_bytes, spool_budget = _windows_artifact_disk_budget(output_path.parent)
+        reserved_bytes = (
+            initial_free_bytes - spool_budget
+            if minimum_free_bytes is None
+            else minimum_free_bytes
+        )
+        spool_budget = max(0, initial_free_bytes - reserved_bytes)
+        if spool_budget <= 0:
+            raise RuntimeError("insufficient temporary disk space for secure Windows container transfer")
+        diagnostic_protected_values = set(protected_values)
+        diagnostic_protected_values.update(_sensitive_environment_values(process_environment))
+        diagnostic_protected_values.update(
+            value
+            for name, value in process_environment.items()
+            if value and name.upper().endswith("_PROXY") and "@" in value
+        )
         full_command = [executable, *command[1:]]
+        loop = asyncio.get_running_loop()
+        total_deadline = loop.time() + total_timeout_sec
         output_created = False
         try:
             stdout_handle = output_path.open("xb", buffering=0)
             output_created = True
             with (
                 stdout_handle as stdout_file,
-                tempfile.TemporaryFile(mode="w+b", buffering=0) as stderr_file,
+                tempfile.TemporaryFile(
+                    mode="w+b",
+                    buffering=0,
+                    dir=output_path.parent,
+                ) as stderr_file,
             ):
                 creation = asyncio.create_task(
                     asyncio.create_subprocess_exec(
                         *full_command,
                         env=dict(process_environment),
                         stdin=asyncio.subprocess.DEVNULL,
-                        stdout=stdout_file,
-                        stderr=stderr_file,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
                         start_new_session=os.name == "posix",
                     )
                 )
                 try:
+                    creation_timeout = min(
+                        _RAW_DOCKER_COMMAND_TIMEOUT_SECONDS,
+                        total_deadline - loop.time(),
+                    )
+                    if creation_timeout <= 0:
+                        raise _WindowsTransferTotalTimeout
                     process = await asyncio.wait_for(
                         asyncio.shield(creation),
-                        timeout=_RAW_DOCKER_COMMAND_TIMEOUT_SECONDS,
+                        timeout=creation_timeout,
                     )
-                except (TimeoutError, asyncio.CancelledError) as primary_error:
+                except (
+                    TimeoutError,
+                    asyncio.CancelledError,
+                    _WindowsTransferTotalTimeout,
+                ) as primary_error:
 
                     async def reap_late_creation(
                         completed_creation: asyncio.Task[asyncio.subprocess.Process],
@@ -2179,61 +2467,151 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                         )
                     if isinstance(primary_error, TimeoutError):
                         raise RuntimeError("secure Windows container transfer process creation timed out") from primary_error
+                    if isinstance(primary_error, _WindowsTransferTotalTimeout):
+                        raise RuntimeError(
+                            "secure Windows container transfer command exceeded its total time limit"
+                        ) from primary_error
                     raise
 
                 process_wait = asyncio.create_task(process.wait())
+                pump_tasks: set[asyncio.Task[None]] = set()
                 try:
-                    loop = asyncio.get_running_loop()
+                    stdout_stream = process.stdout
+                    stderr_stream = process.stderr
+                    if stdout_stream is None or stderr_stream is None:
+                        raise RuntimeError("secure Windows container transfer pipes were unavailable")
+
+                    spooled_bytes = 0
+
+                    async def pump_stream(
+                        stream: asyncio.StreamReader,
+                        destination: BinaryIO,
+                    ) -> None:
+                        nonlocal spooled_bytes
+                        while chunk := await stream.read(64 * 1024):
+                            claimed_bytes = spooled_bytes + len(chunk)
+                            free_bytes = shutil.disk_usage(output_path.parent).free
+                            if (
+                                claimed_bytes > spool_budget
+                                or free_bytes < reserved_bytes + len(chunk)
+                            ):
+                                raise _WindowsTransferDiskBudgetExceeded
+                            view = memoryview(chunk)
+                            while view:
+                                written = destination.write(view)
+                                if written is None or written <= 0:
+                                    raise OSError("Windows transfer spool write made no progress")
+                                view = view[written:]
+                            spooled_bytes = claimed_bytes
+
+                    pump_tasks = {
+                        asyncio.create_task(pump_stream(stdout_stream, stdout_file)),
+                        asyncio.create_task(pump_stream(stderr_stream, stderr_file)),
+                    }
                     idle_deadline = loop.time() + idle_timeout_sec
-                    last_sizes = (
-                        os.fstat(stdout_file.fileno()).st_size,
-                        os.fstat(stderr_file.fileno()).st_size,
-                    )
+                    last_spooled_bytes = 0
+                    process_complete = False
+                    active_pumps = set(pump_tasks)
                     while True:
+                        current_time = loop.time()
+                        if current_time >= total_deadline:
+                            raise _WindowsTransferTotalTimeout
+                        remaining_idle = idle_deadline - current_time
+                        if remaining_idle <= 0:
+                            raise _ComposeCommandTimeout
+                        watched: set[asyncio.Task[Any]] = set(active_pumps)
+                        if not process_complete:
+                            watched.add(process_wait)
                         done, _pending = await asyncio.wait(
-                            {process_wait},
+                            watched,
+                            return_when=asyncio.FIRST_COMPLETED,
                             timeout=min(
                                 _WINDOWS_TRANSFER_POLL_SECONDS,
-                                max(0.001, idle_deadline - loop.time()),
+                                remaining_idle,
+                                total_deadline - current_time,
                             ),
                         )
+                        current_time = loop.time()
+                        if current_time >= total_deadline:
+                            raise _WindowsTransferTotalTimeout
                         if process_wait in done:
+                            process_wait.result()
+                            process_complete = True
+                        completed_pumps = active_pumps.intersection(done)
+                        for completed_pump in completed_pumps:
+                            completed_pump.result()
+                        active_pumps.difference_update(completed_pumps)
+                        if process_complete and not active_pumps:
                             break
-                        current_sizes = (
-                            os.fstat(stdout_file.fileno()).st_size,
-                            os.fstat(stderr_file.fileno()).st_size,
-                        )
-                        if current_sizes != last_sizes:
-                            last_sizes = current_sizes
-                            idle_deadline = loop.time() + idle_timeout_sec
-                        elif loop.time() >= idle_deadline:
+                        if spooled_bytes != last_spooled_bytes:
+                            last_spooled_bytes = spooled_bytes
+                            idle_deadline = current_time + idle_timeout_sec
+                        elif current_time >= idle_deadline:
                             raise _ComposeCommandTimeout
-                    process_wait.result()
                 except BaseException as primary_error:
                     await _terminate_process_tree(
                         process,
                         process_wait,
                         preserve_cancellation=False,
                     )
+                    for pump_task in pump_tasks:
+                        if not pump_task.done():
+                            pump_task.cancel()
+
+                    async def finish_pumps() -> None:
+                        if pump_tasks:
+                            await asyncio.gather(*pump_tasks, return_exceptions=True)
+
+                    pump_cleanup = asyncio.create_task(finish_pumps())
+                    await _await_task_uninterruptibly(
+                        pump_cleanup,
+                        preserve_cancellation=False,
+                    )
                     if isinstance(primary_error, _ComposeCommandTimeout):
                         raise RuntimeError(
                             "secure Windows container transfer command timed out while idle"
+                        ) from primary_error
+                    if isinstance(primary_error, _WindowsTransferDiskBudgetExceeded):
+                        raise RuntimeError(
+                            "secure Windows container transfer exceeded its temporary disk budget"
+                        ) from primary_error
+                    if isinstance(primary_error, _WindowsTransferTotalTimeout):
+                        raise RuntimeError(
+                            "secure Windows container transfer command exceeded its total time limit"
                         ) from primary_error
                     raise
 
                 if process.returncode != 0:
                     stderr_size = os.fstat(stderr_file.fileno()).st_size
-                    stderr_file.seek(max(0, stderr_size - _WINDOWS_TRANSFER_STDERR_MAX_BYTES))
-                    stderr = stderr_file.read(_WINDOWS_TRANSFER_STDERR_MAX_BYTES)
-                    if stderr_size > len(stderr):
-                        stderr = b"[earlier transfer diagnostics truncated]\n" + stderr
-                    detail = stderr.decode(errors="replace")
-                    raise RuntimeError(
-                        _redact(
-                            "secure Windows container transfer command failed: " + detail,
-                            protected_values,
+                    eligible_secrets = _eligible_secret_values(
+                        diagnostic_protected_values,
+                        include_short=True,
+                    )
+                    maximum_secret_bytes = max(
+                        (len(secret.encode("utf-8", errors="surrogatepass")) for secret in eligible_secrets),
+                        default=0,
+                    )
+                    if maximum_secret_bytes > _WINDOWS_TRANSFER_STDERR_MAX_BYTES:
+                        detail = "[transfer diagnostics omitted because a protected value exceeds the safe window]"
+                    else:
+                        read_limit = (
+                            _WINDOWS_TRANSFER_STDERR_MAX_BYTES
+                            + maximum_secret_bytes
+                            + 4
+                        )
+                        stderr_file.seek(max(0, stderr_size - read_limit))
+                        stderr = stderr_file.read(read_limit)
+                        detail = _redact(
+                            stderr.decode(errors="replace"),
+                            diagnostic_protected_values,
                             include_short=True,
                         )
+                        truncated = stderr_size > len(stderr) or len(detail) > _WINDOWS_TRANSFER_STDERR_MAX_BYTES
+                        detail = detail[-_WINDOWS_TRANSFER_STDERR_MAX_BYTES :]
+                        if truncated:
+                            detail = "[earlier transfer diagnostics truncated]\n" + detail
+                    raise RuntimeError(
+                        "secure Windows container transfer command failed: " + detail
                     )
         except BaseException:
             if output_created:
@@ -2257,8 +2635,25 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             excluded_names=excluded_names,
             excluded_values=excluded_values,
         )
+        target = Path(target_dir)
+        parent_usage = _missing_windows_target_parent_usage(target)
+        target_reserve = _windows_artifact_filesystem_reserve(target.parent)
         with tempfile.TemporaryDirectory(prefix="skillevaluator-windows-download-") as temporary_directory:
             private_root = Path(temporary_directory)
+            temporary_reserve = _windows_artifact_filesystem_reserve(private_root)
+            if temporary_reserve.identity == target_reserve.identity:
+                common_reserve = max(
+                    temporary_reserve.minimum_free_bytes,
+                    target_reserve.minimum_free_bytes,
+                )
+                temporary_reserve = _WindowsFilesystemReserve(
+                    identity=temporary_reserve.identity,
+                    minimum_free_bytes=common_reserve,
+                )
+                target_reserve = _WindowsFilesystemReserve(
+                    identity=target_reserve.identity,
+                    minimum_free_bytes=common_reserve,
+                )
             archive_path = private_root / "container.tar"
             extracted = private_root / "extracted"
             extracted.mkdir(mode=0o700)
@@ -2279,11 +2674,37 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 process_environment=process_environment,
                 protected_values=excluded_values,
                 output_path=archive_path,
+                minimum_free_bytes=temporary_reserve.minimum_free_bytes,
             )
-            _extract_regular_tar_archive(archive_path, extracted)
+            usage = _extract_regular_tar_archive(
+                archive_path,
+                extracted,
+                minimum_free_bytes=temporary_reserve.minimum_free_bytes,
+            )
+            existing_target_usage = _existing_windows_target_usage(
+                target,
+                kind="directory",
+            )
+            # ``copytree_secure(..., dirs_exist_ok=True)`` builds one merged
+            # stage plus a rollback snapshot of an existing destination. The
+            # extracted source remains live until publication completes.
+            required_entries = (
+                usage.entries
+                + 2 * existing_target_usage.entries
+                + parent_usage.entries
+            )
+            _require_windows_artifact_resources(
+                target.parent,
+                usage.estimated_disk_bytes
+                + 2 * existing_target_usage.estimated_disk_bytes
+                + parent_usage.estimated_disk_bytes,
+                required_entries=required_entries,
+                minimum_free_bytes=target_reserve.minimum_free_bytes,
+                purpose="directory publication",
+            )
             copytree_secure(
                 extracted,
-                Path(target_dir),
+                target,
                 dirs_exist_ok=True,
                 allowed_root=extracted,
             )

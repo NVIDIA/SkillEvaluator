@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -158,6 +159,21 @@ class _ChunkStream:
             return await self.__anext__()
         except StopAsyncIteration:
             return b""
+
+
+class _FeedableStream:
+    def __init__(self) -> None:
+        self._chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    def feed_data(self, data: bytes) -> None:
+        self._chunks.put_nowait(data)
+
+    def feed_eof(self) -> None:
+        self._chunks.put_nowait(None)
+
+    async def read(self, _limit: int) -> bytes:
+        chunk = await self._chunks.get()
+        return b"" if chunk is None else chunk
 
 
 class _StreamedComposeProcess:
@@ -3461,10 +3477,17 @@ def test_windows_main_downloads_use_scrubbed_docker_env_and_validated_archives(
     class TransferProcess:
         pid = 7643
 
-        def __init__(self, arguments: tuple[str, ...], process_environment: dict[str, str]) -> None:
+        def __init__(
+            self,
+            arguments: tuple[str, ...],
+            process_environment: dict[str, str],
+            archive_payload: bytes,
+        ) -> None:
             self.arguments = arguments
             self.process_environment = process_environment
             self.returncode: int | None = None
+            self.stdout = _ChunkStream([archive_payload])
+            self.stderr = _ChunkStream([b"successful docker warning must not enter tar bytes"])
 
         async def wait(self) -> int:
             self.returncode = 0
@@ -3477,10 +3500,8 @@ def test_windows_main_downloads_use_scrubbed_docker_env_and_validated_archives(
         nonlocal docker_call_count
         assert "env" in kwargs
         assert Path(str(args[0])).name == "docker"
-        stdout = kwargs["stdout"]
-        stderr = kwargs["stderr"]
-        assert hasattr(stdout, "write")
-        assert hasattr(stderr, "write")
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
         docker_call_count += 1
         archive_buffer = io.BytesIO()
         with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
@@ -3497,16 +3518,14 @@ def test_windows_main_downloads_use_scrubbed_docker_env_and_validated_archives(
                 member = tarfile.TarInfo("./nested/value.bin")
                 member.size = len(payload)
                 archive.addfile(member, io.BytesIO(payload))
-        stdout.write(archive_buffer.getvalue())
-        stdout.flush()
-        stderr.write(b"successful docker warning must not enter tar bytes")
-        stderr.flush()
+        archive_payload = archive_buffer.getvalue()
         arguments = tuple(str(argument) for argument in args)
         process_environment = dict(kwargs["env"])
         calls.append((arguments, process_environment))
         return TransferProcess(
             arguments,
             process_environment,
+            archive_payload,
         )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
@@ -3552,6 +3571,58 @@ def test_windows_main_downloads_use_scrubbed_docker_env_and_validated_archives(
         assert all(
             secret not in value for secret in (main_secret, unrelated_secret) for value in process_environment.values()
         )
+
+
+@pytest.mark.parametrize(
+    ("source_path", "expected_parent"),
+    (
+        ("C:/payload.bin", "C:/"),
+        (r"C:\payload.bin", "C:/"),
+        ("/payload.bin", "/"),
+        ("payload.bin", "."),
+    ),
+)
+def test_windows_file_download_preserves_container_source_root_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_path: str,
+    expected_parent: str,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    environment._is_windows_container = True
+    environment._windows_container_name = "harbor-secure-windows"
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    async def download_dir(
+        source_dir: str,
+        target_dir: Path | str,
+        **kwargs: object,
+    ) -> None:
+        archive_members = kwargs["archive_members"]
+        assert isinstance(archive_members, tuple)
+        calls.append((source_dir, archive_members))
+        (Path(target_dir) / "payload.bin").write_bytes(b"payload")
+
+    monkeypatch.setattr(environment, "_secure_windows_download_dir", download_dir)
+    target = tmp_path / "downloaded.bin"
+
+    asyncio.run(environment.service_download_file(source_path, target))
+
+    assert calls == [(expected_parent, ("payload.bin",))]
+    assert target.read_bytes() == b"payload"
+
+
+@pytest.mark.parametrize("source_path", ["", "C:/", "C:\\", "/", "bad\x00name"])
+def test_windows_file_download_rejects_invalid_container_source_path(
+    tmp_path: Path,
+    source_path: str,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    environment._is_windows_container = True
+    environment._windows_container_name = "harbor-secure-windows"
+
+    with pytest.raises(RuntimeError, match="download path is invalid"):
+        asyncio.run(environment.service_download_file(source_path, tmp_path / "target.bin"))
 
 
 def test_windows_transfer_streams_large_binary_output_without_communicate(tmp_path: Path) -> None:
@@ -3626,6 +3697,158 @@ def test_windows_transfer_removes_output_if_diagnostic_spool_creation_fails(
     assert not output_path.exists()
 
 
+@pytest.mark.parametrize(
+    ("stdout_bytes", "stderr_bytes", "should_fail"),
+    (
+        (11, 0, True),
+        (0, 11, True),
+        (6, 5, True),
+        (6, 4, False),
+    ),
+)
+def test_windows_transfer_enforces_combined_temporary_disk_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout_bytes: int,
+    stderr_bytes: int,
+    should_fail: bool,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    output_path = tmp_path / "budgeted-transfer.tar"
+
+    class TransferProcess:
+        pid = 7648
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _ChunkStream([b"o" * stdout_bytes])
+            self.stderr = _ChunkStream([b"e" * stderr_bytes])
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return self.returncode
+
+    async def create_subprocess(*_args: object, **kwargs: object) -> TransferProcess:
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+        return TransferProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_DISK_RESERVE_BYTES", 0)
+    monkeypatch.setattr(
+        secure_docker_environment.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=10),
+    )
+
+    async def transfer() -> None:
+        await environment._run_trusted_transfer_command(
+            ["docker", "version"],
+            process_environment={"PATH": os.environ["PATH"]},
+            protected_values=set(),
+            output_path=output_path,
+        )
+
+    if should_fail:
+        with pytest.raises(RuntimeError, match="exceeded its temporary disk budget"):
+            asyncio.run(transfer())
+        assert not output_path.exists()
+    else:
+        asyncio.run(transfer())
+        assert output_path.read_bytes() == b"o" * stdout_bytes
+
+
+def test_windows_artifact_disk_reserve_does_not_ratchet_between_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    initial_free = 2 * 1024 * 1024 * 1024
+    later_free = 1024 * 1024 * 1024
+    free_values = iter((initial_free, later_free, later_free))
+    monkeypatch.setattr(
+        secure_docker_environment.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=next(free_values)),
+    )
+
+    reserve = secure_docker_environment._windows_artifact_filesystem_reserve(tmp_path)
+    assert reserve.minimum_free_bytes == initial_free // 20
+    exact_later_budget = later_free - reserve.minimum_free_bytes
+
+    secure_docker_environment._require_windows_artifact_resources(
+        tmp_path,
+        exact_later_budget,
+        required_entries=0,
+        minimum_free_bytes=reserve.minimum_free_bytes,
+        purpose="test phase",
+    )
+    with pytest.raises(RuntimeError, match="insufficient disk space"):
+        secure_docker_environment._require_windows_artifact_resources(
+            tmp_path,
+            exact_later_budget + 1,
+            required_entries=0,
+            minimum_free_bytes=reserve.minimum_free_bytes,
+            purpose="test phase",
+        )
+
+
+@pytest.mark.parametrize(
+    ("same_filesystem", "expected_publication_reserve"),
+    ((True, 20), (False, 10)),
+)
+def test_windows_download_reuses_or_separates_filesystem_reserves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    same_filesystem: bool,
+    expected_publication_reserve: int,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    environment._is_windows_container = True
+    environment._windows_container_name = "harbor-secure-windows"
+    target = tmp_path / "target"
+    captured: dict[str, int] = {}
+    reserves = iter(
+        (
+            secure_docker_environment._WindowsFilesystemReserve(identity=1, minimum_free_bytes=10),
+            secure_docker_environment._WindowsFilesystemReserve(
+                identity=1 if same_filesystem else 2,
+                minimum_free_bytes=20,
+            ),
+        )
+    )
+
+    async def transfer(_command: list[str], **kwargs: object) -> None:
+        captured["transfer"] = int(kwargs["minimum_free_bytes"])  # type: ignore[arg-type]
+        Path(kwargs["output_path"]).write_bytes(b"unused")  # type: ignore[arg-type]
+
+    def extract(_archive: Path, _target: Path, **kwargs: object) -> object:
+        captured["extraction"] = int(kwargs["minimum_free_bytes"])  # type: ignore[arg-type]
+        return secure_docker_environment._WindowsArtifactUsage(file_bytes=0, entries=1)
+
+    def require_resources(_path: Path, _required_bytes: int, **kwargs: object) -> None:
+        captured["publication"] = int(kwargs["minimum_free_bytes"])  # type: ignore[arg-type]
+
+    monkeypatch.setattr(secure_docker_environment, "_windows_artifact_filesystem_reserve", lambda _path: next(reserves))
+    monkeypatch.setattr(environment, "_run_trusted_transfer_command", transfer)
+    monkeypatch.setattr(secure_docker_environment, "_extract_regular_tar_archive", extract)
+    monkeypatch.setattr(secure_docker_environment, "_require_windows_artifact_resources", require_resources)
+    monkeypatch.setattr(secure_docker_environment, "copytree_secure", lambda *_args, **_kwargs: None)
+
+    asyncio.run(environment.service_download_dir("C:/artifacts", target))
+
+    assert captured == {
+        "transfer": 20,
+        "extraction": 20,
+        "publication": expected_publication_reserve,
+    }
+
+
 def test_windows_large_file_download_extracts_and_publishes_with_bounded_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3671,6 +3894,144 @@ def test_windows_large_file_download_extracts_and_publishes_with_bounded_memory(
     assert peak_bytes < 12 * 1024 * 1024
 
 
+@pytest.mark.parametrize("operation", ["file", "directory"])
+def test_windows_download_rejects_insufficient_publication_filesystem_before_target_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    environment._is_windows_container = True
+    environment._windows_container_name = "harbor-secure-windows"
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        payload = b"new"
+        member = tarfile.TarInfo("./payload.bin")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    archive_payload = archive_buffer.getvalue()
+
+    async def transfer(_command: list[str], **kwargs: object) -> None:
+        Path(kwargs["output_path"]).write_bytes(archive_payload)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(environment, "_run_trusted_transfer_command", transfer)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_ENTRY_DISK_BYTES", 1)
+    target = tmp_path / ("downloaded.bin" if operation == "file" else "downloaded-dir")
+    if operation == "file":
+        target.write_bytes(b"old")
+        target_budget = 7  # new stage (4) plus existing rollback (4), minus one
+    else:
+        target.mkdir()
+        (target / "sentinel.bin").write_bytes(b"old")
+        target_budget = 14  # new tree (5) plus two existing snapshots (2 * 5), minus one
+
+    def disk_budget(path: Path) -> tuple[int, int]:
+        if Path(path) == target.parent:
+            return target_budget, target_budget
+        return 1024 * 1024, 1024 * 1024
+
+    monkeypatch.setattr(secure_docker_environment, "_windows_artifact_disk_budget", disk_budget)
+
+    if operation == "file":
+        with pytest.raises(RuntimeError, match=r"insufficient disk space.*file publication"):
+            asyncio.run(environment.service_download_file("/remote/payload.bin", target))
+        assert target.read_bytes() == b"old"
+    else:
+        with pytest.raises(RuntimeError, match=r"insufficient disk space.*directory publication"):
+            asyncio.run(environment.service_download_dir("/remote/tree", target))
+        assert [child.name for child in target.iterdir()] == ["sentinel.bin"]
+        assert (target / "sentinel.bin").read_bytes() == b"old"
+
+
+def test_windows_file_publication_charges_missing_destination_parents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    environment._is_windows_container = True
+    environment._windows_container_name = "harbor-secure-windows"
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        payload = b"new"
+        member = tarfile.TarInfo("./payload.bin")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    archive_payload = archive_buffer.getvalue()
+
+    async def transfer(_command: list[str], **kwargs: object) -> None:
+        Path(kwargs["output_path"]).write_bytes(archive_payload)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(environment, "_run_trusted_transfer_command", transfer)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_ENTRY_DISK_BYTES", 1)
+    target = tmp_path / "missing-one" / "missing-two" / "downloaded.bin"
+
+    def disk_budget(path: Path) -> tuple[int, int]:
+        if Path(path) == target.parent:
+            return 5, 5  # file stage (4) plus two missing parents (2), minus one
+        return 1024 * 1024, 1024 * 1024
+
+    monkeypatch.setattr(secure_docker_environment, "_windows_artifact_disk_budget", disk_budget)
+
+    with pytest.raises(RuntimeError, match=r"insufficient disk space.*file publication"):
+        asyncio.run(environment.service_download_file("/remote/payload.bin", target))
+
+    assert not (tmp_path / "missing-one").exists()
+
+
+def test_windows_file_publication_enospc_preserves_existing_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_copy, secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    environment._is_windows_container = True
+    environment._windows_container_name = "harbor-secure-windows"
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        payload = b"replacement"
+        member = tarfile.TarInfo("./payload.bin")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    archive_payload = archive_buffer.getvalue()
+
+    async def transfer(_command: list[str], **kwargs: object) -> None:
+        Path(kwargs["output_path"]).write_bytes(archive_payload)  # type: ignore[arg-type]
+
+    original_copy = secure_copy.copy_file_secure
+
+    def copy_with_enospc(*args: object, **kwargs: object) -> None:
+        original_write = secure_copy.os.write
+        injected = False
+
+        def fail_after_partial_write(descriptor: int, data: bytes | memoryview) -> int:
+            nonlocal injected
+            written = original_write(descriptor, data)
+            if not injected:
+                injected = True
+                raise OSError(errno.ENOSPC, "injected publication disk exhaustion")
+            return written
+
+        with monkeypatch.context() as copy_patch:
+            copy_patch.setattr(secure_copy.os, "write", fail_after_partial_write)
+            original_copy(*args, **kwargs)
+
+    monkeypatch.setattr(environment, "_run_trusted_transfer_command", transfer)
+    monkeypatch.setattr(secure_docker_environment, "copy_file_secure", copy_with_enospc)
+    target = tmp_path / "downloaded.bin"
+    target.write_bytes(b"old")
+
+    with pytest.raises(RuntimeError, match="could not be copied safely"):
+        asyncio.run(environment.service_download_file("/remote/payload.bin", target))
+
+    assert target.read_bytes() == b"old"
+    assert sorted(path.name for path in tmp_path.iterdir() if path.name.startswith(".downloaded.bin")) == []
+
+
 def test_windows_transfer_timeout_reaps_process_and_removes_partial_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3684,7 +4045,11 @@ def test_windows_transfer_timeout_reaps_process_and_removes_partial_output(
 
     class BlockedTransferProcess:
         pid = 7645
-        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _FeedableStream()
+            self.stderr = _FeedableStream()
 
         async def wait(self) -> int:
             await exited.wait()
@@ -3694,14 +4059,16 @@ def test_windows_transfer_timeout_reaps_process_and_removes_partial_output(
     process = BlockedTransferProcess()
 
     async def create_subprocess(*_args: object, **kwargs: object) -> BlockedTransferProcess:
-        stdout = kwargs["stdout"]
-        stdout.write(b"partial-untrusted-archive")
-        stdout.flush()
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+        process.stdout.feed_data(b"partial-untrusted-archive")
         return process
 
     def signal_process_tree(_process: object, value: signal.Signals) -> None:
         signalled.append(value)
         process.returncode = -int(value)
+        process.stdout.feed_eof()
+        process.stderr.feed_eof()
         exited.set()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
@@ -3733,7 +4100,11 @@ def test_windows_transfer_idle_timeout_resets_while_output_progresses(
 
     class ProgressingTransferProcess:
         pid = 7647
-        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _FeedableStream()
+            self.stderr = _FeedableStream()
 
         async def wait(self) -> int:
             await exited.wait()
@@ -3744,13 +4115,15 @@ def test_windows_transfer_idle_timeout_resets_while_output_progresses(
 
     async def create_subprocess(*_args: object, **kwargs: object) -> ProgressingTransferProcess:
         nonlocal producer
-        stdout = kwargs["stdout"]
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
 
         async def produce() -> None:
             for index in range(8):
-                stdout.write(bytes([index]))
-                stdout.flush()
+                process.stdout.feed_data(bytes([index]))
                 await asyncio.sleep(0.01)
+            process.stdout.feed_eof()
+            process.stderr.feed_eof()
             process.returncode = 0
             exited.set()
 
@@ -3775,6 +4148,225 @@ def test_windows_transfer_idle_timeout_resets_while_output_progresses(
     assert output_path.read_bytes() == bytes(range(8))
 
 
+def test_windows_transfer_growing_output_exceeding_budget_reaps_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    output_path = tmp_path / "growing-transfer.tar"
+    exited = asyncio.Event()
+    signalled: list[signal.Signals] = []
+    producer_tasks: list[asyncio.Task[None]] = []
+
+    class GrowingTransferProcess:
+        pid = 7651
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _FeedableStream()
+            self.stderr = _FeedableStream()
+
+        async def wait(self) -> int:
+            await exited.wait()
+            assert self.returncode is not None
+            return self.returncode
+
+    process = GrowingTransferProcess()
+
+    async def create_subprocess(*_args: object, **kwargs: object) -> GrowingTransferProcess:
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+        async def produce() -> None:
+            while not exited.is_set():
+                process.stdout.feed_data(b"grow")
+                await asyncio.sleep(0.002)
+
+        producer_tasks.append(asyncio.create_task(produce()))
+        return process
+
+    def signal_process_tree(_process: object, value: signal.Signals) -> None:
+        signalled.append(value)
+        process.returncode = -int(value)
+        process.stdout.feed_eof()
+        process.stderr.feed_eof()
+        exited.set()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(secure_docker_environment, "_signal_process_tree", signal_process_tree)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TRANSFER_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_DISK_RESERVE_BYTES", 0)
+    monkeypatch.setattr(
+        secure_docker_environment.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=10),
+    )
+
+    with pytest.raises(RuntimeError, match="exceeded its temporary disk budget"):
+        asyncio.run(
+            environment._run_trusted_transfer_command(
+                ["docker", "version"],
+                process_environment={"PATH": os.environ["PATH"]},
+                protected_values=set(),
+                output_path=output_path,
+            )
+        )
+
+    assert signalled == [signal.SIGTERM]
+    assert all(task.done() for task in producer_tasks)
+    assert not output_path.exists()
+
+
+def test_windows_transfer_total_timeout_reaps_continuously_progressing_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    output_path = tmp_path / "trickling-transfer.tar"
+    exited = asyncio.Event()
+    signalled: list[signal.Signals] = []
+    producer_tasks: list[asyncio.Task[None]] = []
+
+    class TricklingTransferProcess:
+        pid = 7652
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _FeedableStream()
+            self.stderr = _FeedableStream()
+
+        async def wait(self) -> int:
+            await exited.wait()
+            assert self.returncode is not None
+            return self.returncode
+
+    process = TricklingTransferProcess()
+
+    async def create_subprocess(*_args: object, **kwargs: object) -> TricklingTransferProcess:
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+        async def produce() -> None:
+            while not exited.is_set():
+                process.stdout.feed_data(b"x")
+                await asyncio.sleep(0.002)
+
+        producer_tasks.append(asyncio.create_task(produce()))
+        return process
+
+    def signal_process_tree(_process: object, value: signal.Signals) -> None:
+        signalled.append(value)
+        process.returncode = -int(value)
+        process.stdout.feed_eof()
+        process.stderr.feed_eof()
+        exited.set()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(secure_docker_environment, "_signal_process_tree", signal_process_tree)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TRANSFER_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="exceeded its total time limit"):
+        asyncio.run(
+            environment._run_trusted_transfer_command(
+                ["docker", "version"],
+                process_environment={"PATH": os.environ["PATH"]},
+                protected_values=set(),
+                output_path=output_path,
+                idle_timeout_sec=0.02,
+                total_timeout_sec=0.01,
+            )
+        )
+
+    assert signalled == [signal.SIGTERM]
+    assert all(task.done() for task in producer_tasks)
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("timeout_name", "timeout_value"),
+    (
+        ("idle_timeout_sec", 0.0),
+        ("idle_timeout_sec", -1.0),
+        ("idle_timeout_sec", float("nan")),
+        ("idle_timeout_sec", float("inf")),
+        ("total_timeout_sec", 0.0),
+        ("total_timeout_sec", -1.0),
+        ("total_timeout_sec", float("nan")),
+        ("total_timeout_sec", float("inf")),
+    ),
+)
+def test_windows_transfer_rejects_nonpositive_or_nonfinite_timeouts(
+    tmp_path: Path,
+    timeout_name: str,
+    timeout_value: float,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+
+    with pytest.raises(ValueError, match="must be a positive finite value"):
+        asyncio.run(
+            environment._run_trusted_transfer_command(
+                ["docker", "version"],
+                process_environment={"PATH": os.environ["PATH"]},
+                protected_values=set(),
+                output_path=tmp_path / "invalid-timeout.tar",
+                **{timeout_name: timeout_value},
+            )
+        )
+
+
+def test_windows_transfer_rejects_process_completion_after_total_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    output_path = tmp_path / "late-completion.tar"
+    signalled: list[signal.Signals] = []
+
+    class LateTransferProcess:
+        pid = 7653
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _ChunkStream([])
+            self.stderr = _ChunkStream([])
+
+        async def wait(self) -> int:
+            await asyncio.sleep(0.02)
+            self.returncode = 0
+            return self.returncode
+
+    process = LateTransferProcess()
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> LateTransferProcess:
+        return process
+
+    def signal_process_tree(_process: object, value: signal.Signals) -> None:
+        signalled.append(value)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(secure_docker_environment, "_signal_process_tree", signal_process_tree)
+
+    with pytest.raises(RuntimeError, match="exceeded its total time limit"):
+        asyncio.run(
+            environment._run_trusted_transfer_command(
+                ["docker", "version"],
+                process_environment={"PATH": os.environ["PATH"]},
+                protected_values=set(),
+                output_path=output_path,
+                total_timeout_sec=0.01,
+            )
+        )
+
+    assert signalled == [signal.SIGTERM]
+    assert not output_path.exists()
+
+
 def test_windows_transfer_repeated_cancellation_reaps_process_and_removes_partial_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3789,7 +4381,11 @@ def test_windows_transfer_repeated_cancellation_reaps_process_and_removes_partia
 
     class BlockedTransferProcess:
         pid = 7646
-        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _FeedableStream()
+            self.stderr = _FeedableStream()
 
         async def wait(self) -> int:
             await exited.wait()
@@ -3799,15 +4395,17 @@ def test_windows_transfer_repeated_cancellation_reaps_process_and_removes_partia
     process = BlockedTransferProcess()
 
     async def create_subprocess(*_args: object, **kwargs: object) -> BlockedTransferProcess:
-        stdout = kwargs["stdout"]
-        stdout.write(b"partial-cancelled-archive")
-        stdout.flush()
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+        process.stdout.feed_data(b"partial-cancelled-archive")
         started.set()
         return process
 
     def signal_process_tree(_process: object, value: signal.Signals) -> None:
         signalled.append(value)
         process.returncode = -int(value)
+        process.stdout.feed_eof()
+        process.stderr.feed_eof()
         exited.set()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
@@ -3895,6 +4493,10 @@ def test_windows_main_download_rejects_unsafe_container_archive_members(
         ("./file/child", "./file"),
         ("./name:alternate-stream",),
         ("./CON.txt",),
+        ("./CONIN$",),
+        ("./CONOUT$.log",),
+        ("./COM0",),
+        ("./LPT0.txt",),
         ("./trailing.",),
         ("./trailing-space ",),
     ),
@@ -3968,7 +4570,7 @@ def test_windows_main_download_rejects_malformed_or_compressed_archive_before_ta
     assert sentinel.read_bytes() == b"unchanged"
 
 
-@pytest.mark.parametrize("bound", ["members", "paths", "metadata", "disk"])
+@pytest.mark.parametrize("bound", ["members", "paths", "components", "metadata", "disk"])
 def test_windows_main_download_enforces_archive_resource_bounds_before_target_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3983,7 +4585,11 @@ def test_windows_main_download_enforces_archive_resource_bounds_before_target_mu
     long_name = "./" + "long-name-" * 20 + "payload.bin"
     with tarfile.open(fileobj=archive_buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
         names = ("./first.bin", "./second.bin") if bound == "members" else (
-            long_name if bound in {"paths", "metadata"} else "./payload.bin",
+            "./nested/payload.bin"
+            if bound == "components"
+            else long_name
+            if bound in {"paths", "metadata"}
+            else "./payload.bin",
         )
         for name in names:
             payload = b"four"
@@ -3996,10 +4602,12 @@ def test_windows_main_download_enforces_archive_resource_bounds_before_target_mu
         monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_MAX_MEMBERS", 1)
     elif bound == "paths":
         monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_MAX_PATH_BYTES", 8)
+    elif bound == "components":
+        monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_MAX_PATH_COMPONENTS", 1)
     elif bound == "metadata":
         monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_MAX_EXTENSION_BYTES", 8)
     else:
-        monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_DISK_RESERVE_BYTES", 0)
+        monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_DISK_RESERVE_BYTES", 0)
         monkeypatch.setattr(
             secure_docker_environment.shutil,
             "disk_usage",
@@ -4015,11 +4623,172 @@ def test_windows_main_download_enforces_archive_resource_bounds_before_target_mu
     sentinel = target / "sentinel.bin"
     sentinel.write_bytes(b"unchanged")
 
-    with pytest.raises(RuntimeError, match="unsafe Windows container download archive"):
+    expected_error = (
+        "insufficient disk space.*archive extraction"
+        if bound == "disk"
+        else "unsafe Windows container download archive"
+    )
+    with pytest.raises(RuntimeError, match=expected_error):
         asyncio.run(environment.service_download_dir("/remote/tree", target))
 
     assert list(target.iterdir()) == [sentinel]
     assert sentinel.read_bytes() == b"unchanged"
+
+
+@pytest.mark.parametrize(
+    "extension_type",
+    (
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    ),
+)
+def test_windows_tar_prescan_bounds_every_allocating_extension_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extension_type: bytes,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "metadata-extension.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        payload = b"1 path=payload.bin\n" + b"x" * 64
+        member = tarfile.TarInfo("pax-metadata")
+        member.type = extension_type
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_MAX_EXTENSION_BYTES", 8)
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_rejects_global_pax_even_below_metadata_limit(
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "global-pax.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        member = tarfile.TarInfo("global-pax")
+        member.type = tarfile.XGLTYPE
+        member.size = 1
+        archive.addfile(member, io.BytesIO(b"x"))
+        for index in range(32):
+            payload = b""
+            regular = tarfile.TarInfo(f"payload-{index}.bin")
+            regular.size = len(payload)
+            archive.addfile(regular, io.BytesIO(payload))
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_archive_budget_counts_zero_byte_entries_before_target_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    environment._is_windows_container = True
+    environment._windows_container_name = "harbor-secure-windows"
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        for index in range(3):
+            member = tarfile.TarInfo(f"./empty-{index}.bin")
+            member.size = 0
+            archive.addfile(member, io.BytesIO())
+    archive_payload = archive_buffer.getvalue()
+
+    async def transfer(_command: list[str], **kwargs: object) -> None:
+        Path(kwargs["output_path"]).write_bytes(archive_payload)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(environment, "_run_trusted_transfer_command", transfer)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_ENTRY_DISK_BYTES", 10)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_DISK_RESERVE_BYTES", 0)
+    monkeypatch.setattr(
+        secure_docker_environment.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=39),
+    )
+    target = tmp_path / "existing-target"
+    target.mkdir()
+    sentinel = target / "sentinel.bin"
+    sentinel.write_bytes(b"unchanged")
+
+    with pytest.raises(RuntimeError, match=r"insufficient disk space.*archive extraction"):
+        asyncio.run(environment.service_download_dir("/remote/tree", target))
+
+    assert list(target.iterdir()) == [sentinel]
+    assert sentinel.read_bytes() == b"unchanged"
+
+
+@pytest.mark.parametrize(("available_bytes", "should_succeed"), ((34, True), (33, False)))
+def test_windows_archive_extraction_enforces_exact_estimated_byte_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    available_bytes: int,
+    should_succeed: bool,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "boundary.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        payload = b"four"
+        member = tarfile.TarInfo("./nested/payload.bin")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    target = tmp_path / "extracted"
+    target.mkdir()
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_ENTRY_DISK_BYTES", 10)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_DISK_RESERVE_BYTES", 0)
+    monkeypatch.setattr(
+        secure_docker_environment.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=available_bytes),
+    )
+
+    if should_succeed:
+        usage = secure_docker_environment._extract_regular_tar_archive(archive_path, target)
+        assert usage.estimated_disk_bytes == available_bytes
+        assert (target / "nested" / "payload.bin").read_bytes() == b"four"
+    else:
+        with pytest.raises(RuntimeError, match="insufficient disk space"):
+            secure_docker_environment._extract_regular_tar_archive(archive_path, target)
+        assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("resource", ["entries", "inodes"])
+def test_windows_archive_rejects_implicit_directory_resource_exhaustion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource: str,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "implicit-directories.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        member = tarfile.TarInfo("./one/two/payload.bin")
+        member.size = 0
+        archive.addfile(member, io.BytesIO())
+    target = tmp_path / "extracted"
+    target.mkdir()
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_ARTIFACT_DISK_RESERVE_BYTES", 0)
+    if resource == "entries":
+        monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_MAX_FILESYSTEM_ENTRIES", 3)
+        expected_error = "unsafe Windows container download archive"
+    else:
+        monkeypatch.setattr(secure_docker_environment, "_windows_artifact_inode_budget", lambda _path: 3)
+        expected_error = "insufficient filesystem entries"
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        secure_docker_environment._extract_regular_tar_archive(archive_path, target)
+
+    assert list(target.iterdir()) == []
 
 
 def test_windows_transfer_error_redacts_exact_short_sensitive_value(
@@ -4034,7 +4803,13 @@ def test_windows_transfer_error_redacts_exact_short_sensitive_value(
 
     class FailedTransferProcess:
         pid = 7644
-        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _ChunkStream([])
+            self.stderr = _ChunkStream(
+                [("discarded-prefix-" * 20 + f"|{secret}|transfer failed").encode()]
+            )
 
         async def wait(self) -> int:
             self.returncode = 9
@@ -4044,9 +4819,8 @@ def test_windows_transfer_error_redacts_exact_short_sensitive_value(
         *_args: object,
         **kwargs: object,
     ) -> FailedTransferProcess:
-        stderr = kwargs["stderr"]
-        stderr.write(("discarded-prefix-" * 20 + f"|{secret}|transfer failed").encode())
-        stderr.flush()
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
         return FailedTransferProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
@@ -4069,6 +4843,98 @@ def test_windows_transfer_error_redacts_exact_short_sensitive_value(
         {secret},
         include_short=True,
     ) in str(caught.value)
+    assert not output_path.exists()
+
+
+def test_windows_transfer_truncated_error_cannot_expose_secret_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    secret = "SYNTHETIC_SECRET_ABCDEF"
+    output_path = tmp_path / "failed-transfer.tar"
+
+    class FailedTransferProcess:
+        pid = 7649
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _ChunkStream([])
+            self.stderr = _ChunkStream([f"prefix|{secret}|FAIL".encode()])
+
+        async def wait(self) -> int:
+            self.returncode = 9
+            return self.returncode
+
+    async def create_subprocess(*_args: object, **kwargs: object) -> FailedTransferProcess:
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+        return FailedTransferProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TRANSFER_STDERR_MAX_BYTES", 16)
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(
+            environment._run_trusted_transfer_command(
+                ["docker", "version"],
+                process_environment={"PATH": os.environ["PATH"]},
+                protected_values={secret},
+                output_path=output_path,
+            )
+        )
+
+    rendered = str(caught.value)
+    assert secret not in rendered
+    assert "CRET_ABCDEF" not in rendered
+    assert "diagnostics omitted" in rendered
+    assert not output_path.exists()
+
+
+def test_windows_transfer_error_redacts_sensitive_docker_client_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    secret = "SYNTHETIC_DOCKER_AUTH_SECRET"
+    output_path = tmp_path / "failed-transfer.tar"
+
+    class FailedTransferProcess:
+        pid = 7650
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _ChunkStream([])
+            self.stderr = _ChunkStream([f"docker auth failed: {secret}".encode()])
+
+        async def wait(self) -> int:
+            self.returncode = 9
+            return self.returncode
+
+    async def create_subprocess(*_args: object, **kwargs: object) -> FailedTransferProcess:
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+        return FailedTransferProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(
+            environment._run_trusted_transfer_command(
+                ["docker", "version"],
+                process_environment={
+                    "PATH": os.environ["PATH"],
+                    "DOCKER_AUTH_CONFIG": secret,
+                },
+                protected_values=set(),
+                output_path=output_path,
+            )
+        )
+
+    assert secret not in str(caught.value)
+    assert _collision_safe_redaction_marker({secret}, include_short=True) in str(caught.value)
     assert not output_path.exists()
 
 

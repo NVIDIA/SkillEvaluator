@@ -66,7 +66,11 @@ def test_raw_path_rewrite_ignores_url_and_local_path_suffixes(tmp_path: Path) ->
 
 @pytest.mark.integration
 @pytest.mark.skipif(os.name == "nt", reason="local subprocess backend requires POSIX")
-def test_real_local_exec_streams_redacted_stdout_and_stderr(tmp_path: Path) -> None:
+@pytest.mark.parametrize("secret_name", ["SANDBOX_TOKEN", "MYSECRET", "SOMEKEY", "AUTHENTICATION"])
+def test_real_local_exec_streams_redacted_stdout_and_stderr(
+    tmp_path: Path,
+    secret_name: str,
+) -> None:
     try:
         detected_sandbox = local_sandbox.detect("require")
     except local_sandbox.SandboxUnavailable as exc:
@@ -90,7 +94,7 @@ def test_real_local_exec_streams_redacted_stdout_and_stderr(tmp_path: Path) -> N
     )
     secret = "real-sandbox-stream-secret"
     callbacks: list[tuple[str, str]] = []
-    command = "printf 'stdout=%s\\n' \"$SANDBOX_TOKEN\"; printf 'stderr=%s\\n' \"$SANDBOX_TOKEN\" >&2"
+    command = f"printf 'stdout=%s\\n' \"${secret_name}\"; printf 'stderr=%s\\n' \"${secret_name}\" >&2"
 
     async def on_output(text: str, stream: str) -> None:
         callbacks.append((text, stream))
@@ -99,7 +103,7 @@ def test_real_local_exec_streams_redacted_stdout_and_stderr(tmp_path: Path) -> N
         await environment.start()
         try:
             with environment.scoped_output_callback(on_output):
-                result = await environment.exec(command, env={"SANDBOX_TOKEN": secret})
+                result = await environment.exec(command, env={secret_name: secret})
             assert environment._sandbox is not None
             return result, environment._sandbox.plan.backend
         finally:
@@ -115,5 +119,7 @@ def test_real_local_exec_streams_redacted_stdout_and_stderr(tmp_path: Path) -> N
     assert callback_stderr == result.stderr
     assert secret not in callback_stdout
     assert secret not in callback_stderr
+    assert secret not in (result.stdout or "")
+    assert secret not in (result.stderr or "")
     assert "stdout=" in callback_stdout
     assert "stderr=" in callback_stderr

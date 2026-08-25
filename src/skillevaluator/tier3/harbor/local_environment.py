@@ -97,6 +97,10 @@ _SENSITIVE_ENV_NAME_RE = re.compile(
     r"CONNECTION(?:_STRING)?|(?:PRE)?SIGNED_?URL|SAS_?URL|CREDENTIAL_?URL|DATABASE_?URL)(?:_|$)",
     re.IGNORECASE,
 )
+_LEGACY_SECRET_ENV_NAME_RE = re.compile(
+    r"(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)",
+    re.IGNORECASE,
+)
 _SHELL_WRITE_REDIRECT_RE = re.compile(r"(?:^|\s)(?:\d?>{1,2}|&>)\s*([^\s;&|]+)")
 _SHELL_WRITE_COMMAND_RE = re.compile(r"(?:^|[;&|]\s*)(?:tee|touch|mkdir|cp|mv)\b(?P<args>[^;&|]*)")
 _BACKGROUND_AMPERSAND_RE = re.compile(r"(?<![&>])&(?![&>])")
@@ -1545,8 +1549,16 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
 
     def _output_secret_values(self, env: dict[str, str] | None, exec_env: dict[str, str]) -> set[str]:
         merged = self._merge_env(env) or {}
-        secret_values = {value for key, value in merged.items() if value and _SENSITIVE_ENV_NAME_RE.search(key)}
-        secret_values.update(value for key, value in exec_env.items() if value and _SENSITIVE_ENV_NAME_RE.search(key))
+        secret_values = {
+            value
+            for key, value in merged.items()
+            if value and (_SENSITIVE_ENV_NAME_RE.search(key) or _LEGACY_SECRET_ENV_NAME_RE.search(key))
+        }
+        secret_values.update(
+            value
+            for key, value in exec_env.items()
+            if value and (_SENSITIVE_ENV_NAME_RE.search(key) or _LEGACY_SECRET_ENV_NAME_RE.search(key))
+        )
         return secret_values
 
     @staticmethod

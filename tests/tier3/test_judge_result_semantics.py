@@ -26,9 +26,7 @@ _CRITERIA = {
     "TASK_ADDRESSED": True,
     "ACTIONABLE": False,
 }
-VALID_ACCURACY_RESPONSE = json.dumps(
-    {"criteria": _CRITERIA, "score": 0.6, "reason": "valid retry"}
-)
+VALID_ACCURACY_RESPONSE = json.dumps({"criteria": _CRITERIA, "score": 0.6, "reason": "valid retry"})
 VALID_GOAL_RESPONSE = json.dumps(
     {
         "user_goal": "complete the task",
@@ -132,6 +130,23 @@ def test_accuracy_retries_invalid_response_once_and_recovers(
     assert "previous reply could not be parsed or validated" in calls[1]["prompt"]
 
 
+def test_accuracy_retries_non_string_reason_once_and_recovers(judge_module, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    invalid = json.dumps({"score": 1.0, "reason": {"nested": "text"}})
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _recorded_pair_script([(invalid, None), (VALID_ACCURACY_RESPONSE, None)], calls),
+    )
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 2
+    assert result["score"] == 0.6
+    assert result["reason"] == "valid retry"
+    assert "previous reply could not be parsed or validated" in calls[1]["prompt"]
+
+
 def test_accuracy_invalid_twice_errors_after_exactly_one_retry(judge_module, monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
@@ -224,6 +239,49 @@ def test_goal_retries_invalid_response_once_and_recovers(
     if judge_module is eval_template:
         assert result["provider"] == "retry-provider"
         assert result["model"] == "retry-model"
+
+
+@pytest.mark.parametrize("field", ["reason", "user_goal", "end_state"])
+def test_goal_retries_non_string_text_fields_once_and_recovers(
+    judge_module,
+    monkeypatch,
+    field: str,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    invalid_payload = {
+        "user_goal": "complete the task",
+        "end_state": "task completed",
+        "achieved": True,
+        "score": 1.0,
+        "reason": "valid judgment",
+    }
+    invalid_payload[field] = {"nested": "text"}
+    _patch_goal_script(
+        judge_module,
+        monkeypatch,
+        [
+            (
+                json.dumps(invalid_payload),
+                None,
+                {"provider": "first-provider", "model": "first-model"},
+            ),
+            (
+                VALID_GOAL_RESPONSE,
+                None,
+                {"provider": "retry-provider", "model": "retry-model"},
+            ),
+        ],
+        calls,
+    )
+
+    result = judge_module.judge_goal_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 2
+    assert result["score"] == 1.0
+    assert result["reason"] == "valid retry"
+    assert result["user_goal"] == "complete the task"
+    assert result["end_state"] == "task completed"
+    assert "previous reply could not be parsed or validated" in calls[1]["prompt"]
 
 
 def test_goal_invalid_twice_errors_after_exactly_one_retry(judge_module, monkeypatch) -> None:
@@ -415,6 +473,32 @@ def test_accuracy_accepts_finite_numeric_scores(judge_module, monkeypatch, score
     assert result.get("status") != "error"
 
 
+def test_accuracy_normalizes_and_bounds_reason(judge_module, monkeypatch) -> None:
+    calls: list[str] = []
+    content = json.dumps({"score": 1.0, "reason": "  " + ("x" * 600) + "  "})
+    monkeypatch.setattr(judge_module, "call_public_llm", _pair_script([(content, None)], calls))
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 1
+    assert result["reason"] == ("x" * 509) + "..."
+    assert len(result["reason"]) == 512
+
+
+def test_accuracy_redacts_configured_secret_before_bounding_reason(judge_module, monkeypatch) -> None:
+    credential = "SECRET-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789"
+    prefix = "x" * 490
+    monkeypatch.setenv("OPENAI_API_KEY", credential)
+    content = json.dumps({"score": 1.0, "reason": prefix + credential})
+    monkeypatch.setattr(judge_module, "call_public_llm", lambda *_args, **_kwargs: (content, None))
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert result["reason"] == prefix + "[REDACTED]"
+    assert credential not in result["reason"]
+    assert "SECRET-" not in result["reason"]
+
+
 @pytest.mark.parametrize("invalid_score", [pytest.param(None, id="absent"), pytest.param(True, id="boolean")])
 def test_accuracy_derives_score_only_from_complete_boolean_criteria(
     judge_module,
@@ -564,6 +648,22 @@ def test_goal_requires_boolean_achieved_and_uses_only_finite_numeric_optional_sc
     assert result.get("status") != "error"
 
 
+def test_goal_normalizes_and_bounds_text_fields(judge_module, monkeypatch) -> None:
+    payload = {
+        "achieved": True,
+        "score": 1.0,
+        "reason": "  " + ("r" * 600) + "  ",
+        "user_goal": "  " + ("g" * 600) + "  ",
+        "end_state": "  " + ("e" * 600) + "  ",
+    }
+
+    result = _judge_goal_with_response(judge_module, monkeypatch, content=json.dumps(payload))
+
+    assert result["reason"] == ("r" * 509) + "..."
+    assert result["user_goal"] == ("g" * 509) + "..."
+    assert result["end_state"] == ("e" * 509) + "..."
+
+
 def test_goal_accepts_unique_object_before_unmatched_trailing_prose_without_retry(
     judge_module,
     monkeypatch,
@@ -653,6 +753,24 @@ def test_behavior_first_provider_error_is_scoreless_without_retry(judge_module, 
 
     assert len(calls) == 1
     _assert_error_result(result)
+
+
+def test_behavior_retries_overflowed_numeric_metadata_once_and_recovers(judge_module, monkeypatch) -> None:
+    calls: list[str] = []
+    overflowed = '{"results":[{"passed":true,"reason":"ok","metadata":1e999}],"score":1.0}'
+    recovered = json.dumps({"results": [{"passed": True, "reason": "ok"}], "score": 1.0, "summary": "recovered"})
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _pair_script([(overflowed, None), (recovered, None)], calls),
+    )
+
+    result = judge_module.judge_behavior_check("conversation", ["behavior"])
+
+    assert len(calls) == 2
+    assert result["score"] == 1.0
+    assert result["reason"] == "recovered"
+    assert "previous reply could not be parsed" in calls[1]
 
 
 @pytest.mark.parametrize(

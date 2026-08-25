@@ -28,6 +28,7 @@ DEFAULT_JUDGE_MODEL = CHAT_DEFAULT_OPENAI
 
 _ERROR_REDACTION_MARKER = "[REDACTED]"
 _JUDGE_ERROR_REASON_LIMIT = 512
+_JUDGE_TEXT_LIMIT = 512
 # Match verifier log redaction; shorter placeholders can corrupt ordinary diagnostic text.
 _MIN_EXACT_SECRET_LENGTH = 8
 _CREDENTIAL_ENV_VARS = (
@@ -142,6 +143,14 @@ def _judge_error(error_reason: str, **metadata: Any) -> dict[str, Any]:
     if len(safe_reason) > _JUDGE_ERROR_REASON_LIMIT:
         safe_reason = safe_reason[: _JUDGE_ERROR_REASON_LIMIT - 3] + "..."
     return {**metadata, "score": None, "status": "error", "reason": safe_reason}
+
+
+def _bounded_judge_text(value: Any) -> str:
+    """Normalize trusted-shape model text before it reaches artifacts and reports."""
+    text = _redact_configured_credentials(value).strip() if isinstance(value, str) else ""
+    if len(text) > _JUDGE_TEXT_LIMIT:
+        text = text[: _JUDGE_TEXT_LIMIT - 3] + "..."
+    return text
 
 
 def _finite_score(value: Any) -> float | None:
@@ -297,6 +306,13 @@ def _reject_nonstandard_json_constant(_value: str) -> None:
     raise ValueError("Non-standard JSON constant")
 
 
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("JSON number overflowed to a non-finite value")
+    return parsed
+
+
 def _json_nesting_within_limit(text: str) -> bool:
     """Bound structural nesting without recursively parsing partial JSON."""
     depth = 0
@@ -349,6 +365,7 @@ def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
                 candidate,
                 object_pairs_hook=_reject_duplicate_object_pairs,
                 parse_constant=_reject_nonstandard_json_constant,
+                parse_float=_parse_finite_json_float,
             )
         except (json.JSONDecodeError, RecursionError, ValueError):
             index = end
@@ -412,6 +429,7 @@ def _is_append_only_json_object_prefix(fragment: str) -> bool:
     decoder = json.JSONDecoder(
         object_pairs_hook=_reject_duplicate_object_pairs,
         parse_constant=_reject_nonstandard_json_constant,
+        parse_float=_parse_finite_json_float,
     )
 
     def _skip_whitespace(index: int) -> int:
@@ -486,6 +504,7 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder(
         object_pairs_hook=_reject_duplicate_object_pairs,
         parse_constant=_reject_nonstandard_json_constant,
+        parse_float=_parse_finite_json_float,
     )
 
     def _skip_whitespace(index: int) -> int:
@@ -656,6 +675,8 @@ def _valid_accuracy_criteria(value: Any) -> bool:
 def _accuracy_payload_error(parsed: Any) -> str | None:
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
+    if "reason" in parsed and not isinstance(parsed["reason"], str):
+        return "Judge response contained an invalid accuracy reason"
     criteria = parsed.get("criteria")
     criteria_valid = _valid_accuracy_criteria(criteria)
     if "criteria" in parsed and not criteria_valid:
@@ -703,7 +724,7 @@ def judge_accuracy(
 
     return {
         "score": round(score, 4),
-        "reason": parsed.get("reason", ""),
+        "reason": _bounded_judge_text(parsed.get("reason", "")),
         "criteria": criteria if criteria_valid else {},
     }
 
@@ -741,6 +762,9 @@ Respond with ONLY a JSON object:
 def _goal_payload_error(parsed: Any) -> str | None:
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
+    for field in ("reason", "user_goal", "end_state"):
+        if field in parsed and not isinstance(parsed[field], str):
+            return f"Judge response contained an invalid {field} value"
     if not isinstance(parsed.get("achieved"), bool):
         return "Judge response contained an invalid achieved value"
     if "score" in parsed and _finite_score(parsed["score"]) is None:
@@ -787,9 +811,9 @@ def judge_goal_accuracy(
 
     return {
         "score": score,
-        "reason": parsed.get("reason", ""),
-        "user_goal": parsed.get("user_goal", ""),
-        "end_state": parsed.get("end_state", ""),
+        "reason": _bounded_judge_text(parsed.get("reason", "")),
+        "user_goal": _bounded_judge_text(parsed.get("user_goal", "")),
+        "end_state": _bounded_judge_text(parsed.get("end_state", "")),
     }
 
 

@@ -17,6 +17,7 @@ from types import ModuleType
 
 import pytest
 
+from skillevaluator.tier3.harbor import collector, report
 from skillevaluator.tier3.harbor.adapter import _write_test_sh
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
@@ -255,6 +256,132 @@ def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(
     assert [kwargs["max_tokens"] for _, kwargs in goal_calls] == [4096, 4096]
     assert "previous reply could not be parsed or validated" in pair_calls[1][0]
     assert "previous reply could not be parsed or validated" in goal_calls[1][0]
+
+
+def test_verifier_retries_non_string_judge_text_before_collector_and_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier(tmp_path)
+    monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: False)
+    accuracy_calls: list[str] = []
+    goal_calls: list[str] = []
+
+    def pair_call(prompt: str, **_kwargs):
+        if "SKILL_IDENTIFIED" not in prompt:
+            return json.dumps({"results": [{"step": 1, "passed": True}], "score": 1.0}), None
+        accuracy_calls.append(prompt)
+        if len(accuracy_calls) == 1:
+            return json.dumps({"score": 1.0, "reason": {"nested": "accuracy"}}), None
+        return json.dumps({"score": 1.0, "reason": "accuracy recovered"}), None
+
+    def goal_call(prompt: str, **_kwargs):
+        goal_calls.append(prompt)
+        if len(goal_calls) == 1:
+            return (
+                json.dumps(
+                    {
+                        "achieved": True,
+                        "score": 1.0,
+                        "reason": ["nested", "goal"],
+                        "user_goal": {"nested": "goal"},
+                        "end_state": ["nested", "state"],
+                    }
+                ),
+                None,
+                {"provider": "nv_build", "model": "first-model"},
+            )
+        return (
+            json.dumps(
+                {
+                    "achieved": True,
+                    "score": 1.0,
+                    "reason": "goal recovered",
+                    "user_goal": "complete the task",
+                    "end_state": "task completed",
+                }
+            ),
+            None,
+            {"provider": "nv_build", "model": "retry-model"},
+        )
+
+    monkeypatch.setattr(verifier, "call_public_llm", pair_call)
+    monkeypatch.setattr(verifier, "_call_public_llm_with_provenance", goal_call)
+
+    verifier.main()
+
+    collected = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    findings = report._extract_findings([collected])
+
+    assert len(accuracy_calls) == 2
+    assert len(goal_calls) == 2
+    assert collected["details"]["accuracy"]["reason"] == "accuracy recovered"
+    assert collected["details"]["goal_accuracy"]["reason"] == "goal recovered"
+    assert all(isinstance(reason, str) for finding in findings for reason in finding["reasons"])
+
+
+@pytest.mark.parametrize(
+    ("metric", "score", "detail"),
+    [
+        pytest.param("accuracy", 1.0, {"reason": {"nested": "a" * 600}}, id="accuracy-pass"),
+        pytest.param("accuracy", 0.0, {"reason": ["nested", "accuracy"]}, id="accuracy-fail"),
+        pytest.param(
+            "goal_accuracy",
+            1.0,
+            {"reason": ["nested", "goal"], "end_state": {"nested": "e" * 600}},
+            id="goal-pass",
+        ),
+        pytest.param("goal_accuracy", 0.0, {"reason": {"nested": "goal"}}, id="goal-fail"),
+        pytest.param(
+            "behavior_check",
+            1.0,
+            {"reason": {"nested": "summary"}, "results": [{"passed": True, "reason": "ok"}]},
+            id="behavior-pass",
+        ),
+        pytest.param(
+            "behavior_check",
+            0.0,
+            {"reason": "failed", "results": [{"passed": False, "reason": {"nested": "step"}}]},
+            id="behavior-fail",
+        ),
+    ],
+)
+def test_report_coerces_and_bounds_non_string_reasons_from_existing_artifacts(
+    metric: str,
+    score: float,
+    detail: dict,
+) -> None:
+    reward = {
+        "entry_id": "legacy-judge-artifact",
+        metric: score,
+        "details": {metric: detail},
+    }
+
+    findings = report._extract_findings([reward])
+
+    finding = next(item for item in findings if item["metric"] == metric)
+    assert finding["reasons"]
+    assert all(isinstance(reason, str) for reason in finding["reasons"])
+    assert all(len(reason) <= 512 for reason in finding["reasons"])
+
+
+def test_report_redacts_configured_secret_before_bounding_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    credential = "SECRET-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789"
+    prefix = "x" * 490
+    monkeypatch.setenv("OPENAI_API_KEY", credential)
+    reward = {
+        "entry_id": "credential-boundary-artifact",
+        "accuracy": 1.0,
+        "details": {"accuracy": {"reason": prefix + credential}},
+    }
+
+    findings = report._extract_findings([reward])
+
+    accuracy = next(item for item in findings if item["metric"] == "accuracy")
+    assert accuracy["reasons"] == [prefix + "[REDACTED]"]
+    assert credential not in accuracy["reasons"][0]
+    assert "SECRET-" not in accuracy["reasons"][0]
 
 
 def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(

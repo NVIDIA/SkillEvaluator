@@ -599,9 +599,12 @@ def _stub_runner(
     html_report=None,
     environment_check=None,
     credential_check=None,
+    model_probe=None,
     task_emitter=None,
     skill_name: str = "demo-skill",
+    provider_name: str = "openai",
     provider_model: str = "gpt-5",
+    provider_base_url: str | None = None,
 ):
     from skillevaluator.tier3.harbor import runner
 
@@ -609,11 +612,14 @@ def _stub_runner(
     (skill / "evals").mkdir(parents=True)
     evals_file = skill / "evals" / "evals.json"
     evals_file.write_text("{}", encoding="utf-8")
+    resolved_base_url = provider_base_url
+    if resolved_base_url is None and provider_name == "openai":
+        resolved_base_url = "https://api.openai.com/v1"
     provider = SimpleNamespace(
-        provider="openai",
+        provider=provider_name,
         model=provider_model,
         api_key="exact-provider-secret",
-        base_url=None,
+        base_url=resolved_base_url,
     )
 
     def emit_tasks(_skill, output, **_kwargs):
@@ -660,6 +666,22 @@ def _stub_runner(
 
     monkeypatch.setattr(
         runtime_preflight,
+        "probe_model",
+        model_probe
+        or (
+            lambda selected_provider: SimpleNamespace(
+                ok=True,
+                provider=selected_provider.provider,
+                model=selected_provider.model,
+                detail=f"model {selected_provider.model} is available",
+                failure_kind=None,
+                http_status=None,
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        runtime_preflight,
         "run_agent_runtime_preflight",
         lambda **kwargs: runtime_preflight.PreflightResult(
             True,
@@ -672,6 +694,737 @@ def _stub_runner(
     monkeypatch.setattr(runner, "collect_harbor_results", collect or collect_results)
     monkeypatch.setattr(runner, "render_agent_eval_html_report", html_report or write_html)
     return runner, skill
+
+
+def _configure_native_task_source(
+    monkeypatch: pytest.MonkeyPatch,
+    runner,
+    skill: Path,
+    *,
+    grading_mode: str = "default",
+) -> None:
+    native_task = skill / "evals" / "harbor" / "case-1"
+    native_task.mkdir(parents=True)
+    (native_task / "instruction.md").write_text("Run the native case.\n", encoding="utf-8")
+    (native_task / "task.toml").write_text(
+        'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-1"\n\n'
+        '[metadata]\nentry_id = "case-1"\n\n[verifier.env]\n'
+        'LLM_JUDGE_MODEL = "authored-native-judge"\n',
+        encoding="utf-8",
+    )
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: {grading_mode}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: (
+            {
+                "harbor": {"task_source": "native_harbor"},
+                "grading": {"mode": grading_mode},
+            },
+            None,
+        ),
+    )
+
+    def emit_native(_skill, output: Path, **_kwargs):
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+
+@pytest.mark.parametrize("agent_runtime_preflight", [True, False])
+def test_credential_validation_401_stops_before_image_and_task_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_runtime_preflight: bool,
+) -> None:
+    secret = "exact-provider-secret"
+    probe_calls: list[Any] = []
+    image_calls: list[Path] = []
+    task_calls: list[Path] = []
+
+    def reject_credential(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=False,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model catalog returned HTTP 401; rejected {secret}",
+            failure_kind="authentication",
+            http_status=401,
+        )
+
+    def build_image(skill_path: Path, *_args, **_kwargs) -> str:
+        image_calls.append(skill_path)
+        return "skillevaluator-test-image"
+
+    def emit_tasks(_skill, output: Path, **_kwargs):
+        task_calls.append(output)
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=reject_credential,
+        task_emitter=emit_tasks,
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: (
+            {
+                "harbor": {
+                    "task_source": "evals_json",
+                    "base_image_mode": "reuse",
+                    "n_attempts": 1,
+                    "n_concurrent": 1,
+                    "max_agents": 1,
+                }
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(runner, "build_eval_base_image", build_image)
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=agent_runtime_preflight,
+        progress_reporter=reporter,
+    )
+
+    assert probe_calls and probe_calls[0].provider == "openai"
+    assert result.get("error")
+    assert "HTTP 401" in json.dumps(result)
+    assert image_calls == []
+    assert task_calls == []
+    transitions = [(event.stage, event.state) for event in reporter.events]
+    assert ("credential-validation", "failed") in transitions
+    assert ("credential-validation", "complete") not in transitions
+    rendered = json.dumps(result) + json.dumps([(event.stage, event.state, event.detail) for event in reporter.events])
+    assert secret not in rendered
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "provider_base_url", "failure_kind", "http_status", "detail"),
+    [
+        ("openai", "https://api.openai.com/v1", "unavailable", None, "model catalog request timed out"),
+        ("openai", "https://api.openai.com/v1", "authorization", 403, "model catalog returned HTTP 403"),
+        ("openai", "https://api.openai.com/v1", None, None, "model requested-model is not listed"),
+        (
+            "openai-compatible",
+            "https://gateway.example/v1",
+            "authentication",
+            401,
+            "model catalog returned HTTP 401",
+        ),
+        ("openai", "https://gateway.example/v1", "authentication", 401, "model catalog returned HTTP 401"),
+        ("anthropic", "https://gateway.example/v1", "authentication", 401, "model catalog returned HTTP 401"),
+    ],
+)
+@pytest.mark.parametrize("agent_runtime_preflight", [True, False])
+def test_inconclusive_credential_probe_degrades_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider_name: str,
+    provider_base_url: str,
+    failure_kind: str | None,
+    http_status: int | None,
+    detail: str,
+    agent_runtime_preflight: bool,
+) -> None:
+    probe_calls: list[Any] = []
+    task_calls: list[Path] = []
+
+    def inconclusive(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=False,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=detail,
+            failure_kind=failure_kind,
+            http_status=http_status,
+        )
+
+    def emit_tasks(_skill, output: Path, **_kwargs):
+        task_calls.append(output)
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=inconclusive,
+        task_emitter=emit_tasks,
+        provider_name=provider_name,
+        provider_model="requested-model",
+        provider_base_url=provider_base_url,
+    )
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=agent_runtime_preflight,
+        progress_reporter=reporter,
+    )
+
+    assert "error" not in result
+    assert len(probe_calls) == (2 if provider_name == "anthropic" else 1)
+    assert any(call.provider == provider_name for call in probe_calls)
+    assert task_calls
+    transitions = [(event.stage, event.state) for event in reporter.events]
+    assert ("credential-validation", "degraded") in transitions
+    assert ("credential-validation", "complete") not in transitions
+    assert transitions[-1] == ("run-finished", "complete")
+    validation = result["run_config"]["credential_validation"]
+    assert validation["status"] == "degraded"
+    assert {target["status"] for target in validation["targets"]} == {"degraded"}
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+    assert persisted["run_config"]["credential_validation"] == validation
+
+
+def test_credential_validation_probes_an_identical_agent_route_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "opencode"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert len(probe_calls) == 1
+    assert probe_calls[0].provider == "openai"
+
+
+def test_credential_validation_probes_each_distinct_agent_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert {probe.provider for probe in probe_calls} == {"openai", "anthropic"}
+
+
+def test_credential_validation_includes_distinct_standard_grading_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+    monkeypatch.setattr(
+        runner,
+        "_provider_environment",
+        lambda _provider: {
+            "OPENAI_API_KEY": "exact-provider-secret",
+            "LLM_JUDGE_MODEL": "judge-gpt",
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert {(probe.provider, probe.model) for probe in probe_calls} == {
+        ("anthropic", "claude-test"),
+        ("openai", "judge-gpt"),
+    }
+
+
+def test_missing_native_task_source_stops_before_credential_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def record_probe(selected_provider):
+        probe_calls.append(selected_provider)
+        raise AssertionError("credential probes must not run without the selected task source")
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=record_probe)
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "native_harbor"}}, None),
+    )
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        progress_reporter=reporter,
+    )
+
+    assert result == {"error": ["No native Harbor task source found at evals/harbor."]}
+    assert probe_calls == []
+    transitions = [(event.stage, event.state) for event in reporter.events]
+    assert ("environment-preflight", "complete") in transitions
+    assert ("with-skill-tasks", "failed") in transitions
+    assert not any(stage == "credential-validation" for stage, _state in transitions)
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+def test_native_standard_grading_without_host_override_marks_judge_probe_inconclusive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    grading_mode: str,
+) -> None:
+    probe_calls: list[Any] = []
+    provider_fallback = "unused-provider-fallback"
+
+    def probe(selected_provider):
+        probe_calls.append(selected_provider)
+        if selected_provider.model == provider_fallback:
+            return SimpleNamespace(
+                ok=False,
+                provider=selected_provider.provider,
+                model=selected_provider.model,
+                detail="model catalog returned HTTP 401",
+                failure_kind="authentication",
+                http_status=401,
+            )
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=probe,
+        provider_model=provider_fallback,
+    )
+    _configure_native_task_source(monkeypatch, runner, skill, grading_mode=grading_mode)
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "actual-agent-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        progress_reporter=reporter,
+    )
+
+    assert "error" not in result
+    assert [(call.provider, call.model) for call in probe_calls] == [("openai", "actual-agent-model")]
+    assert ("credential-validation", "degraded") in [(event.stage, event.state) for event in reporter.events]
+    assert result["run_config"]["task_source"] == "native_harbor"
+    assert result["run_config"]["judge"]["catalog_verification"] == "inconclusive"
+    assert result["run_config"]["judge"]["effective_model_source"] == "native_harbor_runtime"
+    assert result["run_config"]["credential_validation"]["status"] == "degraded"
+    judge_target = next(
+        target
+        for target in result["run_config"]["credential_validation"]["targets"]
+        if target["labels"] == ["standard grader"]
+    )
+    assert judge_target == {
+        "labels": ["standard grader"],
+        "provider": "openai",
+        "model": None,
+        "fallback_model": provider_fallback,
+        "status": "inconclusive",
+        "detail": (
+            "native Harbor resolves the effective judge model at runtime; "
+            "task or step verifier env may supersede the configured fallback"
+        ),
+    }
+
+
+def test_auto_with_both_task_sources_uses_evals_json_and_probes_the_standard_judge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=succeed,
+        provider_model="standard-judge-model",
+    )
+    native_task = skill / "evals" / "harbor" / "case-1"
+    native_task.mkdir(parents=True)
+    (native_task / "instruction.md").write_text("Unused native case.\n", encoding="utf-8")
+    (native_task / "task.toml").write_text(
+        'schema_version = "1.3"\n[task]\nname = "nvidia/case-1"\n[metadata]\nentry_id = "case-1"\n',
+        encoding="utf-8",
+    )
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  task_source: auto\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "auto"}}, None),
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "actual-agent-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert result["run_config"]["task_source"] == "evals_json"
+    assert {(call.provider, call.model) for call in probe_calls} == {
+        ("openai", "actual-agent-model"),
+        ("openai", "standard-judge-model"),
+    }
+    assert result["run_config"]["judge"]["catalog_verification"] == "verified"
+
+
+def test_auto_with_native_only_custom_grading_skips_the_standard_judge_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+    (skill / "evals" / "evals.json").unlink()
+    native_task = skill / "evals" / "harbor" / "case-1"
+    native_task.mkdir(parents=True)
+    (native_task / "instruction.md").write_text("Run the native case.\n", encoding="utf-8")
+    (native_task / "task.toml").write_text(
+        'schema_version = "1.3"\n[task]\nname = "nvidia/case-1"\n[metadata]\nentry_id = "case-1"\n',
+        encoding="utf-8",
+    )
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  task_source: auto\ngrading:\n  mode: custom_only\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: (
+            {"harbor": {"task_source": "auto"}, "grading": {"mode": "custom_only"}},
+            None,
+        ),
+    )
+    monkeypatch.setattr(runner, "find_evals_file", lambda _path: None)
+
+    def emit_native(_skill, output: Path, **_kwargs):
+        output.mkdir(parents=True, exist_ok=True)
+        return [output / "case-1"]
+
+    monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert result["run_config"]["task_source"] == "native_harbor"
+    assert result["run_config"]["judge"] == {"enabled": False}
+    assert len(probe_calls) == 1
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize("override_name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
+def test_native_standard_grading_host_override_is_the_exact_judge_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    grading_mode: str,
+    override_name: str,
+) -> None:
+    probe_calls: list[Any] = []
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=succeed,
+        provider_model="provider-fallback",
+    )
+    _configure_native_task_source(monkeypatch, runner, skill, grading_mode=grading_mode)
+    monkeypatch.setattr(
+        runner,
+        "_provider_environment",
+        lambda _provider: {
+            "OPENAI_API_KEY": "exact-provider-secret",
+            override_name: "host-judge-model",
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "actual-agent-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert {(call.provider, call.model) for call in probe_calls} == {
+        ("openai", "actual-agent-model"),
+        ("openai", "host-judge-model"),
+    }
+    assert result["run_config"]["judge"] == {
+        "enabled": True,
+        "provider": "openai",
+        "model": "host-judge-model",
+        "source": override_name,
+        "override_applied": True,
+        "catalog_verification": "verified",
+    }
+
+
+def test_native_inconclusive_judge_probe_does_not_skip_the_same_route_used_by_an_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    staged: list[Path] = []
+
+    def reject_agent_credential(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=False,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail="model catalog returned HTTP 401",
+            failure_kind="authentication",
+            http_status=401,
+        )
+
+    def emit_native(_skill, output: Path, **_kwargs):
+        staged.append(output)
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=reject_agent_credential,
+        provider_model="shared-route-model",
+    )
+    _configure_native_task_source(monkeypatch, runner, skill)
+    monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "shared-route-model"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert result.get("error")
+    assert [(call.provider, call.model) for call in probe_calls] == [("openai", "shared-route-model")]
+    assert staged == []
+
+
+def test_distinct_standard_grading_probe_failure_is_redacted_and_stops_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    evaluator_secret = "evaluator-only-provider-secret"
+    task_calls: list[Path] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def probe(selected_provider):
+        if selected_provider.provider == "openai":
+            return SimpleNamespace(
+                ok=False,
+                provider=selected_provider.provider,
+                model=selected_provider.model,
+                detail=f"model catalog returned HTTP 401; rejected {evaluator_secret}",
+                failure_kind="authentication",
+                http_status=401,
+            )
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    def emit_tasks(_skill, output: Path, **_kwargs):
+        task_calls.append(output)
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        model_probe=probe,
+        task_emitter=emit_tasks,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_provider_environment",
+        lambda _provider: {"OPENAI_API_KEY": evaluator_secret},
+    )
+    monkeypatch.setattr(
+        runner,
+        "resolve_llm_provider",
+        lambda: SimpleNamespace(
+            provider="openai",
+            model="gpt-5",
+            api_key=evaluator_secret,
+            base_url="https://api.openai.com/v1",
+        ),
+    )
+    reporter = _RecordingReporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        progress_reporter=reporter,
+    )
+
+    rendered = json.dumps(result) + json.dumps([event.detail for event in reporter.events])
+    assert result.get("error")
+    assert "HTTP 401" in rendered
+    assert evaluator_secret not in rendered
+    assert task_calls == []
+
+
+def test_custom_only_credential_validation_skips_unused_evaluator_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe_calls: list[Any] = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def succeed(selected_provider):
+        probe_calls.append(selected_provider)
+        return SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=succeed)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        grading_mode="custom_only",
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert [(probe.provider, probe.model) for probe in probe_calls] == [("anthropic", "claude-test")]
 
 
 def test_default_run_cleans_transient_harbor_artifacts(
@@ -1073,7 +1826,13 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     def fail_staging(*_args, **_kwargs):
         raise ValueError("invalid task")
 
-    runner, skill = _stub_runner(monkeypatch, tmp_path, task_emitter=fail_staging)
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        task_emitter=fail_staging,
+        provider_name="openai-compatible",
+        provider_base_url="https://gateway.example/v1",
+    )
 
     result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
 
@@ -1082,6 +1841,20 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     assert not (run_dir / "_harbor-jobs").exists()
     assert not (run_dir / "_harbor-tasks").exists()
     assert result["harbor_jobs_retained"] is False
+    assert result["run_config"]["credential_validation"]["status"] == "degraded"
+    assert result["run_config"]["credential_validation"]["targets"] == [
+        {
+            "labels": ["codex", "standard grader"],
+            "provider": "openai-compatible",
+            "model": "gpt-5",
+            "status": "degraded",
+            "detail": "model catalog access does not verify runtime credentials for this endpoint",
+        }
+    ]
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+    assert persisted["run_config"] == result["run_config"]
+    run_config_path = run_dir / "run_config.json"
+    assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]
 
 
 @pytest.mark.parametrize("failure_arm", ["with-skill", "baseline"])
@@ -1244,7 +2017,12 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(
         runner,
         "resolve_llm_provider",
-        lambda: SimpleNamespace(provider="openai", model="gpt-5", api_key="sk-test-secret", base_url=None),
+        lambda: SimpleNamespace(
+            provider="openai",
+            model="gpt-5",
+            api_key="sk-test-secret",
+            base_url="https://api.openai.com/v1",
+        ),
     )
     monkeypatch.setattr(
         runner,
@@ -1282,6 +2060,18 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(runner, "_harbor_subprocess_environment", lambda **_kwargs: {})
     from skillevaluator.tier3.harbor import runtime_preflight
 
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: SimpleNamespace(
+            ok=True,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail=f"model {selected_provider.model} is available",
+            failure_kind=None,
+            http_status=None,
+        ),
+    )
     monkeypatch.setattr(
         runtime_preflight,
         "run_agent_runtime_preflight",

@@ -237,7 +237,30 @@ scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
 counts as passed when at least one attempt clears the `--pass-threshold`
 score. Comparing pass@k across arms (in `pass_at_k_lift.json`) tells you
 whether the skill makes success more *repeatable*, not just whether the average
-score moved.
+score moved. Each arm also records a case-level 95% Wilson score interval for
+its pass rate. When both arms contain the same identified cases,
+`pass_at_k_lift.json` records the paired outcome counts — skill-only passes,
+baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
+McNemar diagnostic over the discordant pairs. Partial or unidentified pairing
+is labeled and does not receive that exact-test result.
+
+The paired record also reports its pass-rate delta and the minimum p-value the
+exact test could attain with the observed number of discordant pairs. When that
+minimum is above 0.05, the report labels the test resolution-limited at that
+threshold. This is a mathematical resolution limit, not evidence of no effect;
+with five or fewer discordant pairs, a two-sided exact result cannot fall below
+0.05 regardless of direction. The JSON always preserves compact decimal text
+for both probabilities. It also records a reduced rational in each `*_exact`
+field when the numerator and denominator fit both SkillEvaluator's 4,300-digit
+safety cap and Python's active integer-string conversion limit. Otherwise that
+field is `null`, `*_omitted` is `true`, and `*_omitted_reason` is
+`"decimal_digit_limit"`. The numeric approximation is `null`, rather than a
+false zero, if binary floating-point conversion underflows.
+
+These uncertainty fields describe the cases in one configured run. They do not
+make heterogeneous cases independent, correct dataset leakage, or promote a
+small p-value into proof that a skill generalizes. Keep the dataset, attempt
+policy, agent, model, and environment fixed when interpreting them.
 
 ## Browse results
 

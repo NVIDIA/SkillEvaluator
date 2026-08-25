@@ -1212,8 +1212,9 @@
             box-shadow: var(--shadow);
         }
         .chart-card h3 { font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
-        .table-scroll { overflow-x: auto; margin: 1rem 0; border-radius: 10px; border: 1px solid var(--border-color); }
+        .table-scroll { max-width: 100%; overflow-x: auto; margin: 1rem 0; border-radius: 10px; border: 1px solid var(--border-color); -webkit-overflow-scrolling: touch; }
         .table-scroll .summary-table { margin: 0; }
+        .pass-at-k-table { min-width: 720px; }
         .metric-bar-cell { display: flex; align-items: center; gap: 0.6rem; min-width: 120px; }
         .metric-value { min-width: 2.5rem; font-weight: 700; }
         .mini-bar { width: 76px; height: 7px; background: var(--bg-tertiary); border-radius: 999px; overflow: hidden; }
@@ -2577,11 +2578,12 @@
                     {{ t3_max_attempts }} attempt{{ 's' if t3_max_attempts != 1 else '' }}, where a case counts as
                     "passed" only if the trial score reaches the configured pass threshold (currently
                     {{ "%.2f" | format(t3_attempt_policy.pass_threshold or 0.5) }}).
-                    Higher rates and a positive lift mean the skill consistently helps the agent reach the goal.
+                    Higher rates and a positive lift show better observed repeatability on these evaluated cases.
                 </p>
-                <table class="summary-table" style="width:100%;">
+                <div class="table-scroll" tabindex="0" role="region" aria-label="Pass at K summary table">
+                <table class="summary-table pass-at-k-table" style="width:100%;">
                     <thead><tr>
-                        <th>Agent</th><th>Condition</th><th>Pass Rate</th><th>Cases Passed</th><th>Scored Attempts</th><th>Lift</th>
+                        <th>Agent</th><th>Condition</th><th>Pass Rate</th><th>95% Interval</th><th>Cases Passed</th><th>Scored Attempts</th><th>Lift</th>
                     </tr></thead>
                     <tbody>
                     {% for name, agent in t3_agents.items() %}
@@ -2589,11 +2591,15 @@
                         {% set wp = pak.with_skill or {} %}
                         {% set bp = pak.without_skill or {} %}
                         {% set lf = pak.lift or {} %}
+                        {% set wi = wp.rate_interval or {} %}
+                        {% set bi = bp.rate_interval or {} %}
+                        {% set paired = lf.paired_comparison or {} %}
                         {% if wp %}
                         <tr>
                             <td><strong>{{ name }}</strong></td>
                             <td>With skill</td>
                             <td>{{ "%.0f%%" | format((wp.rate or 0.0) * 100) }}</td>
+                            <td>{% if wi %}{{ wi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ wp.passed_cases or 0 }} of {{ wp.total_cases or 0 }}</td>
                             <td>{{ wp.attempts_used or 0 }} of {{ wp.max_attempts_possible or 0 }}</td>
                             <td style="color:{{ 'var(--success-color)' if (lf.delta or 0) >= tier3_lift_pass_threshold else ('var(--danger-color)' if (lf.delta or 0) <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
@@ -2606,14 +2612,43 @@
                             <td></td>
                             <td>Without skill</td>
                             <td>{{ "%.0f%%" | format((bp.rate or 0.0) * 100) }}</td>
+                            <td>{% if bi %}{{ bi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ bp.passed_cases or 0 }} of {{ bp.total_cases or 0 }}</td>
                             <td>{{ bp.attempts_used or 0 }} of {{ bp.max_attempts_possible or 0 }}</td>
                             <td>baseline</td>
                         </tr>
                         {% endif %}
+                        {% if paired %}
+                        <tr>
+                            <td></td>
+                            <td colspan="6" style="color:var(--text-secondary);font-size:0.82rem;">
+                                {% if paired.paired_cases %}
+                                Paired cases: {{ paired.paired_cases or 0 }}
+                                (skill-only passes {{ paired.with_skill_only_pass or 0 }},
+                                baseline-only passes {{ paired.without_skill_only_pass or 0 }},
+                                both pass {{ paired.both_pass or 0 }}, neither pass {{ paired.neither_pass or 0 }}).
+                                Pairing: {{ paired.pairing_status or 'unavailable' }}.
+                                {% if paired.paired_rate_delta is defined and paired.paired_rate_delta is not none %}
+                                Paired pass-rate delta: {{ paired.paired_rate_delta | adaptive_percent(true) }}.
+                                {% endif %}
+                                {% if paired.mcnemar_exact %}
+                                Exact McNemar p={% if paired.mcnemar_exact.p_value_text is defined %}{{ paired.mcnemar_exact.p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.p_value) }}{% endif %}.
+                                {% if paired.mcnemar_exact.minimum_attainable_p_value is defined %}
+                                Minimum attainable p with {{ paired.discordant_cases or 0 }} observed discordant pair{{ 's' if (paired.discordant_cases or 0) != 1 else '' }}: {% if paired.mcnemar_exact.minimum_attainable_p_value_text is defined %}{{ paired.mcnemar_exact.minimum_attainable_p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.minimum_attainable_p_value) }}{% endif %}{% if paired.mcnemar_exact.resolution_limited_at_alpha_0_05 %}
+                                (resolution-limited at α=0.05){% endif %}.
+                                {% endif %}
+                                Diagnostic only.
+                                {% endif %}
+                                {% else %}
+                                Paired comparison {{ paired.pairing_status or 'unavailable' }}; exact test not computed.
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endif %}
                     {% endfor %}
                     </tbody>
                 </table>
+                </div>
                 </div>
             </details>
             {% endif %}

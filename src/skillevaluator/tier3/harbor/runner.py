@@ -16,10 +16,10 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -70,6 +70,12 @@ from skillevaluator.tier3.harbor.report_data import (
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_KEY_STDIN_ENV as _NVIDIA_BUILD_KEY_STDIN_ENV,
+)
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_STDIN_SENTINEL as _NVIDIA_BUILD_STDIN_SENTINEL,
+)
 from skillevaluator.tier3.output_provenance import (
     mark_generated_output_root,
     remove_generated_output_root_if_owned,
@@ -327,33 +333,34 @@ def format_harbor_view_command(jobs_dir: Path | str, *, multiline: bool = False)
     return f"{command} {path}" if not multiline else f"{command} \\\n  {path}"
 
 
-@contextmanager
+@dataclass(frozen=True)
+class _NvidiaBuildKeyHandoff:
+    """Sanitized child environment plus an optional stdin credential payload."""
+
+    subprocess_env: dict[str, str] = field(repr=False)
+    stdin_text: str | None = field(default=None, repr=False, compare=False)
+
+
 def _nvidia_build_key_handoff(
     run_env: Mapping[str, str],
     *,
     env_mode: str,
-) -> Iterator[dict[str, str]]:
-    """Replace the host Build key with a temporary file-backed sentinel."""
+) -> _NvidiaBuildKeyHandoff:
+    """Replace the host Build key with a stdin-backed sentinel."""
     subprocess_env = dict(run_env)
-    key_handoff: tempfile.TemporaryDirectory[str] | None = None
+    subprocess_env.pop(_NVIDIA_BUILD_KEY_FILE_ENV, None)
+    subprocess_env.pop(_NVIDIA_BUILD_KEY_STDIN_ENV, None)
     api_key = subprocess_env.get("NVIDIA_API_KEY", "")
     if (
         env_mode == "docker"
         and subprocess_env.get("SKILL_EVAL_LLM_PROVIDER") == "nv_build"
         and api_key
-        and api_key != _NVIDIA_BUILD_FILE_SENTINEL
+        and api_key not in {_NVIDIA_BUILD_FILE_SENTINEL, _NVIDIA_BUILD_STDIN_SENTINEL}
     ):
-        key_handoff = tempfile.TemporaryDirectory(prefix="skillevaluator-nvidia-build-host-")
-        key_file = Path(key_handoff.name) / "nvidia-api-key"
-        key_file.write_text(api_key, encoding="utf-8")
-        key_file.chmod(0o600)
-        subprocess_env["NVIDIA_API_KEY"] = _NVIDIA_BUILD_FILE_SENTINEL
-        subprocess_env[_NVIDIA_BUILD_KEY_FILE_ENV] = str(key_file)
-    try:
-        yield subprocess_env
-    finally:
-        if key_handoff is not None:
-            key_handoff.cleanup()
+        subprocess_env["NVIDIA_API_KEY"] = _NVIDIA_BUILD_STDIN_SENTINEL
+        subprocess_env[_NVIDIA_BUILD_KEY_STDIN_ENV] = "1"
+        return _NvidiaBuildKeyHandoff(subprocess_env, api_key)
+    return _NvidiaBuildKeyHandoff(subprocess_env)
 
 
 def build_harbor_run_command(
@@ -1259,15 +1266,16 @@ def _run_harbor(
         verifier_env=verifier_env,
     )
     try:
-        with _nvidia_build_key_handoff(run_env, env_mode=env_mode) as subprocess_env:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                env=subprocess_env,
-                timeout=7200,
-                check=False,
-            )
+        handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            input=handoff.stdin_text,
+            env=handoff.subprocess_env,
+            timeout=7200,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if result.returncode == 0:
@@ -1928,6 +1936,23 @@ def _run_harbor_eval_impl(
         return {"error": prereq_errors}
     reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
 
+    # Resolve the effective source before constructing credential-probe targets.
+    # Native Harbor tasks can select the standard-grader judge model at task or
+    # step scope, so the provider fallback is not necessarily the runtime model.
+    evals_exists = find_evals_file(evaluator_skill_path) is not None
+    native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
+    if task_source == "auto":
+        task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
+    if task_source == "evals_json" and not evals_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
+        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
+    if task_source == "native_harbor" and not native_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
+        return {"error": ["No native Harbor task source found at evals/harbor."]}
+    if task_source not in {"evals_json", "native_harbor"}:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
+        return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail="; ".join(runtime_errors)))
@@ -1949,10 +1974,182 @@ def _run_harbor_eval_impl(
         for agent in agents
         if (import_path := _nvidia_build_agent_import_path(provider, agent, env_mode)) is not None
     }
-    reporter.set_secret_values(
-        set().union(*(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values()))
+    runtime_secret_values = set().union(
+        *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )
-    reporter.emit(ProgressEvent(stage="credential-validation", state="complete", detail="credentials validated"))
+
+    # Probe each exact agent route before reserving output space, building images,
+    # or staging tasks. The runtime-preflight module imports runner helpers, so
+    # this import must remain lazy to avoid a module cycle.
+    from skillevaluator.tier3.harbor.runtime_preflight import (
+        CredentialProbeDisposition,
+        credential_probe_disposition,
+        probe_model,
+    )
+
+    probe_targets: dict[
+        tuple[str, str, str | None, str | None, str | None],
+        tuple[ProviderConfig, list[str]],
+    ] = {}
+    probe_degraded: list[str] = []
+    credential_validation_targets: list[dict[str, Any]] = []
+    judge_config = _judge_model_config(provider, provider_env, grading_mode)
+
+    def add_probe_target(label: str, selected_provider: ProviderConfig) -> None:
+        route_key = (
+            selected_provider.provider,
+            selected_provider.model,
+            selected_provider.api_key,
+            selected_provider.base_url,
+            selected_provider.region,
+        )
+        target = probe_targets.get(route_key)
+        if target is None:
+            probe_targets[route_key] = (selected_provider, [label])
+        else:
+            target[1].append(label)
+
+    for agent in agents:
+        add_probe_target(agent, runtime_plans[agent].provider)
+
+    if grading_mode != "custom_only":
+        if task_source == "native_harbor" and not bool(judge_config["override_applied"]):
+            detail = (
+                "native Harbor resolves the effective judge model at runtime; "
+                "task or step verifier env may supersede the configured fallback"
+            )
+            probe_degraded.append(f"standard grader: {detail}")
+            judge_config["catalog_verification"] = "inconclusive"
+            judge_config["effective_model_source"] = "native_harbor_runtime"
+            credential_validation_targets.append(
+                {
+                    "labels": ["standard grader"],
+                    "provider": provider.provider,
+                    "model": None,
+                    "fallback_model": provider.model,
+                    "status": "inconclusive",
+                    "detail": detail,
+                }
+            )
+        else:
+            judge_model = str(judge_config["model"])
+            litellm_model = str(getattr(provider, "litellm_model", f"{provider.provider}/{provider.model}"))
+            litellm_prefix = litellm_model.partition("/")[0] or provider.provider
+            add_probe_target(
+                "standard grader",
+                ProviderConfig(
+                    provider=provider.provider,
+                    model=judge_model,
+                    api_key=provider.api_key,
+                    base_url=provider.base_url,
+                    litellm_model=f"{litellm_prefix}/{judge_model}",
+                    region=getattr(provider, "region", None),
+                    credential_env=getattr(provider, "credential_env", None),
+                    base_url_env=getattr(provider, "base_url_env", None),
+                ),
+            )
+
+    runtime_secret_values.update(
+        selected_provider.api_key for selected_provider, _labels in probe_targets.values() if selected_provider.api_key
+    )
+    reporter.set_secret_values(runtime_secret_values)
+
+    with ThreadPoolExecutor(max_workers=min(len(probe_targets), 4)) as probe_pool:
+        probe_futures = {
+            route_key: probe_pool.submit(probe_model, selected_provider)
+            for route_key, (selected_provider, _labels) in probe_targets.items()
+        }
+
+    probe_errors: list[str] = []
+    for route_key, (selected_provider, selected_labels) in probe_targets.items():
+        label = ", ".join(selected_labels)
+        try:
+            probe = probe_futures[route_key].result()
+        except Exception as exc:
+            safe_detail = f"model catalog probe failed: {type(exc).__name__}"
+            probe_degraded.append(f"{label}: {safe_detail}")
+            credential_validation_targets.append(
+                {
+                    "labels": list(selected_labels),
+                    "provider": selected_provider.provider,
+                    "model": selected_provider.model,
+                    "status": "degraded",
+                    "detail": safe_detail,
+                }
+            )
+            if "standard grader" in selected_labels:
+                judge_config["catalog_verification"] = "degraded"
+            continue
+
+        safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
+        disposition = credential_probe_disposition(selected_provider, probe)
+        if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
+            safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
+        credential_validation_targets.append(
+            {
+                "labels": list(selected_labels),
+                "provider": selected_provider.provider,
+                "model": selected_provider.model,
+                "status": disposition.value,
+                "detail": safe_detail,
+            }
+        )
+        if "standard grader" in selected_labels:
+            judge_config["catalog_verification"] = disposition.value
+        if disposition == CredentialProbeDisposition.FATAL:
+            probe_errors.append(f"{label} provider verification failed: {safe_detail}")
+        elif disposition == CredentialProbeDisposition.DEGRADED:
+            probe_degraded.append(f"{label}: {safe_detail}")
+
+    if probe_errors:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="failed",
+                detail="; ".join(probe_errors),
+            )
+        )
+        return {"error": probe_errors}
+    if probe_degraded:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="degraded",
+                detail=(
+                    "credential configuration resolved; live catalog verification inconclusive: "
+                    f"{'; '.join(probe_degraded)}; continuing to evaluation"
+                ),
+            )
+        )
+    else:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="complete",
+                detail="credentials and selected models verified",
+            )
+        )
+    run_config = {
+        "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
+        "harbor": {
+            "environment": {"value": env_mode, "source": env_mode_source},
+            "n_attempts": n_attempts,
+            "stop_on_pass": bool(stop_on_pass),
+            "n_concurrent": n_concurrent,
+            "timeout_multiplier": timeout_multiplier,
+            "base_image_mode": base_image_mode,
+            "jobs_retained": keep_harbor_jobs,
+        },
+        "provider": {"name": provider.provider, "model": provider.model},
+        "judge": judge_config,
+        "credential_validation": {
+            "status": "degraded" if probe_degraded else "verified",
+            "targets": credential_validation_targets,
+        },
+        "task_source": task_source,
+        "grading": {"mode": grading_mode},
+        "agents": model_resolution,
+    }
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
@@ -1967,20 +2164,6 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
-
-    evals_exists = find_evals_file(evaluator_skill_path) is not None
-    native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
-    if task_source == "auto":
-        task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
-    if task_source == "evals_json" and not evals_exists:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
-        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
-    if task_source == "native_harbor" and not native_exists:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
-        return {"error": ["No native Harbor task source found at evals/harbor."]}
-    if task_source not in {"evals_json", "native_harbor"}:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
-        return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
     try:
@@ -2026,6 +2209,29 @@ def _run_harbor_eval_impl(
                 ),
             )
         )
+
+    def _persist_pre_execution_failure(errors: list[str]) -> dict[str, Any]:
+        """Retain redacted probe provenance for failures after run reservation."""
+        failed_result: dict[str, Any] = {
+            "skill_name": skill_path.name,
+            "execution_status": "failed",
+            "execution_errors": errors,
+            "error": errors,
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "harbor_jobs_dir": str(jobs_dir),
+            "harbor_jobs_retained": jobs_dir.is_dir(),
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+            "result_path": str(result_path),
+            "agents": {},
+            "run_config": run_config,
+        }
+        write_output_file_atomically(
+            run_dir / "run_config.json",
+            json.dumps(run_config, indent=2).encode("utf-8"),
+        )
+        write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
+        return failed_result
 
     reservation_identity: tuple[int, int] | None = None
     try:
@@ -2152,7 +2358,7 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="skipped", detail="baseline disabled"))
     except (OSError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
-        return {"error": [str(exc)], "run_dir": str(run_dir)}
+        return _persist_pre_execution_failure([str(exc)])
 
     task_names = expected_task_names or []
     expected_trials = len(task_names) * n_attempts
@@ -2220,20 +2426,7 @@ def _run_harbor_eval_impl(
         if preflight_errors:
             detail = "; ".join(preflight_errors)
             reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="failed", detail=detail))
-            failed_result: dict[str, Any] = {
-                "skill_name": skill_path.name,
-                "execution_status": "failed",
-                "execution_errors": preflight_errors,
-                "error": preflight_errors,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "harbor_jobs_dir": str(jobs_dir),
-                "harbor_jobs_retained": True,
-                "duration_seconds": round(time.monotonic() - started_at, 3),
-                "result_path": str(result_path),
-                "agents": {},
-            }
-            write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
+            failed_result = _persist_pre_execution_failure(preflight_errors)
             _emit_run_finished("failed", "agent runtime preflight failed")
             return failed_result
         reporter.emit(
@@ -2351,23 +2544,6 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
-    run_config = {
-        "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
-        "harbor": {
-            "environment": {"value": env_mode, "source": env_mode_source},
-            "n_attempts": n_attempts,
-            "stop_on_pass": bool(stop_on_pass),
-            "n_concurrent": n_concurrent,
-            "timeout_multiplier": timeout_multiplier,
-            "base_image_mode": base_image_mode,
-            "jobs_retained": keep_harbor_jobs,
-        },
-        "provider": {"name": provider.provider, "model": provider.model},
-        "judge": _judge_model_config(provider, provider_env, grading_mode),
-        "task_source": task_source,
-        "grading": {"mode": grading_mode},
-        "agents": model_resolution,
-    }
     dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
     results.update(
         {

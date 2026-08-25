@@ -20,12 +20,28 @@ Tiers describe evaluation depth; credentials are a separate axis. This is the co
 | --- | --- |
 | `validate --no-dedup` (all deterministic checks: schema, security scanners including secret detection, PII, license, code-integrity, unicode, quality, lint) | `rubric-eval` — LLM-as-judge scoring (chat LLM) |
 | `quality-check`, `security-scan`, `pii-scan`, `lint-scripts` | `validate --llm` / `security-scan --llm` — deeper LLM security analysis |
-| `doctor`, `health-check` (offline readiness probes; missing credentials are reported as not ready) | `--llm-verify` on `validate`, `security-scan`, `pii-scan` — LLM false-positive suppression |
+| `doctor`, `health-check` (offline readiness probes by default; missing credentials are reported as not ready) | `--llm-verify` on `validate`, `security-scan`, `pii-scan` — LLM false-positive suppression |
 | | All Tier 2 commands — embeddings API; `context-optimization-check` and `dedup-scan` also use a chat LLM (`similarity-check` is embeddings-only). A local OpenAI-compatible server works too — see [Fully local setup](#fully-local-setup) |
 | Tier 3 scaffolding and inspection: `create-eval-dataset --no-llm`, `init-custom-grader`, `init-harbor-task`, `tier3 validate`, `view`, `harbor-view`, and `compare` | Tier 3 LLM dataset generation needs a provider key; `tier3 evaluate` needs a provider key plus a credential the selected live agent can use — with NVIDIA Build in `--env-mode docker` or `local`, one `NVIDIA_API_KEY` covers both roles |
-| | `models` — lists the selected provider's authenticated model catalog |
+| | `models` and `doctor --verify-models` — provider-catalog reachability and membership checks; public catalogs do not prove that an inference key works |
 
 `validate` without `--no-dedup` stays usable keyless: the Tier 2 dedup pass skips gracefully when no embedding provider is configured.
+
+Before Tier 3 prepares images or stages Harbor tasks, `tier3 evaluate` also
+makes a bounded credential-bearing catalog request for each distinct agent route
+and for the standard-grading route when that grader's effective model is known.
+A definitive native-provider credential rejection or deterministic Bedrock
+credential/configuration error fails immediately. Catalog permission and
+membership are not authoritative for OpenAI Responses access, and NVIDIA Build
+or a compatible gateway may expose a catalog without authenticating inference,
+so those checks are reported as degraded and evaluation continues to the real
+per-agent runtime preflight. That smoke proves agent routes only: when a
+degraded credential route is used solely by the standard grader, inference on
+that route remains unproven until grading begins. The same applies when native
+Harbor must resolve at runtime whether a task or step verifier declaration
+supersedes the configured judge fallback. Redacted per-route outcomes are retained under
+`run_config.credential_validation` in `result.json`, including when that later
+agent runtime preflight fails.
 
 ## Choose an LLM provider
 
@@ -199,7 +215,7 @@ skillevaluator models --limit 20
 skillevaluator models --json
 ```
 
-`skillevaluator models` prints a filtered, bounded view of the authenticated provider catalog (`--limit` accepts 1–100, default 10; `--json` emits machine-readable output). It uses the same provider and credential resolution as evaluation, so it doubles as a quick check that your key works. A model appearing in the catalog is not proof a given agent harness supports it — use `doctor --verify-models` for that. Bedrock exposes no HTTP model catalog, so `models` errors on that provider; use `doctor --verify-models` there too.
+`skillevaluator models` prints a filtered, bounded view of the provider catalog (`--limit` accepts 1–100, default 10; `--json` emits machine-readable output). It uses the same provider and credential resolution as evaluation, so it checks catalog routing and model discovery where that surface is supported. NVIDIA Build and some compatible gateways can expose a public catalog, so a listed model is not proof that the inference key works or that a given agent harness supports it. Tier 3's real per-agent runtime preflight is the stronger check for agent routes; a separate degraded standard-grader route remains unproven until grading begins. Bedrock exposes no HTTP model catalog, so `models` errors on that provider; use `doctor --verify-models` there instead.
 
 ### `runtime_env` is for task values, not credentials
 

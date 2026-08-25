@@ -252,8 +252,10 @@ cleaner experiment.
 
 ## Readiness checks
 
-`doctor` and `health-check` run the same readiness checks and exit `0` only
-when every check passes, so either can gate a script or CI job.
+`doctor` and `health-check` run the same readiness checks and exit nonzero when
+any check fails, so either can gate a script or CI job. Warnings from
+`doctor --verify-models` are nonblocking because the catalog result is
+inconclusive rather than a definitive rejection.
 
 ### doctor
 
@@ -274,10 +276,14 @@ skillevaluator doctor --agents codex --env-mode docker
 `doctor` also accepts `--agent-model AGENT=MODEL` (repeatable), so you can
 check the exact model plan a run would use. Add `--verify-models` to probe
 each agent's resolved model live against the provider's catalog — one extra
-pass/fail row per agent, catching a bad model selection before a long run.
-When a probe fails, browse what your credential can actually see with
-`skillevaluator models` (top 10 of the authenticated catalog by default;
-`--limit` and `--json` to adjust).
+pass, warn, or fail row per agent. A warning means the catalog result is
+non-authoritative, such as a public NVIDIA Build listing or an OpenAI catalog
+permission failure that does not decide inference access. Browse catalog
+membership with `skillevaluator models` (top 10 by default; `--limit` and
+`--json` adjust the result), but use the Tier 3 runtime preflight to prove that
+the agent can actually invoke the model. A different route used only by the
+standard grader is not exercised by that smoke and remains unproven until
+grading begins.
 
 ### health-check
 

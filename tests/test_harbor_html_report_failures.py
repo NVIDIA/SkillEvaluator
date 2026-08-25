@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfig
-from skillevaluator.tier3.harbor import runner
+from skillevaluator.tier3.harbor import runner, runtime_preflight
 from skillevaluator.tier3.harbor.collector import _build_comparison, collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.results_location import external_results_root, resolve_latest_results
@@ -702,6 +702,16 @@ def test_html_generation_failure_is_persisted_identically_to_returned_result(
     monkeypatch.setattr(runner, "_run_agent_pair", lambda **_kwargs: [])
     monkeypatch.setattr(runner, "render_agent_eval_html_report", fail_html)
     monkeypatch.setattr(Path, "symlink_to", deny_symlink)
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            f"model {selected_provider.model} is available",
+        ),
+    )
 
     returned = runner.run_harbor_eval(
         skill_path,

@@ -35,7 +35,7 @@ commands referenced below.
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
 | [doctor](#doctor) | Live-evaluation readiness check | Nothing |
 | [health-check](#health-check) | Quick CLI + backend readiness check | Nothing |
-| [models](#models) | List a filtered view of the selected provider's authenticated catalog | Provider key |
+| [models](#models) | List models visible through the selected provider's catalog | Provider configuration/key |
 | [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
 
 ## Global conventions
@@ -432,7 +432,7 @@ skillevaluator doctor --agents codex --env-mode docker
 | `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
 | `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
-| `--verify-models` | off | Live per-agent model probe: verifies each agent's resolved model against the provider catalog and prints a pass/fail row per agent, so you can catch a bad model selection before a long run. |
+| `--verify-models` | off | Live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. |
 
 `skillevaluator tier3 doctor` takes the same flags, including `--agent-model` and `--verify-models`.
 
@@ -451,7 +451,7 @@ skillevaluator health-check
 
 ## models
 
-List a filtered view of the selected provider's authenticated catalog. Uses the same provider and credential resolution as evaluation (see [Providers & Credentials](configuration.mdx)), so it doubles as a quick check that your key works. A model appearing in the catalog is **not** proof it is compatible with the evaluation harness — use [doctor](#doctor) `--verify-models` for that. Top-level only; there is no tier-prefixed twin.
+List models visible through the selected provider's catalog. It uses the same provider and credential resolution as evaluation (see [Providers & Credentials](configuration.mdx)), so it checks catalog reachability and model membership. NVIDIA Build and some compatible gateways expose public catalogs, so a listed model does **not** prove that the inference key works or that the model is compatible with the evaluation harness. `doctor --verify-models` reports such successful but non-authoritative checks as warnings. Top-level only; there is no tier-prefixed twin.
 
 ```bash title="List the provider's models"
 skillevaluator models --limit 20

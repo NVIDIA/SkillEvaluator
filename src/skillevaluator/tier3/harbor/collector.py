@@ -109,9 +109,18 @@ _AGENT_RUNTIME_EXCEPTION_TYPES = {
 _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES = {
     "AgentAuthenticationError",
     "AgentTimeoutError",
+    "ApiConnectionClosedError",
+    "ApiInternalServerError",
+    "ApiOverloadedError",
+    "ApiProviderResourceNotFoundError",
     "ApiRateLimitError",
+    "ApiResponseStalledError",
+    "ApiUsageLimitError",
+    "ContextWindowExceededError",
     "ModelNotFoundError",
     "NetworkConnectionError",
+    "OutputTokenExceededError",
+    "UnknownApiError",
 }
 
 

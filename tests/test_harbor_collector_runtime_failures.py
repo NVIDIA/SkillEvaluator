@@ -17,6 +17,28 @@ from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
 
+_HARBOR_022_AGENT_RUNTIME_EXCEPTION_TYPES = (
+    "AgentAuthenticationError",
+    "ApiConnectionClosedError",
+    "ApiInternalServerError",
+    "ApiOverloadedError",
+    "ApiProviderResourceNotFoundError",
+    "ApiRateLimitError",
+    "ApiResponseStalledError",
+    "ApiUsageLimitError",
+    "ContextWindowExceededError",
+    "ModelNotFoundError",
+    "NetworkConnectionError",
+    "OutputTokenExceededError",
+    "UnknownApiError",
+)
+
+
+def _expected_typed_runtime_reason(exception_type: str, message: str) -> str:
+    if exception_type == "OutputTokenExceededError":
+        return "OutputTokenExceededError:<redacted>"
+    return f"{exception_type}: {message}"
+
 
 def _write_actual_harbor_022_result(
     job_dir: Path,
@@ -114,12 +136,7 @@ def _write_actual_harbor_022_result(
 
 @pytest.mark.parametrize(
     "exception_type",
-    (
-        "AgentAuthenticationError",
-        "ApiRateLimitError",
-        "ModelNotFoundError",
-        "NetworkConnectionError",
-    ),
+    _HARBOR_022_AGENT_RUNTIME_EXCEPTION_TYPES,
 )
 def test_harbor_022_typed_infrastructure_failure_invalidates_present_reward(
     tmp_path: Path,
@@ -144,7 +161,10 @@ def test_harbor_022_typed_infrastructure_failure_invalidates_present_reward(
     assert opencode["num_trials_with"] == 0
     assert opencode["with_skill"] == {}
     assert opencode["agent_runtime_failures"]["with_skill"] == [
-        {"trial": trial_name, "reason": f"{exception_type}: provider operation failed"}
+        {
+            "trial": trial_name,
+            "reason": _expected_typed_runtime_reason(exception_type, "provider operation failed"),
+        }
     ]
 
 
@@ -372,12 +392,7 @@ def test_actual_harbor_022_multistep_root_reward_is_authoritative(tmp_path: Path
 
 @pytest.mark.parametrize(
     "exception_type",
-    (
-        "AgentAuthenticationError",
-        "ApiRateLimitError",
-        "ModelNotFoundError",
-        "NetworkConnectionError",
-    ),
+    _HARBOR_022_AGENT_RUNTIME_EXCEPTION_TYPES,
 )
 def test_actual_harbor_022_multistep_typed_agent_failure_is_infrastructure_failure(
     tmp_path: Path,
@@ -407,7 +422,10 @@ def test_actual_harbor_022_multistep_typed_agent_failure_is_infrastructure_failu
     assert results["execution_status"] == "failed"
     assert opencode["num_trials_with"] == 0
     assert opencode["agent_runtime_failures"]["with_skill"] == [
-        {"trial": trial_name, "reason": f"{exception_type}: provider step operation failed"}
+        {
+            "trial": trial_name,
+            "reason": _expected_typed_runtime_reason(exception_type, "provider step operation failed"),
+        }
     ]
     assert opencode["trial_failures"]["with_skill"] == []
 

@@ -567,6 +567,52 @@ def test_doctor_verify_models_uses_probe_disposition_for_catalog_failures(
     assert expected_status in result.output
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "base_url", "agent"),
+    [
+        ("openai", "https://gateway.example/v1", "codex"),
+        ("anthropic", "https://gateway.example/v1", "claude-code"),
+    ],
+)
+def test_doctor_verify_models_warns_for_custom_endpoint_catalog_authentication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    base_url: str,
+    agent: str,
+) -> None:
+    from skillevaluator.tier3.harbor import runtime_preflight
+
+    provider = ProviderConfig(
+        provider=provider_name,
+        model="model-test",
+        api_key="provider-key",
+        base_url=base_url,
+        litellm_model=f"{provider_name}/model-test",
+    )
+    probe = Mock(
+        return_value=ModelProbeResult(
+            False,
+            provider_name,
+            "model-test",
+            "model catalog returned HTTP 401",
+            failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
+            http_status=401,
+        )
+    )
+    monkeypatch.setattr(tier3_commands, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(tier3_commands, "_check_prerequisites", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime_preflight, "probe_model", probe)
+
+    result = CliRunner().invoke(
+        cli,
+        ["doctor", "--agents", agent, "--env-mode", "docker", "--verify-models"],
+    )
+
+    assert result.exit_code == 0
+    assert "warn" in result.output
+    assert "HTTP 401" in result.output
+
+
 def test_doctor_reports_missing_independent_cross_provider_credential(monkeypatch) -> None:
     provider = ProviderConfig(
         provider="openai",

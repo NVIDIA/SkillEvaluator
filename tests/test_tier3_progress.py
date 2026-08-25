@@ -824,8 +824,11 @@ def test_credential_validation_401_stops_before_image_and_task_preparation(
             401,
             "model catalog returned HTTP 401",
         ),
+        ("openai", "https://gateway.example/v1", "authentication", 401, "model catalog returned HTTP 401"),
+        ("anthropic", "https://gateway.example/v1", "authentication", 401, "model catalog returned HTTP 401"),
     ],
 )
+@pytest.mark.parametrize("agent_runtime_preflight", [True, False])
 def test_inconclusive_credential_probe_degrades_and_continues(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -834,6 +837,7 @@ def test_inconclusive_credential_probe_degrades_and_continues(
     failure_kind: str | None,
     http_status: int | None,
     detail: str,
+    agent_runtime_preflight: bool,
 ) -> None:
     probe_calls: list[Any] = []
     task_calls: list[Path] = []
@@ -869,12 +873,13 @@ def test_inconclusive_credential_probe_degrades_and_continues(
         skill,
         ["codex"],
         output_dir=tmp_path / "results",
-        agent_runtime_preflight=False,
+        agent_runtime_preflight=agent_runtime_preflight,
         progress_reporter=reporter,
     )
 
     assert "error" not in result
-    assert len(probe_calls) == 1
+    assert len(probe_calls) == (2 if provider_name == "anthropic" else 1)
+    assert any(call.provider == provider_name for call in probe_calls)
     assert task_calls
     transitions = [(event.stage, event.state) for event in reporter.events]
     assert ("credential-validation", "degraded") in transitions
@@ -882,7 +887,7 @@ def test_inconclusive_credential_probe_degrades_and_continues(
     assert transitions[-1] == ("run-finished", "complete")
     validation = result["run_config"]["credential_validation"]
     assert validation["status"] == "degraded"
-    assert validation["targets"][0]["status"] == "degraded"
+    assert {target["status"] for target in validation["targets"]} == {"degraded"}
     persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
     assert persisted["run_config"]["credential_validation"] == validation
 
@@ -1368,7 +1373,7 @@ def test_distinct_standard_grading_probe_failure_is_redacted_and_stops_staging(
             provider="openai",
             model="gpt-5",
             api_key=evaluator_secret,
-            base_url=None,
+            base_url="https://api.openai.com/v1",
         ),
     )
     reporter = _RecordingReporter()

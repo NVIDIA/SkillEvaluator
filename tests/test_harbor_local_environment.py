@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import stat
 from pathlib import Path
 
+import pytest
+from harbor.models.task.config import EnvironmentConfig
+from harbor.models.trial.paths import TrialPaths
+
+from skillevaluator.tier3.harbor import local_sandbox
 from skillevaluator.tier3.harbor.local_environment import SkillEvaluatorLocalEnvironment
 
 
@@ -56,3 +62,58 @@ def test_raw_path_rewrite_ignores_url_and_local_path_suffixes(tmp_path: Path) ->
     rewritten = environment._rewrite_raw_paths(value)
 
     assert rewritten == f'"{local_tests}{os.sep}api" "https://example.invalid/tests/api" "{local_tests}/api"'
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name == "nt", reason="local subprocess backend requires POSIX")
+def test_real_local_exec_streams_redacted_stdout_and_stderr(tmp_path: Path) -> None:
+    try:
+        detected_sandbox = local_sandbox.detect("require")
+    except local_sandbox.SandboxUnavailable as exc:
+        pytest.skip(str(exc))
+
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    environment = SkillEvaluatorLocalEnvironment(
+        environment_dir=environment_dir,
+        environment_name="real-local-streaming",
+        session_id="real-local-streaming",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(),
+        runtime_agent="opencode",
+        runtime_root=str(runtime_root),
+        sandbox_mode="require",
+        allow_net=False,
+        strict_reads=True,
+    )
+    secret = "real-sandbox-stream-secret"
+    callbacks: list[tuple[str, str]] = []
+    command = "printf 'stdout=%s\\n' \"$SANDBOX_TOKEN\"; printf 'stderr=%s\\n' \"$SANDBOX_TOKEN\" >&2"
+
+    async def on_output(text: str, stream: str) -> None:
+        callbacks.append((text, stream))
+
+    async def exercise() -> tuple[object, str]:
+        await environment.start()
+        try:
+            with environment.scoped_output_callback(on_output):
+                result = await environment.exec(command, env={"SANDBOX_TOKEN": secret})
+            assert environment._sandbox is not None
+            return result, environment._sandbox.plan.backend
+        finally:
+            await environment.stop(delete=False)
+
+    result, backend = asyncio.run(exercise())
+    callback_stdout = "".join(text for text, stream in callbacks if stream == "stdout")
+    callback_stderr = "".join(text for text, stream in callbacks if stream == "stderr")
+
+    assert backend == detected_sandbox.plan.backend
+    assert backend in {"bubblewrap", "seatbelt"}
+    assert callback_stdout == result.stdout
+    assert callback_stderr == result.stderr
+    assert secret not in callback_stdout
+    assert secret not in callback_stderr
+    assert "stdout=" in callback_stdout
+    assert "stderr=" in callback_stderr

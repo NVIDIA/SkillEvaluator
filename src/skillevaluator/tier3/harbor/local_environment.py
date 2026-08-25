@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import json
 import os
@@ -16,9 +17,9 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
-from harbor.environments.base import BaseEnvironment, ExecResult
+from harbor.environments.base import BaseEnvironment, ExecResult, OutputCallback, OutputStream
 from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.environment_type import EnvironmentType
 
@@ -31,8 +32,8 @@ from skillevaluator.tier3.harbor.local_runtime import (
     runtime_command_roots,
     validate_runtime_root,
 )
-from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
+from skillevaluator.tier3.harbor.stream_redaction import StreamingLogRedactor
 from skillevaluator.tier3.output_provenance import output_provenance_key_path
 
 _SAFE_HOST_ENV = frozenset(
@@ -90,7 +91,12 @@ _LIVE_AGENT_KEYS = frozenset(
         "ANTHROPIC_BASE_URL",
     }
 )
-_SECRET_ENV_NAME_RE = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)", re.IGNORECASE)
+_SENSITIVE_ENV_NAME_RE = re.compile(
+    r"(?:^|_)(?:API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|KEY|PAT|TOKEN|SECRET|PASS(?:WORD)?|"
+    r"CREDENTIALS?|AUTH(?:ORIZATION)?|BEARER|COOKIE|SESSION|CERT(?:IFICATE)?|DSN|"
+    r"CONNECTION(?:_STRING)?|(?:PRE)?SIGNED_?URL|SAS_?URL|CREDENTIAL_?URL|DATABASE_?URL)(?:_|$)",
+    re.IGNORECASE,
+)
 _SHELL_WRITE_REDIRECT_RE = re.compile(r"(?:^|\s)(?:\d?>{1,2}|&>)\s*([^\s;&|]+)")
 _SHELL_WRITE_COMMAND_RE = re.compile(r"(?:^|[;&|]\s*)(?:tee|touch|mkdir|cp|mv)\b(?P<args>[^;&|]*)")
 _BACKGROUND_AMPERSAND_RE = re.compile(r"(?<![&>])&(?![&>])")
@@ -100,6 +106,8 @@ _COMMAND_PREFIXES = frozenset({"command", "do", "elif", "env", "exec", "if", "th
 _REAP_TERM_SECONDS = 1.0
 _REAP_KILL_SECONDS = 1.0
 _REAP_CANCEL_SECONDS = 0.1
+_CREATION_CANCEL_SECONDS = 0.1
+_STOP_CLEANUP_SECONDS = _REAP_TERM_SECONDS + _REAP_KILL_SECONDS + _REAP_CANCEL_SECONDS + 0.2
 _PATH_START_BOUNDARY_RE = r"(?<![A-Za-z0-9_.-])"
 _PATH_BOUNDARY_RE = r"(?=$|[\s'\";&|<>])"
 _HOST_HOME_PREFIX_RE = r"(?:~|\$HOME|\$\{HOME\}|/Users/[^\s/;'\"&|<>]+|/home/[^\s/;'\"&|<>]+|/root)"
@@ -126,6 +134,87 @@ _SENSITIVE_HOST_PATH_RES = (
 )
 
 
+class _StreamCallbackOutput:
+    """Own per-stream redaction state until the exec outcome is known."""
+
+    def __init__(
+        self,
+        callback: OutputCallback,
+        callback_error: asyncio.Future[BaseException],
+        secret_values: set[str],
+    ) -> None:
+        self._callback = callback
+        self._callback_error = callback_error
+        self._redactors = {
+            "stdout": StreamingLogRedactor(secret_values),
+            "stderr": StreamingLogRedactor(secret_values),
+        }
+        self._raw_chunks: dict[OutputStream, list[bytes]] = {"stdout": [], "stderr": []}
+        self._delivery_cancelled = False
+        self._active_deliveries: set[asyncio.Task[None]] = set()
+
+    def append_raw(self, chunk: bytes, stream: OutputStream) -> None:
+        self._raw_chunks[stream].append(chunk)
+
+    def raw_output(self, stream: OutputStream) -> bytes:
+        return b"".join(self._raw_chunks[stream])
+
+    def abandon_delivery(self) -> None:
+        """Prevent timeout cleanup from re-entering a stuck callback."""
+        self._delivery_cancelled = True
+
+    async def _emit(self, text: str, stream: OutputStream) -> None:
+        if not text or self._callback_error.done() or self._delivery_cancelled:
+            return
+
+        async def invoke_callback() -> None:
+            try:
+                await self._callback(text, stream)
+            except asyncio.CancelledError as exc:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    # Cleanup is cancelling this delivery task. A deliberate
+                    # CancelledError raised by callback code has a zero
+                    # cancellation count and remains the callback failure.
+                    raise
+                if not self._callback_error.done():
+                    self._callback_error.set_result(exc)
+                await asyncio.sleep(0)
+            except BaseException as exc:
+                if not self._callback_error.done():
+                    self._callback_error.set_result(exc)
+                await asyncio.sleep(0)
+
+        delivery = asyncio.create_task(invoke_callback())
+        self._active_deliveries.add(delivery)
+
+        def retire_delivery(completed: asyncio.Task[None]) -> None:
+            self._active_deliveries.discard(completed)
+            with contextlib.suppress(BaseException):
+                completed.result()
+
+        delivery.add_done_callback(retire_delivery)
+        try:
+            await asyncio.shield(delivery)
+        except asyncio.CancelledError:
+            # Cancellation of the collector/finalizer must explicitly target
+            # the shielded callback task. Repeating cancellation handles a
+            # callback that performs async cleanup after its first cancel.
+            self._delivery_cancelled = True
+            cancellation = asyncio.create_task(_cancel_task_repeatedly(delivery, timeout=_REAP_CANCEL_SECONDS))
+            await _await_task_uninterruptibly(cancellation, preserve_cancellation=False)
+            raise
+
+    async def feed(self, text: str, stream: OutputStream) -> None:
+        await self._emit(self._redactors[stream].feed(text), stream)
+
+    async def finish(self, *, stderr_suffix: str = "") -> None:
+        await self._emit(self._redactors["stdout"].finish(), "stdout")
+        if stderr_suffix:
+            await self._emit(self._redactors["stderr"].feed(stderr_suffix), "stderr")
+        await self._emit(self._redactors["stderr"].finish(), "stderr")
+
+
 async def _await_task_uninterruptibly(
     task: asyncio.Task[Any],
     *,
@@ -145,6 +234,27 @@ async def _await_task_uninterruptibly(
     if cancellation_requested and preserve_cancellation:
         raise asyncio.CancelledError
     return result
+
+
+async def _cancel_task_repeatedly(task: asyncio.Future[Any], *, timeout: float) -> bool:
+    """Bound cleanup even when a coroutine suppresses its first cancellation."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    retry_interval = min(0.01, timeout / 4) if timeout > 0 else 0
+    while not task.done():
+        task.cancel()
+        # Give the cancellation target a chance to catch the injected error
+        # before deciding whether another cancellation is necessary.
+        await asyncio.sleep(0)
+        if task.done():
+            break
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        await asyncio.wait({task}, timeout=min(retry_interval, remaining))
+    if task.done():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+    return task.done()
 
 
 def _looks_like_path_token(token: str) -> bool:
@@ -357,6 +467,15 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             asyncio.subprocess.Process,
             asyncio.Task[tuple[bytes, bytes]] | None,
         ] = {}
+        self._active_process_secret_values: dict[asyncio.subprocess.Process, set[str]] = {}
+        self._pending_creations: set[asyncio.Task[asyncio.subprocess.Process]] = set()
+        self._creation_secret_values: dict[asyncio.Task[asyncio.subprocess.Process], set[str]] = {}
+        self._creation_cleanups: dict[
+            asyncio.Task[asyncio.subprocess.Process],
+            asyncio.Task[None],
+        ] = {}
+        self._creation_cleanup_errors: list[set[str]] = []
+        self._stop_requested = False
         super().__init__(*args, **kwargs)
         base_dir = self._working_dir_override or (self.trial_paths.trial_dir / "local-environment")
         self._root = base_dir.resolve()
@@ -389,6 +508,16 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
 
     async def start(self, force_build: bool = False) -> None:
         _ = force_build
+        if (
+            self._pending_creations
+            or self._creation_secret_values
+            or self._creation_cleanups
+            or self._creation_cleanup_errors
+            or self._active_processes
+            or self._active_process_secret_values
+        ):
+            raise RuntimeError("Cannot start local environment while process cleanup is still pending")
+        self._stop_requested = False
         self.trial_paths.mkdir()
         for path in (
             self._root,
@@ -418,11 +547,141 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             self.logger.warning("local mode is NOT kernel-sandboxed; advisory guardrails only: %s", plan.reason)
 
     async def stop(self, delete: bool) -> None:
+        self._stop_requested = True
+        pending_creations = tuple(self._pending_creations)
+        for creation in pending_creations:
+            self._schedule_creation_cleanup(creation)
+        if pending_creations:
+            await asyncio.wait(
+                pending_creations,
+                timeout=_CREATION_CANCEL_SECONDS,
+            )
+
+        async def wait_for_resolved_creation_cleanups() -> None:
+            cleanup_tasks = tuple(
+                cleanup
+                for creation, cleanup in self._creation_cleanups.items()
+                if creation.done() and not cleanup.done()
+            )
+            if cleanup_tasks:
+                await asyncio.wait(cleanup_tasks, timeout=_STOP_CLEANUP_SECONDS)
+            # Let cleanup callbacks retire their creation/mapping entries
+            # before the final containment check.
+            await asyncio.sleep(0)
+
+        await wait_for_resolved_creation_cleanups()
+
         for proc, communication in tuple(self._active_processes.items()):
-            await self._terminate_process_tree(proc, communication)
-        self._active_processes.clear()
+            try:
+                await self._terminate_process_tree(proc, communication)
+            except BaseException:
+                # Keep the handle and protected values for a redacted retry.
+                continue
+            self._release_active_process(proc)
+
+        # A pending creation can resolve while known active processes are
+        # being reaped. Give its already-tracked cleanup the same bounded
+        # opportunity before deciding whether deletion is safe.
+        await wait_for_resolved_creation_cleanups()
+
+        if (
+            not self._pending_creations
+            and not self._creation_secret_values
+            and not self._creation_cleanups
+            and not self._active_processes
+        ):
+            # Every process whose earlier cleanup failed has now been reaped
+            # through its retained active-process handle.
+            self._creation_cleanup_errors.clear()
+
+        unresolved_creations = tuple(creation for creation in self._pending_creations if not creation.done())
+        outstanding_cleanups = tuple(cleanup for cleanup in self._creation_cleanups.values() if not cleanup.done())
+        if (
+            unresolved_creations
+            or self._creation_secret_values
+            or outstanding_cleanups
+            or self._creation_cleanup_errors
+            or self._active_processes
+        ):
+            details: list[str] = []
+            if unresolved_creations:
+                details.append("process creation containment remains unresolved")
+            if outstanding_cleanups:
+                details.append("late process cleanup remains unresolved")
+            if self._creation_cleanup_errors:
+                details.append("creation cleanup failed")
+            if self._active_processes:
+                details.append("active process cleanup remains unresolved")
+            diagnostic = "Local environment stop could not confirm process creation containment before the deadline" + (
+                f" ({'; '.join(details)})" if details else ""
+            )
+            cleanup_secret_values = set().union(
+                *self._creation_cleanup_errors,
+                *self._creation_secret_values.values(),
+                *self._active_process_secret_values.values(),
+            )
+            raise RuntimeError(self._redact_output(diagnostic, cleanup_secret_values))
+
         if delete and self._root.exists():
             shutil.rmtree(self._root, ignore_errors=True)
+
+    def _schedule_creation_cleanup(
+        self,
+        creation: asyncio.Task[asyncio.subprocess.Process],
+        *,
+        secret_values: set[str] | None = None,
+    ) -> asyncio.Task[None]:
+        if secret_values:
+            self._creation_secret_values.setdefault(creation, set()).update(secret_values)
+        existing = self._creation_cleanups.get(creation)
+        if existing is not None:
+            return existing
+
+        async def reap_created_process() -> None:
+            try:
+                process = await asyncio.shield(creation)
+            except BaseException:
+                return
+            communication = asyncio.create_task(process.communicate())
+            self._active_processes[process] = communication
+            self._active_process_secret_values[process] = set(self._creation_secret_values.get(creation, set()))
+            try:
+                await self._terminate_process_tree(process, communication)
+            except BaseException:
+                # Retain ownership so stop() can retry containment.
+                raise
+            self._release_active_process(process)
+
+        cleanup = asyncio.create_task(reap_created_process())
+        self._creation_cleanups[creation] = cleanup
+
+        def finish_cleanup(completed: asyncio.Task[None]) -> None:
+            self._pending_creations.discard(creation)
+            self._creation_cleanups.pop(creation, None)
+            protected_values = self._creation_secret_values.pop(creation, set())
+            try:
+                completed.result()
+            except BaseException:
+                self._creation_cleanup_errors.append(protected_values)
+                diagnostic = self._redact_output(
+                    "Local process creation cleanup failed",
+                    protected_values,
+                )
+                with contextlib.suppress(RuntimeError):
+                    loop = asyncio.get_running_loop()
+                    loop.call_exception_handler(
+                        {
+                            "message": diagnostic,
+                            "exception": RuntimeError(diagnostic),
+                        }
+                    )
+
+        cleanup.add_done_callback(finish_cleanup)
+        return cleanup
+
+    def _release_active_process(self, process: asyncio.subprocess.Process) -> None:
+        self._active_processes.pop(process, None)
+        self._active_process_secret_values.pop(process, None)
 
     async def prepare_logs_for_host(self) -> None:
         return None
@@ -474,35 +733,35 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         user: str | int | None = None,
     ) -> ExecResult:
         _ = user
+        output_callback = self._output_callback()
+        output_secret_values = self._output_secret_values(env, {})
+
+        async def blocked(reason: str) -> ExecResult:
+            diagnostic = self._redact_output(f"Local mode command blocked: {reason}", output_secret_values)
+            self.logger.warning("%s", diagnostic)
+            if output_callback is not None:
+                await output_callback(diagnostic, "stderr")
+            return ExecResult(stdout="", stderr=diagnostic, return_code=126)
+
+        if self._stop_requested:
+            return await blocked("environment shutdown is in progress")
+
         rewritten = self._rewrite_command(command)
         try:
             workdir = self._resolve_path(cwd) if cwd else self._workspace
         except ValueError as exc:
-            return ExecResult(stdout="", stderr=f"Local mode command blocked: {exc}", return_code=126)
+            return await blocked(str(exc))
         if not self._path_is_within_allowed_local_roots(workdir):
-            return ExecResult(
-                stdout="",
-                stderr=f"Local mode command blocked: cwd {workdir} is outside the local run directory.",
-                return_code=126,
-            )
+            return await blocked(f"cwd {workdir} is outside the local run directory.")
         workdir.mkdir(parents=True, exist_ok=True)
         try:
             exec_env = self._exec_env(env)
         except ValueError as exc:
-            self.logger.warning("Local mode command blocked: %s", exc)
-            return ExecResult(
-                stdout="",
-                stderr=f"Local mode command blocked: {exc}",
-                return_code=126,
-            )
+            return await blocked(str(exc))
+        output_secret_values.update(self._output_secret_values(env, exec_env))
         guardrail_reason = self._local_command_guardrail_reason(command, rewritten, exec_env)
         if guardrail_reason:
-            self.logger.warning("Local mode command blocked: %s", guardrail_reason)
-            return ExecResult(
-                stdout="",
-                stderr=f"Local mode command blocked: {guardrail_reason}",
-                return_code=126,
-            )
+            return await blocked(guardrail_reason)
 
         sandbox = self._sandbox
         if sandbox is None:
@@ -551,43 +810,289 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 start_new_session=os.name == "posix",
             )
         )
+        self._pending_creations.add(creation)
+        self._creation_secret_values[creation] = set(output_secret_values)
         try:
             proc = await asyncio.shield(creation)
-        except asyncio.CancelledError:
-            # A second cancellation must not propagate into ``creation`` after
-            # the OS process exists but before asyncio returns its handle.
-            proc = await _await_task_uninterruptibly(creation, preserve_cancellation=False)
-            await self._terminate_process_tree(proc)
+        except asyncio.CancelledError as primary_error:
+            # Cancellation may arrive after the OS process exists but before
+            # asyncio returns its handle. Bound how long the caller waits for
+            # an uncooperative creation coroutine. The tracked cleanup owns
+            # the eventual handle and remains visible to stop().
+            cleanup = self._schedule_creation_cleanup(creation)
+            resolution = asyncio.create_task(asyncio.wait({creation}, timeout=_CREATION_CANCEL_SECONDS))
+            done, _pending = await _await_task_uninterruptibly(
+                resolution,
+                preserve_cancellation=False,
+            )
+            if creation in done:
+                safe_cleanup_error: RuntimeError | None = None
+                try:
+                    await _await_task_uninterruptibly(cleanup, preserve_cancellation=False)
+                except BaseException as cleanup_error:
+                    safe_cleanup_error = self._redacted_cleanup_error(cleanup_error, output_secret_values)
+                if safe_cleanup_error is not None:
+                    self._raise_primary_with_cleanup(
+                        primary_error,
+                        safe_cleanup_error,
+                        output_secret_values,
+                        note_prefix="Local process-tree cleanup also failed during creation cancellation",
+                    )
+            else:
+                primary_error.add_note(
+                    self._redact_output(
+                        "Local process creation cancellation remained pending past the cleanup deadline; "
+                        "a tracked late-process reaper remains active",
+                        output_secret_values,
+                    )
+                )
             raise
-        self._active_processes[proc] = None
-        communication = asyncio.create_task(proc.communicate(input=env_payload))
+        except BaseException:
+            self._pending_creations.discard(creation)
+            self._creation_secret_values.pop(creation, None)
+            raise
+
+        if self._stop_requested:
+            cleanup = self._schedule_creation_cleanup(creation)
+            safe_cleanup_error: RuntimeError | None = None
+            try:
+                await _await_task_uninterruptibly(cleanup, preserve_cancellation=False)
+            except BaseException as cleanup_error:
+                safe_cleanup_error = self._redacted_cleanup_error(cleanup_error, output_secret_values)
+            if safe_cleanup_error is not None:
+                raise safe_cleanup_error from None
+            raise RuntimeError("Local process creation completed during environment shutdown")
+        self._pending_creations.discard(creation)
+        self._creation_secret_values.pop(creation, None)
+        callback_error: asyncio.Future[BaseException] | None = None
+        callback_output: _StreamCallbackOutput | None = None
+        if output_callback is not None:
+            callback_error = asyncio.get_running_loop().create_future()
+            callback_output = _StreamCallbackOutput(output_callback, callback_error, output_secret_values)
+        communication = asyncio.create_task(
+            proc.communicate(input=env_payload)
+            if output_callback is None
+            else self._collect_streamed_output(
+                proc,
+                env_payload,
+                callback_output,
+            )
+        )
         self._active_processes[proc] = communication
+        self._active_process_secret_values[proc] = set(output_secret_values)
+        process_contained = False
+
+        async def terminate_preserving_primary(primary_error: BaseException) -> tuple[bytes, bytes]:
+            nonlocal process_contained
+            cleanup = asyncio.create_task(self._terminate_process_tree(proc, communication))
+            safe_cleanup_error: RuntimeError | None = None
+            try:
+                result = await _await_task_uninterruptibly(cleanup, preserve_cancellation=False)
+            except BaseException as cleanup_error:
+                safe_cleanup_error = self._redacted_cleanup_error(cleanup_error, output_secret_values)
+            if callback_output is not None and not communication.done():
+                callback_output.abandon_delivery()
+            if safe_cleanup_error is not None:
+                self._raise_primary_with_cleanup(
+                    primary_error,
+                    safe_cleanup_error,
+                    output_secret_values,
+                    note_prefix="Local process-tree cleanup also failed",
+                )
+            process_contained = True
+            return result
+
+        async def cleanup_process_tree() -> tuple[bytes, bytes]:
+            """Contain the group while preserving cancellation as primary."""
+            nonlocal process_contained
+            cleanup = asyncio.create_task(self._terminate_process_tree(proc, communication))
+            safe_cleanup_error: RuntimeError | None = None
+            try:
+                result = await asyncio.shield(cleanup)
+            except asyncio.CancelledError as primary_error:
+                try:
+                    result = await _await_task_uninterruptibly(cleanup, preserve_cancellation=False)
+                except BaseException as cleanup_error:
+                    safe_cleanup_error = self._redacted_cleanup_error(cleanup_error, output_secret_values)
+                if callback_output is not None and not communication.done():
+                    callback_output.abandon_delivery()
+                if safe_cleanup_error is not None:
+                    self._raise_primary_with_cleanup(
+                        primary_error,
+                        safe_cleanup_error,
+                        output_secret_values,
+                        note_prefix="Local process-tree cleanup also failed",
+                    )
+                process_contained = True
+                self._release_active_process(proc)
+                raise
+            except BaseException as cleanup_error:
+                safe_cleanup_error = self._redacted_cleanup_error(cleanup_error, output_secret_values)
+            if callback_output is not None and not communication.done():
+                callback_output.abandon_delivery()
+            if safe_cleanup_error is not None:
+                raise safe_cleanup_error from None
+            process_contained = True
+            self._release_active_process(proc)
+            return result
+
+        callback_failure: BaseException | None = None
+        timed_out = False
         try:
             try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    asyncio.shield(communication),
+                waitables: set[asyncio.Future[Any] | asyncio.Task[Any]] = {communication}
+                if callback_error is not None:
+                    waitables.add(callback_error)
+                done, _pending = await asyncio.wait(
+                    waitables,
                     timeout=timeout_sec,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-            except TimeoutError:
-                stdout_b, stderr_b = await self._terminate_process_tree(proc, communication)
-                stdout = self._redact_output(stdout_b.decode(errors="replace"), exec_env)
-                stderr = self._redact_output(stderr_b.decode(errors="replace"), exec_env)
-                return ExecResult(
-                    stdout=stdout,
-                    stderr=(stderr + "\nTimed out").strip(),
-                    return_code=124,
-                )
-            except asyncio.CancelledError:
-                await self._terminate_process_tree(proc, communication)
+                if not done:
+                    timed_out = True
+                elif callback_error is not None and callback_error in done:
+                    callback_failure = callback_error.result()
+                else:
+                    stdout_b, stderr_b = await asyncio.shield(communication)
+            except asyncio.CancelledError as primary_error:
+                await terminate_preserving_primary(primary_error)
+                raise
+            except BaseException as primary_error:
+                await terminate_preserving_primary(primary_error)
                 raise
 
+            if callback_failure is None and callback_error is not None and callback_error.done():
+                callback_failure = callback_error.result()
+            if callback_failure is not None:
+                await terminate_preserving_primary(callback_failure)
+                raise callback_failure
+
+            if timed_out:
+                stdout_b, stderr_b = await cleanup_process_tree()
+                if callback_output is not None:
+                    stdout_b = callback_output.raw_output("stdout")
+                    stderr_b = callback_output.raw_output("stderr")
+                if callback_error is not None and callback_error.done():
+                    callback_failure = callback_error.result()
+                    raise callback_failure
+                raw_stdout = stdout_b.decode(errors="replace")
+                raw_stderr = stderr_b.decode(errors="replace")
+                diagnostic = "Timed out" if not raw_stderr or raw_stderr.endswith("\n") else "\nTimed out"
+                if callback_output is not None:
+                    callback_finish = asyncio.create_task(callback_output.finish(stderr_suffix=diagnostic))
+
+                    async def cancel_callback_finish(*, preserve_cancellation: bool) -> bool:
+                        callback_output.abandon_delivery()
+                        cancellation = asyncio.create_task(
+                            _cancel_task_repeatedly(callback_finish, timeout=_REAP_CANCEL_SECONDS)
+                        )
+                        return bool(
+                            await _await_task_uninterruptibly(
+                                cancellation,
+                                preserve_cancellation=preserve_cancellation,
+                            )
+                        )
+
+                    try:
+                        done, _pending = await asyncio.wait(
+                            {callback_finish},
+                            timeout=_REAP_CANCEL_SECONDS,
+                        )
+                    except asyncio.CancelledError:
+                        await cancel_callback_finish(preserve_cancellation=False)
+                        raise
+                    if callback_finish not in done:
+                        if not await cancel_callback_finish(preserve_cancellation=True):
+                            raise RuntimeError(
+                                self._redact_output(
+                                    "Local callback cleanup remained pending past the deadline",
+                                    output_secret_values,
+                                )
+                            )
+                    else:
+                        callback_finish.result()
+                    if callback_error is not None and callback_error.done():
+                        raise callback_error.result()
+                stdout = self._redact_output(raw_stdout, output_secret_values)
+                timeout_stderr = self._redact_output(raw_stderr + diagnostic, output_secret_values)
+                return ExecResult(
+                    stdout=stdout,
+                    stderr=timeout_stderr,
+                    return_code=124,
+                )
+
+            # proc.wait()/communicate() only proves that the launcher exited;
+            # a same-group descendant may have closed its inherited streams
+            # and survived. Contain the group immediately, before an
+            # arbitrarily slow final callback creates a PID-reuse window.
+            await cleanup_process_tree()
+
+            if callback_output is not None:
+                await callback_output.finish()
+                if callback_error is not None and callback_error.done():
+                    callback_failure = callback_error.result()
+                    raise callback_failure
+
             return ExecResult(
-                stdout=self._redact_output(stdout_b.decode(errors="replace"), exec_env),
-                stderr=self._redact_output(stderr_b.decode(errors="replace"), exec_env),
+                stdout=self._redact_output(stdout_b.decode(errors="replace"), output_secret_values),
+                stderr=self._redact_output(stderr_b.decode(errors="replace"), output_secret_values),
                 return_code=int(proc.returncode or 0),
             )
         finally:
-            self._active_processes.pop(proc, None)
+            if process_contained:
+                self._release_active_process(proc)
+
+    @staticmethod
+    async def _collect_streamed_output(
+        proc: asyncio.subprocess.Process,
+        stdin_data: bytes,
+        callback_output: _StreamCallbackOutput,
+    ) -> tuple[bytes, bytes]:
+        """Drain both process streams while preserving ``communicate`` results."""
+        assert proc.stdin is not None
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+
+        async def write_stdin() -> None:
+            try:
+                proc.stdin.write(stdin_data)
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                # Match asyncio's communicate(): an early child exit is
+                # represented by its return code, not a host-side pipe error.
+                pass
+            finally:
+                proc.stdin.close()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    await proc.stdin.wait_closed()
+
+        async def drain_stream(
+            reader: asyncio.StreamReader,
+            stream: OutputStream,
+        ) -> bytes:
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            chunks: list[bytes] = []
+
+            while chunk := await reader.read(64 * 1024):
+                chunks.append(chunk)
+                callback_output.append_raw(chunk, stream)
+                if text := decoder.decode(chunk):
+                    await callback_output.feed(text, stream)
+                # A callback coroutine is allowed to complete synchronously;
+                # still give command timeout/cancellation and the other stream
+                # a scheduling point after each bounded read.
+                await asyncio.sleep(0)
+            if text := decoder.decode(b"", final=True):
+                await callback_output.feed(text, stream)
+            return b"".join(chunks)
+
+        _, stdout, stderr, _ = await asyncio.gather(
+            write_stdin(),
+            drain_stream(proc.stdout, "stdout"),
+            drain_stream(proc.stderr, "stderr"),
+            proc.wait(),
+        )
+        return stdout, stderr
 
     async def exec_with_sensitive_env(
         self,
@@ -615,35 +1120,93 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             active_communication = communication
             if active_communication is None:
                 active_communication = asyncio.create_task(proc.communicate())
+            process_wait: asyncio.Task[tuple[bytes, bytes]] | None = None
 
             def send(sig: signal.Signals) -> None:
                 if os.name == "posix":
-                    with contextlib.suppress(ProcessLookupError):
+                    try:
                         os.killpg(proc.pid, sig)
+                    except ProcessLookupError:
+                        return
+                    except PermissionError:
+                        if proc.returncode is not None:
+                            return
+                        try:
+                            os.getpgid(proc.pid)
+                        except ProcessLookupError:
+                            return
+                        raise
                 elif proc.returncode is None:
                     if sig == signal.SIGTERM:
                         proc.terminate()
                     else:
                         proc.kill()
 
+            async def wait_for_process_group_exit(seconds: float) -> None:
+                if os.name != "posix" or not isinstance(proc, asyncio.subprocess.Process):
+                    return
+                deadline = asyncio.get_running_loop().time() + seconds
+                while True:
+                    try:
+                        os.killpg(proc.pid, 0)
+                    except ProcessLookupError:
+                        return
+                    except PermissionError:
+                        return
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        return
+                    await asyncio.sleep(min(0.01, remaining))
+
             async def bounded_wait(seconds: float) -> tuple[bytes, bytes] | None:
+                nonlocal process_wait
                 try:
                     return await asyncio.wait_for(asyncio.shield(active_communication), timeout=seconds)
                 except TimeoutError:
                     return None
+                except BaseException:
+                    # A collector failure is the caller's primary error, but
+                    # cleanup still has to confirm process exit. Fall back to
+                    # waiting on the process handle without re-reading pipes.
+                    if not hasattr(proc, "wait"):
+                        raise
+                    if process_wait is None:
+
+                        async def wait_for_process() -> tuple[bytes, bytes]:
+                            await proc.wait()
+                            return b"", b""
+
+                        process_wait = asyncio.create_task(wait_for_process())
+                    try:
+                        return await asyncio.wait_for(asyncio.shield(process_wait), timeout=seconds)
+                    except TimeoutError:
+                        return None
 
             send(signal.SIGTERM)
-            if output := await bounded_wait(_REAP_TERM_SECONDS):
-                return output
-            send(signal.SIGKILL)
-            if output := await bounded_wait(_REAP_KILL_SECONDS):
-                return output
+            term_output = await bounded_wait(_REAP_TERM_SECONDS)
+            if os.name != "posix" and term_output is not None:
+                return term_output
 
-            active_communication.cancel()
-            done, _pending = await asyncio.wait({active_communication}, timeout=_REAP_CANCEL_SECONDS)
-            if active_communication in done:
+            # On POSIX the launcher can exit and close its pipes while a
+            # same-group descendant ignores SIGTERM.  Escalate to the original
+            # group immediately even when communication already completed;
+            # this minimizes the process-group-ID reuse window and prevents a
+            # successful collector from being mistaken for containment.
+            send(signal.SIGKILL)
+            group_exit = asyncio.create_task(wait_for_process_group_exit(_REAP_KILL_SECONDS))
+            kill_output = term_output
+            if kill_output is None:
+                kill_output = await bounded_wait(_REAP_KILL_SECONDS)
+            await group_exit
+            if kill_output is not None:
+                return kill_output
+
+            if not await _cancel_task_repeatedly(active_communication, timeout=_REAP_CANCEL_SECONDS):
+                raise RuntimeError("Local output cleanup remained pending past the reap deadline")
+            if process_wait is not None and not process_wait.done():
+                process_wait.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
-                    active_communication.result()
+                    await process_wait
             return b"", b""
 
         cleanup = asyncio.create_task(reap())
@@ -981,12 +1544,40 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         except ValueError:
             return False
 
+    def _output_secret_values(self, env: dict[str, str] | None, exec_env: dict[str, str]) -> set[str]:
+        merged = self._merge_env(env) or {}
+        secret_values = {value for key, value in merged.items() if value and _SENSITIVE_ENV_NAME_RE.search(key)}
+        secret_values.update(value for key, value in exec_env.items() if value and _SENSITIVE_ENV_NAME_RE.search(key))
+        return secret_values
+
     @staticmethod
-    def _redact_output(text: str, env: dict[str, str]) -> str:
-        secret_values = [
-            value for key, value in env.items() if _SECRET_ENV_NAME_RE.search(key) and value and len(value) >= 8
-        ]
-        return redact_secrets_in_log_line(text, extra_secret_values=secret_values)
+    def _redact_output(text: str, secret_values: set[str]) -> str:
+        redactor = StreamingLogRedactor(secret_values)
+        return redactor.feed(text) + redactor.finish()
+
+    def _redacted_cleanup_error(self, error: BaseException, secret_values: set[str]) -> RuntimeError:
+        """Return a fresh cleanup error with no reference to the raw exception."""
+        error_type = type(error).__name__
+        try:
+            summary = f"{error_type}: {error}"
+        except BaseException:
+            summary = f"{error_type}: cleanup detail unavailable"
+        return RuntimeError(self._redact_output(summary, secret_values))
+
+    def _raise_primary_with_cleanup(
+        self,
+        primary_error: BaseException,
+        cleanup_error: RuntimeError,
+        secret_values: set[str],
+        *,
+        note_prefix: str,
+    ) -> NoReturn:
+        note = self._redact_output(
+            f"{note_prefix}: {cleanup_error}",
+            secret_values,
+        )
+        primary_error.add_note(note)
+        raise primary_error from cleanup_error
 
     def _path_with_evaluator_python(self, path: str) -> str:
         """Ensure local verifier scripts use the evaluator's Python runtime."""

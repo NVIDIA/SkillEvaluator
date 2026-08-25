@@ -24,7 +24,18 @@ The flag is repeatable and accepts comma- or space-separated values
 the terminal shows a compact summary and the run writes `html` and `json`
 report files. An explicit `-r` is honored exactly, including `-r cli`, which
 prints the full terminal report and writes no files. Files land in `reports/`
-unless you override it with `-o`.
+unless you override it with `-o`. Report output must be outside the source tree
+whose publication identity it describes. When the default `reports/` would be
+inside the target (for example, after `cd my-skill`), SkillEvaluator safely
+reserves the sibling directory `my-skill-reports/` instead. A catalog uses the
+same rule and relocates to `<catalog>-reports/`. An explicit in-target `-o` is
+rejected; choose an external directory instead. Existing nonempty sibling
+directories are reused only when their SkillEvaluator ownership marker is
+valid, preventing the default from overwriting an unrelated directory.
+
+For compatibility, commands launched from a parent directory keep the familiar
+layout: `skillevaluator validate ./my-skill` still writes to `./reports/`
+because that directory is outside `./my-skill/`.
 
 For `validate`, that compact default is a pipeline view — a per-check ticker
 plus a summary. Pass `--verbose` to get the full per-check detail stream in
@@ -76,16 +87,84 @@ dataset provenance, agent/model details, and a dimension-by-dimension
 profile names and absolute host paths.
 
 The card carries one overall verdict — `PASS`, `NEUTRAL`, `FAIL`, or
-`INCOMPLETE`. It
-fails closed: if a required scanner produced no trustworthy evidence, the
-verdict is `INCOMPLETE` and the card explicitly says not to use it to recommend
-publication. A Publication Recommendation section appears only on a clean
-`PASS`; `NEUTRAL` means the evidence is complete but at least one required
-dimension remains below the pass band. Tier 3 evidence is publication-required
-by default, so a missing, skipped, or incomplete live evaluation produces
-`INCOMPLETE` rather than a publication recommendation. A catalog may
-explicitly persist `benchmark_policy.tier3_required = false`; the card
-discloses that exception instead of implying that Tier 3 ran.
+`INCOMPLETE`. It fails closed: if a required scanner produced no trustworthy
+evidence, the verdict is `INCOMPLETE` and the card explicitly says not to use
+it to recommend publication. A Publication Recommendation section appears only
+on a clean `PASS`; `NEUTRAL` means the evidence is complete but at least one
+required dimension remains below the pass band.
+
+Tier 1 is always required for publication. Tier 2 and Tier 3 are also required
+by default, so a missing, skipped, or incomplete required tier produces
+`INCOMPLETE` rather than a publication recommendation. Catalog orchestration
+may explicitly persist `benchmark_policy.tier2_required = false` or
+`benchmark_policy.tier3_required = false`; the card discloses each exception
+instead of implying that the tier ran. An optional tier that is present but
+incomplete still makes the card `INCOMPLETE` because malformed evidence cannot
+certify publication. A default-passed result object is not sufficient. Tier 1
+and Tier 2 evidence must carry a valid `publication_evidence` marker written by
+a built-in command wrapper, and every recognized result must record a success,
+finding, or positive check count that proves it executed. Legacy and custom
+results remain visible, and their failures still block publication, but they
+cannot satisfy a required tier or create a waiver. Generic per-result `optional`
+metadata is not a publication waiver; only the resolved `benchmark_policy` from
+recognized evidence can make Tier 2 or Tier 3 optional. An unrecognized `true`
+claim can conservatively require a tier, but an unrecognized `false` claim
+cannot waive one.
+
+Agent-evaluation payload metadata and its summary are duplicated claims at the
+same precedence level and must agree. A conflict between valid booleans at that
+level resolves to required evidence. Invalid entries do not count as policy
+values; when the level contains no valid boolean, resolution falls through to
+the next lower-precedence source, and no valid value anywhere means required.
+The consistent payload/summary claim takes precedence over recognized peer result
+metadata. Conflicting booleans among peer results likewise resolve to required
+evidence so aggregation order cannot create a publication waiver.
+Every Tier 1, Tier 2, and Tier 3 result used for publication carries a
+`publication_target` with the exact NFC filesystem-entry name, a SHA-256 source digest,
+and the versioned `skill-evaluator-source-tree/2` recipe. The recipe binds
+author-owned relative paths, node kinds, executable bits, and file contents
+while excluding only known generated artifacts. In particular, authored
+`evals/` inputs are included. The v2 exclusions are any-depth `.git`, `.venv`,
+`__pycache__`, and `node_modules`; root `.evals`, `.results`, `.versions`,
+`results`, and `versions`; `evals/results`; and the generated root files
+`BENCHMARK.md`, `skill-card.md`, and `skill.oms.sig`. Filesystem case aliases
+are treated according to the host filesystem, while a case-distinct authored
+name on a case-sensitive filesystem remains covered. A same-named file below
+another authored directory is still included. Tier 1, Tier 2, Tier 3 runtime
+projection, and full `--copy-repo` staging omit the same generated inputs so
+bytes outside the claimed identity cannot affect evaluation evidence. Split-job
+results must match this identity exactly. Legacy anonymous results remain
+readable, but their publication status is `INCOMPLETE`.
+
+Built-in Tier 1 and Tier 2 results also carry a versioned
+`publication_evidence` object with exact `schema_version`, `producer`, `tier`,
+and canonical `check_id` fields. Reporters accept only the documented built-in
+producer/check combinations. This marker is provenance inside trusted local or
+CI artifacts; it is not a cryptographic signature for accepting result files
+from an untrusted party.
+
+Publication model, evaluator, environment, and skill identities reject reserved
+placeholder text after Unicode confusable-skeleton comparison. This prevents a
+visually spoofed placeholder such as one containing a Cyrillic or Greek letter
+from becoming publication evidence while preserving ordinary multilingual
+identities.
+
+Payload and summary policy claims are accepted only when their containing
+evidence matches that exact publication target; evidence from another source
+cannot waive a required tier. A skipped Tier 3 payload must satisfy the same
+target binding before its policy can waive evidence. A completed Tier 3 payload
+also duplicates its run-owned `run_id` in the payload and summary; missing or
+contradictory run identity is incomplete publication evidence.
+When multiple complete Tier 3 payloads disagree, reporters select the most
+conservative effective verdict (`FAIL`, then `NEUTRAL`, then `PASS`) before
+applying deterministic tie-breakers.
+
+Execution controls do not rewrite that publication policy. `--no-dedup` and
+`--tiers 1,3` select which validators run, while `--no-block-on-dedup` changes
+whether Tier 2 affects the command exit code. None of those flags persists a
+publication waiver. Without explicit policy metadata, a run that omits Tier 2
+therefore exits according to its CLI gate but still produces an `INCOMPLETE`
+publication card.
 
 Keep the file with the skill and refresh it whenever the skill, eval dataset,
 agent/model, evaluator version, scoring policy, attempt policy, or execution
@@ -112,7 +191,10 @@ of:
 
 With an external root (the first two options), each skill gets its own
 subdirectory — runs land under `<dir>/<skill-name>/`, not directly under
-`<dir>`.
+`<dir>`. Configured roots must be outside the skill. The canonical
+`<skill>/evals/results/` path is the only supported in-skill result root; this
+keeps generated runs outside the versioned source-tree digest used to combine
+publication evidence.
 
 Each run creates a collision-safe directory named by its run ID
 (`YYYYMMDD_HHMMSS_<pid>_<12-hex-nonce>`). Where symlinks are supported, a
@@ -316,9 +398,17 @@ For CI and tooling, two JSON entry points matter:
 - **`validate --tier3` runs** — the combined
   `skillevaluator-output-<timestamp>.json` report embeds the Tier 3 payload
   alongside the Tier 1 and Tier 2 results, so one file covers all three
-  tiers. Each result carries finalized gating metadata. Tier 3 is advisory by
-  default and becomes blocking with `--block-on-agent-eval`; Tier 2 is blocking
-  by default and becomes advisory with `--no-block-on-dedup`.
+  tiers. Each built-in Tier 1 or Tier 2 result carries its validated
+  `publication_evidence` producer marker alongside finalized gating metadata,
+  and the top-level
+  `benchmark_policy` records whether Tier 2 and Tier 3 evidence is required for
+  publication. `publication_status` is the compact machine-readable verdict;
+  `publication` carries eligibility, reasons, and the Tier 3 evidence status.
+  This is intentionally separate from `overall_status`, which continues to
+  describe the command/process gate. Tier 3 is advisory for the CLI exit code by default and becomes
+  blocking with `--block-on-agent-eval`; Tier 2 is blocking for the exit code
+  by default and becomes advisory with `--no-block-on-dedup`. Those exit-code
+  controls are separate from `benchmark_policy`.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

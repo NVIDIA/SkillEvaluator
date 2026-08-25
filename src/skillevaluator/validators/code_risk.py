@@ -13,17 +13,20 @@ from pathlib import Path
 
 from skillevaluator.config import CONFIG_DIR
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import Severity, Tools, parse_json_output
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, iter_scannable_files
 
 
-def _semgrep_file_excludes() -> list[str]:
-    """Return generated file patterns for Semgrep's case-sensitive excludes."""
+def _semgrep_file_excludes(skill_path: Path) -> list[str]:
+    """Return generated file patterns using the target filesystem's case semantics."""
     excludes = set(SCAN_EXCLUDED_FILES)
-    for name in SCAN_EXCLUDED_FILES:
-        path = Path(name)
-        if path.suffix:
-            excludes.add(f"{path.stem.upper()}{path.suffix}")
+    try:
+        for entry in skill_path.iterdir():
+            if entry.is_file() and matches_filesystem_name(entry, SCAN_EXCLUDED_FILES):
+                excludes.add(entry.name)
+    except OSError:
+        pass
     return sorted(excludes)
 
 
@@ -275,7 +278,7 @@ class CodeRiskValidator(ValidatorBase):
             args.extend(["--exclude", "tests", "--exclude", "test"])
         for d in sorted(SCAN_EXCLUDED_DIRS):
             args.extend(["--exclude", d])
-        for f in _semgrep_file_excludes():
+        for f in _semgrep_file_excludes(skill_path):
             args.extend(["--exclude", f])
         args.append(str(skill_path.resolve()))
 

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
@@ -17,11 +18,33 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
-    KEBAB_CASE_PATTERN,
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.publication_evidence import result_has_publication_evidence, result_publication_evidence
+from skillevaluator.reporting.base import (
+    PublicationTargetIdentity,
+    ReporterBase,
+    agent_eval_dimension_verdict,
+    agent_eval_publication_dataset_provenance,
+    agent_eval_publication_evaluated_at,
+    agent_eval_publication_evidence_complete,
+    agent_eval_publication_run_id,
+    assess_publication,
+    assess_tier3_evidence,
+    get_skip_reason,
+    is_advisory_agent_eval_skip,
+    is_cleanly_skipped,
+    is_tier2_result,
+    is_tier3_result,
+    publication_identity_present,
+    publication_semantic_text,
+    publication_target_for_results,
+    resolve_benchmark_policy,
+    result_has_execution_evidence,
+    result_matches_publication_target,
+    select_agent_eval_payload,
+)
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -38,24 +61,38 @@ _SIGNAL_DESCRIPTIONS = {
     "token_efficiency": "token usage with and without the skill (reported separately; not scored as a dimension)",
 }
 
-_TIER2_VALIDATORS = {
-    "context deduplication",
-    "intra-skill deduplication",
-}
-
 _RETIRED_PRODUCT_NAME = re.compile(r"\b[a-z]*[\s_-]*skills[\s_-]*eval\b", flags=re.IGNORECASE)
+_RETIRED_PRODUCT_TOKEN = re.compile(r"\bskills[\s_-]*eval\b", flags=re.IGNORECASE)
 _RETIRED_SANDBOX_REFERENCE = re.compile(
-    rf"\b{re.escape(chr(97) + 'stra')}[\s_-]+sandbox\b",
+    rf"\b{re.escape(chr(97) + 'stra')}[\s_\-\u2010-\u2015\u2043\u2212]+sandbox\b",
     flags=re.IGNORECASE,
 )
-_PATH_START = re.compile(r"(?<![A-Za-z0-9:/])(?:[A-Za-z]:[\\/]|\\\\|\\|/)")
-_QUOTED_ABSOLUTE_PATH = re.compile(r"(?P<quote>['\"])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|\\|/)[^'\"\r\n]+)(?P=quote)")
+_POSIX_PATH_SEPARATORS = "/\u2044\u2215\u29f8"
+_WINDOWS_PATH_SEPARATORS = "\\\u2216\u29f5"
+_PATH_SEPARATOR_CLASS = re.escape(_POSIX_PATH_SEPARATORS + _WINDOWS_PATH_SEPARATORS)
+_PATH_SEPARATOR_TRANSLATION = str.maketrans(
+    {**dict.fromkeys(_POSIX_PATH_SEPARATORS[1:], "/"), **dict.fromkeys(_WINDOWS_PATH_SEPARATORS[1:], "\\")}
+)
+_PATH_START = re.compile(rf"(?<![A-Za-z0-9:/])(?:[A-Za-z]:[{_PATH_SEPARATOR_CLASS}]|[{_PATH_SEPARATOR_CLASS}])")
+_QUOTED_ABSOLUTE_PATH = re.compile(
+    rf"(?P<quote>['\"])(?P<path>(?:[A-Za-z]:[{_PATH_SEPARATOR_CLASS}]|[{_PATH_SEPARATOR_CLASS}])[^'\"\r\n]+)(?P=quote)"
+)
 _QUOTED_FILE_URI_PATH = re.compile(
-    r"(?P<quote>['\"])(?:file:)(?://[^/'\"\r\n]*)?(?P<path>/[^'\"\r\n]+)(?P=quote)",
+    rf"(?P<quote>['\"])(?:file:)(?://[^/'\"\r\n]*)?"
+    rf"(?P<path>(?:[A-Za-z]:[{_PATH_SEPARATOR_CLASS}]|[{_PATH_SEPARATOR_CLASS}])[^'\"\r\n]+)(?P=quote)",
     flags=re.IGNORECASE,
 )
 _FILE_URI_PATH = re.compile(
-    r"\bfile:(?://[^/\s'\"<>]*)?(?P<path>/[^\s'\"<>]+)",
+    rf"\bfile:(?://[^/\s'\"<>]*)?"
+    rf"(?P<path>(?:[A-Za-z]:[{_PATH_SEPARATOR_CLASS}]|[{_PATH_SEPARATOR_CLASS}])[^\s'\"<>]+)",
+    flags=re.IGNORECASE,
+)
+_PUBLIC_USER_PATH = re.compile(
+    rf"(?P<path>(?:"
+    rf"[{re.escape(_POSIX_PATH_SEPARATORS)}](?:Users|home)[{re.escape(_POSIX_PATH_SEPARATORS)}]"
+    rf"|[A-Za-z]:[{_PATH_SEPARATOR_CLASS}]Users[{_PATH_SEPARATOR_CLASS}]"
+    rf"|[{re.escape(_WINDOWS_PATH_SEPARATORS)}]Users[{re.escape(_WINDOWS_PATH_SEPARATORS)}]"
+    rf")[^\s'\"<>]+)",
     flags=re.IGNORECASE,
 )
 _MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\*_\[\]~])")
@@ -64,6 +101,8 @@ _MARKDOWN_THEMATIC_BREAK = re.compile(r"^(?:\s*[-*_]){3,}\s*$")
 _PUBLICATION_URL_SCHEME = re.compile(r"(?P<scheme>https?|ftp)://", flags=re.IGNORECASE)
 _PUBLICATION_WWW_PREFIX = re.compile(r"\bwww\.", flags=re.IGNORECASE)
 _TRAILING_PATH_PUNCTUATION = ".,;!?)]}>`'\""
+_LEGACY_AMBIGUOUS_UPLIFT = re.compile(r"\b(?P<score>\d+%)\s+\((?P<change>[+-]\d+%)\)")
+_LEGACY_NUM_HEADER = re.compile(r"\|\s*Dimension\s*\|\s*Num\s*\|", flags=re.IGNORECASE)
 
 
 class BenchmarkReporter(ReporterBase):
@@ -93,10 +132,11 @@ class BenchmarkReporter(ReporterBase):
 
     def render_all(self, results: list[ValidationResult]) -> str:
         ae = _agent_eval_payload(results)
-        skill_name = _publication_safe_skill_name(self.skill_name or _skill_name(results, ae))
+        expected_skill_name = self.skill_name or _skill_name(results, ae)
+        skill_name = _publication_safe_skill_name(expected_skill_name)
         private_labels = _private_environment_labels(ae)
-        policy = _benchmark_policy(results, ae)
-        status = _overall_status(results, ae, policy)
+        policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
+        status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
 
         lines: list[str] = [
             f"# Skill Benchmark: {skill_name}",
@@ -144,10 +184,18 @@ class BenchmarkReporter(ReporterBase):
             skill_name,
             policy,
             private_labels=private_labels,
+            expected_skill_name=expected_skill_name,
         )
         self._render_report_purpose(lines)
         self._render_results_at_a_glance(lines, ae, private_labels)
-        self._render_tier_status(lines, results, ae, policy, private_labels)
+        self._render_tier_status(
+            lines,
+            results,
+            ae,
+            policy,
+            private_labels,
+            expected_skill_name=expected_skill_name,
+        )
         self._render_findings(lines, results, private_labels)
         self._render_methodology(lines, ae, private_labels)
         self._render_freshness(lines)
@@ -179,20 +227,35 @@ class BenchmarkReporter(ReporterBase):
         benchmark_policy: dict[str, bool],
         *,
         private_labels: tuple[str, ...],
+        expected_skill_name: str | None,
     ) -> None:
         lines.extend(["## Evaluation Metadata", "", f"- Skill: `{skill_name}`"])
 
+        publication_target = publication_target_for_results(
+            results,
+            ae,
+            expected_skill_name=expected_skill_name,
+        )
+        if publication_target is not None:
+            lines.append(
+                f"- Source digest: `{publication_target.skill_digest}` ({publication_target.skill_digest_algorithm})"
+            )
+        else:
+            lines.append("- Source digest: not recorded (legacy or unbound result)")
+
         evaluated_at = _evaluated_at(ae)
         lines.append(
-            f"- Evaluation date: {_publication_safe_inline(_evaluation_date(evaluated_at), private_labels)}"
+            f"- Evaluation date: {_publication_safe_inline(_evaluation_date(evaluated_at))}"
             if evaluated_at
             else "- Evaluation date: not recorded (legacy or non-live result)"
         )
 
         summary = _mapping((ae or {}).get("summary"))
-        version = (ae or {}).get("evaluator_version") or summary.get("evaluator_version")
+        version = _first_publication_safe_label(
+            ((ae or {}).get("evaluator_version"), summary.get("evaluator_version")),
+        )
         lines.append(
-            f"- Evaluator version: `{_publication_safe_inline(version, private_labels)}`"
+            f"- Evaluator version: `{version}`"
             if version
             else "- Evaluator version: not recorded (legacy or non-live result)"
         )
@@ -206,7 +269,7 @@ class BenchmarkReporter(ReporterBase):
             requested = (ae or {}).get("requested_agents") or []
             if isinstance(requested, list) and requested:
                 labels = ", ".join(
-                    f"{_human_agent_name(_publication_safe_label(agent, private_labels))} (model not recorded)"
+                    f"{_human_agent_name(_first_publication_safe_label((agent,)) or 'Agent')} (model not recorded)"
                     for agent in requested
                 )
                 lines.append("- Agents: requested but not run — " + labels)
@@ -220,21 +283,26 @@ class BenchmarkReporter(ReporterBase):
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
 
-        digest = (ae or {}).get("dataset_digest") or summary.get("dataset_digest")
-        digest_algorithm = (ae or {}).get("dataset_digest_algorithm") or summary.get("dataset_digest_algorithm")
-        if digest:
-            safe_digest = _publication_safe_inline(digest, private_labels)
-            algorithm_label = (
-                f" ({_publication_safe_inline(digest_algorithm, private_labels)})" if digest_algorithm else ""
-            )
+        dataset_provenance = agent_eval_publication_dataset_provenance(ae)
+        if dataset_provenance is not None:
+            digest, digest_algorithm = dataset_provenance
+            safe_digest = _publication_safe_inline(digest)
+            algorithm_label = f" ({_publication_safe_inline(digest_algorithm)})"
             lines.append(f"- Dataset digest: `{safe_digest}`{algorithm_label}")
         else:
             lines.append("- Dataset digest: not recorded (legacy or non-live result)")
 
+        tier3_run_id = agent_eval_publication_run_id(ae)
+        lines.append(
+            f"- Tier 3 run ID: `{_publication_safe_inline(tier3_run_id)}`"
+            if tier3_run_id
+            else "- Tier 3 run ID: not recorded (Tier 3 did not complete)"
+        )
+
         policy = _mapping((ae or {}).get("attempt_policy"))
-        attempts = policy.get("max_attempts")
-        if attempts is not None:
-            lines.append(f"- Attempts per task: {_publication_safe_inline(attempts, private_labels)}")
+        attempts = _nonnegative_int(policy.get("max_attempts"))
+        if attempts > 0:
+            lines.append(f"- Attempts per task: {attempts}")
         else:
             lines.append("- Attempts per task: not recorded (legacy or non-live result)")
 
@@ -244,6 +312,8 @@ class BenchmarkReporter(ReporterBase):
         else:
             lines.append("- Environment: not recorded (legacy or non-live result)")
 
+        tier2_requirement = "required for publication" if benchmark_policy["tier2_required"] else "optional by policy"
+        lines.append(f"- Tier 2 evidence: {tier2_requirement}")
         tier3_requirement = "required for publication" if benchmark_policy["tier3_required"] else "optional by policy"
         lines.append(f"- Tier 3 evidence: {tier3_requirement}")
         if skip_message := _advisory_agent_eval_skip_message(results):
@@ -350,7 +420,14 @@ class BenchmarkReporter(ReporterBase):
         ae: dict[str, Any] | None,
         benchmark_policy: dict[str, bool],
         private_labels: tuple[str, ...],
+        *,
+        expected_skill_name: str | None,
     ) -> None:
+        publication_target = publication_target_for_results(
+            results,
+            ae,
+            expected_skill_name=expected_skill_name,
+        )
         tier_groups = [
             ("Tier 1", "Static validation", _tier1_results(results)),
             ("Tier 2", "Semantic deduplication", _tier2_results(results)),
@@ -366,12 +443,19 @@ class BenchmarkReporter(ReporterBase):
             ]
         )
         for tier, purpose, tier_results in tier_groups:
-            status, evidence = _tier_status(tier, tier_results, ae, benchmark_policy)
+            status, evidence = _tier_status(
+                tier,
+                tier_results,
+                ae,
+                benchmark_policy,
+                expected_skill_name=expected_skill_name,
+                expected_publication_target=publication_target,
+            )
             lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 
         for tier, _purpose, tier_results in tier_groups:
-            if tier_results and all(_result_skipped(result) for result in tier_results):
+            if tier_results and all(is_cleanly_skipped(result) for result in tier_results):
                 lines.append(f"{tier} validation was skipped and executed 0 checks.")
                 for reason in _skip_reasons(tier_results):
                     lines.append(f"- {_publication_safe_inline(reason, private_labels)}")
@@ -555,11 +639,7 @@ class BenchmarkReporter(ReporterBase):
 
 
 def _agent_eval_payload(results: list[ValidationResult]) -> dict[str, Any] | None:
-    for result in results:
-        payload = result.metadata.get("agent_eval") if isinstance(result.metadata, dict) else None
-        if isinstance(payload, dict):
-            return payload
-    return None
+    return select_agent_eval_payload(results)
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -569,162 +649,61 @@ def _mapping(value: object) -> dict[str, Any]:
 def _benchmark_policy(
     results: list[ValidationResult],
     ae: dict[str, Any] | None,
+    *,
+    expected_skill_name: str | None = None,
 ) -> dict[str, bool]:
-    """Resolve the persisted publication policy, defaulting Tier 3 to required."""
-    candidates: list[object] = [
-        (ae or {}).get("benchmark_policy"),
-        _mapping((ae or {}).get("summary")).get("benchmark_policy"),
-    ]
-    candidates.extend(
-        result.metadata.get("benchmark_policy") for result in results if isinstance(result.metadata, dict)
-    )
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        required = candidate.get("tier3_required")
-        if isinstance(required, bool):
-            return {"tier3_required": required}
-    return {"tier3_required": True}
+    """Resolve the persisted publication policy for all configurable tiers."""
+    return resolve_benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
 
 
 def _tier3_evidence_complete(ae: dict[str, Any] | None) -> bool:
     """Require a succeeded run with the minimum publication provenance."""
-    if not isinstance(ae, dict):
-        return False
-    agents = _agents(ae)
-    if not agents or any(
-        not str(agent.get("model") or agent.get("model_name") or agent.get("llm_model") or "").strip()
-        for agent in agents.values()
-    ):
-        return False
-    summary = _mapping(ae.get("summary"))
-    verdict = str(ae.get("verdict") or summary.get("verdict") or "").lower()
-    if verdict not in {"pass", "neutral", "fail"}:
-        return False
-    execution_status = str(ae.get("execution_status") or summary.get("execution_status") or "").lower()
-    evaluated_at = ae.get("evaluated_at") or summary.get("evaluated_at")
-    evaluator_version = ae.get("evaluator_version") or summary.get("evaluator_version")
-    dataset_digest = ae.get("dataset_digest") or summary.get("dataset_digest")
-    attempt_policy = _mapping(ae.get("attempt_policy"))
-    attempts = _nonnegative_int(attempt_policy.get("max_attempts"))
-    environment = summary.get("environment") or ae.get("environment")
-    return bool(
-        execution_status == "succeeded"
-        and _tier3_dimension_verdict(ae) is not None
-        and str(evaluated_at or "").strip()
-        and str(evaluator_version or "").strip()
-        and str(dataset_digest or "").strip()
-        and _dataset_summary(ae)["total_tasks"] > 0
-        and attempts > 0
-        and str(environment or "").strip()
-    )
+    return agent_eval_publication_evidence_complete(ae)
 
 
 def _tier3_dimension_verdict(ae: dict[str, Any] | None) -> str | None:
     """Recompute the canonical verdict from every supported agent's dimensions."""
-    supported_agents = [agent for agent in _agents(ae).values() if agent.get("execution_status") == "succeeded"]
-    if not supported_agents:
-        return None
-
-    agent_verdicts: list[str] = []
-    has_partial_evidence = False
-    for agent in supported_agents:
-        scores = _agent_dimension_scores(agent)
-        if scores is None:
-            has_partial_evidence = True
-            continue
-        if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
-            agent_verdicts.append("fail")
-        elif any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
-            agent_verdicts.append("neutral")
-        else:
-            agent_verdicts.append("pass")
-
-    if "pass" in agent_verdicts:
-        return "pass"
-    if has_partial_evidence or not agent_verdicts:
-        return None
-    if "neutral" in agent_verdicts:
-        return "neutral"
-    return "fail"
-
-
-def _agent_dimension_scores(agent: dict[str, Any]) -> list[float] | None:
-    """Return all configured in-range dimension scores, rejecting partial evidence."""
-    raw_dimensions = agent.get("dimensions")
-    if not isinstance(raw_dimensions, list):
-        return None
-    dimensions: dict[str, dict[str, Any]] = {}
-    for dimension in raw_dimensions:
-        if not isinstance(dimension, dict):
-            continue
-        dimension_id = str(dimension.get("id") or "")
-        if dimension_id in dimensions:
-            return None
-        dimensions[dimension_id] = dimension
-
-    scores: list[float] = []
-    for dimension_id in DIMENSION_MAPPING:
-        dimension = dimensions.get(dimension_id)
-        if dimension is None:
-            return None
-        value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
-        score = _number(value)
-        if score is None or not 0.0 <= score <= 1.0:
-            return None
-        scores.append(score)
-    return scores
+    return agent_eval_dimension_verdict(ae)
 
 
 def _advisory_agent_eval_skip_message(results: list[ValidationResult]) -> str | None:
+    if assess_tier3_evidence(results).status != "skipped":
+        return None
     for result in results:
         if not is_advisory_agent_eval_skip(result):
             continue
         payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
         provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
         message = provenance.get("message") if isinstance(provenance, dict) else None
-        return str(message or "Live evaluation did not run.")
+        return _safe_scalar_text(message).strip() or "Live evaluation did not run."
     return None
-
-
-def _result_skipped(result: ValidationResult) -> bool:
-    """Return whether a result records a skipped validator run."""
-    return bool(result.metadata.get("skipped")) or is_advisory_agent_eval_skip(result)
 
 
 def _overall_status(
     results: list[ValidationResult],
     ae: dict[str, Any] | None,
     benchmark_policy: dict[str, bool],
+    *,
+    expected_skill_name: str | None = None,
 ) -> str:
-    if any(result.is_incomplete for result in results):
-        return "INCOMPLETE"
+    # Keep this compatibility wrapper so existing callers continue to use the
+    # benchmark's uppercase vocabulary while every reporter shares one
+    # publication assessment implementation.
+    del benchmark_policy
+    return assess_publication(results, ae, expected_skill_name=expected_skill_name).status.upper()
 
-    blocking_skips = [
-        result
-        for result in results
-        if _result_skipped(result) and not result.metadata.get("optional") and not is_advisory_agent_eval_skip(result)
-    ]
-    if blocking_skips:
-        return "INCOMPLETE"
 
-    has_failures = not all(passes_required_gate(result) for result in results)
-    summary = _mapping((ae or {}).get("summary"))
-    verdict = str((ae or {}).get("verdict") or summary.get("verdict") or "").lower()
-    dimension_verdict = _tier3_dimension_verdict(ae)
-    if has_failures or verdict == "fail" or dimension_verdict == "fail":
-        return "FAIL"
-
-    tier3_results = _tier3_results(results)
-    has_present_tier3_result = bool(tier3_results) and not all(_result_skipped(result) for result in tier3_results)
-    if (benchmark_policy["tier3_required"] or has_present_tier3_result) and not _tier3_evidence_complete(ae):
-        return "INCOMPLETE"
-    execution_status = str((ae or {}).get("execution_status") or summary.get("execution_status") or "").lower()
-    if verdict == "neutral" and execution_status in {"succeeded", ""}:
-        return "NEUTRAL"
-    if verdict == "pass" and dimension_verdict == "neutral":
-        return "NEUTRAL"
-    return "PASS"
+def _is_blocking_publication_skip(
+    result: ValidationResult,
+    benchmark_policy: dict[str, bool],
+) -> bool:
+    """Return whether a clean skip blocks this publication policy."""
+    return bool(
+        is_cleanly_skipped(result)
+        and not is_advisory_agent_eval_skip(result)
+        and not (_is_tier2(result) and not benchmark_policy["tier2_required"])
+        and not (_is_tier3(result) and not benchmark_policy["tier3_required"])
+    )
 
 
 def _verdict_callout(status: str) -> str:
@@ -741,20 +720,45 @@ def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> s
     if ae:
         summary = _mapping(ae.get("summary"))
         candidate = ae.get("skill_name") or summary.get("skill_name")
-        if candidate:
-            return str(candidate)
+        if candidate_text := _safe_scalar_text(candidate).strip():
+            return candidate_text
     for result in results:
         quality = result.metadata.get("quality_scores") if isinstance(result.metadata, dict) else None
-        if isinstance(quality, dict) and quality.get("skill_name"):
-            return str(quality["skill_name"])
+        if isinstance(quality, dict) and (candidate := _safe_scalar_text(quality.get("skill_name")).strip()):
+            return candidate
     return "skill"
+
+
+def _safe_scalar_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value) if value.bit_length() <= 256 else ""
+    if isinstance(value, float) and math.isfinite(value):
+        return str(value)
+    return ""
 
 
 def _agents(ae: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     agents = (ae or {}).get("agents")
     if not isinstance(agents, dict):
         return {}
-    return {str(name): agent for name, agent in agents.items() if isinstance(agent, dict)}
+    normalized: dict[str, dict[str, Any]] = {}
+    normalized_names: set[str] = set()
+    for raw_name, agent in agents.items():
+        if not publication_identity_present(raw_name):
+            return {}
+        safe_name = publication_semantic_text(raw_name).strip()
+        identity_key = safe_name.casefold()
+        if not publication_identity_present(safe_name) or not isinstance(agent, dict):
+            return {}
+        if identity_key in normalized_names:
+            return {}
+        normalized_names.add(identity_key)
+        normalized[safe_name] = agent
+    return normalized
 
 
 def _agent_label(
@@ -762,12 +766,12 @@ def _agent_label(
     agent: dict[str, Any],
     private_labels: tuple[str, ...] = (),
 ) -> str:
-    display = _human_agent_name(
-        _publication_safe_label(agent.get("display_name") or agent.get("label") or name, private_labels)
+    display = _agent_display_label(name, agent, private_labels).replace(",", "&#44;")
+    safe_model = _first_publication_safe_label(
+        (agent.get("model"), agent.get("model_name"), agent.get("llm_model")),
     )
-    model = agent.get("model") or agent.get("model_name") or agent.get("llm_model")
-    if model:
-        return f"{display} (`{_publication_safe_label(model, private_labels)}`)"
+    if safe_model:
+        return f"{display} (`{safe_model}`)"
     return f"{display} (model not recorded)"
 
 
@@ -776,37 +780,86 @@ def _agent_table_label(
     agent: dict[str, Any],
     private_labels: tuple[str, ...] = (),
 ) -> str:
-    display = _human_agent_name(
-        _publication_safe_label(agent.get("display_name") or agent.get("label") or name, private_labels)
-    )
+    display = _agent_display_label(name, agent, private_labels)
     return f"{display} (Baseline → Skill Uplift)"
+
+
+def _agent_display_label(
+    name: str,
+    agent: dict[str, Any],
+    private_labels: tuple[str, ...] = (),
+) -> str:
+    label = ""
+    for value in (agent.get("display_name"), agent.get("label")):
+        if not publication_identity_present(value):
+            continue
+        candidate = _normalized_publication_text(value)
+        contains_private_label = any(
+            re.search(
+                rf"(?<![^\W_]){re.escape(private_label)}(?![^\W_])",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+            for private_label in private_labels
+        )
+        if contains_private_label:
+            continue
+        label = _publication_safe_label(candidate)
+        if publication_identity_present(label):
+            break
+        label = ""
+    # A display label containing private environment identity is presentation
+    # data, not proof. Fall back to the canonical executed-agent key instead
+    # of substituting text that would falsify provenance.
+    if not label:
+        label = _first_publication_safe_label((name,))
+    return _human_agent_name(label or "Agent")
+
+
+def _first_publication_safe_label(
+    values: tuple[object, ...],
+    private_labels: tuple[str, ...] = (),
+) -> str:
+    for value in values:
+        if not publication_identity_present(value):
+            continue
+        label = _publication_safe_label(value, private_labels)
+        if publication_identity_present(label):
+            return label
+    return ""
 
 
 def _human_agent_name(name: str) -> str:
     if name == "claude-code":
         return "Claude Code"
     if re.fullmatch(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", name):
-        return name.replace("_", " ").replace("-", " ").title()
-    return name.title()
+        humanized = name.replace("_", " ").replace("-", " ").title()
+    else:
+        humanized = name.title()
+    return humanized.replace("Skill" + "evaluator", "SkillEvaluator")
 
 
 def _evaluated_at(ae: dict[str, Any] | None) -> str | None:
-    value = (ae or {}).get("evaluated_at") or _mapping((ae or {}).get("summary")).get("evaluated_at")
-    return str(value).strip() if value else None
+    return agent_eval_publication_evaluated_at(ae)
 
 
 def _evaluation_date(value: str) -> str:
     candidate = value.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(candidate).date().isoformat()
+        parsed = datetime.fromisoformat(candidate)
+        if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+            parsed = parsed.astimezone(UTC)
+        return parsed.date().isoformat()
     except ValueError:
         return value[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", value) else value
 
 
 def _environment(ae: dict[str, Any] | None) -> str | None:
     summary = _mapping((ae or {}).get("summary"))
-    value = summary.get("environment") or (ae or {}).get("environment")
-    return str(value) if value else None
+    for value in (summary.get("environment"), (ae or {}).get("environment")):
+        if publication_identity_present(value):
+            return _safe_scalar_text(value).strip()
+    return None
 
 
 def _environment_note(environment: str | None) -> str | None:
@@ -838,7 +891,7 @@ def _dataset_summary(ae: dict[str, Any] | None) -> dict[str, int | str]:
             "positive_tasks": _nonnegative_int(summary.get("positive_tasks")),
             "negative_tasks": _nonnegative_int(summary.get("negative_tasks")),
             "unclassified_tasks": _nonnegative_int(summary.get("unclassified_tasks")),
-            "source": str(summary.get("source") or "payload"),
+            "source": _safe_scalar_text(summary.get("source")) or "payload",
         }
 
     dataset = _dataset(ae)
@@ -853,13 +906,16 @@ def _dataset_summary(ae: dict[str, Any] | None) -> dict[str, int | str]:
         }
 
     task_ids: set[str] = set()
-    for trial in (ae or {}).get("trials") or []:
+    raw_trials = (ae or {}).get("trials")
+    trials = raw_trials if isinstance(raw_trials, list) else []
+    for trial in trials:
         if not isinstance(trial, dict):
             continue
         for key in ("entry_id", "case_id", "task_id", "id"):
             value = trial.get(key)
-            if value is not None and str(value).strip():
-                task_ids.add(str(value).strip())
+            safe_value = _safe_scalar_text(value).strip()
+            if safe_value:
+                task_ids.add(safe_value)
                 break
     return {
         "total_tasks": len(task_ids),
@@ -897,23 +953,25 @@ def _dataset_composition_label(summary: dict[str, int | str]) -> str:
 
 
 def _nonnegative_int(value: object) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
+    return value if 0 <= value <= 2**63 - 1 else 0
 
 
 def _number(value: object) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     return number if math.isfinite(number) else None
 
 
 def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | None:
-    for dimension in agent.get("dimensions") or []:
+    raw_dimensions = agent.get("dimensions")
+    dimensions = raw_dimensions if isinstance(raw_dimensions, list) else []
+    for dimension in dimensions:
         if isinstance(dimension, dict) and dimension.get("id") == dim_id:
             return dimension
     return None
@@ -950,6 +1008,9 @@ def _tier_status(
     results: list[ValidationResult],
     ae: dict[str, Any] | None,
     benchmark_policy: dict[str, bool],
+    *,
+    expected_skill_name: str | None = None,
+    expected_publication_target: PublicationTargetIdentity | None = None,
 ) -> tuple[str, str]:
     if not results:
         return "NOT RUN", "No result was recorded"
@@ -957,50 +1018,112 @@ def _tier_status(
     if incomplete:
         tools = list(dict.fromkeys(tool for result in incomplete for tool in result.incomplete_scans))
         return "INCOMPLETE", f"Missing trustworthy evidence from {', '.join(tools)}"
-    if all(_result_skipped(result) for result in results):
-        optional = all(result.metadata.get("optional") or is_advisory_agent_eval_skip(result) for result in results)
+    if all(is_cleanly_skipped(result) for result in results):
+        if tier == "Tier 3" and ae:
+            tier3 = assess_tier3_evidence(
+                results,
+                ae,
+                expected_skill_name=expected_skill_name,
+            )
+            if tier3.status != "skipped":
+                return tier3.status.upper(), tier3.reason or "Tier 3 skip evidence is incomplete"
+        if tier == "Tier 1":
+            optional = False
+        elif tier == "Tier 2":
+            optional = not benchmark_policy["tier2_required"]
+        else:
+            optional = not benchmark_policy["tier3_required"] or all(
+                is_advisory_agent_eval_skip(result) for result in results
+            )
         return ("SKIPPED (ADVISORY)" if optional else "INCOMPLETE"), "; ".join(_skip_reasons(results))
 
     findings = [finding for result in results for finding in result.findings]
-    if any(not result.passed and not _result_skipped(result) for result in results):
+    if any(not result.passed and not is_cleanly_skipped(result) for result in results):
         return "FAILED", f"{len(results)} validator(s); {len(findings)} finding(s)"
 
-    if tier == "Tier 3" and ae:
-        summary = _mapping(ae.get("summary"))
-        execution = str(ae.get("execution_status") or summary.get("execution_status") or "").lower()
-        verdict = str(ae.get("verdict") or summary.get("verdict") or "").lower()
-        dimension_verdict = _tier3_dimension_verdict(ae)
-        if verdict == "fail" or dimension_verdict == "fail":
-            return "FAIL", f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
-        if execution and execution != "succeeded":
-            return "INCOMPLETE", f"Execution status: {execution}"
-        if not _tier3_evidence_complete(ae):
+    publication_results = results
+    if tier in {"Tier 1", "Tier 2"}:
+        expected_tier = 1 if tier == "Tier 1" else 2
+        publication_results = [
+            result for result in results if result_has_publication_evidence(result, tier=expected_tier)
+        ]
+        if not publication_results:
+            return "INCOMPLETE", f"No recognized built-in {tier} producer evidence was recorded"
+
+    unbound_results = [
+        result
+        for result in publication_results
+        if not is_cleanly_skipped(result) and not result_matches_publication_target(result, expected_publication_target)
+    ]
+    if tier in {"Tier 1", "Tier 2"} and unbound_results:
+        validator_names = list(
+            dict.fromkeys(result.validator_name or f"{tier} validator" for result in unbound_results)
+        )
+        return "INCOMPLETE", f"Missing canonical source identity from {', '.join(validator_names)}"
+
+    if tier in {"Tier 1", "Tier 2"} and (missing_evidence := _results_without_execution_evidence(publication_results)):
+        validator_names = list(
+            dict.fromkeys(result.validator_name or f"{tier} validator" for result in missing_evidence)
+        )
+        return "INCOMPLETE", f"Missing trustworthy execution evidence from {', '.join(validator_names)}"
+
+    skipped = [result for result in publication_results if is_cleanly_skipped(result)]
+    if tier in {"Tier 1", "Tier 2"} and skipped:
+        reasons = "; ".join(_skip_reasons(skipped))
+        completed = len(publication_results) - len(skipped)
+        evidence = f"{completed} completed validator(s); {len(findings)} finding(s); {reasons}"
+        if any(_is_blocking_publication_skip(result, benchmark_policy) for result in skipped):
+            return "INCOMPLETE", evidence
+        return "PASSED WITH OBSERVATIONS", evidence
+
+    if tier == "Tier 3":
+        if not ae:
             evidence = (
                 "Required Tier 3 evidence is missing"
                 if benchmark_policy["tier3_required"]
                 else "Present Tier 3 result lacks complete evidence"
             )
             return "INCOMPLETE", evidence
-        effective_verdict = verdict
-        if verdict == "pass" and dimension_verdict == "neutral":
-            effective_verdict = "neutral"
-        if effective_verdict in {"pass", "neutral"}:
-            return effective_verdict.upper(), (
-                f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
+        tier3 = assess_tier3_evidence(results, ae, expected_skill_name=expected_skill_name)
+        if tier3.status == "fail":
+            return "FAIL", f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)"
+        if not tier3.evidence_complete:
+            evidence = tier3.reason or (
+                "Required Tier 3 evidence is missing"
+                if benchmark_policy["tier3_required"]
+                else "Present Tier 3 result lacks complete evidence"
             )
+            return "INCOMPLETE", evidence
+        if unbound_results:
+            validator_names = list(
+                dict.fromkeys(result.validator_name or "Tier 3 validator" for result in unbound_results)
+            )
+            return "INCOMPLETE", f"Missing canonical source identity from {', '.join(validator_names)}"
+        if tier3.status in {"pass", "neutral"}:
+            return tier3.status.upper(), (f"{len(_agents(ae))} agent(s); {_dataset_summary(ae)['total_tasks']} task(s)")
 
     status = "PASSED WITH OBSERVATIONS" if findings else "PASSED"
     return status, f"{len(results)} validator(s); {len(findings)} finding(s)"
 
 
+def _results_without_execution_evidence(
+    results: list[ValidationResult],
+) -> list[ValidationResult]:
+    """Return non-skipped results that do not prove a validator ran."""
+    return [
+        result for result in results if not is_cleanly_skipped(result) and not result_has_execution_evidence(result)
+    ]
+
+
+def _tier2_results_without_execution_evidence(
+    results: list[ValidationResult],
+) -> list[ValidationResult]:
+    """Backward-compatible alias for the generalized evidence check."""
+    return _results_without_execution_evidence(results)
+
+
 def _skip_reasons(results: list[ValidationResult]) -> list[str]:
-    reasons: list[str] = []
-    for result in results:
-        payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
-        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
-        advisory_message = provenance.get("message") if isinstance(provenance, dict) else None
-        reasons.append(str(result.metadata.get("skip_reason") or advisory_message or "Prerequisite unavailable"))
-    return list(dict.fromkeys(reasons))
+    return list(dict.fromkeys(get_skip_reason(result) for result in results))
 
 
 def _metric_signals(ae: dict[str, Any] | None) -> list[str]:
@@ -1011,15 +1134,20 @@ def _metric_signals(ae: dict[str, Any] | None) -> list[str]:
         if not isinstance(evaluators, dict):
             continue
         for name, values in evaluators.items():
-            if name in seen or not isinstance(values, dict):
+            safe_name = _safe_scalar_text(name).strip()
+            if not safe_name or safe_name in seen or not isinstance(values, dict):
                 continue
             if any(values.get(field) is not None for field in ("with_skill", "baseline", "lift")):
-                seen.add(str(name))
-                signals.append(str(name))
+                seen.add(safe_name)
+                signals.append(safe_name)
     if signals:
         return signals
     metric_ids = (ae or {}).get("metric_ids")
-    return [str(item) for item in metric_ids] if isinstance(metric_ids, list) else []
+    return (
+        [safe for item in metric_ids if (safe := _safe_scalar_text(item).strip())]
+        if isinstance(metric_ids, list)
+        else []
+    )
 
 
 def _metric_labels(ae: dict[str, Any] | None) -> dict[str, str]:
@@ -1037,7 +1165,7 @@ def _weighted_signals(config: dict[str, Any]) -> str:
 
 
 def _tier1_results(results: list[ValidationResult]) -> list[ValidationResult]:
-    return [result for result in results if not _is_tier2(result) and not _is_tier3(result)]
+    return [result for result in results if not _is_tier3(result) and not _is_tier2(result)]
 
 
 def _tier2_results(results: list[ValidationResult]) -> list[ValidationResult]:
@@ -1049,14 +1177,14 @@ def _tier3_results(results: list[ValidationResult]) -> list[ValidationResult]:
 
 
 def _is_tier2(result: ValidationResult) -> bool:
-    name = result.validator_name.lower()
-    if name in _TIER2_VALIDATORS or "dedup" in name:
-        return True
-    return any(finding.category == "CONTENT_DEDUP" for finding in result.findings)
+    producer = result_publication_evidence(result)
+    if producer is not None:
+        return producer.tier == 2
+    return is_tier2_result(result)
 
 
 def _is_tier3(result: ValidationResult) -> bool:
-    return bool(result.metadata.get("agent_eval")) or result.validator_name == "AGENT_EVAL"
+    return is_tier3_result(result)
 
 
 def _top_findings(findings: list[Finding], *, limit: int) -> list[Finding]:
@@ -1081,13 +1209,13 @@ def _trusted_md_cell(value: object) -> str:
 
 
 def _publication_safe_skill_name(value: object) -> str:
-    """Return a canonical target identity or a non-injectable public fallback."""
-    candidate = " ".join(str(value).split())
-    if re.fullmatch(KEBAB_CASE_PATTERN, candidate) is not None:
-        return candidate
-    if _RETIRED_PRODUCT_NAME.fullmatch(candidate):
+    """Return an exact NFC target identity or a non-injectable fallback."""
+    candidate = _exact_publication_text(value)
+    if not publication_identity_present(candidate):
+        return "skill"
+    if _RETIRED_PRODUCT_NAME.search(publication_semantic_text(candidate, strip_marks=True)):
         return "SkillEvaluator"
-    return "skill"
+    return _publication_safe_inline(candidate, preserve_exact_nfc=True)
 
 
 def _private_environment_labels(ae: dict[str, Any] | None) -> tuple[str, ...]:
@@ -1103,33 +1231,46 @@ def _private_environment_labels(ae: dict[str, Any] | None) -> tuple[str, ...]:
     ]
     labels: list[str] = []
     for value in candidates:
-        label = " ".join(str(value or "").split())
-        if label and label.casefold() not in HARBOR_ENV_MODES and label not in labels:
+        if not publication_identity_present(value):
+            continue
+        label = _normalized_publication_text(value)
+        if publication_identity_present(label) and label.casefold() not in HARBOR_ENV_MODES and label not in labels:
             labels.append(label)
     return tuple(labels)
 
 
 def _publication_safe_label(value: object, private_labels: tuple[str, ...] = ()) -> str:
-    """Sanitize a classified display label and normalize only an exact retired product name."""
-    label = _publication_safe_inline(value, private_labels)
-    if _RETIRED_PRODUCT_NAME.fullmatch(label):
-        return "SkillEvaluator"
-    return label
+    """Sanitize a classified display label for a public benchmark card."""
+    label = _normalized_publication_text(value)
+    is_private_label = any(label.casefold() == private_label.casefold() for private_label in private_labels)
+    matching_label = publication_semantic_text(label, strip_marks=True)
+    if not is_private_label and _RETIRED_PRODUCT_NAME.fullmatch(matching_label):
+        label = "SkillEvaluator"
+    return _publication_safe_inline(label, private_labels)
 
 
-def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()) -> str:
+def _publication_safe_inline(
+    value: object,
+    private_labels: tuple[str, ...] = (),
+    *,
+    preserve_exact_nfc: bool = False,
+) -> str:
     """Render untrusted metadata as one publication-safe Markdown line."""
-    text = " ".join(str(value).split())
+    text = _exact_publication_text(value) if preserve_exact_nfc else _normalized_publication_text(value)
     text = _redact_absolute_paths(text)
     text = _RETIRED_SANDBOX_REFERENCE.sub("isolated sandbox", text)
     for label in sorted(private_labels, key=len, reverse=True):
         text = re.sub(
-            re.escape(label),
+            rf"(?<![^\W_]){re.escape(label)}(?![^\W_])",
             "Isolated sandbox",
             text,
             flags=re.IGNORECASE,
         )
-    text = text.replace("`", "'").replace("<", "&lt;").replace(">", "&gt;")
+    text = _replace_semantic_tokens(text, _RETIRED_SANDBOX_REFERENCE, "isolated sandbox")
+    text = _replace_retired_product_tokens(text)
+    text = _LEGACY_AMBIGUOUS_UPLIFT.sub(r"\g<score> [change \g<change>]", text)
+    text = _LEGACY_NUM_HEADER.sub("| Dimension | Count |", text)
+    text = text.replace("&", "&amp;").replace("`", "'").replace("<", "&lt;").replace(">", "&gt;")
     text = _PUBLICATION_URL_SCHEME.sub(lambda match: f"{match.group('scheme')}&#58;//", text)
     text = _PUBLICATION_WWW_PREFIX.sub(lambda match: f"{match.group(0)[:-1]}&#46;", text)
     text = text.replace("@", "&#64;")
@@ -1142,6 +1283,56 @@ def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()
             return f"{text[:punctuation_index]}\\{text[punctuation_index:]}"
         return f"\\{text}"
     return text
+
+
+def _normalized_publication_text(value: object) -> str:
+    """Canonicalize text and discard invisible controls before publication decisions."""
+    return " ".join(publication_semantic_text(value).split())
+
+
+def _exact_publication_text(value: object) -> str:
+    """Preserve a filesystem identity only when its exact NFC text is safe."""
+    if not isinstance(value, str):
+        return ""
+    text = value.encode("utf-8", errors="replace").decode("utf-8")
+    if text != value:
+        return ""
+    text = unicodedata.normalize("NFC", text)
+    if publication_semantic_text(text) != unicodedata.normalize("NFKC", text):
+        return ""
+    return text
+
+
+def _replace_retired_product_tokens(value: str) -> str:
+    """Replace retired identity tokens even when Unicode marks split the spelling."""
+    return _replace_semantic_tokens(value, _RETIRED_PRODUCT_TOKEN, "SkillEvaluator")
+
+
+def _replace_semantic_tokens(value: str, pattern: re.Pattern[str], replacement: str) -> str:
+    """Replace match-only normalized tokens with one linear source reconstruction."""
+    searchable: list[str] = []
+    source_offsets: list[int] = []
+    for index, character in enumerate(value):
+        for semantic_character in publication_semantic_text(character, strip_marks=True):
+            searchable.append(semantic_character)
+            source_offsets.append(index)
+    matches = list(pattern.finditer("".join(searchable)))
+    if not matches:
+        return value
+
+    # Reconstruct once. Repeated whole-string slicing here is quadratic for
+    # dense untrusted metadata such as thousands of adjacent retired tokens.
+    parts: list[str] = []
+    cursor = 0
+    for match in matches:
+        start = source_offsets[match.start()]
+        end = source_offsets[match.end() - 1] + 1
+        if start < cursor:
+            continue
+        parts.extend((value[cursor:start], replacement))
+        cursor = end
+    parts.append(value[cursor:])
+    return "".join(parts)
 
 
 def _redact_absolute_paths(value: str) -> str:
@@ -1163,8 +1354,26 @@ def _redact_absolute_paths(value: str) -> str:
         basename = _absolute_path_basename(path)
         return f"{match.group('quote')}{basename}{match.group('quote')}" if basename else match.group(0)
 
+    def redact_public_user_path(match: re.Match[str]) -> str:
+        candidate = match.group("path")
+        core = candidate.rstrip(_TRAILING_PATH_PUNCTUATION)
+        suffix = candidate[len(core) :]
+        basename = _absolute_path_basename(core)
+        if not basename:
+            return match.group(0)
+        is_drive_path = len(core) >= 2 and core[1] == ":"
+        preceding = value[match.start("path") - 1] if match.start("path") > 0 else ""
+        preserve_separator = (
+            not is_drive_path
+            and candidate[0] in _POSIX_PATH_SEPARATORS
+            and (preceding.isalnum() or preceding in {":", "/"})
+        )
+        separator = candidate[0] if preserve_separator else ""
+        return f"{separator}{basename}{suffix}"
+
     text = _QUOTED_FILE_URI_PATH.sub(redact_quoted_file_uri, value)
     text = _FILE_URI_PATH.sub(redact_file_uri, text)
+    text = _PUBLIC_USER_PATH.sub(redact_public_user_path, text)
     text = _QUOTED_ABSOLUTE_PATH.sub(redact_quoted, text)
     tokens: list[str] = []
     for token in text.split(" "):
@@ -1182,9 +1391,10 @@ def _redact_absolute_paths(value: str) -> str:
 
 
 def _absolute_path_basename(value: str) -> str | None:
-    posix_path = PurePosixPath(value)
-    windows_path = PureWindowsPath(value)
-    if posix_path.is_absolute() and not value.startswith("//"):
+    canonical_value = value.translate(_PATH_SEPARATOR_TRANSLATION)
+    posix_path = PurePosixPath(canonical_value)
+    windows_path = PureWindowsPath(canonical_value)
+    if posix_path.is_absolute() and not canonical_value.startswith("//"):
         return posix_path.name or "redacted-path"
     if windows_path.is_absolute() or windows_path.root:
         return windows_path.name or "redacted-path"
@@ -1192,7 +1402,7 @@ def _absolute_path_basename(value: str) -> str | None:
 
 
 def _publication_safe_environment(value: object) -> str:
-    environment = str(value).strip()
+    environment = _normalized_publication_text(value)
     return environment if environment.casefold() in HARBOR_ENV_MODES else "Isolated sandbox"
 
 

@@ -47,6 +47,7 @@ VERDICT_NEUTRAL = "neutral"
 
 _AGENT_EVAL_VALIDATOR = "AGENT_EVAL"
 _AGENT_EVAL_DESCRIPTION = "Tier 3: Live Agent Evaluation (Harbor)"
+_PUBLICATION_TARGET_CONFLICT_MARKER = "source changed during evaluation"
 
 _DIMENSION_IDS = list(DIMENSION_MAPPING.keys())
 
@@ -441,8 +442,13 @@ def agent_eval_result_from_directory(
 
     run_truth = _run_truth_metadata(run_dir, engine_result, load_dataset_snapshot(run_dir))
     dataset = run_truth.get("dataset") or load_staged_harbor_dataset(run_dir)
+    publication_target = run_truth.get("publication_target")
+    persisted_skill_name = publication_target.get("skill_name") if isinstance(publication_target, dict) else None
+    skill_name = (
+        persisted_skill_name if isinstance(persisted_skill_name, str) and persisted_skill_name else skill_path.name
+    )
     payload = build_agent_eval_payload(
-        skill_path.name,
+        skill_name,
         agents,
         dataset=dataset,
         attempt_policy=_read_attempt_policy(run_dir),
@@ -458,6 +464,9 @@ def agent_eval_result_from_directory(
         persisted_dataset_summary=run_truth.get("dataset_summary"),
         dataset_digest=run_truth.get("dataset_digest"),
         dataset_digest_algorithm=run_truth.get("dataset_digest_algorithm"),
+        run_id=run_truth.get("run_id"),
+        publication_target=publication_target,
+        publication_target_conflict=run_truth.get("publication_target_conflict"),
         use_llm_judge=use_llm_judge,
     )
     return _validation_result_from_payload(payload)
@@ -473,6 +482,15 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
         validator_description=_AGENT_EVAL_DESCRIPTION,
     )
     result.metadata["agent_eval"] = payload
+    publication_target = payload.get("publication_target")
+    if isinstance(publication_target, dict):
+        result.metadata["publication_target"] = dict(publication_target)
+    publication_target_conflict = payload.get("publication_target_conflict")
+    if isinstance(publication_target_conflict, str):
+        result.metadata["publication_target_conflict"] = publication_target_conflict
+    run_id = payload.get("run_id")
+    if isinstance(run_id, str):
+        result.metadata["run_id"] = run_id
     best = payload.get("best_agent") or "n/a"
     if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
         result.add_success(
@@ -526,6 +544,7 @@ def render_agent_eval_html_report(
         target_path=str(skill_path),
         content_label="Skill",
         tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
+        expected_skill_name=skill_path.name,
     )
     reporter.save([result], target)
     return target
@@ -549,6 +568,9 @@ def build_agent_eval_payload(
     persisted_dataset_summary: dict[str, Any] | None = None,
     dataset_digest: str | None = None,
     dataset_digest_algorithm: str | None = None,
+    run_id: str | None = None,
+    publication_target: dict[str, str] | None = None,
+    publication_target_conflict: str | None = None,
     use_llm_judge: bool = True,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
@@ -654,6 +676,8 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "run_id": run_id,
+        "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
@@ -662,6 +686,8 @@ def build_agent_eval_payload(
         ),
         "scored_attempts": sum(_as_nonnegative_int(agent.get("scored_attempts")) for agent in agent_payloads.values()),
     }
+    if publication_target_conflict == _PUBLICATION_TARGET_CONFLICT_MARKER:
+        summary["publication_target_conflict"] = _PUBLICATION_TARGET_CONFLICT_MARKER
     if harbor_summary:
         summary["harbor_viewer"] = {
             key: harbor_summary[key] for key in ("job_url", "analysis_url") if harbor_summary.get(key)
@@ -713,6 +739,8 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "run_id": run_id,
+        "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
         "verdict_policy": verdict_policy,
         "agents": agent_payloads,
         "dimensions": best_dimensions,
@@ -741,6 +769,8 @@ def build_agent_eval_payload(
             detail_priority=detail_priority,
         ),
     }
+    if publication_target_conflict == _PUBLICATION_TARGET_CONFLICT_MARKER:
+        payload["publication_target_conflict"] = _PUBLICATION_TARGET_CONFLICT_MARKER
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
 
@@ -2576,7 +2606,8 @@ def _run_truth_metadata(
     """Read dataset/evaluator truth owned by the evaluated run, never live source."""
     persisted_result: dict[str, Any] | None = None
     result_file = run_dir / "result.json"
-    if result_file.exists():
+    result_file_present = result_file.exists()
+    if result_file_present:
         with contextlib.suppress(OSError, UnicodeError, ValueError):
             loaded = json.loads(result_file.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
@@ -2603,6 +2634,20 @@ def _run_truth_metadata(
             value = candidate.get(field_name)
             if field_name not in truth and isinstance(value, str) and value.strip():
                 truth[field_name] = value.strip()
+
+    # Publication identity is one run-owned pair. A completed ``result.json``
+    # is authoritative for rerenders; the in-memory engine result is used only
+    # while the runner is rendering before that final artifact exists.
+    identity_source = persisted_result if result_file_present else engine_result
+    if isinstance(identity_source, dict):
+        run_id = identity_source.get("run_id")
+        publication_target = identity_source.get("publication_target")
+        if isinstance(run_id, str) and run_id == run_dir.name:
+            truth["run_id"] = run_id
+            if "publication_target_conflict" in identity_source:
+                truth["publication_target_conflict"] = _PUBLICATION_TARGET_CONFLICT_MARKER
+            elif isinstance(publication_target, dict):
+                truth["publication_target"] = dict(publication_target)
     return truth
 
 

@@ -56,13 +56,43 @@ skillevaluator validate ./skills/example-skill \
   --output-dir ./benchmark-backfill/example-skill
 ```
 
-Tier 3 is publication-required by default. Omitting `--agent-eval` therefore
-produces an `INCOMPLETE` card with Tier 3 marked `NOT RUN`, and never a
-publication recommendation. If a catalog intentionally makes Tier 3 optional,
-its orchestration must persist `benchmark_policy.tier3_required = false`; the
-card then discloses that policy. Do not reuse a prior live score while changing
-only its label or date. If a baseline was not run, keep the explicit “uplift
-unavailable” state.
+Tier 1 is always publication-required. Tier 2 and Tier 3 are
+publication-required by default. Omitting Tier 2 with `--no-dedup` or
+`--tiers 1,3`, or omitting Tier 3 by leaving out `--agent-eval`, therefore
+produces an `INCOMPLETE` card with the omitted tier marked `NOT RUN` and never a
+publication recommendation. `--no-block-on-dedup` changes the command exit
+gate; it is not a publication waiver.
+
+If a catalog intentionally makes Tier 2 or Tier 3 optional, its orchestration
+must persist `benchmark_policy.tier2_required = false` or
+`benchmark_policy.tier3_required = false`. The card then discloses that policy.
+An optional tier that produced incomplete evidence still makes the card
+`INCOMPLETE`; only absent or cleanly skipped evidence can use the waiver.
+Do not reuse a prior live score while changing only its label or date. If a
+baseline was not run, keep the explicit “uplift unavailable” state.
+
+When an orchestrator combines tiers from separate jobs, merge the actual result
+objects, including each result's `publication_target` and the built-in Tier 1
+or Tier 2 `publication_evidence` producer marker, and preserve the explicit
+`benchmark_policy` in the combined artifact. Every contributing result must
+carry the same exact NFC filesystem-entry name and
+`skill-evaluator-source-tree/2` digest. Completed Tier 3 evidence
+must also preserve its run-owned `run_id` in the payload and summary. Anonymous
+legacy results, a changed source tree, or inconsistent run identity make the
+combined publication status `INCOMPLETE`.
+Do not infer a waiver from an unselected tier or a non-blocking job. A missing
+result or policy key defaults to required, so an incomplete split-tier merge
+fails closed. Peer result objects have equal precedence: conflicting required
+flags resolve to `true` independent of merge order. Agent-evaluation payload
+metadata and its summary are duplicated higher-precedence policy claims that
+must agree. Those claims are used only when the containing result is bound to
+the same exact source digest; a foreign or anonymous payload cannot create a
+waiver.
+
+Use the combined JSON report's top-level `publication_status` or
+`publication.status` for publication automation. Do not substitute
+`overall_status`, which records the process gate and can remain `passed` when
+publication evidence is incomplete.
 
 The candidate card is:
 
@@ -87,7 +117,7 @@ Expected presentation changes include:
 - removal of the `Num` column;
 - explicit `NOT RUN`, `SKIPPED`, and `INCOMPLETE` tier states;
 - collapsible methodology and non-blocking observations;
-- evaluator version, dataset digest, task composition, Tier 3 requirement,
+- evaluator version, dataset digest, task composition, Tier 2 and Tier 3 requirements,
   isolation wording, and freshness copy.
 
 Investigate any numerical change. The canonical mapping is Security=`security`,
@@ -105,7 +135,7 @@ and does not override that gate.
 Scan all candidates before copying them into skills:
 
 ```bash
-python scripts/ci/check_public_benchmarks.py \
+uv run python scripts/ci/check_public_benchmarks.py \
   --require-files \
   ./benchmark-backfill
 ```
@@ -113,7 +143,8 @@ python scripts/ci/check_public_benchmarks.py \
 The linter rejects configured known leak patterns such as retired product
 identities, any validation-profile metadata line, common absolute home paths,
 ambiguous legacy uplift cells, the old `Num` column, missing metadata/decision
-sections, and a publication `PASS` without completed required Tier 3 evidence.
+sections, and a publication `PASS` without completed required Tier 1, Tier 2,
+or Tier 3 evidence.
 A clean result means none of those configured patterns matched; it is a fixture
 regression guard, not proof that a card is safe to publish. Keep human review
 and the repository's broader boundary and security checks in the promotion
@@ -128,7 +159,7 @@ catalog:
 cp ./benchmark-backfill/example-skill/BENCHMARK.md \
   ./skills/example-skill/BENCHMARK.md
 
-python scripts/ci/check_public_benchmarks.py --require-files ./skills
+uv run python scripts/ci/check_public_benchmarks.py --require-files ./skills
 git diff --check
 git diff -- ./skills/example-skill/BENCHMARK.md
 ```
@@ -149,6 +180,8 @@ Regenerate a card when any of these inputs changes:
 - attempt count/pass threshold;
 - execution environment or isolation mode.
 
-The generated evaluation date must come from the live run artifact. Older
-artifacts without an unambiguous timestamp remain “not recorded”; never replace
-that state with the report-generation date.
+The generated evaluation date must come from the live run artifact as a
+timezone-aware ISO timestamp. Date-only, timezone-naive, malformed, or
+materially future-dated values are not publication evidence. Older artifacts
+without an unambiguous timestamp remain “not recorded”; never replace that state
+with the report-generation date.

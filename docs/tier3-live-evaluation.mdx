@@ -110,11 +110,14 @@ native-task identities. The snapshot is removed when the run returns and
 requires temporary space only for the selected compatibility scope.
 
 Tier 3 does not install evaluator-owned directories from the target or any
-nested, reference, or workspace skill into agent-visible copies. `--copy-repo`
-uses the same filtering and excludes generated result roots. Authenticated
-historical result roots remain excluded after the configured output location is
-changed; a present marker that is copied, stale, or cannot be authenticated
-fails staging closed instead of copying that tree. Custom result roots created
+nested, reference, or workspace skill into agent-visible copies. Runtime skill
+projection and `--copy-repo` also omit every generated path excluded by the
+versioned publication-source digest. The active report directory and the whole
+catalog report root are explicitly excluded from full repo context, preventing
+a repeated run from exposing prior reports or Tier 3 evidence to the agent.
+Authenticated historical result roots remain excluded after the configured
+output location is changed; a present marker that is copied, stale, or cannot
+be authenticated fails staging closed instead of copying that tree. Custom result roots created
 outside `evals/` by a pre-marker version cannot be identified safely after the
 configured location changes. Move or delete that old content before
 `--copy-repo` or another full-context evaluation, then rerun with the current
@@ -392,7 +395,7 @@ The high-signal flags, with defaults:
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
-| `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory |
+| `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory; custom in-skill roots are rejected |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
 | `--timeout-multiplier` | `1.0` | Scale Harbor step timeouts |
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |

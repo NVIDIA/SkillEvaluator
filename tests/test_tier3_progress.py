@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -694,6 +695,21 @@ def _stub_runner(
     monkeypatch.setattr(runner, "collect_harbor_results", collect or collect_results)
     monkeypatch.setattr(runner, "render_agent_eval_html_report", html_report or write_html)
     return runner, skill
+
+
+def test_runner_rejects_custom_in_skill_results_root_before_creating_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    results_root = skill / "custom-results"
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=results_root)
+
+    assert result.get("error")
+    assert "canonical" in json.dumps(result)
+    assert "evals/results" in json.dumps(result)
+    assert not results_root.exists()
 
 
 def _configure_native_task_source(
@@ -1799,6 +1815,156 @@ def test_runner_persists_compact_feedback_to_result_json(
     assert "agent_eval" not in persisted
 
 
+def test_runner_persists_run_owned_publication_identity_in_final_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    report_identity: dict[str, Any] = {}
+
+    def write_html(_skill_path: Path, run_dir: Path, *, engine_result: dict[str, Any], **_kwargs: Any) -> Path:
+        report_identity.update(
+            {
+                "run_id": engine_result.get("run_id"),
+                "publication_target": engine_result.get("publication_target"),
+            }
+        )
+        path = run_dir / "report.html"
+        path.write_text("<html></html>", encoding="utf-8")
+        return path
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, html_report=write_html)
+    expected_target = publication_target_from_path(skill)
+    assert expected_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert result["publication_target"] == expected_target
+    assert persisted["publication_target"] == expected_target
+    assert persisted["run_id"] == result["run_id"] == Path(result["run_dir"]).name
+    assert report_identity == {
+        "run_id": result["run_id"],
+        "publication_target": expected_target,
+    }
+
+
+def test_runner_rejects_source_change_after_private_snapshot_before_engine_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    task_calls: list[Path] = []
+    engine_calls: list[dict[str, Any]] = []
+
+    def emit_tasks(_skill: Path, output: Path, **_kwargs: Any) -> list[Path]:
+        task_calls.append(output)
+        return [output / "case-1"]
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        engine_calls.append(kwargs)
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        task_emitter=emit_tasks,
+        run_agent=run_agent,
+    )
+    original_snapshot = runner.private_evaluator_skill_snapshot
+    initial_target = publication_target_from_path(skill)
+    assert initial_target is not None
+
+    @contextmanager
+    def mutate_after_copy(path: Path):
+        with original_snapshot(path) as snapshot:
+            assert (snapshot / "evals" / "evals.json").read_text(encoding="utf-8") == "{}"
+            (path / "evals" / "evals.json").write_text('{"changed": true}', encoding="utf-8")
+            yield snapshot
+
+    monkeypatch.setattr(runner, "private_evaluator_skill_snapshot", mutate_after_copy)
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+
+    assert result == {"error": ["Publication source changed while its private evaluator snapshot was created"]}
+    assert publication_target_from_path(skill) != initial_target
+    assert task_calls == []
+    assert engine_calls == []
+    assert not (tmp_path / "results").exists()
+
+
+def test_runner_marks_publication_identity_conflict_when_source_changes_mid_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill_ref: list[Path] = []
+
+    def collect_after_mutation(**_kwargs: Any) -> dict[str, Any]:
+        (skill_ref[0] / "SKILL.md").write_text("# changed during evaluation\n", encoding="utf-8")
+        return {"execution_status": "succeeded", "execution_errors": [], "metrics": []}
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, collect=collect_after_mutation)
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    skill_ref.append(skill)
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    run_end_target = publication_target_from_path(skill)
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert run_end_target is not None and run_end_target != run_start_target
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {
+        "run_start": run_start_target,
+        "run_end": run_end_target,
+    }
+    assert persisted["publication_target"] is None
+    assert persisted["publication_target_conflict"] == result["publication_target_conflict"]
+
+
+def test_runner_rechecks_identity_after_report_generation_and_renders_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill_ref: list[Path] = []
+    rendered_targets: list[object] = []
+
+    def write_html(_skill_path: Path, run_dir: Path, *, engine_result: dict[str, Any], **_kwargs: Any) -> Path:
+        rendered_targets.append(engine_result.get("publication_target"))
+        if len(rendered_targets) == 1:
+            (skill_ref[0] / "SKILL.md").write_text("# changed during report\n", encoding="utf-8")
+        path = run_dir / "report.html"
+        path.write_text("<html></html>", encoding="utf-8")
+        return path
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, html_report=write_html)
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    skill_ref.append(skill)
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    run_end_target = publication_target_from_path(skill)
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert run_end_target is not None and run_end_target != run_start_target
+    assert rendered_targets == [run_start_target, None]
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {
+        "run_start": run_start_target,
+        "run_end": run_end_target,
+    }
+    assert persisted["publication_target"] is None
+    assert persisted["publication_target_conflict"] == result["publication_target_conflict"]
+
+
 def test_keep_flag_retains_harbor_artifacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1855,6 +2021,27 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     assert persisted["run_config"] == result["run_config"]
     run_config_path = run_dir / "run_config.json"
     assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]
+
+
+def test_runner_persists_run_owned_identity_for_pre_execution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    def fail_staging(*_args: Any, **_kwargs: Any) -> list[Path]:
+        raise ValueError("invalid task")
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, task_emitter=fail_staging)
+    expected_target = publication_target_from_path(skill)
+    assert expected_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert result["publication_target"] == expected_target
+    assert persisted["publication_target"] == expected_target
+    assert persisted["run_id"] == result["run_id"] == Path(result["run_dir"]).name
 
 
 @pytest.mark.parametrize("failure_arm", ["with-skill", "baseline"])

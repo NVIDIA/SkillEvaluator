@@ -9,11 +9,14 @@ from pathlib import Path
 
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.publication_evidence import stamp_publication_evidence
+from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
 from skillevaluator.tier1.commands import emit_reports
 from skillevaluator.validators.similarity import SimilarityValidator
 
 
-def _guarded_result(title: str, target_path: Path, callback) -> list[ValidationResult]:
+def _guarded_result(title: str, target_path: Path, callback, *, check_id: str) -> list[ValidationResult]:
+    initial_target = publication_target_from_path(target_path)
     try:
         result = callback()
     except Exception as exc:  # validators convert expected failures; this protects CLI UX
@@ -23,6 +26,8 @@ def _guarded_result(title: str, target_path: Path, callback) -> list[ValidationR
         result.validator_name = title
     if not result.validator_description:
         result.validator_description = f"Tier 2 check for {target_path}"
+    stamp_publication_evidence([result], tier=2, check_id=check_id)
+    finalize_publication_target([result], target_path, initial_target)
     return [result]
 
 
@@ -51,7 +56,7 @@ def run_similarity_check(
         )
         return validator.validate(content_path)
 
-    return _guarded_result("Similarity Check", content_path, _run)
+    return _guarded_result("Similarity Check", content_path, _run, check_id="similarity")
 
 
 def run_context_optimization_check(
@@ -70,6 +75,7 @@ def run_context_optimization_check(
         "Context Deduplication",
         skill_path,
         lambda: validator.validate(skill_path),
+        check_id="context-optimization",
     )
 
 

@@ -53,6 +53,21 @@ class TestCollectFiles:
         assert len(result) == 1
         assert result[0].extension == ".py"
 
+    def test_excluded_directory_case_alias_follows_filesystem_semantics(self, skill_root: Path) -> None:
+        alias = skill_root / ".VENV"
+        alias.mkdir()
+        scanned = alias / "evil.py"
+        scanned.write_text("print('scanned')\n")
+        canonical = skill_root / ".venv"
+
+        result = collect_files(skill_root)
+        paths = {item.rel_path for item in result}
+
+        if canonical.exists() and alias.samefile(canonical):
+            assert ".VENV/evil.py" not in paths
+        else:
+            assert ".VENV/evil.py" in paths
+
     def test_collects_shell(self, skill_root: Path) -> None:
         (skill_root / "setup.sh").write_text("#!/bin/bash\necho hello\n")
         result = collect_files(skill_root)
@@ -690,6 +705,19 @@ class TestCollectFilesExclusions:
         result = collect_files(skill_root)
         rel_paths = sorted(f.rel_path for f in result)
         assert rel_paths == ["SKILL.md", "references/guide.md"]
+
+    def test_generated_file_case_alias_follows_filesystem_semantics(self, skill_root: Path) -> None:
+        alias = skill_root / "BENCHMARK.MD"
+        alias.write_text("# Case-sensitive authored benchmark\n")
+        canonical = skill_root / "BENCHMARK.md"
+
+        result = collect_files(skill_root)
+        paths = {item.rel_path for item in result}
+
+        if canonical.exists() and alias.samefile(canonical):
+            assert "BENCHMARK.MD" not in paths
+        else:
+            assert "BENCHMARK.MD" in paths
 
     def test_keeps_plural_benchmarks_report(self, skill_root: Path) -> None:
         """``benchmarks.md`` is not a generated artifact."""

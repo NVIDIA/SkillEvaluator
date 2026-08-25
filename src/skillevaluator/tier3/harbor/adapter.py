@@ -34,6 +34,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+from skillevaluator.publication_identity import (
+    publication_source_entry_is_excluded,
+    publication_source_path_is_excluded,
+)
 from skillevaluator.tier3.case_ids import safe_child, validate_case_ids, validate_output_directory_path
 from skillevaluator.tier3.harbor.secure_copy import (
     copy_file_secure,
@@ -626,6 +630,24 @@ def validate_results_root_location(
     validate_output_directory_path(results_root)
     if _path_is_excluded(skill_path, (results_root,)):
         raise ValueError(f"Generated output root must not contain the runtime skill source: {results_root}")
+    evals_dir = skill_path / "evals"
+    canonical_in_skill_root = evals_dir / "results"
+    if _path_is_excluded(results_root, (evals_dir,)) and not _path_is_canonically_contained(
+        results_root,
+        canonical_in_skill_root,
+    ):
+        raise ValueError(
+            f"Generated output root must not be inside evaluator source directory '{evals_dir}': {results_root}"
+        )
+    if _path_is_excluded(results_root, (skill_path,)) and not _path_is_canonically_contained(
+        results_root,
+        canonical_in_skill_root,
+    ):
+        canonical_label = canonical_in_skill_root.relative_to(skill_path).as_posix()
+        raise ValueError(
+            "An in-skill Tier 3 results root must be contained by the canonical "
+            f"'{canonical_label}' directory; use an external --results-dir otherwise: {results_root}"
+        )
     _validate_output_roots_outside_evaluator_sources(skill_path, (results_root,))
     runtime_sources = [*(workspace_skill_paths or [])]
     if reference_skills_dir is not None:
@@ -686,13 +708,14 @@ def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] 
 
     def _ignore(directory: str, contents: list[str]) -> list[str]:
         current = Path(directory)
-        ignored = {name for name in contents if name in {"results", "__pycache__", ".git"}}
+        ignored: set[str] = set()
         if current.resolve() == resolved_root:
             ignored.update(name for name in contents if name.casefold() == "evals")
         for name in contents:
             candidate = current / name
             if (
-                _is_skill_evals_path(candidate, skill_root)
+                publication_source_entry_is_excluded(skill_root, candidate)
+                or _is_skill_evals_path(candidate, skill_root)
                 or _path_is_excluded(candidate, excluded_roots)
                 or _authenticated_generated_output_ancestor(
                     candidate,
@@ -737,7 +760,9 @@ def _runtime_skill_fingerprint(skill_root: Path, excluded_roots: Sequence[Path] 
             if entry.name in ignored:
                 continue
             path = Path(entry.path)
-            metadata = entry.stat(follow_symlinks=False)
+            # DirEntry.stat() exposes zero identity fields on Windows. Use a
+            # full path stat before enforcing link and hard-link policy.
+            metadata = path.lstat()
             if _path_is_link_or_reparse(path, metadata):
                 return None
             relative = path.relative_to(skill_root).as_posix().encode("utf-8")
@@ -1062,6 +1087,7 @@ def _iter_repo_context_files(
     root: Path,
     authenticated_output_roots: set[Path],
     excluded_roots: Sequence[Path] = (),
+    ignored_path_predicate: Callable[[Path], bool] | None = None,
 ) -> list[Path]:
     """Enumerate repository files without inspecting excluded output trees."""
     git_files = _git_context_files(root)
@@ -1070,6 +1096,7 @@ def _iter_repo_context_files(
             path
             for path in git_files
             if not _path_is_excluded(path, excluded_roots)
+            and not (ignored_path_predicate is not None and ignored_path_predicate(path))
             and path.is_file()
             and not _repo_context_ignore_file(path, root, authenticated_output_roots)
         )
@@ -1085,6 +1112,8 @@ def _iter_repo_context_files(
                 # descent: result trees can contain unsafe or unreadable user
                 # artifacts and are explicitly outside the staged context.
                 if _path_is_excluded(path, excluded_roots):
+                    continue
+                if ignored_path_predicate is not None and ignored_path_predicate(path):
                     continue
                 if _repo_context_ignore_file(path, root, authenticated_output_roots):
                     continue
@@ -1144,6 +1173,7 @@ def _stage_repo_context(
             repo_root,
             authenticated_output_roots,
             resolved_excluded_roots,
+            lambda path: publication_source_path_is_excluded(source_skill_path, path),
         ):
             if _is_excluded_output(src):
                 continue

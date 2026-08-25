@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -36,6 +36,7 @@ from skillevaluator.provider_config import (
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
+from skillevaluator.publication_identity import publication_target_from_path
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
@@ -1801,7 +1802,9 @@ def _run_harbor_eval_impl(
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
     progress_reporter: ProgressReporter | None = None,
+    repo_context_exclude_paths: Sequence[Path] = (),
     _evaluator_skill_path: Path | None = None,
+    _snapshot_publication_target: dict[str, str] | None = None,
     _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
@@ -1829,11 +1832,15 @@ def _run_harbor_eval_impl(
         forwarded.pop("agents")
         with ExitStack() as snapshot_stack:
             try:
+                snapshot_publication_target = publication_target_from_path(skill_path)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
+                if publication_target_from_path(skill_path) != snapshot_publication_target:
+                    raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
                 reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
                 return {"error": [str(exc)]}
             forwarded["_evaluator_skill_path"] = evaluator_skill_path
+            forwarded["_snapshot_publication_target"] = snapshot_publication_target
             forwarded["_monotonic_start"] = started_at
             return _run_harbor_eval_impl(skill_path, agents, **forwarded)
 
@@ -2166,6 +2173,7 @@ def _run_harbor_eval_impl(
         return {"error": [str(exc)]}
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
+    effective_repo_context_exclude_paths = (root, *(Path(path) for path in repo_context_exclude_paths))
     try:
         validate_output_provenance_key_location(
             skill_path,
@@ -2189,10 +2197,45 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
     run_id = run_dir.name
+    publication_target = _snapshot_publication_target
     jobs_dir = run_dir / "_harbor-jobs"
     tasks_dir = run_dir / "_harbor-tasks"
     result_path = run_dir / "result.json"
     report_path: Path | None = None
+    publication_target_conflict: dict[str, Any] | None = None
+
+    def _run_owned_publication_fields() -> dict[str, Any]:
+        """Return the boundary identity, or a fail-closed mutation marker."""
+        nonlocal publication_target_conflict
+        if publication_target_conflict is not None:
+            return {
+                "publication_target": None,
+                "publication_target_conflict": {
+                    "run_start": (
+                        dict(publication_target_conflict["run_start"])
+                        if isinstance(publication_target_conflict["run_start"], dict)
+                        else None
+                    ),
+                    "run_end": (
+                        dict(publication_target_conflict["run_end"])
+                        if isinstance(publication_target_conflict["run_end"], dict)
+                        else None
+                    ),
+                },
+            }
+        run_end_target = publication_target_from_path(skill_path)
+        if run_end_target == publication_target:
+            return {
+                "publication_target": dict(publication_target) if publication_target is not None else None,
+            }
+        publication_target_conflict = {
+            "run_start": dict(publication_target) if publication_target is not None else None,
+            "run_end": dict(run_end_target) if run_end_target is not None else None,
+        }
+        return {
+            "publication_target": None,
+            "publication_target_conflict": dict(publication_target_conflict),
+        }
 
     def _emit_run_finished(state: str, detail: str, *, include_artifacts: bool = True) -> None:
         reporter.emit(
@@ -2218,6 +2261,7 @@ def _run_harbor_eval_impl(
             "execution_errors": errors,
             "error": errors,
             "run_id": run_id,
+            **_run_owned_publication_fields(),
             "run_dir": str(run_dir),
             "harbor_jobs_dir": str(jobs_dir),
             "harbor_jobs_retained": jobs_dir.is_dir(),
@@ -2262,7 +2306,7 @@ def _run_harbor_eval_impl(
             reference_skills_dir,
             workspace_skill_paths=workspace_skills,
             evaluator_skill_path=evaluator_skill_path,
-            excluded_roots=(root,),
+            excluded_roots=effective_repo_context_exclude_paths,
             force_rebuild=base_image_mode == "rebuild",
         )
         if base_image:
@@ -2303,7 +2347,7 @@ def _run_harbor_eval_impl(
                 base_image=base_image,
                 custom_dockerfile_mode=dockerfile_mode,
                 copy_repo=copy_repo,
-                repo_context_exclude_paths=(root,),
+                repo_context_exclude_paths=effective_repo_context_exclude_paths,
                 runtime_env=dict(runtime_plans[agent].staged_env),
                 verifier_env=staged_verifier_env,
                 pre_agent_setup=harbor_config.get("pre_agent_setup", []),
@@ -2325,7 +2369,7 @@ def _run_harbor_eval_impl(
                 skill_path,
                 reference_skills_dir,
                 workspace_skills,
-                excluded_roots=(root,),
+                excluded_roots=effective_repo_context_exclude_paths,
             )
         else:
             baseline_alias_validation = None
@@ -2343,7 +2387,7 @@ def _run_harbor_eval_impl(
                     base_image=base_image,
                     custom_dockerfile_mode=dockerfile_mode,
                     copy_repo=copy_repo,
-                    repo_context_exclude_paths=(root,),
+                    repo_context_exclude_paths=effective_repo_context_exclude_paths,
                     runtime_env=dict(runtime_plans[agent].staged_env),
                     verifier_env=staged_verifier_env,
                     pre_agent_setup=harbor_config.get("pre_agent_setup", []),
@@ -2549,6 +2593,7 @@ def _run_harbor_eval_impl(
         {
             "skill_name": skill_path.name,
             "run_id": run_id,
+            **_run_owned_publication_fields(),
             "run_dir": str(run_dir),
             "result_path": str(result_path),
             "harbor_jobs_dir": str(jobs_dir),
@@ -2589,21 +2634,43 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "report artifacts could not be written")
         raise
 
-    report_warning: str | None = None
-    try:
-        candidate_report_path = render_agent_eval_html_report(
-            skill_path,
-            run_dir,
-            env_mode=env_mode,
-            engine_result=results,
-        )
-        if candidate_report_path.is_file():
-            report_path = candidate_report_path
+    def _render_current_report() -> tuple[Path | None, str | None]:
+        try:
+            candidate = render_agent_eval_html_report(
+                skill_path,
+                run_dir,
+                env_mode=env_mode,
+                engine_result=results,
+            )
+            if candidate.is_file():
+                return candidate, None
+            return None, "HTML report was not generated: report file is missing"
+        except Exception as exc:
+            return None, f"HTML report was not generated: {exc}"
+
+    identity_before_report = {
+        key: results[key] for key in ("publication_target", "publication_target_conflict") if key in results
+    }
+    report_path, report_warning = _render_current_report()
+    if report_path is not None:
+        results["report_path"] = str(report_path)
+
+    identity_after_report = _run_owned_publication_fields()
+    if identity_after_report != identity_before_report:
+        stale_report_path = report_path
+        results.pop("publication_target", None)
+        results.pop("publication_target_conflict", None)
+        results.update(identity_after_report)
+        results.pop("report_path", None)
+        report_path, report_warning = _render_current_report()
+        if report_path is not None:
             results["report_path"] = str(report_path)
-        else:
-            report_warning = "HTML report was not generated: report file is missing"
-    except Exception as exc:
-        report_warning = f"HTML report was not generated: {exc}"
+        elif stale_report_path is not None:
+            try:
+                stale_report_path.resolve().relative_to(run_dir.resolve())
+                stale_report_path.unlink(missing_ok=True)
+            except (OSError, RuntimeError, ValueError):
+                pass
     if report_warning:
         results.setdefault("warnings", []).append(report_warning)
         results["report_status"] = "degraded"

@@ -350,27 +350,79 @@ def _report_options(func):
     )(func)
 
 
-_validate_json_report_var: ContextVar[str | None] = ContextVar(
-    "_validate_json_report_var",
-    default=None,
-)
+def _path_is_within(candidate: Path, root: Path) -> bool:
+    """Check containment using both path text and existing filesystem aliases."""
+    for path, path_root in (
+        (candidate.absolute(), root.absolute()),
+        (candidate.resolve(strict=False), root.resolve(strict=True)),
+    ):
+        try:
+            path.relative_to(path_root)
+            return True
+        except ValueError:
+            pass
+
+    current = candidate.absolute()
+    while True:
+        try:
+            current.lstat()
+            break
+        except FileNotFoundError:
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+        except OSError:
+            return False
+
+    while True:
+        try:
+            if current.samefile(root):
+                return True
+        except (OSError, ValueError):
+            return False
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
-def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -> tuple[str, ...]:
-    """Resolve the report formats ``validate`` will actually emit."""
-    if quiet and not _report_formats_explicit():
-        return tuple(dict.fromkeys([fmt for fmt in report_formats if fmt != "cli"] + ["html", "json"]))
-    return report_formats
+def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path:
+    """Keep report writes outside the source tree whose identity they describe."""
+    if not target_path.is_dir():
+        return output_dir
+    try:
+        lexical_target = target_path.absolute()
+        resolved_target = target_path.resolve(strict=True)
+        lexical_output = output_dir.absolute()
+        resolved_output = output_dir.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise click.ClickException(f"Cannot resolve report output directory: {output_dir}") from exc
 
+    output_is_in_target = _path_is_within(lexical_output, lexical_target) or _path_is_within(
+        resolved_output,
+        resolved_target,
+    )
+    if not output_is_in_target:
+        return output_dir
 
-def _record_validate_json_report(report_name: str | None) -> None:
-    _validate_json_report_var.set(report_name)
+    from click.core import ParameterSource
 
+    context = click.get_current_context(silent=True)
+    parameter_source = context.get_parameter_source("output_dir") if context is not None else None
+    if parameter_source is ParameterSource.DEFAULT:
+        relocated = target_path.with_name(f"{target_path.name}-reports")
+        try:
+            if not _path_is_within(relocated, resolved_target):
+                from skillevaluator.tier3.output_provenance import mark_generated_output_root
 
-def _consume_validate_json_report() -> str | None:
-    report_name = _validate_json_report_var.get()
-    _validate_json_report_var.set(None)
-    return report_name
+                mark_generated_output_root(relocated)
+                return relocated
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise click.ClickException(f"Cannot safely reserve default report output directory: {relocated}") from exc
+    raise click.ClickException(
+        f"Report output must be outside the publication target; use an external --output-dir: {output_dir}"
+    )
 
 
 def _report_formats_explicit() -> bool:
@@ -400,12 +452,15 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     import importlib.util
 
     def _skip(message: str) -> list[ValidationResult]:
+        from skillevaluator.publication_identity import stamp_publication_target
+
         result = ValidationResult(
             validator_name="Tier 2 Deduplication",
             validator_description="Embedding-based duplicate detection",
         )
         result.add_warning(message)
         result.metadata["skipped"] = True
+        stamp_publication_target([result], target_path)
         return [result]
 
     def _available(module: str) -> bool:
@@ -599,7 +654,7 @@ def _run_agent_eval_or_skip(
     agent_runtime_preflight: bool | None = None,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
-    evaluated_source: dict[str, str] | None = None,
+    repo_context_exclude_paths: tuple[Path, ...] = (),
     progress_reporter=None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
@@ -649,8 +704,7 @@ def _run_agent_eval_or_skip(
         copy_repo=copy_repo,
         timeout_multiplier=timeout_multiplier,
         harbor_keep_jobs=harbor_keep_jobs,
-        agent_runtime_preflight=agent_runtime_preflight,
-        evaluated_source=evaluated_source,
+        repo_context_exclude_paths=repo_context_exclude_paths,
     )
     try:
         service = EvaluationService()
@@ -1103,38 +1157,29 @@ def _validate_catalog(
         return
 
     failures: list[tuple[str, str]] = []
-    skill_reports: dict[str, str | None] = {}
-    for index, skill_dir in enumerate(skill_dirs, start=1):
-        _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
-        skill_output = output_dir / skill_dir.name
-        overrides = {
-            **ctx.params,
-            "target_path": skill_dir,
-            "content_type": "skill",
-            "output_dir": skill_output,
-        }
-        reason = ""
-        try:
-            ctx.invoke(validate, **overrides)
-        except click.ClickException as exc:
-            reason = str(getattr(exc, "message", exc))
-            failures.append((skill_dir.name, reason))
-        except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
-            reason = f"unexpected error: {exc}"
-            failures.append((skill_dir.name, reason))
-        skill_reports[skill_dir.name] = _consume_validate_json_report()
-    failure_map = dict(failures)
-    skill_entries = [
-        _catalog_skill_entry(
-            skill_dir.name,
-            output_dir / skill_dir.name,
-            passed=skill_dir.name not in failure_map,
-            reason=failure_map.get(skill_dir.name, ""),
-            json_report_name=skill_reports.get(skill_dir.name),
-        )
-        for skill_dir in skill_dirs
-    ]
-    _write_catalog_summary(output_dir, skill_entries)
+    meta_key = "skillevaluator_catalog_report_root"
+    previous_catalog_root = ctx.meta.get(meta_key)
+    ctx.meta[meta_key] = output_dir
+    try:
+        for index, skill_dir in enumerate(skill_dirs, start=1):
+            _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
+            overrides = {
+                **ctx.params,
+                "target_path": skill_dir,
+                "content_type": "skill",
+                "output_dir": output_dir / skill_dir.name,
+            }
+            try:
+                ctx.invoke(validate, **overrides)
+            except click.ClickException as exc:
+                failures.append((skill_dir.name, str(getattr(exc, "message", exc))))
+            except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
+                failures.append((skill_dir.name, f"unexpected error: {exc}"))
+    finally:
+        if previous_catalog_root is None:
+            ctx.meta.pop(meta_key, None)
+        else:
+            ctx.meta[meta_key] = previous_catalog_root
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     if failures:
         raise click.ClickException(
@@ -1756,6 +1801,8 @@ def validate(
 
     from skillevaluator.constants import CONTENT_TYPE_UNKNOWN
 
+    output_dir = _resolve_report_output_location(target_path, output_dir)
+
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
     # once per skill, each as its own job with its own reports.
     if (
@@ -1799,6 +1846,20 @@ def validate(
     else:
         _print_run_banner(target_path, resolved_type, getattr(policy, "profile", None))
         _print_tier_banner(_TIER_BANNERS["tier1"])
+
+    # Autopilot source generation must precede every tier's publication-target
+    # capture so one combined report cannot bind otherwise valid tier evidence
+    # to different source trees. Generation remains advisory: retain any error
+    # for the later Tier 3 skip result and continue through Tier 1/2.
+    autopilot_error: str | None = None
+    autopilot_dataset_note: str | None = None
+    if autopilot:
+        try:
+            autopilot_dataset_note = _ensure_autopilot_dataset(target_path, quiet=quiet)
+        except (Exception, SystemExit) as exc:
+            autopilot_error = f"autopilot dataset generation failed: {getattr(exc, 'message', exc)}"
+            if not quiet:
+                click.echo(f"Warning: {autopilot_error}", err=True)
 
     view.start()
     view.tier_start(0)
@@ -1887,23 +1948,8 @@ def validate(
             detail_row("model", model_display),
         ]
 
-        # Autopilot: reuse the standalone evaluate command's dataset flow.
-        # Tier 3 is advisory, so a dataset-generation failure must not abort
-        # validate after Tier 1/2 already ran -- Tier 3 skips with the reason.
-        autopilot_error: str | None = None
-        if autopilot:
-            view.tier_progress(
-                tier3_index, [*tier3_config_rows, stage_hint_row("status", "preparing evaluation dataset…")]
-            )
-            try:
-                dataset_note = _ensure_autopilot_dataset(tier3_path, quiet=quiet)
-            except (Exception, SystemExit) as exc:
-                autopilot_error = f"autopilot dataset generation failed: {getattr(exc, 'message', exc)}"
-                if not quiet:
-                    click.echo(f"Warning: {autopilot_error}", err=True)
-            else:
-                if dataset_note:
-                    tier3_config_rows.append(detail_row("dataset", dataset_note))
+        if autopilot_dataset_note:
+            tier3_config_rows.append(detail_row("dataset", autopilot_dataset_note))
 
         view.tier_progress(
             tier3_index,
@@ -1914,6 +1960,13 @@ def validate(
             view.tier_progress(tier3_index, [*tier3_config_rows, *engine_feed_rows(lines)])
 
         reporter = ViewProgressReporter(_on_engine_tail) if quiet else None
+        repo_context_exclude_paths = [output_dir]
+        catalog_report_root = click.get_current_context().meta.get("skillevaluator_catalog_report_root")
+        if isinstance(catalog_report_root, Path) and not paths_refer_to_same_location(
+            catalog_report_root,
+            output_dir,
+        ):
+            repo_context_exclude_paths.append(catalog_report_root)
         tier3_result = _run_agent_eval_or_skip(
             tier3_path,
             agents=agents,
@@ -1938,6 +1991,7 @@ def validate(
             validate_source=preflight_tier3_source,
             evaluated_source=evaluated_source,
             progress_reporter=reporter,
+            repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
         tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
@@ -2007,6 +2061,7 @@ def validate(
         basename=report_basename_value,
         policy=policy,
         target_path=target_display,
+        expected_skill_name=target_path.name,
         content_label=content_label,
         announce_paths=not quiet,
         sarif_scan_root=target_path,
@@ -2043,7 +2098,9 @@ def validate(
         )
     if tier3_result is not None and block_on_agent_eval_effective:
         effective_gate_results.append(tier3_result)
-    gate_failed = not all(result.passed for result in effective_gate_results)
+    from skillevaluator.reporting.base import passes_required_gate
+
+    gate_failed = not all(passes_required_gate(result) for result in effective_gate_results)
     if quiet:
         _finish_pipeline_view(
             view,
@@ -2075,6 +2132,7 @@ validate.help_group_descriptions = {
 @_report_options
 def quality_check(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Score skill quality across correctness, discoverability, reliability, and efficiency."""
+    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
     if not emit_reports(
         run_quality_check(target_path, min_score=min_score),
         report_formats=report_formats,
@@ -2090,6 +2148,7 @@ def quality_check(target_path: Path, min_score: int, report_formats: tuple[str, 
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
+    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
     if not emit_reports(
         run_rubric_eval(target_path, min_score=min_score),
         report_formats=report_formats,
@@ -2108,6 +2167,7 @@ def security_scan(
     target_path: Path, llm: bool, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path
 ) -> None:
     """Scan for security vulnerabilities."""
+    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
     if not emit_reports(
         run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify),
         report_formats=report_formats,
@@ -2123,6 +2183,7 @@ def security_scan(
 @_report_options
 def pii_scan(target_path: Path, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Scan for PII and local identifiers."""
+    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
     if not emit_reports(
         run_pii_scan(target_path, llm_verify=llm_verify),
         report_formats=report_formats,
@@ -2137,6 +2198,7 @@ def pii_scan(target_path: Path, llm_verify: bool, report_formats: tuple[str, ...
 @_report_options
 def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run advisory lint checks on skill scripts."""
+    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
     if not emit_reports(
         run_lint_scripts(target_path),
         report_formats=report_formats,
@@ -2209,6 +2271,7 @@ def similarity_check(
         raise click.UsageError("--catalog and --save-catalog cannot be used together")
 
     _reject_linked_tier2_root(content_path)
+    output_dir = _resolve_report_output_location(content_path.resolve(), output_dir)
     similarity_basename = report_basename("similarity")
     _reject_catalog_report_collisions(
         resolved_catalog,
@@ -2263,6 +2326,7 @@ def context_optimization_check(
     from skillevaluator.tier2.commands import run_context_optimization_check
 
     _reject_linked_tier2_root(skill_path)
+    output_dir = _resolve_report_output_location(skill_path.resolve(), output_dir)
     results = run_context_optimization_check(skill_path, threshold=threshold, model=model, llm_model=llm_model)
     sanitize_tier2_results(results, skill_path)
     if not emit_reports(
@@ -2292,6 +2356,7 @@ def dedup_scan(
     from skillevaluator.tier2.commands import run_dedup_scan
 
     _reject_linked_tier2_root(skill_path)
+    output_dir = _resolve_report_output_location(skill_path.resolve(), output_dir)
     results = run_dedup_scan(
         skill_path,
         threshold=threshold,

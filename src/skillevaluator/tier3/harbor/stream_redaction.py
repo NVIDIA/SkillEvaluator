@@ -196,8 +196,10 @@ class StreamingSecretRedactor:
         pending_parts = [self._pending]
         while offset < len(text):
             if self._state is self._root:
-                assert self._first_character_re is not None
-                match = self._first_character_re.search(text, offset)
+                first_character_re = self._first_character_re
+                if first_character_re is None:
+                    raise RuntimeError("exact redactor invariant violated")
+                match = first_character_re.search(text, offset)
                 end = len(text) if match is None else match.start()
                 if end > offset:
                     plain = text[offset:end]
@@ -457,7 +459,8 @@ class _StreamingKnownPatternRedactor:
                 self._prove_candidate(emitted, _OPENSHIFT_BODY_RE)
                 return pending[offset:]
 
-            assert kind == "jwt"
+            if kind != "jwt":
+                raise RuntimeError("known-pattern redactor invariant violated")
             if _is_ascii_key_body(character):
                 self._candidate.append(character)
                 self._candidate_count += 1

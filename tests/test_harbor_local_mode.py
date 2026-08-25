@@ -56,7 +56,11 @@ from skillevaluator.tier3.harbor.runner import (
 )
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
-from skillevaluator.tier3.harbor.stream_redaction import StreamingLogRedactor
+from skillevaluator.tier3.harbor.stream_redaction import (
+    StreamingLogRedactor,
+    StreamingSecretRedactor,
+    _StreamingKnownPatternRedactor,
+)
 
 _NATIVE_WINDOWS_LOCAL_REASON = "native Windows local mode requires WSL2; these checks exercise the POSIX backend"
 
@@ -183,6 +187,40 @@ def test_streaming_log_redactor_is_chunk_partition_invariant() -> None:
     assert "task-granularity" in baseline
     for secret in (*secrets, known_secret):
         assert secret not in baseline
+
+
+def test_exact_stream_redactor_rejects_missing_compiled_prefix_matcher() -> None:
+    redactor = StreamingSecretRedactor({"invariant-secret"})
+    redactor._first_character_re = None
+
+    with pytest.raises(RuntimeError, match="exact redactor invariant"):
+        redactor.feed("ordinary output")
+
+
+def test_known_pattern_redactor_rejects_unknown_candidate_kind() -> None:
+    redactor = _StreamingKnownPatternRedactor()
+    redactor._candidate_kind = "unexpected"
+    redactor._candidate_prefix = "eyJ"
+    redactor._candidate = ["eyJ"]
+
+    with pytest.raises(RuntimeError, match="known-pattern redactor invariant"):
+        redactor.feed("A")
+
+
+@pytest.mark.parametrize("missing_stream", ("stdin", "stdout", "stderr"))
+def test_local_stream_collector_rejects_missing_required_pipe(missing_stream: str) -> None:
+    streams = {"stdin": object(), "stdout": object(), "stderr": object()}
+    streams[missing_stream] = None
+    process = SimpleNamespace(**streams)
+
+    with pytest.raises(RuntimeError, match="local subprocess pipe invariant"):
+        asyncio.run(
+            SkillEvaluatorLocalEnvironment._collect_streamed_output(
+                process,  # type: ignore[arg-type]
+                b"",
+                None,  # type: ignore[arg-type]
+            )
+        )
 
 
 def test_streaming_log_redactor_preserves_nested_known_pattern_starts() -> None:

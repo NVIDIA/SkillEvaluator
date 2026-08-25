@@ -1049,9 +1049,8 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         callback_output: _StreamCallbackOutput,
     ) -> tuple[bytes, bytes]:
         """Drain both process streams while preserving ``communicate`` results."""
-        assert proc.stdin is not None
-        assert proc.stdout is not None
-        assert proc.stderr is not None
+        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+            raise RuntimeError("local subprocess pipe invariant violated")
 
         async def write_stdin() -> None:
             try:

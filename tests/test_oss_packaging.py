@@ -241,6 +241,31 @@ def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     assert "IDNA (BSD-3-Clause)" in notices
 
 
+def test_tier3_direct_dependencies_have_complete_license_notices() -> None:
+    tier3 = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["tier3"]]
+    direct_packages = {
+        canonicalize_name(requirement.name)
+        for requirement in tier3
+        if canonicalize_name(requirement.name) != "skillevaluator"
+    }
+    expected_notices = {
+        "harbor": "Harbor (Apache-2.0)",
+        "mcp": "MCP (MIT)",
+        "pyjwt": "PyJWT (MIT)",
+    }
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+
+    assert direct_packages == expected_notices.keys()
+    assert all(notice in notices for notice in expected_notices.values())
+
+
+def test_public_docker_docs_explain_project_dotenv_rejection() -> None:
+    agents_and_sandboxes = (REPO_ROOT / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8")
+
+    assert "Docker Compose project `.env` files are rejected before startup" in agents_and_sandboxes
+    assert "`harbor.runtime_env`" in agents_and_sandboxes
+
+
 def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -> None:
     project = _project()
     lock = _lock()

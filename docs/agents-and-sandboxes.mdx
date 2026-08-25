@@ -196,6 +196,13 @@ Environment rules — size limits, auto-generated fallbacks, and sidecar
 containers — are part of the `evals/` contract in
 [Eval Datasets](eval-datasets.mdx).
 
+Docker Compose project `.env` files are rejected before startup. Protected
+main-container and sidecar operations disable Compose's implicit env-file
+loading so the same definition cannot start with one interpolation value and
+later run with another. Put non-secret interpolation values in
+`harbor.runtime_env` in `evals/config.yml`; keep operator credentials in the
+host environment as described above.
+
 ## Local mode
 
 <Warning>

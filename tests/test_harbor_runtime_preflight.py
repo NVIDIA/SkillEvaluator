@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1329,21 +1328,22 @@ def test_bedrock_model_probe_allows_distinct_routes_to_overlap(monkeypatch) -> N
 
 def test_bedrock_model_probe_deadline_covers_blocked_credential_provider(monkeypatch) -> None:
     release = Event()
+    credential_provider_finished = Event()
     existing_threads = {id(thread) for thread in enumerate_threads()}
 
     class Session:
         def __init__(self):
             release.wait(timeout=1)
+            credential_provider_finished.set()
 
         def client(self, *_args, **_kwargs):
             raise AssertionError("client creation must remain inside the deadline worker")
 
     monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
     provider = ProviderConfig("bedrock", "model", None, None, "bedrock/model", region="us-west-2")
-    started = time.monotonic()
     try:
         result = runtime_preflight.probe_model(provider, timeout_seconds=0.02)
-        elapsed = time.monotonic() - started
+        credential_provider_finished_before_release = credential_provider_finished.is_set()
     finally:
         release.set()
         for thread in enumerate_threads():
@@ -1353,7 +1353,7 @@ def test_bedrock_model_probe_deadline_covers_blocked_credential_provider(monkeyp
     assert result.ok is False
     assert result.failure_kind == "unavailable"
     assert "timed out" in result.detail
-    assert elapsed < 0.15
+    assert credential_provider_finished_before_release is False
 
 
 def test_bedrock_model_probe_deadline_caps_blocked_workers(monkeypatch) -> None:

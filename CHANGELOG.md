@@ -4,6 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
+  the results directory is not visible to the Docker daemon. Previously the smoke
+  run passed -- agent output travels over the Docker exec API rather than through
+  the mounts -- and every scored trial then failed with `RewardFileNotFoundError`
+  while the rewards sat inside the daemon's own filesystem.
+
 ## 0.2.1 - 2026-08-24
 
 ### Added

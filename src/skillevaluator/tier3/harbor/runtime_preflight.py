@@ -94,10 +94,36 @@ def _first_trial_exception_detail(job_dir: Path) -> str:
     return ""
 
 
+def _mounted_agent_artifacts_present(job_dir: Path) -> bool:
+    """Return whether any trial exposed agent artifacts on the host filesystem.
+
+    Harbor bind-mounts the trial's ``agent`` directory into the container, so a
+    completed agent run always leaves at least one non-empty file there. An empty
+    tree means the daemon resolved the mount source on its own machine and the
+    host never received the writes.
+    """
+    try:
+        trial_dirs = [child for child in job_dir.iterdir() if child.is_dir()]
+    except OSError:
+        return False
+    for trial_dir in trial_dirs:
+        agent_dir = trial_dir / "agent"
+        if not agent_dir.is_dir():
+            continue
+        try:
+            for entry in agent_dir.rglob("*"):
+                if entry.is_file() and entry.stat().st_size > 0:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def validate_harbor_agent_only_job_result(
     result_path: Path,
     *,
     expected_trials: int,
+    env_mode: str | None = None,
 ) -> tuple[bool, str]:
     """Validate a verification-disabled Harbor job and its agent result.
 
@@ -231,6 +257,16 @@ def validate_harbor_agent_only_job_result(
                     f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} has no agent result"
                 )
 
+    if env_mode == "docker" and not _mounted_agent_artifacts_present(job_dir):
+        return False, (
+            f"Harbor reported a completed agent run but left no agent artifacts under {job_dir}, "
+            "so the results directory is not visible to the Docker daemon. Container writes go to a "
+            "bind mount whose source the daemon resolves on its own machine, so a path outside the "
+            "daemon's shared roots becomes an empty directory there and no reward or agent file ever "
+            "reaches the host. Use a results directory the daemon shares -- colima and Lima mount only "
+            "$HOME by default -- or add this path to the daemon's file sharing configuration."
+        )
+
     return True, ""
 
 
@@ -337,5 +373,6 @@ def run_agent_runtime_preflight(
     ok, detail = validate_harbor_agent_only_job_result(
         jobs_dir / job_name / "result.json",
         expected_trials=1,
+        env_mode=env_mode,
     )
     return PreflightResult(ok, agent, model, _redact_detail(detail, run_env), job_name)

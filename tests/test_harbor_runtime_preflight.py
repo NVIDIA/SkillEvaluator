@@ -118,7 +118,11 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
 
 def test_runtime_preflight_accepts_harbor_0132_unscored_agent_success(monkeypatch, tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
-    _write_harbor_0132_unscored_result(jobs_dir)
+    result_path = _write_harbor_0132_unscored_result(jobs_dir)
+    # A real completed agent run always leaves its transcript on the mounted host path.
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
     monkeypatch.setattr(runtime_preflight, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
     monkeypatch.setattr(
         runtime_preflight.subprocess,
@@ -737,3 +741,52 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
     assert result["harbor_jobs_retention_reason"] == "not_retained"
     assert not (Path(result["run_dir"]) / "_harbor-jobs").exists()
     assert not (Path(result["run_dir"]) / "_harbor-tasks").exists()
+
+
+def test_agent_only_validation_accepts_visible_agent_artifacts_in_docker_mode(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    ) == (True, "")
+
+
+def test_agent_only_validation_rejects_invisible_agent_artifacts_in_docker_mode(tmp_path: Path) -> None:
+    """An empty host-side agent tree means the daemon never shared the results directory."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    # Harbor creates the mount points, but a daemon-side bind source leaves them empty.
+    (result_path.parent / "case-001__attempt" / "agent" / "setup").mkdir(parents=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_skips_mount_check_outside_docker_mode(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    (result_path.parent / "case-001__attempt" / "agent" / "setup").mkdir(parents=True)
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="local"
+    ) == (True, "")
+
+
+def test_agent_only_validation_ignores_empty_files_when_checking_visibility(tmp_path: Path) -> None:
+    """A zero-byte placeholder is not evidence that container writes reached the host."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("", encoding="utf-8")
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail

@@ -2534,7 +2534,7 @@ def test_sidecar_retains_structurally_required_nonsecret_host_compose_value(
     ("required_name", "required_value"),
     [
         ("API_TOKEN", "compose-required-api-token-secret"),
-        ("NVIDIA_INFERENCE_KEY", "short7"),
+        ("SIDECAR_API_KEY", "short7"),
         ("DOCKER_HOST", "tcp://compose-target.invalid:2376"),
         ("HELPER_IMAGE", "prefix:compose-wrapped-secret:suffix"),
     ],

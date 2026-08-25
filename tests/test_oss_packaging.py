@@ -144,9 +144,7 @@ def test_harbor_022_dependency_contract_keeps_base_install_isolated() -> None:
     assert litellm_specifier.contains(Version("1.93.0"), prereleases=True)
     assert not litellm_specifier.contains(Version("1.94.0.dev0"), prereleases=True)
     declared_names = base_names | {
-        canonicalize_name(Requirement(raw).name)
-        for requirements in extras.values()
-        for raw in requirements
+        canonicalize_name(Requirement(raw).name) for requirements in extras.values() for raw in requirements
     }
     assert "claude-agent-sdk" not in declared_names
 
@@ -626,6 +624,23 @@ def test_tier3_docs_explain_cost_controls_and_local_mode_tradeoffs() -> None:
     assert "--env-mode local" in tier3
     assert "does **not** automatically eliminate model charges" in tier3
     assert "weaker isolation than Docker" in tier3
+
+
+def test_tier3_docs_name_the_supported_harbor_backend_version() -> None:
+    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(tier3.split())
+
+    assert "The `tier3` extra installs Harbor 0.22.0" in normalized
+    assert "0.13.2" not in normalized
+
+
+def test_tier3_docs_describe_the_current_nvidia_build_docker_handoff() -> None:
+    sandboxes = (REPO_ROOT / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(sandboxes.split())
+
+    assert "host-only key file" not in normalized
+    assert "trusted parent process over stdin" in normalized
+    assert "short-lived, container-only stdin handoff" in normalized
 
 
 def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:

@@ -4,6 +4,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Upgraded the optional Tier 3 backend to Harbor 0.22.0 and its compatible
+  LiteLLM 1.92-1.93 window. Existing SkillEvaluator agent and environment
+  options now use Harbor's unified selectors; installed Codex adapters preserve
+  merged user and MCP configuration; Docker and local execution stream redacted
+  callbacks; and Docker supports stdin plus isolated sidecar operations without
+  exposing environment values on Compose argv. Generated schema 1.3 and
+  unmodified native task schemas remain compatible, while collection accepts
+  Harbor 0.22 job, trial, reward, and ATIF v1.7 artifacts.
+
 ### Fixed
 
 - Tier 3 paired pass@k evidence now respects Python's active integer-string

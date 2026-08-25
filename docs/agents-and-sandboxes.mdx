@@ -91,8 +91,10 @@ silently, and an unavailable model fails the run rather than falling back.
 
 The bridged CLIs — Codex and Claude Code — never see the real Build key:
 
-- **Docker mode** hands the key to the trial through a host-only key file —
-  values never appear on `docker exec` argv.
+- **Docker mode** passes the key to Harbor's trusted parent process over stdin,
+  then uses a short-lived, container-only stdin handoff for each main-container
+  exec. The handoff is removed before the agent command runs, and values never
+  appear on Docker Compose argv.
 - **Local mode** keeps the real key in Harbor's trusted parent process; each
   bridged CLI receives a unique per-trial capability token that only the
   loopback bridge accepts.

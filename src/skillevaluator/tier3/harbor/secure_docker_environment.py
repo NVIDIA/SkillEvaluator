@@ -14,21 +14,24 @@ through a short-lived container handoff removed before the requested command.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import contextvars
+import math
 import os
 import re
 import shlex
 import shutil
 import signal
 import stat
+import tarfile
 import tempfile
 import unicodedata
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -41,11 +44,13 @@ from harbor.environments.base import (
 )
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
 
+from skillevaluator.tier3.harbor.secure_copy import copy_file_secure, copytree_secure
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_KEY_STDIN_ENV,
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
 )
+from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
 SECURE_DOCKER_ENV_IMPORT_PATH = (
     "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureDockerEnvironment"
@@ -75,6 +80,20 @@ _MAX_COMPOSE_MODEL_FILES = 64
 _MAX_COMPOSE_MODEL_BYTES = 8 * 1024 * 1024
 _MAX_COMPOSE_MODEL_NODES = 100_000
 _MAX_COMPOSE_MODEL_DEPTH = 128
+_WINDOWS_TRANSFER_IDLE_TIMEOUT_SECONDS = 300.0
+_WINDOWS_TRANSFER_POLL_SECONDS = 0.1
+_WINDOWS_TRANSFER_STDERR_MAX_BYTES = 1024 * 1024
+_WINDOWS_TAR_MAX_MEMBERS = 100_000
+_WINDOWS_TAR_MAX_PATH_BYTES = 8 * 1024 * 1024
+_WINDOWS_TAR_MAX_DEPTH = 128
+_WINDOWS_TAR_MAX_EXTENSION_BYTES = 1024 * 1024
+_WINDOWS_TAR_MAX_TOTAL_EXTENSION_BYTES = 8 * 1024 * 1024
+_WINDOWS_TAR_DISK_RESERVE_BYTES = 512 * 1024 * 1024
+_TAR_BLOCK_BYTES = 512
+_WINDOWS_RESERVED_NAME_RE = re.compile(
+    r"(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])",
+    re.IGNORECASE,
+)
 _REDACTION_LABEL = "[REDACTED]"
 _REDACTION_SENTINEL_CANDIDATES = ("␟", "␞", "␝", "␜", "")
 
@@ -717,6 +736,199 @@ def _render_environment_script(environment: Mapping[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidatedTarMember:
+    canonical_parts: tuple[str, ...]
+    kind: str
+    size: int
+
+
+def _prescan_uncompressed_tar_archive(archive_path: Path) -> None:
+    """Bound tar metadata before ``tarfile`` is allowed to allocate it."""
+    extension_types = {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    }
+    archive_size = archive_path.stat().st_size
+    raw_members = 0
+    extension_bytes = 0
+    saw_zero_block = False
+    with archive_path.open("rb") as archive:
+        while archive.tell() < archive_size:
+            header = archive.read(_TAR_BLOCK_BYTES)
+            if len(header) != _TAR_BLOCK_BYTES:
+                raise ValueError
+            if not any(header):
+                if saw_zero_block:
+                    while remainder := archive.read(64 * 1024):
+                        if any(remainder):
+                            raise ValueError
+                    return
+                saw_zero_block = True
+                continue
+            if saw_zero_block:
+                raise ValueError
+            try:
+                member = tarfile.TarInfo.frombuf(
+                    header,
+                    encoding="utf-8",
+                    errors="surrogateescape",
+                )
+            except (tarfile.HeaderError, ValueError):
+                raise ValueError from None
+            raw_members += 1
+            if raw_members > _WINDOWS_TAR_MAX_MEMBERS:
+                raise ValueError
+            if member.size < 0 or member.type == tarfile.GNUTYPE_SPARSE:
+                raise ValueError
+            if member.type in extension_types:
+                if member.size > _WINDOWS_TAR_MAX_EXTENSION_BYTES:
+                    raise ValueError
+                extension_bytes += member.size
+                if extension_bytes > _WINDOWS_TAR_MAX_TOTAL_EXTENSION_BYTES:
+                    raise ValueError
+            padded_size = ((member.size + _TAR_BLOCK_BYTES - 1) // _TAR_BLOCK_BYTES) * _TAR_BLOCK_BYTES
+            if archive.tell() + padded_size > archive_size:
+                raise ValueError
+            archive.seek(padded_size, os.SEEK_CUR)
+    raise ValueError
+
+
+def _validated_windows_tar_member(
+    member: tarfile.TarInfo,
+    target: Path,
+) -> _ValidatedTarMember | None:
+    """Return one collision-safe Windows pathname or reject the member."""
+    name = member.name
+    if not name or "\x00" in name or "\\" in name:
+        raise ValueError
+    declared = PurePosixPath(name)
+    if declared.is_absolute():
+        raise ValueError
+
+    spelling = name[:-1] if member.isdir() and name.endswith("/") else name
+    raw_parts = spelling.split("/")
+    while raw_parts and raw_parts[0] == ".":
+        raw_parts.pop(0)
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise ValueError
+    if not raw_parts:
+        if not member.isdir():
+            raise ValueError
+        return None
+    if len(raw_parts) > _WINDOWS_TAR_MAX_DEPTH:
+        raise ValueError
+
+    canonical_parts: list[str] = []
+    for part in raw_parts:
+        if part.endswith((" ", ".")) or ":" in part:
+            raise ValueError
+        normalized = unicodedata.normalize("NFC", part)
+        try:
+            normalized.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise ValueError from None
+        reserved_stem = normalized.split(".", maxsplit=1)[0]
+        if _WINDOWS_RESERVED_NAME_RE.fullmatch(reserved_stem):
+            raise ValueError
+        canonical_parts.append(normalized.casefold())
+
+    filtered = tarfile.data_filter(member, str(target))
+    if filtered is None or getattr(filtered, "sparse", None):
+        raise ValueError
+    if filtered.isdir():
+        kind = "directory"
+    elif filtered.isfile() and filtered.size >= 0:
+        kind = "file"
+    else:
+        raise ValueError
+    return _ValidatedTarMember(tuple(canonical_parts), kind, filtered.size)
+
+
+def _extract_regular_tar_archive(archive_path: Path, target_dir: Path | str) -> None:
+    """Validate a disk-backed container archive, then extract it privately."""
+    target = Path(target_dir)
+    try:
+        expected_target = target.lstat()
+        if stat_is_link_or_reparse(expected_target) or not stat.S_ISDIR(expected_target.st_mode):
+            raise ValueError
+        archive_metadata = archive_path.lstat()
+        if (
+            stat_is_link_or_reparse(archive_metadata)
+            or not stat.S_ISREG(archive_metadata.st_mode)
+            or archive_metadata.st_nlink != 1
+        ):
+            raise ValueError
+        _prescan_uncompressed_tar_archive(archive_path)
+
+        manifest: list[_ValidatedTarMember] = []
+        member_kinds: dict[tuple[str, ...], str] = {}
+        required_directories: set[tuple[str, ...]] = set()
+        path_bytes = 0
+        total_file_bytes = 0
+        with tarfile.open(archive_path, mode="r:", errorlevel=2) as archive:
+            for member in archive:
+                validated = _validated_windows_tar_member(member, target)
+                archive.members.clear()
+                if validated is None:
+                    continue
+                path_bytes += sum(len(part.encode("utf-8")) for part in validated.canonical_parts)
+                if len(manifest) >= _WINDOWS_TAR_MAX_MEMBERS or path_bytes > _WINDOWS_TAR_MAX_PATH_BYTES:
+                    raise ValueError
+                key = validated.canonical_parts
+                if key in member_kinds:
+                    raise ValueError
+                for depth in range(1, len(key)):
+                    prefix = key[:depth]
+                    if member_kinds.get(prefix) == "file":
+                        raise ValueError
+                    required_directories.add(prefix)
+                if validated.kind == "file":
+                    if key in required_directories:
+                        raise ValueError
+                    total_file_bytes += validated.size
+                member_kinds[key] = validated.kind
+                manifest.append(validated)
+
+        free_bytes = shutil.disk_usage(target).free
+        reserve_bytes = min(
+            _WINDOWS_TAR_DISK_RESERVE_BYTES,
+            max(64 * 1024 * 1024, free_bytes // 20),
+        )
+        if total_file_bytes > max(0, free_bytes - reserve_bytes):
+            raise ValueError
+
+        extracted_index = 0
+        with tarfile.open(archive_path, mode="r|", errorlevel=2) as archive:
+            for member in archive:
+                validated = _validated_windows_tar_member(member, target)
+                archive.members.clear()
+                if validated is None:
+                    continue
+                if extracted_index >= len(manifest) or validated != manifest[extracted_index]:
+                    raise ValueError
+                archive.extract(member, path=target, filter="data")
+                extracted_index += 1
+        if extracted_index != len(manifest):
+            raise ValueError
+
+        observed_target = target.lstat()
+        observed_archive = archive_path.lstat()
+        if (
+            stat_is_link_or_reparse(observed_target)
+            or not stat.S_ISDIR(observed_target.st_mode)
+            or not os.path.samestat(expected_target, observed_target)
+            or stat_is_link_or_reparse(observed_archive)
+            or not stat.S_ISREG(observed_archive.st_mode)
+            or not os.path.samestat(archive_metadata, observed_archive)
+        ):
+            raise ValueError
+    except (OSError, tarfile.TarError, UnicodeError, ValueError):
+        raise RuntimeError("unsafe Windows container download archive") from None
+
+
 class SkillEvaluatorDockerEnvironment(DockerEnvironment):
     """Pinned Harbor compatibility backend with host-visible argv safety."""
 
@@ -726,6 +938,75 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         if os.environ.get("NVIDIA_API_KEY", "").strip() == NVIDIA_BUILD_STDIN_SENTINEL:
             read_nvidia_build_key_from_stdin()
         super().preflight()
+
+    async def start(self, force_build: bool) -> None:
+        """Reject unsupported Compose inputs before Docker mutates a project."""
+        self._compose_model_metadata()
+        await super().start(force_build)
+
+    @staticmethod
+    async def _collect_streamed_output(
+        process: asyncio.subprocess.Process,
+        *,
+        timeout_sec: int | None,
+        stdin_data: bytes | None = None,
+        on_output: OutputCallback,
+    ) -> ExecResult:
+        """Stream bounded chunks without asyncio's newline-size limit."""
+        stdout_stream = process.stdout
+        if stdout_stream is None:
+            raise RuntimeError("Streaming requires a captured stdout pipe")
+        chunks: list[bytes] = []
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+        async def write_stdin() -> None:
+            if stdin_data is None:
+                return
+            stdin = process.stdin
+            if stdin is None:
+                raise RuntimeError("stdin_data requires a stdin pipe")
+            stdin.write(stdin_data)
+            await stdin.drain()
+            stdin.close()
+            await stdin.wait_closed()
+
+        async def read_stdout_and_wait() -> None:
+            while raw_chunk := await stdout_stream.read(64 * 1024):
+                chunks.append(raw_chunk)
+                if text := decoder.decode(raw_chunk):
+                    await on_output(text, "stdout")
+                await asyncio.sleep(0)
+            if text := decoder.decode(b"", final=True):
+                await on_output(text, "stdout")
+            await process.wait()
+
+        async def read_and_wait() -> None:
+            if stdin_data is not None:
+                async with asyncio.TaskGroup() as task_group:
+                    task_group.create_task(write_stdin())
+                    task_group.create_task(read_stdout_and_wait())
+            else:
+                await read_stdout_and_wait()
+
+        try:
+            if timeout_sec:
+                await asyncio.wait_for(read_and_wait(), timeout=timeout_sec)
+            else:
+                await read_and_wait()
+        except TimeoutError:
+            await DockerEnvironment._terminate_process(process)
+            raise RuntimeError(f"Command timed out after {timeout_sec} seconds") from None
+        except BaseException:
+            if process.returncode is None:
+                await DockerEnvironment._terminate_process(process)
+            raise
+
+        stdout = b"".join(chunks).decode(errors="replace")
+        return ExecResult(
+            stdout=stdout or None,
+            stderr=None,
+            return_code=process.returncode or 0,
+        )
 
     def _trusted_docker_client_environment(self) -> dict[str, str]:
         """Build a host-only Docker CLI environment without Compose/task state."""
@@ -1356,6 +1637,17 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         closed for dynamic or external include/extends inputs.
         """
         environment_root = self.environment_dir.resolve()
+        try:
+            (environment_root / ".env").lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise RuntimeError("could not inspect Docker Compose interpolation inputs") from exc
+        else:
+            raise RuntimeError(
+                "Docker Compose project .env files are not supported; "
+                "declare interpolation values through the Harbor task environment"
+            )
         root_paths = [path.resolve() for path in self._docker_compose_paths]
         pending_models = [(path, environment_root) for path in root_paths]
         trusted_roots = {environment_root, *(path.parent for path in root_paths)}
@@ -1675,16 +1967,36 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
 
         if service == MAIN_SERVICE_NAME and self._is_windows_container:
             with tempfile.TemporaryDirectory() as temporary_directory:
+                normalized_source = source_path.replace("\\", "/")
+                declared_source = PurePosixPath(normalized_source)
+                if not declared_source.name or declared_source.name in {".", ".."}:
+                    raise RuntimeError("requested Windows container download path is invalid")
                 await self._secure_windows_download_dir(
-                    str(Path(source_path).parent).replace("\\", "/"),
+                    str(declared_source.parent),
                     temporary_directory,
                     excluded_names=excluded_names,
                     excluded_values=excluded_values,
+                    archive_members=(declared_source.name,),
                 )
-                downloaded = Path(temporary_directory) / Path(source_path).name
-                if not downloaded.is_file():
-                    raise RuntimeError("requested file was not present in the Windows container download")
-                shutil.copy2(downloaded, target_path)
+                downloaded = Path(temporary_directory) / declared_source.name
+                try:
+                    downloaded_metadata = downloaded.lstat()
+                except OSError:
+                    raise RuntimeError("requested file was not present in the Windows container download") from None
+                if (
+                    stat_is_link_or_reparse(downloaded_metadata)
+                    or not stat.S_ISREG(downloaded_metadata.st_mode)
+                    or downloaded_metadata.st_nlink != 1
+                ):
+                    raise RuntimeError("requested Windows container download was not a regular file")
+                try:
+                    copy_file_secure(
+                        downloaded,
+                        Path(target_path),
+                        allowed_root=downloaded.parent,
+                    )
+                except (OSError, ValueError):
+                    raise RuntimeError("requested Windows container download could not be copied safely") from None
             return
 
         async def download() -> None:
@@ -1723,7 +2035,6 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         excluded_names, excluded_values = self._main_only_compose_environment()
 
         if service == MAIN_SERVICE_NAME and self._is_windows_container:
-            Path(target_dir).mkdir(parents=True, exist_ok=True)
             await self._secure_windows_download_dir(
                 source_dir,
                 target_dir,
@@ -1762,46 +2073,173 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         *,
         process_environment: Mapping[str, str],
         protected_values: set[str],
-        stdin_data: bytes | None = None,
-    ) -> bytes:
-        executable = shutil.which(command[0])
+        output_path: Path,
+        idle_timeout_sec: float = _WINDOWS_TRANSFER_IDLE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Stream untrusted transfer output to disk with idle and cleanup bounds."""
+        if not math.isfinite(idle_timeout_sec) or idle_timeout_sec <= 0:
+            raise ValueError("idle_timeout_sec must be a positive finite value")
+        executable = shutil.which(command[0], path=process_environment.get("PATH"))
         if executable is None:
             raise RuntimeError(f"required host transfer executable {command[0]!r} was not found")
         full_command = [executable, *command[1:]]
-        creation = asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                *full_command,
-                env=dict(process_environment),
-                stdin=(asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=os.name == "posix",
-            )
-        )
+        output_created = False
         try:
-            process = await asyncio.shield(creation)
-        except asyncio.CancelledError:
-            process = await _await_task_uninterruptibly(creation, preserve_cancellation=False)
-            communication = asyncio.create_task(process.communicate(input=stdin_data))
-            await _terminate_process_tree(process, communication, preserve_cancellation=False)
-            raise
-
-        communication = asyncio.create_task(process.communicate(input=stdin_data))
-        try:
-            stdout, stderr = await asyncio.shield(communication)
-        except asyncio.CancelledError:
-            await _terminate_process_tree(process, communication, preserve_cancellation=False)
-            raise
-        if process.returncode != 0:
-            detail = b"\n".join(part for part in (stdout, stderr) if part).decode(errors="replace")
-            raise RuntimeError(
-                _redact(
-                    "secure Windows container transfer command failed: " + detail,
-                    protected_values,
-                    include_short=True,
+            stdout_handle = output_path.open("xb", buffering=0)
+            output_created = True
+            with (
+                stdout_handle as stdout_file,
+                tempfile.TemporaryFile(mode="w+b", buffering=0) as stderr_file,
+            ):
+                creation = asyncio.create_task(
+                    asyncio.create_subprocess_exec(
+                        *full_command,
+                        env=dict(process_environment),
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        start_new_session=os.name == "posix",
+                    )
                 )
-            )
-        return stdout or b""
+                try:
+                    process = await asyncio.wait_for(
+                        asyncio.shield(creation),
+                        timeout=_RAW_DOCKER_COMMAND_TIMEOUT_SECONDS,
+                    )
+                except (TimeoutError, asyncio.CancelledError) as primary_error:
+
+                    async def reap_late_creation(
+                        completed_creation: asyncio.Task[asyncio.subprocess.Process],
+                    ) -> None:
+                        try:
+                            late_process = completed_creation.result()
+                        except BaseException:
+                            return
+                        late_wait = asyncio.create_task(late_process.wait())
+                        await _terminate_process_tree(
+                            late_process,
+                            late_wait,
+                            preserve_cancellation=False,
+                        )
+
+                    def schedule_late_reap(
+                        completed_creation: asyncio.Task[asyncio.subprocess.Process],
+                    ) -> None:
+                        late_cleanup = asyncio.create_task(reap_late_creation(completed_creation))
+
+                        def report_late_cleanup_failure(
+                            completed_cleanup: asyncio.Task[None],
+                        ) -> None:
+                            try:
+                                completed_cleanup.result()
+                            except BaseException as exc:
+                                asyncio.get_running_loop().call_exception_handler(
+                                    {
+                                        "message": "late Windows transfer client cleanup failed",
+                                        "exception": exc,
+                                        "task": completed_cleanup,
+                                    }
+                                )
+
+                        late_cleanup.add_done_callback(report_late_cleanup_failure)
+
+                    async def cancel_creation_race() -> tuple[
+                        asyncio.subprocess.Process | None,
+                        bool,
+                    ]:
+                        creation.cancel()
+                        done, _pending = await asyncio.wait(
+                            {creation},
+                            timeout=_COMPOSE_CANCEL_SECONDS,
+                        )
+                        if creation not in done:
+                            creation.add_done_callback(schedule_late_reap)
+                            return None, False
+                        try:
+                            return creation.result(), True
+                        except BaseException:
+                            return None, True
+
+                    cancellation = asyncio.create_task(cancel_creation_race())
+                    process, creation_resolved = await _await_task_uninterruptibly(
+                        cancellation,
+                        preserve_cancellation=False,
+                    )
+                    if process is not None:
+                        process_wait = asyncio.create_task(process.wait())
+                        await _terminate_process_tree(
+                            process,
+                            process_wait,
+                            preserve_cancellation=False,
+                        )
+                    if not creation_resolved:
+                        primary_error.add_note(
+                            "Windows transfer process creation cancellation remained pending; "
+                            "a late-process reaper was installed"
+                        )
+                    if isinstance(primary_error, TimeoutError):
+                        raise RuntimeError("secure Windows container transfer process creation timed out") from primary_error
+                    raise
+
+                process_wait = asyncio.create_task(process.wait())
+                try:
+                    loop = asyncio.get_running_loop()
+                    idle_deadline = loop.time() + idle_timeout_sec
+                    last_sizes = (
+                        os.fstat(stdout_file.fileno()).st_size,
+                        os.fstat(stderr_file.fileno()).st_size,
+                    )
+                    while True:
+                        done, _pending = await asyncio.wait(
+                            {process_wait},
+                            timeout=min(
+                                _WINDOWS_TRANSFER_POLL_SECONDS,
+                                max(0.001, idle_deadline - loop.time()),
+                            ),
+                        )
+                        if process_wait in done:
+                            break
+                        current_sizes = (
+                            os.fstat(stdout_file.fileno()).st_size,
+                            os.fstat(stderr_file.fileno()).st_size,
+                        )
+                        if current_sizes != last_sizes:
+                            last_sizes = current_sizes
+                            idle_deadline = loop.time() + idle_timeout_sec
+                        elif loop.time() >= idle_deadline:
+                            raise _ComposeCommandTimeout
+                    process_wait.result()
+                except BaseException as primary_error:
+                    await _terminate_process_tree(
+                        process,
+                        process_wait,
+                        preserve_cancellation=False,
+                    )
+                    if isinstance(primary_error, _ComposeCommandTimeout):
+                        raise RuntimeError(
+                            "secure Windows container transfer command timed out while idle"
+                        ) from primary_error
+                    raise
+
+                if process.returncode != 0:
+                    stderr_size = os.fstat(stderr_file.fileno()).st_size
+                    stderr_file.seek(max(0, stderr_size - _WINDOWS_TRANSFER_STDERR_MAX_BYTES))
+                    stderr = stderr_file.read(_WINDOWS_TRANSFER_STDERR_MAX_BYTES)
+                    if stderr_size > len(stderr):
+                        stderr = b"[earlier transfer diagnostics truncated]\n" + stderr
+                    detail = stderr.decode(errors="replace")
+                    raise RuntimeError(
+                        _redact(
+                            "secure Windows container transfer command failed: " + detail,
+                            protected_values,
+                            include_short=True,
+                        )
+                    )
+        except BaseException:
+            if output_created:
+                with contextlib.suppress(OSError):
+                    output_path.unlink()
+            raise
 
     async def _secure_windows_download_dir(
         self,
@@ -1810,6 +2248,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         *,
         excluded_names: set[str],
         excluded_values: set[str],
+        archive_members: tuple[str, ...] = (".",),
     ) -> None:
         container_name = self._windows_container_name
         if not container_name or not _COMPOSE_SERVICE_NAME_RE.fullmatch(container_name):
@@ -1818,28 +2257,36 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             excluded_names=excluded_names,
             excluded_values=excluded_values,
         )
-        tar_data = await self._run_trusted_transfer_command(
-            [
-                "docker",
-                "exec",
-                "--",
-                container_name,
-                "tar",
-                "cf",
-                "-",
-                "-C",
-                source_dir,
-                ".",
-            ],
-            process_environment=process_environment,
-            protected_values=excluded_values,
-        )
-        await self._run_trusted_transfer_command(
-            ["tar", "xf", "-", "-C", str(target_dir)],
-            process_environment=process_environment,
-            protected_values=excluded_values,
-            stdin_data=tar_data,
-        )
+        with tempfile.TemporaryDirectory(prefix="skillevaluator-windows-download-") as temporary_directory:
+            private_root = Path(temporary_directory)
+            archive_path = private_root / "container.tar"
+            extracted = private_root / "extracted"
+            extracted.mkdir(mode=0o700)
+            await self._run_trusted_transfer_command(
+                [
+                    "docker",
+                    "exec",
+                    "--",
+                    container_name,
+                    "tar",
+                    "cf",
+                    "-",
+                    "-C",
+                    source_dir,
+                    "--",
+                    *archive_members,
+                ],
+                process_environment=process_environment,
+                protected_values=excluded_values,
+                output_path=archive_path,
+            )
+            _extract_regular_tar_archive(archive_path, extracted)
+            copytree_secure(
+                extracted,
+                Path(target_dir),
+                dirs_exist_ok=True,
+                allowed_root=extracted,
+            )
 
     async def service_exec(
         self,

@@ -119,6 +119,54 @@ def test_public_extras_use_public_dependency_sources() -> None:
     )
 
 
+def test_harbor_022_dependency_contract_keeps_base_install_isolated() -> None:
+    project = _project()
+    extras = project["project"]["optional-dependencies"]
+    base_requirements = [Requirement(raw) for raw in project["project"]["dependencies"]]
+    llm_requirements = [Requirement(raw) for raw in extras["llm"]]
+    tier3_requirements = [Requirement(raw) for raw in extras["tier3"]]
+
+    base_names = {canonicalize_name(requirement.name) for requirement in base_requirements}
+    harbor_requirements = [
+        requirement for requirement in tier3_requirements if canonicalize_name(requirement.name) == "harbor"
+    ]
+    litellm_requirements = [
+        requirement for requirement in llm_requirements if canonicalize_name(requirement.name) == "litellm"
+    ]
+
+    assert base_names.isdisjoint({"harbor", "litellm"})
+    assert len(harbor_requirements) == 1
+    assert not harbor_requirements[0].extras
+    assert str(harbor_requirements[0].specifier) == "==0.22.0"
+    assert len(litellm_requirements) == 1
+    litellm_specifier = litellm_requirements[0].specifier
+    assert litellm_specifier.contains(Version("1.92.0"), prereleases=True)
+    assert litellm_specifier.contains(Version("1.93.0"), prereleases=True)
+    assert not litellm_specifier.contains(Version("1.94.0.dev0"), prereleases=True)
+    declared_names = base_names | {
+        canonicalize_name(Requirement(raw).name)
+        for requirements in extras.values()
+        for raw in requirements
+    }
+    assert "claude-agent-sdk" not in declared_names
+
+    lock = _lock()
+    locked_versions = {
+        name: [Version(package["version"]) for package in lock["package"] if package["name"] == name]
+        for name in ("harbor", "litellm")
+    }
+    assert locked_versions["harbor"] == [Version("0.22.0")]
+    assert len(locked_versions["litellm"]) == 1
+    assert litellm_specifier.contains(locked_versions["litellm"][0], prereleases=True)
+
+    root_lock = next(package for package in lock["package"] if package["name"] == "skillevaluator")
+    locked_requirements = root_lock["metadata"]["requires-dist"]
+    locked_harbor = [requirement for requirement in locked_requirements if requirement["name"] == "harbor"]
+    locked_litellm = [requirement for requirement in locked_requirements if requirement["name"] == "litellm"]
+    assert [requirement["specifier"] for requirement in locked_harbor] == ["==0.22.0"]
+    assert [requirement["specifier"] for requirement in locked_litellm] == [">=1.92.0,<1.94.0.dev0"]
+
+
 def test_public_extras_exclude_internal_runtime_dependencies() -> None:
     project = _project()
     extras = project["project"]["optional-dependencies"]

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.classify_ci_changes import changed_paths, is_docs_only, main, parse_name_status_z
+from scripts.classify_ci_changes import changed_paths, is_docs_only, is_metadata_only, main, parse_name_status_z
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -25,6 +25,24 @@ def _commit(repo: Path, message: str) -> str:
     _git(repo, "add", "-A")
     _git(repo, "commit", "--quiet", "-m", message)
     return _git(repo, "rev-parse", "HEAD")
+
+
+def _write_skill(repo: Path, *, artifact: str | None = None, body: str = "Use the skill.\n") -> Path:
+    skill = repo / "skills" / "demo"
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo\n"
+        "description: Demo skill\n"
+        "metadata:\n"
+        "  owner: examples\n"
+        "---\n"
+        f"{body}",
+        encoding="utf-8",
+    )
+    if artifact:
+        (skill / artifact).write_text("# Existing Tier 3 evidence\n", encoding="utf-8")
+    return skill
 
 
 @pytest.fixture
@@ -124,8 +142,8 @@ def test_main_classifies_a_real_docs_only_diff(
 
     assert _classify(repo, base, head, output, monkeypatch) == 0
 
-    assert capsys.readouterr().out == "docs_only=true\n"
-    assert output.read_text(encoding="utf-8") == "docs_only=true\n"
+    assert capsys.readouterr().out == "docs_only=true\nmetadata_only=false\n"
+    assert output.read_text(encoding="utf-8") == "docs_only=true\nmetadata_only=false\n"
 
 
 def test_main_classifies_a_real_mixed_diff_as_full_ci(
@@ -142,8 +160,90 @@ def test_main_classifies_a_real_mixed_diff_as_full_ci(
 
     assert _classify(repo, base, head, output, monkeypatch) == 0
 
-    assert capsys.readouterr().out == "docs_only=false\n"
-    assert output.read_text(encoding="utf-8") == "docs_only=false\n"
+    assert capsys.readouterr().out == "docs_only=false\nmetadata_only=false\n"
+    assert output.read_text(encoding="utf-8") == "docs_only=false\nmetadata_only=false\n"
+
+
+@pytest.mark.parametrize("artifact", ["skill-card.md", "BENCHMARK.md"])
+def test_main_skips_tier3_for_existing_skill_metadata_only_changes(
+    git_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    artifact: str,
+) -> None:
+    repo, _ = git_repo
+    skill = _write_skill(repo, artifact=artifact)
+    base = _commit(repo, "add evaluated skill")
+    skill_file = skill / "SKILL.md"
+    skill_file.write_text(
+        skill_file.read_text(encoding="utf-8").replace("owner: examples", "owner: platform"),
+        encoding="utf-8",
+    )
+    head = _commit(repo, "change skill metadata")
+    paths = changed_paths(repo, base, head)
+    output = tmp_path / "github-output"
+
+    assert is_metadata_only(repo, base, head, paths) is True
+    assert _classify(repo, base, head, output, monkeypatch) == 0
+
+    assert capsys.readouterr().out == "docs_only=false\nmetadata_only=true\n"
+    assert output.read_text(encoding="utf-8") == "docs_only=false\nmetadata_only=true\n"
+
+
+def test_metadata_only_requires_preexisting_tier3_evidence(
+    git_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _ = git_repo
+    skill = _write_skill(repo)
+    base = _commit(repo, "add unevaluated skill")
+    skill_file = skill / "SKILL.md"
+    skill_file.write_text(
+        skill_file.read_text(encoding="utf-8").replace("owner: examples", "owner: platform"),
+        encoding="utf-8",
+    )
+    (skill / "BENCHMARK.md").write_text("# Newly added evidence\n", encoding="utf-8")
+    head = _commit(repo, "add metadata and evidence")
+    paths = changed_paths(repo, base, head)
+    output = tmp_path / "github-output"
+
+    # The head has a benchmark, but it was not present in the trusted baseline.
+    # It must not qualify the accompanying frontmatter edit for a Tier 3 skip.
+    assert is_metadata_only(repo, base, head, [b"skills/demo/SKILL.md"]) is False
+    assert is_metadata_only(repo, base, head, paths) is False
+    assert _classify(repo, base, head, output, monkeypatch) == 0
+    assert output.read_text(encoding="utf-8") == "docs_only=false\nmetadata_only=false\n"
+
+
+def test_metadata_only_rejects_a_skill_body_change(
+    git_repo: tuple[Path, str],
+) -> None:
+    repo, _ = git_repo
+    skill = _write_skill(repo, artifact="BENCHMARK.md")
+    base = _commit(repo, "add evaluated skill")
+    skill_file = skill / "SKILL.md"
+    skill_file.write_text(skill_file.read_text(encoding="utf-8") + "Changed instruction.\n", encoding="utf-8")
+    head = _commit(repo, "change skill instructions")
+
+    assert is_metadata_only(repo, base, head, changed_paths(repo, base, head)) is False
+
+
+def test_metadata_only_rejects_a_non_metadata_frontmatter_change(
+    git_repo: tuple[Path, str],
+) -> None:
+    repo, _ = git_repo
+    skill = _write_skill(repo, artifact="BENCHMARK.md")
+    base = _commit(repo, "add evaluated skill")
+    skill_file = skill / "SKILL.md"
+    skill_file.write_text(
+        skill_file.read_text(encoding="utf-8").replace("description: Demo skill", "description: Changed skill"),
+        encoding="utf-8",
+    )
+    head = _commit(repo, "change skill description")
+
+    assert is_metadata_only(repo, base, head, changed_paths(repo, base, head)) is False
 
 
 def test_main_treats_a_deleted_docs_file_as_docs_only(
@@ -156,7 +256,7 @@ def test_main_treats_a_deleted_docs_file_as_docs_only(
     head = _commit(repo, "delete docs")
 
     assert _classify(repo, base, head, tmp_path / "github-output", monkeypatch) == 0
-    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=true\n"
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=true\nmetadata_only=false\n"
 
 
 def test_main_checks_both_sides_of_a_rename(
@@ -170,7 +270,7 @@ def test_main_checks_both_sides_of_a_rename(
     head = _commit(repo, "rename out of docs")
 
     assert _classify(repo, base, head, tmp_path / "github-output", monkeypatch) == 0
-    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=false\n"
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=false\nmetadata_only=false\n"
 
 
 def test_main_treats_a_rename_within_docs_as_docs_only(
@@ -183,7 +283,7 @@ def test_main_treats_a_rename_within_docs_as_docs_only(
     head = _commit(repo, "rename within docs")
 
     assert _classify(repo, base, head, tmp_path / "github-output", monkeypatch) == 0
-    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=true\n"
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=true\nmetadata_only=false\n"
 
 
 def test_main_checks_the_source_of_a_rename_into_docs(
@@ -196,7 +296,7 @@ def test_main_checks_the_source_of_a_rename_into_docs(
     head = _commit(repo, "rename into docs")
 
     assert _classify(repo, base, head, tmp_path / "github-output", monkeypatch) == 0
-    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=false\n"
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=false\nmetadata_only=false\n"
 
 
 def test_changed_paths_detects_an_unmodified_copy_source_outside_docs(
@@ -228,7 +328,7 @@ def test_main_uses_the_merge_base_when_the_base_branch_advances(
     advanced_base = _commit(repo, "advance base")
 
     assert _classify(repo, advanced_base, feature_head, tmp_path / "github-output", monkeypatch) == 0
-    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=true\n"
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == "docs_only=true\nmetadata_only=false\n"
 
 
 @pytest.mark.parametrize("revision", ["0" * 40, "not-a-sha"])
@@ -245,9 +345,9 @@ def test_main_fails_closed_for_invalid_revisions(
     assert _classify(repo, revision, head, output, monkeypatch) == 0
 
     captured = capsys.readouterr()
-    assert captured.out == "docs_only=false\n"
+    assert captured.out == "docs_only=false\nmetadata_only=false\n"
     assert "falling back to full CI" in captured.err
-    assert output.read_text(encoding="utf-8") == "docs_only=false\n"
+    assert output.read_text(encoding="utf-8") == "docs_only=false\nmetadata_only=false\n"
 
 
 def test_main_fails_closed_for_an_empty_diff(
@@ -263,9 +363,9 @@ def test_main_fails_closed_for_an_empty_diff(
     assert _classify(repo, head, head, output, monkeypatch) == 0
 
     captured = capsys.readouterr()
-    assert captured.out == "docs_only=false\n"
+    assert captured.out == "docs_only=false\nmetadata_only=false\n"
     assert "no changed paths" in captured.err
-    assert output.read_text(encoding="utf-8") == "existing=value\ndocs_only=false\n"
+    assert output.read_text(encoding="utf-8") == "existing=value\ndocs_only=false\nmetadata_only=false\n"
 
 
 def test_main_fails_closed_outside_a_git_repository(
@@ -280,9 +380,9 @@ def test_main_fails_closed_outside_a_git_repository(
     assert _classify(tmp_path / "missing-repo", head, head, output, monkeypatch) == 0
 
     captured = capsys.readouterr()
-    assert captured.out == "docs_only=false\n"
+    assert captured.out == "docs_only=false\nmetadata_only=false\n"
     assert "falling back to full CI" in captured.err
-    assert output.read_text(encoding="utf-8") == "docs_only=false\n"
+    assert output.read_text(encoding="utf-8") == "docs_only=false\nmetadata_only=false\n"
 
 
 def test_cli_classifies_a_real_fern_only_diff(git_repo: tuple[Path, str], tmp_path: Path) -> None:
@@ -309,9 +409,9 @@ def test_cli_classifies_a_real_fern_only_diff(git_repo: tuple[Path, str], tmp_pa
         env={"GITHUB_OUTPUT": str(output)},
     )
 
-    assert result.stdout == "docs_only=true\n"
+    assert result.stdout == "docs_only=true\nmetadata_only=false\n"
     assert result.stderr == ""
-    assert output.read_text(encoding="utf-8") == "docs_only=true\n"
+    assert output.read_text(encoding="utf-8") == "docs_only=true\nmetadata_only=false\n"
 
 
 def test_output_write_failure_is_not_silently_downgraded(

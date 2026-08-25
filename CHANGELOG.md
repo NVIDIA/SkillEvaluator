@@ -4,6 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `skillevaluator validate --tier3 --previous-skill <path>` now skips a fresh
+  Tier 3 run when only the `metadata` field in `SKILL.md` changed and the prior
+  skill has a generated `skill-card.md` or `BENCHMARK.md`. The decision fails
+  closed for any behavioral change, invalid frontmatter, or missing evidence.
+
 ### Fixed
 
 - Tier 3 paired pass@k evidence now respects Python's active integer-string

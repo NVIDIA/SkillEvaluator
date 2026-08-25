@@ -3,6 +3,7 @@
 
 """Tier 3 synthetic dataset creation and live agent evaluation."""
 
+from skillevaluator.tier3.change_detection import Tier3RunDecision, tier3_run_decision
 from skillevaluator.tier3.commands import (
     compare_results,
     create_dataset,
@@ -13,10 +14,12 @@ from skillevaluator.tier3.commands import (
 )
 
 __all__ = [
+    "Tier3RunDecision",
     "compare_results",
     "create_dataset",
     "doctor",
     "evaluate",
+    "tier3_run_decision",
     "validate_evals",
     "view_results",
 ]

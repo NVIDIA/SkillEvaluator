@@ -317,6 +317,14 @@
           "type": "text"
         },
         {
+          "name": "previous_skill",
+          "opts": [
+            "--previous-skill"
+          ],
+          "param_type": "option",
+          "type": "path"
+        },
+        {
           "choices": [
             "docker",
             "daytona",
@@ -1551,6 +1559,14 @@
               "type": "boolean"
             },
             {
+              "name": "previous_skill",
+              "opts": [
+                "--previous-skill"
+              ],
+              "param_type": "option",
+              "type": "path"
+            },
+            {
               "is_flag": true,
               "name": "block_on_agent_eval",
               "opts": [
@@ -2203,6 +2219,14 @@
               "type": "text"
             },
             {
+              "name": "previous_skill",
+              "opts": [
+                "--previous-skill"
+              ],
+              "param_type": "option",
+              "type": "path"
+            },
+            {
               "choices": [
                 "docker",
                 "daytona",
@@ -2833,6 +2857,14 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "name": "previous_skill",
+          "opts": [
+            "--previous-skill"
+          ],
+          "param_type": "option",
+          "type": "path"
         },
         {
           "is_flag": true,

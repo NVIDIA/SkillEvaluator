@@ -16,11 +16,147 @@ from pathlib import Path
 
 DOC_PREFIXES = (b"docs/", b"fern/")
 KNOWN_STATUSES = frozenset(b"ACDMRTUXB")
+SKILL_FILENAME = b"SKILL.md"
+TIER3_EVIDENCE_FILENAMES = (b"skill-card.md", b"BENCHMARK.md")
 
 
 def is_docs_only(paths: Sequence[bytes]) -> bool:
     """Return whether every changed path belongs to published documentation."""
     return bool(paths) and all(path.startswith(DOC_PREFIXES) for path in paths)
+
+
+def _is_skill_file(path: bytes) -> bool:
+    return path == SKILL_FILENAME or path.endswith(b"/" + SKILL_FILENAME)
+
+
+def _split_frontmatter(content: bytes) -> tuple[bytes, bytes] | None:
+    """Split a Markdown file into YAML frontmatter and body, if present.
+
+    This intentionally validates only the delimiter shape.  The Tier 1 schema
+    validator remains responsible for validating the YAML itself; CI routing
+    must stay dependency-free because it runs before the project is installed.
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].rstrip(b"\r\n") != b"---":
+        return None
+
+    for index, line in enumerate(lines[1:], start=1):
+        if line.rstrip(b"\r\n") in {b"---", b"..."}:
+            return b"".join(lines[: index + 1]), b"".join(lines[index + 1 :])
+    return None
+
+
+def _metadata_section(frontmatter: bytes) -> tuple[bytes, bytes, bytes] | None:
+    """Return the immutable prefix/suffix around a top-level ``metadata`` key.
+
+    The PR classifier must run before dependencies are installed, so it keeps a
+    deliberately narrow YAML shape instead of parsing arbitrary YAML.  Anything
+    outside this conventional top-level metadata block is treated as behavioral
+    and therefore falls back to a full Tier 3 run.
+    """
+    lines = frontmatter.splitlines(keepends=True)
+    for index, line in enumerate(lines[1:-1], start=1):
+        if not line.startswith(b"metadata:"):
+            continue
+        value = line[len(b"metadata:") :].strip()
+        end = index + 1
+        if not value or value.startswith(b"#"):
+            while end < len(lines) - 1:
+                candidate = lines[end]
+                if candidate.startswith((b" ", b"\t", b"\r", b"\n", b"#")):
+                    end += 1
+                    continue
+                break
+        return b"".join(lines[:index]), b"".join(lines[index:end]), b"".join(lines[end:])
+    return None
+
+
+def _is_metadata_only_change(previous: bytes, current: bytes) -> bool:
+    previous_parts = _split_frontmatter(previous)
+    current_parts = _split_frontmatter(current)
+    if previous_parts is None or current_parts is None:
+        return False
+    previous_frontmatter, previous_body = previous_parts
+    current_frontmatter, current_body = current_parts
+    if previous_body != current_body:
+        return False
+
+    previous_metadata = _metadata_section(previous_frontmatter)
+    current_metadata = _metadata_section(current_frontmatter)
+    if previous_metadata is None and current_metadata is None:
+        return False
+    if previous_metadata is None:
+        current_prefix, current_block, current_suffix = current_metadata
+        return current_prefix + current_suffix == previous_frontmatter and bool(current_block)
+    if current_metadata is None:
+        previous_prefix, previous_block, previous_suffix = previous_metadata
+        return previous_prefix + previous_suffix == current_frontmatter and bool(previous_block)
+    previous_prefix, previous_block, previous_suffix = previous_metadata
+    current_prefix, current_block, current_suffix = current_metadata
+    return (
+        previous_prefix == current_prefix
+        and previous_suffix == current_suffix
+        and previous_block != current_block
+    )
+
+
+def _merge_base(repo: Path, base: str, head: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", base, head],
+        check=True,
+        capture_output=True,
+    )
+    merge_base = result.stdout.strip().decode("ascii")
+    return _validate_revision(merge_base)
+
+
+def _revision_file(repo: Path, revision: str, path: bytes) -> bytes:
+    """Read ``path`` from a Git revision without touching the worktree."""
+    path_text = os.fsdecode(path)
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{revision}:{path_text}"],
+        check=True,
+        capture_output=True,
+    )
+    return result.stdout
+
+
+def _has_tier3_evidence(repo: Path, revision: str, skill_path: bytes) -> bool:
+    skill_parent = skill_path.rsplit(b"/", 1)[0] if b"/" in skill_path else b""
+    for filename in TIER3_EVIDENCE_FILENAMES:
+        evidence_path = filename if not skill_parent else skill_parent + b"/" + filename
+        try:
+            _revision_file(repo, revision, evidence_path)
+        except subprocess.CalledProcessError:
+            continue
+        return True
+    return False
+
+
+def is_metadata_only(repo: Path, base: str, head: str, paths: Sequence[bytes]) -> bool:
+    """Return whether a diff changes only existing skills' frontmatter.
+
+    Tier 3 is expensive and need not run after metadata-only edits, but this is
+    safe only when the affected skill already has a generated card or benchmark
+    from an earlier evaluation.  Evidence is read from the merge-base revision
+    so a pull request cannot qualify itself by adding a new artifact.
+    """
+    if not paths or not all(_is_skill_file(path) for path in paths):
+        return False
+
+    merge_base = _merge_base(repo, base, head)
+    for path in paths:
+        if not _has_tier3_evidence(repo, merge_base, path):
+            return False
+
+        try:
+            previous = _revision_file(repo, merge_base, path)
+            current = _revision_file(repo, head, path)
+        except subprocess.CalledProcessError:
+            return False
+        if not _is_metadata_only_change(previous, current):
+            return False
+    return True
 
 
 def parse_name_status_z(payload: bytes) -> list[bytes]:
@@ -89,13 +225,16 @@ def changed_paths(repo: Path, base: str, head: str) -> list[bytes]:
     return parse_name_status_z(result.stdout)
 
 
-def _write_result(docs_only: bool) -> None:
-    line = f"docs_only={'true' if docs_only else 'false'}"
+def _write_result(docs_only: bool, metadata_only: bool) -> None:
+    lines = (
+        f"docs_only={'true' if docs_only else 'false'}",
+        f"metadata_only={'true' if metadata_only else 'false'}",
+    )
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
         with Path(output_path).open("a", encoding="utf-8") as output:
-            output.write(f"{line}\n")
-    print(line)
+            output.writelines(f"{line}\n" for line in lines)
+    print(*lines, sep="\n")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -114,11 +253,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not paths:
             raise ValueError("no changed paths found")
         docs_only = is_docs_only(paths)
+        metadata_only = is_metadata_only(args.repo, args.base, args.head, paths)
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         print(f"change classification failed; falling back to full CI: {error}", file=sys.stderr)
         docs_only = False
+        metadata_only = False
 
-    _write_result(docs_only)
+    _write_result(docs_only, metadata_only)
     return 0
 
 

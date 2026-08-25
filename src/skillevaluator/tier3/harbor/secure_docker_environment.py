@@ -15,16 +15,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import os
 import re
 import shlex
 import signal
+import unicodedata
 import uuid
-from collections.abc import Mapping
+from collections import deque
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from harbor.environments.base import ExecResult
+from harbor.environments.base import ExecResult, OutputCallback, OutputStream
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
 
 from skillevaluator.tier3.harbor.sensitive_stdin import (
@@ -46,6 +50,259 @@ _COMPOSE_TERMINATE_SECONDS = 5.0
 _COMPOSE_KILL_SECONDS = 5.0
 _COMPOSE_CANCEL_SECONDS = 0.1
 _MAIN_CONTAINER_STOP_TIMEOUT_SECONDS = 8
+_REDACTION_LABEL = "[REDACTED]"
+_REDACTION_SENTINEL_CANDIDATES = ("␟", "␞", "␝", "␜", "")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _SecureHandoffScope:
+    environment_names: frozenset[str]
+    secret_values: frozenset[str]
+
+
+_SECURE_HANDOFF_SCOPES: contextvars.ContextVar[tuple[_SecureHandoffScope, ...]] = contextvars.ContextVar(
+    "skillevaluator_secure_docker_handoff_scopes",
+    default=(),
+)
+
+
+class _ComposeCommandTimeout(Exception):
+    """Internal marker that cannot collide with callback exception types."""
+
+
+class _SecretTrieNode:
+    __slots__ = ("children", "failure", "max_terminal_length", "terminal_length")
+
+    def __init__(self) -> None:
+        self.children: dict[str, _SecretTrieNode] = {}
+        self.failure = self
+        self.max_terminal_length = 0
+        self.terminal_length = 0
+
+
+def _eligible_secret_values(secret_values: Iterable[str]) -> list[str]:
+    return sorted({value for value in secret_values if value and len(value) >= _MIN_EXACT_SECRET_LENGTH})
+
+
+def _collision_safe_redaction_marker(secret_values: Iterable[str]) -> str:
+    """Build a marker that cannot contain or join into an eligible secret."""
+    secrets = _eligible_secret_values(secret_values)
+    if not secrets:
+        return _REDACTION_LABEL
+
+    sentinel: str | None = None
+    for candidate in _REDACTION_SENTINEL_CANDIDATES:
+        if all(candidate not in secret for secret in secrets):
+            sentinel = candidate
+            break
+
+    if sentinel is None:
+        used_characters: set[str] = set()
+        for secret in secrets:
+            used_characters.update(secret)
+
+        # Private-use scalars have no standardized control semantics. If they
+        # are all occupied, accept only Unicode letters, numbers, punctuation,
+        # or symbols; controls, separators, combining marks, and surrogates
+        # are unsafe as callback and diagnostic boundaries.
+        private_use_ranges = (
+            range(0xE000, 0xF900),
+            range(0xF0000, 0xFFFFE),
+            range(0x100000, 0x10FFFE),
+        )
+        for candidate_range in private_use_ranges:
+            for codepoint in candidate_range:
+                candidate = chr(codepoint)
+                if candidate not in used_characters:
+                    sentinel = candidate
+                    break
+            if sentinel is not None:
+                break
+
+        if sentinel is None:
+            scalar_ranges = (range(1, 0xD800), range(0xE000, 0x110000))
+            for scalar_range in scalar_ranges:
+                for codepoint in scalar_range:
+                    candidate = chr(codepoint)
+                    if candidate not in used_characters and unicodedata.category(candidate)[0] in "LNPS":
+                        sentinel = candidate
+                        break
+                if sentinel is not None:
+                    break
+
+    if sentinel is None:
+        # No marker can satisfy the absent-character invariant. Fail without
+        # rendering any secret value; callers construct this before spawning.
+        raise RuntimeError("Could not construct a collision-safe redaction marker")
+
+    minimum_secret_length = min(map(len, secrets))
+    chunk_length = minimum_secret_length - 1
+    # Sentinel boundaries prevent a secret from bridging raw text and the
+    # marker. Splitting the readable label keeps every sentinel-free run below
+    # the shortest eligible secret length, so no secret can live in the marker.
+    label_chunks = [
+        _REDACTION_LABEL[index : index + chunk_length] for index in range(0, len(_REDACTION_LABEL), chunk_length)
+    ]
+    return sentinel + sentinel.join(label_chunks) + sentinel
+
+
+class _StreamingSecretRedactor:
+    """Redact the union of secret-match spans using Aho-Corasick.
+
+    Collapsing every connected covered span deliberately redacts more than
+    leftmost-longest replacement when secrets overlap. Each automaton state
+    stores only its longest terminal suffix, because that interval covers all
+    shorter matches ending at the same position.
+    """
+
+    def __init__(
+        self,
+        secret_values: Iterable[str],
+        *,
+        _replacement: str | None = None,
+        _track_transitions: bool = False,
+    ) -> None:
+        secrets = _eligible_secret_values(secret_values)
+        self._root = _SecretTrieNode()
+        for secret in secrets:
+            node = self._root
+            for character in secret:
+                child = node.children.get(character)
+                if child is None:
+                    child = _SecretTrieNode()
+                    node.children[character] = child
+                node = child
+            node.terminal_length = len(secret)
+
+        failure_queue = deque(self._root.children.values())
+        for child in failure_queue:
+            child.failure = self._root
+            child.max_terminal_length = child.terminal_length
+        while failure_queue:
+            node = failure_queue.popleft()
+            for character, child in node.children.items():
+                failure = node.failure
+                while failure is not self._root and character not in failure.children:
+                    failure = failure.failure
+                child.failure = failure.children.get(character, self._root)
+                child.max_terminal_length = max(
+                    child.terminal_length,
+                    child.failure.max_terminal_length,
+                )
+                failure_queue.append(child)
+
+        self._has_secrets = bool(secrets)
+        self._max_secret_length = max(map(len, secrets), default=0)
+        self._state = self._root
+        self._pending: deque[str] = deque()
+        self._pending_start = 0
+        self._processed = 0
+        self._coverage: deque[tuple[int, int]] = deque()
+        self._redaction_open = False
+        self._replacement = _collision_safe_redaction_marker(secrets) if _replacement is None else _replacement
+        self._track_transitions = _track_transitions
+        self._match_transition_count = 0
+        self._match_work_count = 0
+
+    @property
+    def match_transition_count(self) -> int:
+        return self._match_transition_count
+
+    @property
+    def match_work_count(self) -> int:
+        """Return instrumented scan, coverage, and commit operations."""
+        return self._match_work_count
+
+    def _record_work(self) -> None:
+        if self._track_transitions:
+            self._match_work_count += 1
+
+    def _add_coverage(self, start: int, end: int) -> None:
+        merged_start = start
+        while True:
+            self._record_work()
+            if not self._coverage or self._coverage[-1][1] < merged_start:
+                break
+            previous_start, _previous_end = self._coverage.pop()
+            merged_start = min(merged_start, previous_start)
+            self._record_work()
+        self._coverage.append((merged_start, end))
+        self._record_work()
+
+    def _advance(self, character: str) -> None:
+        while True:
+            if self._track_transitions:
+                self._match_transition_count += 1
+                self._match_work_count += 1
+            child = self._state.children.get(character)
+            if child is not None:
+                self._state = child
+                break
+            if self._state is self._root:
+                break
+            self._state = self._state.failure
+
+        match_end = self._processed + 1
+        match_length = self._state.max_terminal_length
+        self._record_work()
+        if match_length:
+            self._add_coverage(match_end - match_length, match_end)
+        self._processed = match_end
+
+    def _position_is_covered(self, position: int) -> bool:
+        while True:
+            self._record_work()
+            if not self._coverage or self._coverage[0][1] > position:
+                break
+            self._coverage.popleft()
+            self._record_work()
+        self._record_work()
+        return bool(self._coverage and self._coverage[0][0] <= position < self._coverage[0][1])
+
+    def _drain(self, *, final: bool) -> str:
+        if final:
+            safe_end = self._processed
+        else:
+            safe_end = self._processed - self._max_secret_length + 1
+
+        emitted: list[str] = []
+        while self._pending_start < safe_end:
+            character = self._pending.popleft()
+            if self._position_is_covered(self._pending_start):
+                if not self._redaction_open:
+                    emitted.append(self._replacement)
+                    self._redaction_open = True
+            else:
+                self._redaction_open = False
+                emitted.append(character)
+            self._pending_start += 1
+            self._record_work()
+
+        return "".join(emitted)
+
+    def feed(self, text: str, *, final: bool = False) -> str:
+        """Return safe output, retaining at most one maximum-pattern window."""
+        if not self._has_secrets:
+            self._processed += len(text)
+            self._pending_start = self._processed
+            return text
+
+        emitted: list[str] = []
+        for character in text:
+            self._pending.append(character)
+            self._advance(character)
+            safe_output = self._drain(final=False)
+            if safe_output:
+                emitted.append(safe_output)
+        if final:
+            final_output = self._drain(final=True)
+            if final_output:
+                emitted.append(final_output)
+        return "".join(emitted)
+
+    def finish(self) -> str:
+        """Flush the final suffix once no later chunk can complete a match."""
+        return self.feed("", final=True)
 
 
 async def _await_task_uninterruptibly(
@@ -92,23 +349,27 @@ def _secure_exec_arguments(
     return arguments, subprocess_environment
 
 
-def _redact(text: str | None, secret_values: set[str]) -> str | None:
+def _redact(
+    text: str | None,
+    secret_values: set[str],
+    *,
+    replacement: str | None = None,
+) -> str | None:
     if text is None:
         return None
-    redacted = text
-    for value in sorted(
-        (value for value in secret_values if value and len(value) >= _MIN_EXACT_SECRET_LENGTH),
-        key=len,
-        reverse=True,
-    ):
-        redacted = redacted.replace(value, "[REDACTED]")
-    return redacted
+    redactor = _StreamingSecretRedactor(secret_values, _replacement=replacement)
+    return redactor.feed(text) + redactor.finish()
 
 
-def _redact_result(result: ExecResult, secret_values: set[str]) -> ExecResult:
+def _redact_result(
+    result: ExecResult,
+    secret_values: set[str],
+    *,
+    replacement: str | None = None,
+) -> ExecResult:
     return ExecResult(
-        stdout=_redact(result.stdout, secret_values),
-        stderr=_redact(result.stderr, secret_values),
+        stdout=_redact(result.stdout, secret_values, replacement=replacement),
+        stderr=_redact(result.stderr, secret_values, replacement=replacement),
         return_code=result.return_code,
     )
 
@@ -117,8 +378,22 @@ def _signal_process_tree(process: asyncio.subprocess.Process, value: signal.Sign
     if process.returncode is not None:
         return
     if os.name == "posix":
-        with contextlib.suppress(ProcessLookupError):
+        try:
             os.killpg(process.pid, value)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            # macOS can report EPERM instead of ESRCH if the process-group
+            # leader exits between the returncode check and killpg(). Suppress
+            # only when a second liveness check proves that PID is gone; a live
+            # process with a genuine permission failure must still fail closed.
+            if process.returncode is not None:
+                return
+            try:
+                os.getpgid(process.pid)
+            except ProcessLookupError:
+                return
+            raise
     elif value == signal.SIGTERM:
         process.terminate()
     else:
@@ -127,27 +402,39 @@ def _signal_process_tree(process: asyncio.subprocess.Process, value: signal.Sign
 
 async def _terminate_process_tree(
     process: asyncio.subprocess.Process,
-    communication: asyncio.Task[tuple[bytes, bytes]],
+    communication: asyncio.Task[Any],
     *,
     preserve_cancellation: bool,
 ) -> None:
     async def reap() -> None:
         _signal_process_tree(process, signal.SIGTERM)
-        try:
-            await asyncio.wait_for(asyncio.shield(communication), timeout=_COMPOSE_TERMINATE_SECONDS)
+        done, _pending = await asyncio.wait(
+            {communication},
+            timeout=_COMPOSE_TERMINATE_SECONDS,
+        )
+        if communication in done and process.returncode is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                communication.result()
             return
-        except TimeoutError:
-            pass
 
         _signal_process_tree(process, signal.SIGKILL)
-        try:
-            await asyncio.wait_for(asyncio.shield(communication), timeout=_COMPOSE_KILL_SECONDS)
-        except TimeoutError:
+        done, _pending = await asyncio.wait(
+            {communication},
+            timeout=_COMPOSE_KILL_SECONDS,
+        )
+        if communication in done:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                communication.result()
+        else:
             communication.cancel()
             done, _pending = await asyncio.wait({communication}, timeout=_COMPOSE_CANCEL_SECONDS)
             if communication in done:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     communication.result()
+            # asyncio cannot forcibly terminate a coroutine that deliberately
+            # suppresses CancelledError. Keep this wait bounded; cooperative
+            # callbacks are owned and reaped above, while a hostile callback can
+            # only be left for event-loop shutdown after ignoring cancellation.
 
     cleanup = asyncio.create_task(reap())
     await _await_task_uninterruptibly(cleanup, preserve_cancellation=preserve_cancellation)
@@ -235,7 +522,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
     async def _contain_main_and_reap_compose(
         self,
         process: asyncio.subprocess.Process,
-        communication: asyncio.Task[tuple[bytes, bytes]],
+        communication: asyncio.Task[Any],
         *,
         stop_main_on_interrupt: bool,
     ) -> None:
@@ -275,6 +562,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             exec_command,
             check=False,
             timeout_sec=timeout_sec,
+            on_output=self._output_callback(),
             env_overrides=subprocess_environment,
             stop_main_on_interrupt=True,
         )
@@ -283,11 +571,12 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         self,
         command: list[str],
         check: bool = True,
-        timeout_sec: int | None = None,
+        timeout_sec: float | None = None,
+        stdin_data: bytes | None = None,
+        on_output: OutputCallback | None = None,
         *,
         env_overrides: Mapping[str, str] | None = None,
-        stdin_bytes: bytes | None = None,
-        redact_values: set[str] | None = None,
+        additional_secret_values: Iterable[str] | None = None,
         stop_main_on_interrupt: bool = False,
     ) -> ExecResult:
         """Run compose with sensitive values only in child env or stdin."""
@@ -303,17 +592,40 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             full_command.extend(["-f", str(path.resolve().absolute())])
         full_command.extend(command)
 
+        active_handoff_scopes = _SECURE_HANDOFF_SCOPES.get()
+        effective_env_overrides = (
+            _validate_environment(env_overrides) if active_handoff_scopes else dict(env_overrides or {})
+        )
+        active_handoff_names: set[str] = set()
+        active_handoff_values: set[str] = set()
+        for handoff_scope in active_handoff_scopes:
+            active_handoff_names.update(handoff_scope.environment_names)
+            active_handoff_values.update(handoff_scope.secret_values)
+        if active_handoff_scopes:
+            active_handoff_names.update(effective_env_overrides)
+            active_handoff_values.update(_eligible_secret_values(effective_env_overrides.values()))
+
         process_environment = self._compose_env_vars(include_os_env=True)
-        process_environment.update(env_overrides or {})
-        secret_values = {
-            value for value in (env_overrides or {}).values() if value and len(value) >= _MIN_EXACT_SECRET_LENGTH
-        }
-        secret_values.update(redact_values or set())
+        process_environment.update(effective_env_overrides)
+        if active_handoff_scopes:
+            process_environment = {
+                name: value
+                for name, value in process_environment.items()
+                if name not in active_handoff_names
+                and not (
+                    isinstance(value, str) and any(secret_value in value for secret_value in active_handoff_values)
+                )
+            }
+
+        secret_values = set(_eligible_secret_values(effective_env_overrides.values()))
+        secret_values.update(_eligible_secret_values(additional_secret_values or ()))
+        secret_values.update(active_handoff_values)
+        redaction_marker = _collision_safe_redaction_marker(secret_values)
         creation = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *full_command,
                 env=process_environment,
-                stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
+                stdin=(asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=os.name == "posix",
@@ -323,9 +635,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             process = await asyncio.shield(creation)
         except asyncio.CancelledError:
             process = await _await_task_uninterruptibly(creation, preserve_cancellation=False)
-            communication = asyncio.create_task(
-                process.communicate(stdin_bytes) if stdin_bytes is not None else process.communicate()
-            )
+            communication = asyncio.create_task(process.communicate())
             cleanup = asyncio.create_task(
                 self._contain_main_and_reap_compose(
                     process,
@@ -341,18 +651,114 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 ) from exc
             raise
 
-        communication = asyncio.create_task(
-            process.communicate(stdin_bytes) if stdin_bytes is not None else process.communicate()
-        )
-        try:
-            if timeout_sec:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    asyncio.shield(communication),
-                    timeout=timeout_sec,
+        callback_error: asyncio.Future[BaseException] | None = None
+
+        if on_output is None:
+
+            async def collect_buffered_output() -> ExecResult:
+                if stdin_data is None:
+                    stdout_bytes, stderr_bytes = await process.communicate()
+                else:
+                    stdout_bytes, stderr_bytes = await process.communicate(input=stdin_data)
+                stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else None
+                stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else None
+                return ExecResult(
+                    stdout=stdout,
+                    stderr=stderr,
+                    return_code=process.returncode or 0,
                 )
+
+            communication = asyncio.create_task(collect_buffered_output())
+        else:
+            callback_error = asyncio.get_running_loop().create_future()
+            stream_redactor = _StreamingSecretRedactor(
+                secret_values,
+                _replacement=redaction_marker,
+            )
+
+            async def emit_redacted_output(text: str, stream: OutputStream) -> None:
+                if callback_error.done():
+                    await asyncio.sleep(0)
+                    return
+                try:
+                    await on_output(text, stream)
+                except BaseException as exc:
+                    if not callback_error.done():
+                        callback_error.set_result(exc)
+                    # Do not re-raise into Harbor's collector: it would race its
+                    # immediate-process termination against our process-group and
+                    # optional main-container cleanup. The outer owner wakes on
+                    # callback_error and performs containment exactly once.
+                    await asyncio.sleep(0)
+
+            async def redacted_callback(text: str, stream: OutputStream) -> None:
+                if callback_error.done():
+                    await asyncio.sleep(0)
+                    return
+                redacted_text = stream_redactor.feed(text)
+                if redacted_text:
+                    await emit_redacted_output(redacted_text, stream)
+
+            async def collect_streamed_output() -> ExecResult:
+                try:
+                    result = await self._collect_streamed_output(
+                        process,
+                        timeout_sec=None,
+                        stdin_data=stdin_data,
+                        on_output=redacted_callback,
+                    )
+                    if not callback_error.done():
+                        final_output = stream_redactor.finish()
+                        if final_output:
+                            await emit_redacted_output(final_output, "stdout")
+                    return result
+                except BaseException as exc:
+                    if not callback_error.done():
+                        callback_error.set_result(exc)
+                    # The outer owner performs process-group cleanup before it
+                    # propagates the original collector/callback exception.
+                    return ExecResult(
+                        stdout=None,
+                        stderr=None,
+                        return_code=process.returncode or 0,
+                    )
+
+            communication = asyncio.create_task(collect_streamed_output())
+
+        async def cleanup_preserving_primary(primary_error: BaseException) -> None:
+            cleanup = asyncio.create_task(
+                self._contain_main_and_reap_compose(
+                    process,
+                    communication,
+                    stop_main_on_interrupt=stop_main_on_interrupt,
+                )
+            )
+            try:
+                await _await_task_uninterruptibly(cleanup, preserve_cancellation=False)
+            except BaseException as cleanup_error:
+                primary_error.add_note(
+                    "Docker Compose cleanup or main-container containment also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                raise primary_error from cleanup_error
+
+        callback_failure: BaseException | None = None
+        try:
+            waitables: set[asyncio.Future[Any] | asyncio.Task[Any]] = {communication}
+            if callback_error is not None:
+                waitables.add(callback_error)
+            done, _pending = await asyncio.wait(
+                waitables,
+                timeout=timeout_sec or None,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise _ComposeCommandTimeout
+            if callback_error is not None and callback_error in done:
+                callback_failure = callback_error.result()
             else:
-                stdout_bytes, stderr_bytes = await asyncio.shield(communication)
-        except TimeoutError:
+                result = await asyncio.shield(communication)
+        except _ComposeCommandTimeout:
             cleanup = asyncio.create_task(
                 self._contain_main_and_reap_compose(
                     process,
@@ -382,20 +788,34 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                     "main task container containment could not be confirmed during cancellation"
                 ) from exc
             raise
+        except BaseException as exc:
+            await cleanup_preserving_primary(exc)
+            raise
 
-        stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else None
-        stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else None
-        result = _redact_result(
-            ExecResult(stdout=stdout, stderr=stderr, return_code=process.returncode or 0),
-            secret_values,
-        )
+        if callback_failure is not None:
+            # Kept outside the try/except above so a callback's deliberate
+            # CancelledError is not mistaken for cancellation of this caller.
+            await cleanup_preserving_primary(callback_failure)
+            raise callback_failure
+
         if check and result.return_code != 0:
-            raise RuntimeError(
+            detail = (
                 f"Docker compose command failed for environment {self.environment_name}. "
                 f"Command: {' '.join(full_command)}. Return code: {result.return_code}. "
                 f"Stdout: {result.stdout}. Stderr: {result.stderr}."
             )
-        return result
+            raise RuntimeError(
+                _redact(
+                    detail,
+                    secret_values,
+                    replacement=redaction_marker,
+                )
+            )
+        return _redact_result(
+            result,
+            secret_values,
+            replacement=redaction_marker,
+        )
 
 
 class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
@@ -418,13 +838,14 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
             exec_command.extend(["-u", str(user)])
         exec_command.append("main")
         exec_command.extend(self._platform.exec_shell_args(command))
-        result = await self._run_docker_compose_command(
+        return await self._run_docker_compose_command(
             exec_command,
             check=False,
             timeout_sec=timeout_sec,
+            on_output=self._output_callback(),
+            additional_secret_values=secret_values,
             stop_main_on_interrupt=True,
         )
-        return _redact_result(result, secret_values or set())
 
     async def _remove_handoff(self, remote_path: str) -> None:
         result = await self._run_docker_compose_command(
@@ -453,10 +874,19 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
             )
 
         merged = _host_handoff_environment(merged)
+        secret_values = set(_eligible_secret_values(merged.values()))
+        if secret_values:
+            # Fail before writing or uploading a handoff if no structurally
+            # safe output marker can represent these values.
+            _collision_safe_redaction_marker(secret_values)
         remote_path = f"/tmp/.skillevaluator-exec-env-{uuid.uuid4().hex}.sh"
+        handoff_scope = _SecureHandoffScope(
+            environment_names=frozenset(merged),
+            secret_values=frozenset(secret_values),
+        )
+        scope_token = _SECURE_HANDOFF_SCOPES.set((*_SECURE_HANDOFF_SCOPES.get(), handoff_scope))
         primary_error: BaseException | None = None
         try:
-            secret_values = {value for value in merged.values() if value and len(value) >= _MIN_EXACT_SECRET_LENGTH}
             await self._run_docker_compose_command(
                 [
                     "exec",
@@ -471,23 +901,26 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
                     remote_path,
                 ],
                 check=True,
-                stdin_bytes=_render_environment_script(merged).encode("utf-8"),
-                redact_values=secret_values,
+                stdin_data=_render_environment_script(merged).encode("utf-8"),
+                additional_secret_values=secret_values,
             )
 
             if user is None:
                 await self._run_docker_compose_command(
                     ["exec", "-u", "root", "main", "chmod", "600", remote_path],
                     check=True,
+                    additional_secret_values=secret_values,
                 )
             else:
                 await self._run_docker_compose_command(
                     ["exec", "-u", "root", "main", "chown", "--", str(user), remote_path],
                     check=True,
+                    additional_secret_values=secret_values,
                 )
                 await self._run_docker_compose_command(
                     ["exec", "-u", "root", "main", "chmod", "600", remote_path],
                     check=True,
+                    additional_secret_values=secret_values,
                 )
             quoted_path = shlex.quote(remote_path)
             wrapped = (
@@ -505,19 +938,22 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
             primary_error = exc
             raise
         finally:
-            cleanup = asyncio.create_task(self._remove_handoff(remote_path))
             try:
-                await _await_task_uninterruptibly(
-                    cleanup,
-                    preserve_cancellation=primary_error is None,
-                )
-            except Exception as cleanup_error:
-                message = f"could not confirm removal of Docker environment handoff {remote_path}"
-                if primary_error is not None:
-                    if hasattr(primary_error, "add_note"):
-                        primary_error.add_note(f"{message}: {cleanup_error}")
-                else:
-                    raise RuntimeError(message) from cleanup_error
+                cleanup = asyncio.create_task(self._remove_handoff(remote_path))
+                try:
+                    await _await_task_uninterruptibly(
+                        cleanup,
+                        preserve_cancellation=primary_error is None,
+                    )
+                except Exception as cleanup_error:
+                    message = f"could not confirm removal of Docker environment handoff {remote_path}"
+                    if primary_error is not None:
+                        if hasattr(primary_error, "add_note"):
+                            primary_error.add_note(f"{message}: {cleanup_error}")
+                    else:
+                        raise RuntimeError(message) from cleanup_error
+            finally:
+                _SECURE_HANDOFF_SCOPES.reset(scope_token)
 
     async def exec_with_sensitive_env(
         self,

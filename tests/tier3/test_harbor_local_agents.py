@@ -493,8 +493,7 @@ def test_nvidia_build_codex_bridge_scope_wins_real_harbor_env_merge_and_resets(
     for name in ("OPENAI_BASE_URL", "OPENAI_API_BASE", "NVIDIA_API_KEY"):
         assert name not in child_env
     external_secret_values = {
-        external_values[name]
-        for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "NVIDIA_API_KEY")
+        external_values[name] for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "NVIDIA_API_KEY")
     }
     assert not external_secret_values.intersection(child_env.values())
 

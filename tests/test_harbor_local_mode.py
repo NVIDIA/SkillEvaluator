@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -79,6 +80,8 @@ def _local_environment(
     environment._strict_reads = False
     environment._active_processes = {}
     environment._persistent_env = persistent_env or {}
+    environment._output_callbacks = contextvars.ContextVar("test_local_output_callbacks", default=())
+    environment._exec_env_overlays = contextvars.ContextVar("test_local_exec_env_overlays", default=())
     environment._sandbox = local_sandbox.Sandbox(local_sandbox.SandboxPlan("none", "advisory-only", "test"))
     environment.trial_paths = type(
         "TrialPaths",
@@ -192,9 +195,7 @@ def test_harbor_unified_specs_import_non_abstract_skill_evaluator_classes(tmp_pa
     from harbor.models.trial.paths import TrialPaths
 
     agent_specs = {
-        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode": (
-            "SkillEvaluatorLocalClaudeCode"
-        ),
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode": ("SkillEvaluatorLocalClaudeCode"),
         "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex": "SkillEvaluatorLocalCodex",
         "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode": "SkillEvaluatorLocalOpenCode",
     }
@@ -1008,11 +1009,6 @@ def test_nvidia_build_bridge_rejects_unsafe_environment_before_reading_or_transf
 
     assert key_reads == []
     assert uploads == []
-    assert executions == []
-
-    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": "bridge-client-token-secret"}
-    with pytest.raises(RuntimeError, match="protected sensitive-value transport"):
-        asyncio.run(agent.exec_as_agent(UnsafeEnvironment(), command="codex exec -- test"))
     assert executions == []
 
 

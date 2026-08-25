@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -97,25 +98,30 @@ def _first_trial_exception_detail(job_dir: Path) -> str:
 def _mounted_agent_artifacts_present(job_dir: Path) -> bool:
     """Return whether any trial exposed agent artifacts on the host filesystem.
 
-    Harbor bind-mounts the trial's ``agent`` directory into the container, so a
-    completed agent run always leaves at least one non-empty file there. An empty
-    tree means the daemon resolved the mount source on its own machine and the
-    host never received the writes.
+    Harbor keeps single-step logs in the trial's ``agent`` directory and moves
+    multi-step logs into ``steps/<step>/agent``. A completed agent run leaves at
+    least one non-empty file in one of those directories. An empty tree means
+    the daemon resolved the mount source on its own machine and the host never
+    received the writes.
     """
     try:
         trial_dirs = [child for child in job_dir.iterdir() if child.is_dir()]
     except OSError:
         return False
     for trial_dir in trial_dirs:
-        agent_dir = trial_dir / "agent"
-        if not agent_dir.is_dir():
-            continue
-        try:
-            for entry in agent_dir.rglob("*"):
-                if entry.is_file() and entry.stat().st_size > 0:
-                    return True
-        except OSError:
-            continue
+        agent_dirs = [trial_dir / "agent"]
+        steps_dir = trial_dir / "steps"
+        with suppress(OSError):
+            agent_dirs.extend(child / "agent" for child in steps_dir.iterdir() if child.is_dir())
+        for agent_dir in agent_dirs:
+            if not agent_dir.is_dir():
+                continue
+            try:
+                for entry in agent_dir.rglob("*"):
+                    if entry.is_file() and entry.stat().st_size > 0:
+                        return True
+            except OSError:
+                continue
     return False
 
 

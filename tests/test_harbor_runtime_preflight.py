@@ -754,6 +754,35 @@ def test_agent_only_validation_accepts_visible_agent_artifacts_in_docker_mode(tm
     ) == (True, "")
 
 
+def test_agent_only_validation_accepts_visible_multistep_agent_artifacts_in_docker_mode(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    trial_dir = result_path.parent / "case-001__attempt"
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": "case-001__attempt",
+                "agent_result": None,
+                "exception_info": None,
+                "step_results": [
+                    {
+                        "step_name": "author-skill",
+                        "agent_result": {"n_input_tokens": 100},
+                        "exception_info": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    step_agent_dir = trial_dir / "steps" / "author-skill" / "agent"
+    step_agent_dir.mkdir(parents=True)
+    (step_agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    ) == (True, "")
+
+
 def test_agent_only_validation_rejects_invisible_agent_artifacts_in_docker_mode(tmp_path: Path) -> None:
     """An empty host-side agent tree means the daemon never shared the results directory."""
     result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")

@@ -656,6 +656,10 @@ def test_tier3_docs_name_the_supported_harbor_backend_version() -> None:
     normalized = " ".join(tier3.split())
 
     assert "The `tier3` extra installs Harbor 0.22.0" in normalized
+    assert "The exact Harbor pin is deliberate" in normalized
+    assert "stable Harbor 0.22.0 rather than unreleased `main`" in normalized
+    assert "litellm>=1.92.0,<1.94.0.dev0" in normalized
+    assert "static Tier 1 installs do not pull it in" in normalized
     assert "0.13.2" not in normalized
 
 

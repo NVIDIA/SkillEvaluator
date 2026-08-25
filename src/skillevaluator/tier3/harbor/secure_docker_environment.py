@@ -1404,8 +1404,10 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 if len(content) > remaining_bytes:
                     raise RuntimeError("could not inspect Docker Compose interpolation inputs")
                 total_bytes += len(content)
-                # _ComposeModelLoader subclasses yaml.SafeLoader and only adds
-                # bounded-node accounting; arbitrary object construction stays disabled.
+                # _ComposeModelLoader subclasses yaml.SafeLoader and registers only
+                # scalar, sequence, and mapping constructors for Compose's !reset and
+                # !override tags, so arbitrary Python-object construction stays disabled.
+                # Depth and node-count bounds are enforced separately after parsing.
                 model = yaml.load(  # nosec B506
                     content.decode("utf-8"),
                     Loader=_ComposeModelLoader,

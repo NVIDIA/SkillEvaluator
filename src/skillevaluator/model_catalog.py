@@ -14,13 +14,14 @@ import time
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from functools import partial
 from http.client import HTTPConnection, HTTPException, HTTPResponse, HTTPSConnection
 from queue import Empty, Queue
 from threading import BoundedSemaphore, Thread
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPHandler, HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 if TYPE_CHECKING:
@@ -50,8 +51,48 @@ _NON_CHAT_MARKERS = (
 )
 
 
+class ModelCatalogFailureKind(StrEnum):
+    """Structured catalog failure categories safe for command-level policy."""
+
+    AUTHENTICATION = "authentication"
+    AUTHORIZATION = "authorization"
+    UNSUPPORTED = "unsupported"
+    UNAVAILABLE = "unavailable"
+    INVALID_CONFIGURATION = "invalid_configuration"
+    INVALID_RESPONSE = "invalid_response"
+    MODEL_NOT_FOUND = "model_not_found"
+    OTHER_HTTP = "other_http"
+    UNKNOWN = "unknown"
+
+
 class ModelCatalogError(RuntimeError):
-    """Safe-to-display catalog error without response or credential content."""
+    """Safe-to-display catalog error with non-secret structured metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: ModelCatalogFailureKind | str = ModelCatalogFailureKind.UNKNOWN,
+        http_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        try:
+            self.kind = ModelCatalogFailureKind(kind)
+        except (TypeError, ValueError):
+            self.kind = ModelCatalogFailureKind.UNKNOWN
+        self.http_status = http_status
+
+
+def _http_failure_kind(status: int) -> ModelCatalogFailureKind:
+    if status == 401:
+        return ModelCatalogFailureKind.AUTHENTICATION
+    if status == 403:
+        return ModelCatalogFailureKind.AUTHORIZATION
+    if status in {404, 405, 501}:
+        return ModelCatalogFailureKind.UNSUPPORTED
+    if status in {408, 429} or 500 <= status <= 599:
+        return ModelCatalogFailureKind.UNAVAILABLE
+    return ModelCatalogFailureKind.OTHER_HTTP
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -301,7 +342,7 @@ class CatalogModel:
 
 
 def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -> tuple[ModelRecord, ...]:
-    """Fetch and normalize the selected provider's authenticated ``/models`` catalog."""
+    """Fetch and normalize the selected provider's ``/models`` catalog."""
     _validate_timeout(timeout_seconds)
     url, headers = _request_settings(config)
     records: list[ModelRecord] = []
@@ -314,7 +355,10 @@ def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -
     for page_number in range(1, _MAX_CATALOG_PAGES + 1):
         request_timeout = timeout_seconds if page_number == 1 else deadline - time.monotonic()
         if request_timeout <= 0:
-            raise ModelCatalogError("model catalog request timed out")
+            raise ModelCatalogError(
+                "model catalog request timed out",
+                kind=ModelCatalogFailureKind.UNAVAILABLE,
+            )
         payload, response_bytes = _request_json(
             next_url,
             headers=headers,
@@ -325,7 +369,10 @@ def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -
         remaining_bytes -= response_bytes
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
-            raise ModelCatalogError("model catalog response has no data list")
+            raise ModelCatalogError(
+                "model catalog response has no data list",
+                kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+            )
 
         for item in data:
             if not isinstance(item, dict):
@@ -342,7 +389,10 @@ def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -
             ):
                 continue
             if len(records) >= _MAX_MODEL_RECORDS:
-                raise ModelCatalogError("model catalog exceeded the safe record limit")
+                raise ModelCatalogError(
+                    "model catalog exceeded the safe record limit",
+                    kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+                )
             created = item.get("created")
             normalized_created = (
                 created if isinstance(created, int) and not isinstance(created, bool) and created >= 0 else None
@@ -360,17 +410,76 @@ def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -
             or _has_unsafe_control(cursor)
             or cursor in seen_cursors
         ):
-            raise ModelCatalogError("model catalog pagination cursor is invalid")
+            raise ModelCatalogError(
+                "model catalog pagination cursor is invalid",
+                kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+            )
         if remaining_bytes <= 0:
-            raise ModelCatalogError("model catalog response exceeded the safe size limit")
+            raise ModelCatalogError(
+                "model catalog response exceeded the safe size limit",
+                kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+            )
         seen_cursors.add(cursor)
         next_url = f"{url}?{urlencode({'after_id': cursor})}"
     else:
-        raise ModelCatalogError("model catalog exceeded the safe pagination limit")
+        raise ModelCatalogError(
+            "model catalog exceeded the safe pagination limit",
+            kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+        )
 
     if data and not records:
-        raise ModelCatalogError("model catalog response did not contain valid model records")
+        raise ModelCatalogError(
+            "model catalog response did not contain valid model records",
+            kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+        )
     return tuple(records)
+
+
+def fetch_anthropic_model_record(
+    config: ProviderConfig,
+    model_id: str,
+    timeout_seconds: float = 15.0,
+) -> ModelRecord:
+    """Resolve one Anthropic model ID or alias through its native endpoint."""
+    _validate_timeout(timeout_seconds)
+    if config.provider != "anthropic":
+        raise ModelCatalogError(
+            "single-model lookup is only supported for Anthropic",
+            kind=ModelCatalogFailureKind.UNSUPPORTED,
+        )
+    if (
+        not isinstance(model_id, str)
+        or not model_id
+        or model_id != model_id.strip()
+        or len(model_id) > _MAX_MODEL_ID_LENGTH
+        or _has_unsafe_control(model_id)
+    ):
+        raise ModelCatalogError(
+            "model catalog model ID is invalid",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    catalog_url, headers = _request_settings(config)
+    deadline = time.monotonic() + timeout_seconds
+    payload, _response_bytes = _request_json(
+        f"{catalog_url}/{quote(model_id, safe='')}",
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+        max_response_bytes=_MAX_RESPONSE_BYTES,
+        deadline=deadline,
+    )
+    resolved_id = payload.get("id") if isinstance(payload, dict) else None
+    if (
+        not isinstance(resolved_id, str)
+        or not resolved_id.strip()
+        or len(resolved_id) > _MAX_MODEL_ID_LENGTH
+        or _has_unsafe_control(resolved_id)
+    ):
+        raise ModelCatalogError(
+            "model catalog response did not contain a valid model record",
+            kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+        )
+    return ModelRecord(id=resolved_id.strip())
 
 
 def select_catalog_models(
@@ -401,17 +510,29 @@ def select_catalog_models(
 
 def _request_settings(config: ProviderConfig) -> tuple[str, dict[str, str]]:
     if config.provider == "bedrock":
-        raise ModelCatalogError("bedrock does not expose this HTTP catalog; use skillevaluator doctor --verify-models")
+        raise ModelCatalogError(
+            "bedrock does not expose this HTTP catalog; use skillevaluator doctor --verify-models",
+            kind=ModelCatalogFailureKind.UNSUPPORTED,
+        )
     if config.provider not in {"nv_build", "openai", "openai-compatible", "anthropic"}:
-        raise ModelCatalogError(f"{config.provider} does not expose a supported HTTP model catalog")
+        raise ModelCatalogError(
+            f"{config.provider} does not expose a supported HTTP model catalog",
+            kind=ModelCatalogFailureKind.UNSUPPORTED,
+        )
 
     api_key = config.api_key
     if not isinstance(api_key, str) or not api_key.strip():
         credential = config.credential_env or "provider API key"
-        raise ModelCatalogError(f"{credential} is required for authenticated model discovery")
+        raise ModelCatalogError(
+            f"{credential} is required for authenticated model discovery",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
     if _has_unsafe_control(api_key):
         credential = config.credential_env or "provider API key"
-        raise ModelCatalogError(f"{credential} contains invalid control characters")
+        raise ModelCatalogError(
+            f"{credential} contains invalid control characters",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
 
     if config.provider == "anthropic":
         base_url = config.base_url or _ANTHROPIC_BASE_URL
@@ -421,25 +542,40 @@ def _request_settings(config: ProviderConfig) -> tuple[str, dict[str, str]]:
         }
 
     if not config.base_url:
-        raise ModelCatalogError(f"{config.provider} does not expose an HTTP model catalog")
+        raise ModelCatalogError(
+            f"{config.provider} does not expose an HTTP model catalog",
+            kind=ModelCatalogFailureKind.UNSUPPORTED,
+        )
     return _provider_url(config.base_url), {"Authorization": f"Bearer {api_key}"}
 
 
 def _provider_url(base_url: str, *, ensure_v1: bool = False) -> str:
     if not isinstance(base_url, str) or not base_url or base_url != base_url.strip():
-        raise ModelCatalogError("model catalog base URL is invalid")
+        raise ModelCatalogError(
+            "model catalog base URL is invalid",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
     if _has_unsafe_control(base_url) or "\\" in base_url:
-        raise ModelCatalogError("model catalog base URL is invalid")
+        raise ModelCatalogError(
+            "model catalog base URL is invalid",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
     try:
         parsed = urlsplit(base_url)
         port = parsed.port
     except ValueError:
-        raise ModelCatalogError("model catalog base URL is invalid") from None
+        raise ModelCatalogError(
+            "model catalog base URL is invalid",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        ) from None
 
     scheme = parsed.scheme.casefold()
     hostname = parsed.hostname
     if scheme not in {"http", "https"} or not parsed.netloc or not hostname:
-        raise ModelCatalogError("model catalog base URL must be absolute HTTP or HTTPS")
+        raise ModelCatalogError(
+            "model catalog base URL must be absolute HTTP or HTTPS",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
     if (
         parsed.username is not None
         or parsed.password is not None
@@ -447,11 +583,20 @@ def _provider_url(base_url: str, *, ensure_v1: bool = False) -> str:
         or "#" in base_url
         or parsed.netloc.endswith(":")
     ):
-        raise ModelCatalogError("model catalog base URL must not contain credentials, query, or fragment")
+        raise ModelCatalogError(
+            "model catalog base URL must not contain credentials, query, or fragment",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
     if ";" in parsed.path:
-        raise ModelCatalogError("model catalog base URL path is invalid")
+        raise ModelCatalogError(
+            "model catalog base URL path is invalid",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
     if scheme == "http" and not _is_loopback_host(hostname):
-        raise ModelCatalogError("model catalog base URL must use HTTPS unless it targets loopback")
+        raise ModelCatalogError(
+            "model catalog base URL must use HTTPS unless it targets loopback",
+            kind=ModelCatalogFailureKind.UNSUPPORTED,
+        )
 
     host = f"[{hostname}]" if ":" in hostname else hostname
     authority = f"{host}:{port}" if port is not None else host
@@ -480,24 +625,49 @@ def _request_json(
         with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - validated above
             raw = _read_response_body(response, max_response_bytes=max_response_bytes, deadline=deadline)
     except HTTPError as exc:
-        raise ModelCatalogError(f"model catalog returned HTTP {exc.code}") from None
+        raise ModelCatalogError(
+            f"model catalog returned HTTP {exc.code}",
+            kind=_http_failure_kind(exc.code),
+            http_status=exc.code,
+        ) from None
     except TimeoutError:
-        raise ModelCatalogError("model catalog request timed out") from None
+        raise ModelCatalogError(
+            "model catalog request timed out",
+            kind=ModelCatalogFailureKind.UNAVAILABLE,
+        ) from None
     except URLError as exc:
         if isinstance(exc.reason, TimeoutError):
-            raise ModelCatalogError("model catalog request timed out") from None
-        raise ModelCatalogError(f"model catalog request failed: {type(exc).__name__}") from None
+            raise ModelCatalogError(
+                "model catalog request timed out",
+                kind=ModelCatalogFailureKind.UNAVAILABLE,
+            ) from None
+        raise ModelCatalogError(
+            f"model catalog request failed: {type(exc).__name__}",
+            kind=ModelCatalogFailureKind.UNAVAILABLE,
+        ) from None
     except (HTTPException, OSError) as exc:
-        raise ModelCatalogError(f"model catalog request failed: {type(exc).__name__}") from None
+        raise ModelCatalogError(
+            f"model catalog request failed: {type(exc).__name__}",
+            kind=ModelCatalogFailureKind.UNAVAILABLE,
+        ) from None
     except (TypeError, ValueError):
-        raise ModelCatalogError("model catalog request configuration is invalid") from None
+        raise ModelCatalogError(
+            "model catalog request configuration is invalid",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        ) from None
 
     if len(raw) > max_response_bytes:
-        raise ModelCatalogError("model catalog response exceeded the safe size limit")
+        raise ModelCatalogError(
+            "model catalog response exceeded the safe size limit",
+            kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+        )
     try:
         return json.loads(raw), len(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-        raise ModelCatalogError("model catalog returned invalid JSON") from None
+        raise ModelCatalogError(
+            "model catalog returned invalid JSON",
+            kind=ModelCatalogFailureKind.INVALID_RESPONSE,
+        ) from None
 
 
 def _read_response_body(response: Any, *, max_response_bytes: int, deadline: float) -> bytes:
@@ -517,7 +687,10 @@ def _read_response_body(response: Any, *, max_response_bytes: int, deadline: flo
     if not callable(read_once):
         raw = response.read(max_response_bytes + 1)
         if time.monotonic() >= deadline:
-            raise ModelCatalogError("model catalog request timed out")
+            raise ModelCatalogError(
+                "model catalog request timed out",
+                kind=ModelCatalogFailureKind.UNAVAILABLE,
+            )
         return raw
 
     chunks: list[bytes] = []
@@ -525,11 +698,17 @@ def _read_response_body(response: Any, *, max_response_bytes: int, deadline: flo
     while total <= max_response_bytes:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ModelCatalogError("model catalog request timed out")
+            raise ModelCatalogError(
+                "model catalog request timed out",
+                kind=ModelCatalogFailureKind.UNAVAILABLE,
+            )
         _set_response_socket_timeout(response, remaining)
         chunk = read_once(min(_RESPONSE_READ_CHUNK_BYTES, max_response_bytes + 1 - total))
         if time.monotonic() >= deadline:
-            raise ModelCatalogError("model catalog request timed out")
+            raise ModelCatalogError(
+                "model catalog request timed out",
+                kind=ModelCatalogFailureKind.UNAVAILABLE,
+            )
         if not chunk:
             break
         chunks.append(chunk)
@@ -559,7 +738,10 @@ def _validate_timeout(timeout_seconds: float) -> None:
         or not math.isfinite(timeout_seconds)
         or timeout_seconds <= 0
     ):
-        raise ModelCatalogError("model catalog timeout must be a positive number")
+        raise ModelCatalogError(
+            "model catalog timeout must be a positive number",
+            kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
 
 
 def _has_unsafe_control(value: str) -> bool:

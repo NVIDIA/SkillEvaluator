@@ -65,6 +65,7 @@ _MAX_RAW_TRIAL_REWARDS_TOTAL = 256
 _MAX_RAW_METRICS_PER_REWARD = 64
 _MAX_RAW_REWARD_FIELDS = 96
 _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD = 128
+_MAX_UNPAIRED_CASE_IDS_IN_REPORT = 64
 _MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
 
 
@@ -123,6 +124,7 @@ class _ReportBudget:
                 "raw_trial_rewards": _MAX_RAW_TRIAL_REWARDS_TOTAL,
                 "raw_metrics_per_reward": _MAX_RAW_METRICS_PER_REWARD,
                 "custom_metric_name_visits_per_reward": _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD,
+                "unpaired_case_id_samples": _MAX_UNPAIRED_CASE_IDS_IN_REPORT,
             },
             "omitted": dict(sorted(self.omitted.items())),
         }
@@ -923,6 +925,46 @@ def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _Repor
     report_budget.omit("non_best_agent_details", omitted)
 
 
+def _prune_pass_at_k_pairing_diagnostics(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Bound legacy full mismatch-ID arrays while preserving counts and samples."""
+    pass_at_k_payloads = [payload.get("pass_at_k")]
+    agents = payload.get("agents")
+    if isinstance(agents, dict):
+        pass_at_k_payloads.extend(agent.get("pass_at_k") for agent in agents.values() if isinstance(agent, dict))
+
+    seen: set[int] = set()
+    omitted = 0
+    for pass_at_k in pass_at_k_payloads:
+        if not isinstance(pass_at_k, dict):
+            continue
+        lift = pass_at_k.get("lift")
+        paired = lift.get("paired_comparison") if isinstance(lift, dict) else None
+        if not isinstance(paired, dict) or id(paired) in seen:
+            continue
+        seen.add(id(paired))
+
+        for condition in ("with_skill", "without_skill"):
+            ids_key = f"{condition}_unpaired_case_ids"
+            count_key = f"{condition}_unpaired_case_count"
+            truncated_key = f"{ids_key}_truncated"
+            case_ids = paired.get(ids_key)
+            if not isinstance(case_ids, list):
+                continue
+
+            declared_count = paired.get(count_key)
+            if not isinstance(declared_count, int) or isinstance(declared_count, bool) or declared_count < 0:
+                declared_count = 0
+            paired[count_key] = max(declared_count, len(case_ids))
+            if len(case_ids) > _MAX_UNPAIRED_CASE_IDS_IN_REPORT:
+                omitted += len(case_ids) - _MAX_UNPAIRED_CASE_IDS_IN_REPORT
+                paired[ids_key] = case_ids[:_MAX_UNPAIRED_CASE_IDS_IN_REPORT]
+                paired[truncated_key] = True
+            else:
+                paired[truncated_key] = bool(paired.get(truncated_key))
+
+    report_budget.omit("unpaired_case_ids", omitted)
+
+
 def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
     """Keep the complete self-contained payload within a hard serialized budget.
 
@@ -936,6 +978,11 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
         if report_budget.truncated:
             payload["report_truncation"] = report_budget.signal()
 
+    # Older artifacts may contain every unmatched case identifier. Normalize
+    # them before the size check so a report cannot discard all agents and
+    # pass@k truth merely because diagnostic IDs were duplicated into the
+    # best-agent and top-level projections.
+    _prune_pass_at_k_pairing_diagnostics(payload, report_budget)
     refresh_signal()
     if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
         return

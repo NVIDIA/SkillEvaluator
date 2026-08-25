@@ -523,6 +523,17 @@ def test_tier3_validate_help() -> None:
     assert "--harbor-contract" in result.output
 
 
+@pytest.mark.parametrize("args", [["doctor", "--help"], ["tier3", "doctor", "--help"]])
+def test_doctor_verify_models_help_describes_live_catalog_probe(args: list[str]) -> None:
+    result = CliRunner().invoke(cli, args, terminal_width=240)
+
+    assert result.exit_code == 0
+    assert "--verify-models" in result.output
+    normalized_output = " ".join(result.output.split()).lower()
+    assert "catalog reachability" in normalized_output
+    assert "authenticated" not in normalized_output
+
+
 def test_removed_benchmark_authoring_command_is_unavailable() -> None:
     removed_command = "convert" + "-benchmark"
 

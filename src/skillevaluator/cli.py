@@ -2009,7 +2009,7 @@ def view(skill_path: Path, results_dir: Path | None) -> None:
 @click.option("--limit", type=click.IntRange(min=1, max=100), default=10, show_default=True)
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def models_command(limit: int, as_json: bool) -> None:
-    """List a filtered view of the selected provider's authenticated catalog."""
+    """Check catalog reachability and list visible provider models."""
     from skillevaluator.model_commands import run_models_command
 
     raise SystemExit(run_models_command(limit=limit, as_json=as_json))
@@ -2025,7 +2025,11 @@ def models_command(limit: int, as_json: bool) -> None:
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
-@click.option("--verify-models", is_flag=True, help="Show the configured public provider model.")
+@click.option(
+    "--verify-models",
+    is_flag=True,
+    help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
+)
 def doctor(agents: str, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor

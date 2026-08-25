@@ -149,7 +149,7 @@ skillevaluator --version
 skillevaluator health-check
 ```
 
-`--version` confirms the CLI is on PATH — that is the whole smoke test for a Tier 1-only install. `health-check` goes one step further: a quick readiness check of the CLI and the selected live-eval backend (defaults: the `codex` agent, `docker` environment), useful once you plan to run Tier 3. On an install without the `tier3` extra or a configured provider it lists the missing pieces and exits non-zero — expected for a Tier 1-only setup, not a broken install. For a deeper diagnosis, `doctor` covers the same ground plus model verification — see the [CLI Reference](cli-reference.mdx) for both.
+`--version` confirms the CLI is on PATH — that is the whole smoke test for a Tier 1-only install. `health-check` goes one step further: a quick readiness check of the CLI and the selected live-eval backend (defaults: the `codex` agent, `docker` environment), useful once you plan to run Tier 3. On an install without the `tier3` extra or a configured provider it lists the missing pieces and exits non-zero — expected for a Tier 1-only setup, not a broken install. For a deeper diagnosis, `doctor` covers the same ground; add `doctor --verify-models` to make a live credential-bearing catalog request for each resolved agent model. A public or otherwise non-authoritative result is reported as a warning because catalog access alone does not prove inference access. See the [CLI Reference](cli-reference.mdx) for both commands.
 
 ## Troubleshooting
 

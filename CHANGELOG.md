@@ -12,8 +12,14 @@ All notable changes to SkillEvaluator are documented in this file.
   successful trial and its full comparison arm unscoreable. Generated and
   injected Harbor verifier configs now reserve 600 seconds for six sequential
   direct provider attempts plus fail-closed artifact writes. Explicit native
-  task timeouts remain owner-controlled and are not rewritten
+  task timeouts remain owner-controlled and are not rewritten, and whole jobs
+  defer to Harbor's task-configured phase controls instead of a hidden two-hour
+  cap
   ([#70](https://github.com/NVIDIA/SkillEvaluator/issues/70)).
+- Tier 3 paired pass@k evidence now respects Python's active integer-string
+  conversion limit, preserves nonzero Wilson interval widths and paired-effect
+  directions at large case counts, and documents exact-rational omission
+  markers.
 
 ## 0.2.1 - 2026-08-24
 
@@ -21,6 +27,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Added a public benchmark publication gate, regression coverage, and a
   documented rollout plan for generated `BENCHMARK.md` cards.
+- Tier 3 pass@k results now include per-arm 95% Wilson score intervals and,
+  when case identities pair completely, direction-preserving paired outcomes
+  with a two-sided exact McNemar diagnostic, its attainable-p resolution limit,
+  and the paired pass-rate delta.
 
 ### Changed
 
@@ -36,6 +46,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 now exercises each resolved agent route and the enabled standard-
+  grading route against its provider's model catalog before image preparation
+  or task staging. Definitive native-provider authentication and deterministic
+  Bedrock credential/configuration failures stop immediately with a redacted
+  diagnostic. Non-authoritative OpenAI catalog permission/membership results,
+  public or compatible catalog success that does not authenticate inference,
+  compatible-gateway catalog authentication, transient failures, and native
+  Harbor judge selection resolved only at runtime continue as degraded checks.
+  Redacted per-route outcomes are retained even when the later agent runtime
+  preflight fails ([#71](https://github.com/NVIDIA/SkillEvaluator/issues/71)).
 - Tier 3 Harbor collection now accepts the `step_results: null` sentinel
   emitted for successful single-step trials while retaining fail-closed
   validation for malformed non-null multi-step result containers.

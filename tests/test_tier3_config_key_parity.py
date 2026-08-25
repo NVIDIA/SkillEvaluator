@@ -79,6 +79,16 @@ def _run_engine(
     monkeypatch.setattr(runner, "_run_agent_pair", pair)
     monkeypatch.setattr(runner, "collect_harbor_results", collect)
     monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            f"model {selected_provider.model} is available",
+        ),
+    )
     agents = engine_kwargs.pop("agents", ["opencode"])
     result = runner.run_harbor_eval(
         skill,

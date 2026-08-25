@@ -472,11 +472,12 @@ def _write_reward(
     score: float = 0.25,
     steps: tuple[str, ...] = (),
     trial_name: str | None = None,
+    include_entry_id: bool = True,
+    result_task_name: str | None = None,
 ) -> None:
     trial = jobs_dir / f"demo-opencode-{variant}" / (trial_name or f"{case_id}_attempt{attempt:03d}")
     verifier_dirs = [trial / "steps" / step / "verifier" for step in steps] or [trial / "verifier"]
     reward = {
-        "entry_id": case_id,
         "overall": score,
         "security": score,
         "skill_execution": score,
@@ -485,9 +486,16 @@ def _write_reward(
         "goal_accuracy": score,
         "behavior_check": score,
     }
+    if include_entry_id:
+        reward["entry_id"] = case_id
     for verifier_dir in verifier_dirs:
         verifier_dir.mkdir(parents=True, exist_ok=True)
         (verifier_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    if result_task_name is not None:
+        (trial / "result.json").write_text(
+            json.dumps({"trial_name": trial.name, "task_name": result_task_name}),
+            encoding="utf-8",
+        )
 
 
 def _write_variant_job_results(jobs_dir: Path, variants: tuple[str, ...] = ("with", "without")) -> None:
@@ -527,6 +535,88 @@ def test_stop_on_pass_does_not_report_intentionally_skipped_attempts(tmp_path: P
     assert result["execution_status"] == "succeeded"
     assert result["expected_attempts"] == 4
     assert result["scored_attempts"] == 4
+
+
+def test_complete_ab_run_records_paired_pass_evidence(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=1.0)
+    _write_reward(jobs_dir, variant="with", case_id="case-b", attempt=1, score=1.0)
+    _write_reward(jobs_dir, variant="without", case_id="case-a", attempt=1, score=0.0)
+    _write_reward(jobs_dir, variant="without", case_id="case-b", attempt=1, score=1.0)
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path, n_attempts=1)
+
+    assert result["execution_status"] == "succeeded"
+    pass_at_k = result["agents"]["opencode"]["pass_at_k"]
+    assert pass_at_k["with_skill"]["rate_interval"]["confidence_level"] == 0.95
+    paired = pass_at_k["lift"]["paired_comparison"]
+    assert paired["pairing_status"] == "complete"
+    assert paired["paired_cases"] == 2
+    assert paired["with_skill_only_pass"] == 1
+    assert paired["without_skill_only_pass"] == 0
+    assert paired["paired_rate_delta"] == 0.5
+    assert paired["mcnemar_exact"]["p_value"] == 1.0
+
+    persisted = json.loads((tmp_path / "results/opencode/pass_at_k_lift.json").read_text(encoding="utf-8"))
+    assert persisted["delta"] == 0.5
+    assert persisted["count_derived_delta"] == 0.5
+    assert persisted["paired_comparison"] == paired
+
+
+def test_result_derived_case_ids_exercise_partial_pairing_through_collector(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="unused",
+        attempt=1,
+        score=1.0,
+        trial_name="opaque-with-shared",
+        include_entry_id=False,
+        result_task_name="suite/shared",
+    )
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="unused",
+        attempt=1,
+        score=1.0,
+        trial_name="opaque-with-only",
+        include_entry_id=False,
+        result_task_name="suite/with-only",
+    )
+    _write_reward(
+        jobs_dir,
+        variant="without",
+        case_id="unused",
+        attempt=1,
+        score=0.0,
+        trial_name="opaque-without-shared",
+        include_entry_id=False,
+        result_task_name="suite/shared",
+    )
+    _write_reward(
+        jobs_dir,
+        variant="without",
+        case_id="unused",
+        attempt=1,
+        score=0.0,
+        trial_name="opaque-without-only",
+        include_entry_id=False,
+        result_task_name="suite/without-only",
+    )
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path, n_attempts=1, expected_cases=2, expected_case_ids=None)
+
+    assert result["execution_status"] == "succeeded"
+    paired = result["agents"]["opencode"]["pass_at_k"]["lift"]["paired_comparison"]
+    assert paired["pairing_status"] == "partial"
+    assert paired["paired_cases"] == 1
+    assert paired["with_skill_unpaired_case_ids"] == ["with-only"]
+    assert paired["without_skill_unpaired_case_ids"] == ["without-only"]
+    assert "mcnemar_exact" not in paired
 
 
 def test_stop_on_pass_records_skipped_attempts_in_pass_summary(tmp_path: Path) -> None:

@@ -63,8 +63,11 @@ skillevaluator doctor --agents codex --env-mode docker
 `doctor` takes seconds and names anything missing: the evaluator provider,
 the selected backend's prerequisites, and unsupported agent names. Add
 `--verify-models` to live-probe each agent's model against the provider's
-catalog — one pass/fail row per agent — and `--agent-model AGENT=MODEL` to
-check an override before committing to a run.
+catalog — one pass, warn, or fail row per agent — and `--agent-model AGENT=MODEL`
+to check an override before committing to a run. Warnings identify catalog
+results that do not authoritatively prove inference access. Tier 3's runtime
+preflight is the stronger check for agent routes; it does not invoke a separate
+standard-grader-only route before the evaluation reaches grading.
 `skillevaluator health-check` is the quicker
 CLI-and-backend variant; [Agents & Sandboxes](agents-and-sandboxes.mdx) covers
 both in depth.
@@ -199,17 +202,32 @@ wrote and how to interpret it.
 
 ## How a run works
 
-`tier3 evaluate` reads the accepted dataset (or native task source) and builds
-a Harbor task bundle. Before spending the full A/B matrix, a runtime preflight
-runs one real, bounded smoke task per agent to confirm each agent runtime
-actually works (on by default; disable with `--no-agent-runtime-preflight`). Harbor then
-starts the selected environment and runs the agent in both arms; with standard
-grading, each transcript is judged against the case's expected output and
-assertions using the configured evaluator provider. Finally, SkillEvaluator
-collects the artifacts and computes the dimension scores, pass rates, and
-Skill Lift. Harbor task and job directories are transient: they are deleted
-after collection whether the run succeeds or fails, unless you pass
-`--harbor-keep-jobs`.
+`tier3 evaluate` reads the accepted dataset (or native task source), resolves
+each agent's actual provider route and the enabled standard-grading route, and
+makes bounded credential-bearing model-catalog requests before image preparation
+or task staging. Definitive native-provider authentication, authoritative model
+rejection, and deterministic Bedrock credential/configuration failures stop
+immediately. Non-authoritative OpenAI catalog permission or membership results,
+compatible-gateway catalog authentication, unsupported catalogs, and transient
+failures are reported as degraded rather than blocking the run. A successful
+NVIDIA Build or compatible-gateway listing is also inconclusive when that
+catalog does not authenticate inference; the real per-agent runtime preflight
+is the stronger check for agent routes. A degraded route used only by the
+standard grader remains unproven until grading begins. Native Harbor judge selection is likewise inconclusive
+until runtime when no host judge override is set. `result.json` retains the
+redacted target-by-target outcome under `run_config.credential_validation`,
+including when the subsequent agent runtime preflight fails.
+
+SkillEvaluator then builds the Harbor task bundle. Before spending the full
+A/B matrix, a runtime preflight runs one real, bounded smoke task per agent to
+confirm each agent runtime actually works (on by default; disable with
+`--no-agent-runtime-preflight`). Harbor then starts the selected environment
+and runs the agent in both arms; with standard grading, each transcript is
+judged against the case's expected output and assertions using the configured
+evaluator provider. Finally, SkillEvaluator collects the artifacts and
+computes the dimension scores, pass rates, and Skill Lift. Harbor task and job
+directories are transient: they are deleted after collection whether the run
+succeeds or fails, unless you pass `--harbor-keep-jobs`.
 
 Two credential roles are involved: the evaluator provider generates datasets
 and performs standard grading, while the live agent uses its own native

@@ -3816,7 +3816,7 @@ def main():
     if judge_errors:
         result["evaluation_status"] = "failed"
         result["evaluation_errors"] = judge_errors
-        # Harbor 0.13.2 still parses reward.json when the verifier exits nonzero.
+        # Harbor 0.22 still parses reward.json when the verifier exits nonzero.
         # Keep this artifact deliberately incomplete so the collector cannot
         # score it even if the richer diagnostic sidecar is unavailable.
         write_reward_outputs(result, 0.0)

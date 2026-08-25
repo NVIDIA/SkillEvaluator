@@ -107,7 +107,11 @@ _AGENT_RUNTIME_EXCEPTION_TYPES = {
     "ProviderException",
 }
 _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES = {
+    "AgentAuthenticationError",
     "AgentTimeoutError",
+    "ApiRateLimitError",
+    "ModelNotFoundError",
+    "NetworkConnectionError",
 }
 
 
@@ -502,12 +506,8 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     return ""
 
 
-def _trial_exception_details(trial_dir: Path) -> tuple[str, str]:
-    """Return the Harbor trial exception type and display reason, if present."""
-    result = _read_json(trial_dir / "result.json")
-    if not isinstance(result, dict):
-        return "", ""
-    exception_info = result.get("exception_info")
+def _exception_details(exception_info: Any) -> tuple[str, str]:
+    """Return one Harbor exception type and bounded display reason."""
     if not isinstance(exception_info, dict):
         return "", ""
 
@@ -516,6 +516,30 @@ def _trial_exception_details(trial_dir: Path) -> tuple[str, str]:
     if exception_type and exception_message:
         return exception_type, f"{exception_type}: {exception_message}"[:600]
     return exception_type, (exception_type or exception_message)[:600]
+
+
+def _trial_exception_details(trial_dir: Path) -> tuple[str, str]:
+    """Return the Harbor trial-root exception type and display reason, if present."""
+    result = _read_json(trial_dir / "result.json")
+    if not isinstance(result, dict):
+        return "", ""
+    return _exception_details(result.get("exception_info"))
+
+
+def _trial_step_exception_details(trial_dir: Path) -> list[tuple[str, str]]:
+    """Return ordered native multi-step exception types and display reasons."""
+    result = _read_json(trial_dir / "result.json")
+    if not isinstance(result, dict):
+        return []
+    step_results = result.get("step_results")
+    if not isinstance(step_results, list):
+        return []
+    return [
+        details
+        for step in step_results
+        if isinstance(step, dict)
+        if (details := _exception_details(step.get("exception_info"))) != ("", "")
+    ]
 
 
 def _agent_log_runtime_failure_reason(
@@ -558,24 +582,28 @@ def _agent_log_runtime_failure_reason(
 
 def _agent_runtime_failure_reason(trial_dir: Path) -> str:
     """Return why a trial cannot produce a valid score."""
-    exception_type, exception_reason = _trial_exception_details(trial_dir)
+    exception_details = [
+        _trial_exception_details(trial_dir),
+        *_trial_step_exception_details(trial_dir),
+    ]
     agent_reason = _agent_log_runtime_failure_reason(
         trial_dir,
-        include_text_logs=bool(exception_reason),
+        include_text_logs=any(reason for _exception_type, reason in exception_details),
     )
     if agent_reason:
         return agent_reason
 
-    if exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES:
-        return exception_reason
+    for exception_type, exception_reason in exception_details:
+        if exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES:
+            return exception_reason
 
-    # Do not classify verifier/healthcheck/task exceptions as agent runtime failures.
-    if (
-        exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES
-        and exception_reason
-        and _text_contains_agent_runtime_failure(exception_reason)
-    ):
-        return exception_reason
+        # Do not classify verifier/healthcheck/task exceptions as agent runtime failures.
+        if (
+            exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES
+            and exception_reason
+            and _text_contains_agent_runtime_failure(exception_reason)
+        ):
+            return exception_reason
 
     return ""
 

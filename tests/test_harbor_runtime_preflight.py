@@ -249,6 +249,72 @@ def test_runtime_preflight_accepts_harbor_0132_unscored_agent_success(monkeypatc
     assert result.ok is True
 
 
+def test_agent_only_validation_accepts_actual_harbor_022_single_step_result(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from harbor.models.job.result import JobResult, JobStats
+    from harbor.models.trial.result import TrialResult
+
+    job_dir = tmp_path / "jobs" / "runtime-preflight-opencode"
+    trial_dir = job_dir / "case-001__attempt"
+    trial_dir.mkdir(parents=True)
+    now = datetime(2026, 8, 25, tzinfo=UTC)
+    trial_result = TrialResult.model_validate(
+        {
+            "id": UUID(int=2),
+            "task_name": "nvidia/skillevaluator-case-001",
+            "trial_name": trial_dir.name,
+            "trial_uri": trial_dir.as_uri(),
+            "task_id": {"path": str(job_dir / "task" / "case-001")},
+            "task_checksum": "harbor-0.22-agent-only-fixture",
+            "config": {
+                "task": {"path": str(job_dir / "task" / "case-001")},
+                "trial_name": trial_dir.name,
+                "verifier": {"disable": True},
+            },
+            "agent_info": {
+                "name": "opencode",
+                "version": "test",
+                "model_info": {"name": "test-model"},
+            },
+            "agent_result": {
+                "n_input_tokens": 100,
+                "n_cache_tokens": 20,
+                "n_output_tokens": 10,
+            },
+            "verifier_result": None,
+            "exception_info": None,
+            "started_at": now,
+            "finished_at": now,
+            "step_results": None,
+        }
+    )
+    job_result = JobResult(
+        id=UUID(int=1),
+        started_at=now,
+        updated_at=now,
+        finished_at=now,
+        n_total_trials=1,
+        stats=JobStats.from_trial_results([trial_result], n_total_trials=1),
+        trial_results=[trial_result],
+    )
+    result_path = job_dir / "result.json"
+    result_path.write_text(job_result.model_dump_json(indent=2), encoding="utf-8")
+    (trial_dir / "result.json").write_text(trial_result.model_dump_json(indent=2), encoding="utf-8")
+
+    persisted_job = JobResult.model_validate_json(result_path.read_text(encoding="utf-8"))
+    persisted_trial = TrialResult.model_validate_json((trial_dir / "result.json").read_text(encoding="utf-8"))
+
+    assert persisted_job.stats.n_completed_trials == 1
+    assert persisted_job.stats.n_errored_trials == 0
+    assert persisted_job.stats.n_input_tokens == 100
+    assert persisted_job.stats.n_cache_tokens == 20
+    assert persisted_job.stats.n_output_tokens == 10
+    assert persisted_trial.step_results is None
+    assert runtime_preflight.validate_harbor_agent_only_job_result(result_path, expected_trials=1) == (True, "")
+
+
 def test_agent_only_validation_accepts_harbor_0132_unscored_multistep_agent_success(tmp_path: Path) -> None:
     result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
     trial_result_path = result_path.parent / "case-001__attempt" / "result.json"

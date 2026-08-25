@@ -848,7 +848,7 @@ def validate_harbor_agent_only_job_result(
 ) -> tuple[bool, str]:
     """Validate a verification-disabled Harbor job and its agent result.
 
-    Harbor 0.13.2 records an agent-only trial as completed at the job level,
+    Harbor 0.22 records an agent-only trial as completed at the job level,
     but intentionally leaves its evaluation trial and reward counts at zero.
     The per-trial result is therefore the proof that the agent actually ran.
     """

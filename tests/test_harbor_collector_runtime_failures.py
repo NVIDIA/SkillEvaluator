@@ -6,11 +6,448 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
+from uuid import UUID
+
+import pytest
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
+
+
+def _write_actual_harbor_022_result(
+    job_dir: Path,
+    *,
+    reward: float = 1.0,
+    verifier_mode: Literal["present", "null", "missing"] = "present",
+    exception_type: str | None = None,
+    step_rewards: tuple[float, ...] | None = None,
+    step_exception_type: str | None = None,
+) -> str:
+    """Persist a real Harbor 0.22 JobResult and its TrialResult artifact."""
+    from harbor.models.job.result import JobResult, JobStats
+    from harbor.models.trial.result import TrialResult
+
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    now = datetime(2026, 8, 25, tzinfo=UTC)
+    agent_context = {
+        "n_input_tokens": 7,
+        "n_cache_tokens": 2,
+        "n_output_tokens": 3,
+    }
+    payload: dict[str, object] = {
+        "id": UUID(int=2),
+        "task_name": "nvidia/skillevaluator-case-001",
+        "trial_name": trial_name,
+        "trial_uri": trial_dir.as_uri(),
+        "task_id": {"path": str(job_dir / "task" / "case-001")},
+        "task_checksum": "harbor-0.22-fixture",
+        "config": {
+            "task": {"path": str(job_dir / "task" / "case-001")},
+            "trial_name": trial_name,
+        },
+        "agent_info": {
+            "name": "opencode",
+            "version": "test",
+            "model_info": {"name": "test-model"},
+        },
+        "agent_result": agent_context,
+        "started_at": now,
+        "finished_at": now,
+        "step_results": None,
+    }
+    if verifier_mode == "present":
+        payload["verifier_result"] = {"rewards": {"overall": reward}}
+    elif verifier_mode == "null":
+        payload["verifier_result"] = {"rewards": None}
+    if step_rewards is not None:
+        payload["agent_result"] = None
+        step_results_payload: list[dict[str, object]] = []
+        for index, step_reward in enumerate(step_rewards, start=1):
+            step_result: dict[str, object] = {
+                "step_name": f"step-{index}",
+                "agent_result": agent_context,
+                "verifier_result": {"rewards": {"overall": step_reward}},
+            }
+            if index == 1 and step_exception_type is not None:
+                step_result["exception_info"] = {
+                    "exception_type": step_exception_type,
+                    "exception_message": "provider step operation failed",
+                    "exception_traceback": "",
+                    "occurred_at": now,
+                }
+            step_results_payload.append(step_result)
+        payload["step_results"] = step_results_payload
+    if exception_type is not None:
+        payload["exception_info"] = {
+            "exception_type": exception_type,
+            "exception_message": "provider operation failed",
+            "exception_traceback": "",
+            "occurred_at": now,
+        }
+    trial_result = TrialResult.model_validate(payload)
+    job_result = JobResult(
+        id=UUID(int=1),
+        started_at=now,
+        updated_at=now,
+        finished_at=now,
+        n_total_trials=1,
+        stats=JobStats.from_trial_results([trial_result], n_total_trials=1),
+        trial_results=[trial_result],
+    )
+    (trial_dir / "result.json").write_text(trial_result.model_dump_json(indent=2), encoding="utf-8")
+    (job_dir / "result.json").write_text(job_result.model_dump_json(indent=2), encoding="utf-8")
+    for index, step_reward in enumerate(step_rewards or (), start=1):
+        verifier_dir = trial_dir / "steps" / f"step-{index}" / "verifier"
+        verifier_dir.mkdir(parents=True)
+        (verifier_dir / "reward.json").write_text(
+            json.dumps({"overall": step_reward, "entry_id": "case-001"}),
+            encoding="utf-8",
+        )
+    return trial_name
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    (
+        "AgentAuthenticationError",
+        "ApiRateLimitError",
+        "ModelNotFoundError",
+        "NetworkConnectionError",
+    ),
+)
+def test_harbor_022_typed_infrastructure_failure_invalidates_present_reward(
+    tmp_path: Path,
+    exception_type: str,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0, exception_type=exception_type)
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert opencode["num_trials_with"] == 0
+    assert opencode["with_skill"] == {}
+    assert opencode["agent_runtime_failures"]["with_skill"] == [
+        {"trial": trial_name, "reason": f"{exception_type}: provider operation failed"}
+    ]
+
+
+def test_harbor_022_safety_refusal_remains_a_scored_zero_outcome(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=0.0)
+    agent_dir = job_dir / trial_name / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "opencode.txt").write_text(
+        json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "name": "AgentSafetyRefusalError",
+                    "message": "the model declined this request on safety grounds",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "succeeded"
+    assert opencode["num_trials_with"] == 1
+    assert opencode["agent_runtime_failures"]["with_skill"] == []
+    persisted_summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert persisted_summary["overall_score"] == 0.0
+    persisted_reward = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert persisted_reward["overall"] == 0.0
+
+
+def test_harbor_022_safety_refusal_exception_is_not_an_infrastructure_failure(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(
+        job_dir,
+        reward=0.0,
+        exception_type="AgentSafetyRefusalError",
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert opencode["num_trials_with"] == 0
+    assert opencode["agent_runtime_failures"]["with_skill"] == []
+    assert opencode["trial_failures"]["with_skill"] == [
+        {"trial": trial_name, "reason": "AgentSafetyRefusalError: provider operation failed"}
+    ]
+
+
+def test_actual_harbor_022_single_step_success_serializes_and_scores(tmp_path: Path) -> None:
+    from harbor.models.job.result import JobResult
+    from harbor.models.trial.result import TrialResult
+
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+
+    job_result = JobResult.model_validate_json((job_dir / "result.json").read_text(encoding="utf-8"))
+    trial_result = TrialResult.model_validate_json((job_dir / trial_name / "result.json").read_text(encoding="utf-8"))
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert job_result.stats.n_completed_trials == 1
+    assert job_result.stats.n_errored_trials == 0
+    assert trial_result.step_results is None
+    assert trial_result.verifier_result is not None
+    assert trial_result.verifier_result.rewards == {"overall": 1.0}
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"]["num_trials_with"] == 1
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["overall_score"] == 1.0
+
+
+@pytest.mark.parametrize("verifier_mode", ("null", "missing"))
+def test_actual_harbor_022_null_or_missing_reward_is_unscored(
+    tmp_path: Path,
+    verifier_mode: Literal["null", "missing"],
+) -> None:
+    from harbor.models.job.result import JobResult
+    from harbor.models.trial.result import TrialResult
+
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, verifier_mode=verifier_mode)
+
+    job_result = JobResult.model_validate_json((job_dir / "result.json").read_text(encoding="utf-8"))
+    trial_result = TrialResult.model_validate_json((job_dir / trial_name / "result.json").read_text(encoding="utf-8"))
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert job_result.stats.n_completed_trials == 1
+    assert job_result.stats.n_errored_trials == 0
+    assert trial_result.step_results is None
+    if verifier_mode == "null":
+        assert trial_result.verifier_result is not None
+        assert trial_result.verifier_result.rewards is None
+    else:
+        assert trial_result.verifier_result is None
+    assert results["execution_status"] == "failed"
+    assert results["agents"]["opencode"]["num_trials_with"] == 0
+    assert results["agents"]["opencode"]["job_failures"]["with_skill"] == (
+        "Harbor evaluation statistics account for 0/1 completed trials"
+    )
+
+
+@pytest.mark.parametrize(
+    ("exception_type", "job_failure"),
+    (
+        ("RuntimeError", "Harbor job did not complete successfully: 1 errored"),
+        ("CancelledError", "Harbor job did not complete successfully: 1 cancelled"),
+    ),
+)
+def test_actual_harbor_022_error_or_cancelled_job_suppresses_reward(
+    tmp_path: Path,
+    exception_type: str,
+    job_failure: str,
+) -> None:
+    from harbor.models.job.result import JobResult
+
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    _write_actual_harbor_022_result(job_dir, reward=1.0, exception_type=exception_type)
+
+    job_result = JobResult.model_validate_json((job_dir / "result.json").read_text(encoding="utf-8"))
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert job_result.stats.n_errored_trials == 1
+    assert job_result.stats.n_cancelled_trials == (exception_type == "CancelledError")
+    assert results["execution_status"] == "failed"
+    assert results["agents"]["opencode"]["num_trials_with"] == 0
+    assert results["agents"]["opencode"]["job_failures"]["with_skill"] == job_failure
+
+
+def test_actual_harbor_022_multistep_root_reward_is_authoritative(tmp_path: Path) -> None:
+    from harbor.models.trial.result import TrialResult
+
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=0.8, step_rewards=(0.0, 0.2))
+
+    trial_result = TrialResult.model_validate_json((job_dir / trial_name / "result.json").read_text(encoding="utf-8"))
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert trial_result.agent_result is None
+    assert trial_result.step_results is not None
+    assert [step.verifier_result.rewards for step in trial_result.step_results if step.verifier_result] == [
+        {"overall": 0.0},
+        {"overall": 0.2},
+    ]
+    assert trial_result.verifier_result is not None
+    assert trial_result.verifier_result.rewards == {"overall": 0.8}
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"]["num_trials_with"] == 1
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["overall_score"] == 0.8
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    (
+        "AgentAuthenticationError",
+        "ApiRateLimitError",
+        "ModelNotFoundError",
+        "NetworkConnectionError",
+    ),
+)
+def test_actual_harbor_022_multistep_typed_agent_failure_is_infrastructure_failure(
+    tmp_path: Path,
+    exception_type: str,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(
+        job_dir,
+        reward=1.0,
+        step_rewards=(1.0, 1.0),
+        step_exception_type=exception_type,
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert opencode["num_trials_with"] == 0
+    assert opencode["agent_runtime_failures"]["with_skill"] == [
+        {"trial": trial_name, "reason": f"{exception_type}: provider step operation failed"}
+    ]
+    assert opencode["trial_failures"]["with_skill"] == []
+
+
+def test_actual_harbor_022_multistep_safety_refusal_stays_out_of_infrastructure_failures(
+    tmp_path: Path,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(
+        job_dir,
+        reward=0.0,
+        step_rewards=(0.0, 0.0),
+        step_exception_type="AgentSafetyRefusalError",
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert opencode["num_trials_with"] == 0
+    assert opencode["agent_runtime_failures"]["with_skill"] == []
+    assert opencode["trial_failures"]["with_skill"] == [
+        {
+            "trial": trial_name,
+            "reason": (
+                "Required judge evaluation failed: collector: Constituent default reward for step step-1 "
+                "is incomplete, non-finite, or failed; the authoritative aggregate was not scored"
+            ),
+        }
+    ]
 
 
 def _write_complete_job_result(job_dir: Path, trial_names: list[str]) -> None:

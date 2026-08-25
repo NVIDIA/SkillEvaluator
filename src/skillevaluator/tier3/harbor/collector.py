@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
@@ -1955,16 +1956,12 @@ def _wilson_score_interval(successes: int, total: int) -> dict[str, Any] | None:
     z_squared = z * z
     denominator = 1.0 + z_squared / total
     center = (proportion + z_squared / (2.0 * total)) / denominator
-    margin = (
-        z
-        * math.sqrt((proportion * (1.0 - proportion) + z_squared / (4.0 * total)) / total)
-        / denominator
-    )
+    margin = z * math.sqrt((proportion * (1.0 - proportion) + z_squared / (4.0 * total)) / total) / denominator
     return {
         "method": "wilson_score",
         "confidence_level": 0.95,
-        "lower": round(max(0.0, center - margin), 4),
-        "upper": round(min(1.0, center + margin), 4),
+        "lower": max(0.0, center - margin),
+        "upper": min(1.0, center + margin),
     }
 
 
@@ -2027,13 +2024,22 @@ def _decimal_digit_count(value: int) -> int:
 
 def _probability_exact(probability: Fraction) -> str | None:
     """Return a bounded reduced rational, or None when decimal rendering is unsafe."""
-    if max(_decimal_digit_count(probability.numerator), _decimal_digit_count(probability.denominator)) > (
-        _MAX_EXACT_PROBABILITY_INTEGER_DIGITS
-    ):
+    active_limit = sys.get_int_max_str_digits()
+    render_limit = (
+        min(_MAX_EXACT_PROBABILITY_INTEGER_DIGITS, active_limit)
+        if active_limit > 0
+        else _MAX_EXACT_PROBABILITY_INTEGER_DIGITS
+    )
+    if max(_decimal_digit_count(probability.numerator), _decimal_digit_count(probability.denominator)) > (render_limit):
         return None
-    if probability.denominator == 1:
-        return str(probability.numerator)
-    return f"{probability.numerator}/{probability.denominator}"
+    try:
+        if probability.denominator == 1:
+            return str(probability.numerator)
+        return f"{probability.numerator}/{probability.denominator}"
+    except ValueError:
+        # The interpreter-wide limit can change between the digit check and
+        # rendering. Treat that race like any other bounded omission.
+        return None
 
 
 def _exact_probability_fields(field: str, probability: Fraction) -> dict[str, Any]:
@@ -2127,10 +2133,7 @@ def _paired_pass_comparison(
 
     paired_cases = len(common_ids)
     paired_delta = (
-        round(
-            (outcomes["with_skill_only_pass"] - outcomes["without_skill_only_pass"]) / paired_cases,
-            4,
-        )
+        (outcomes["with_skill_only_pass"] - outcomes["without_skill_only_pass"]) / paired_cases
         if paired_cases
         else None
     )

@@ -1369,6 +1369,56 @@ def test_pass_at_k_render_preserves_narrow_intervals_and_small_paired_delta() ->
     assert "Paired pass-rate delta: +0.01%" in html
 
 
+def test_pass_at_k_render_preserves_sub_basis_point_endpoint_uncertainty() -> None:
+    payload = build_agent_eval_payload(
+        "endpoint-precision-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 200_000,
+                "scored_attempts": 200_000,
+                "overall_with_skill": 0.5,
+                "overall_without_skill": 0.5,
+                "pass_with_skill": {
+                    "rate": 0.0,
+                    "rate_interval": {"lower": 0.0, "upper": 0.000038413},
+                    "passed_cases": 0,
+                    "total_cases": 100_000,
+                },
+                "pass_without_skill": {
+                    "rate": 1.0,
+                    "rate_interval": {"lower": 0.999961587, "upper": 1.0},
+                    "passed_cases": 100_000,
+                    "total_cases": 100_000,
+                },
+                "pass_lift": {
+                    "delta": -1.0,
+                    "paired_comparison": {
+                        "pairing_status": "complete",
+                        "paired_cases": 25_000,
+                        "with_skill_only_pass": 1,
+                        "without_skill_only_pass": 0,
+                        "both_pass": 0,
+                        "neither_pass": 24_999,
+                        "discordant_cases": 1,
+                        "paired_rate_delta": 1 / 25_000,
+                    },
+                },
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert "0%\u20130.004%" in html
+    assert "99.996%\u2013100%" in html
+    assert "Paired pass-rate delta: +0.004%" in html
+
+
 def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
     payload = build_agent_eval_payload(
         "responsive-pass-evidence-demo",

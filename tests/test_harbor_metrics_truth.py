@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import math
+import os
+import subprocess
+import sys
 import time
 
 import pytest
@@ -137,6 +140,18 @@ def test_wilson_interval_is_unavailable_without_cases() -> None:
     assert _wilson_score_interval(0, 0) is None
 
 
+def test_wilson_interval_preserves_endpoint_uncertainty_beyond_four_decimal_places() -> None:
+    zero_passes = _wilson_score_interval(0, 100_000)
+    all_passes = _wilson_score_interval(100_000, 100_000)
+
+    assert zero_passes is not None
+    assert all_passes is not None
+    assert zero_passes["lower"] == 0.0
+    assert 0.0 < zero_passes["upper"] < 0.0001
+    assert 0.9999 < all_passes["lower"] < 1.0
+    assert all_passes["upper"] == 1.0
+
+
 def test_mcnemar_exact_p_value_preserves_small_nonzero_results() -> None:
     assert _mcnemar_exact_p_value(32, 0) == pytest.approx(2**-31)
     assert _mcnemar_exact_p_value(32, 0) > 0.0
@@ -244,8 +259,28 @@ def test_complete_pairing_delta_matches_count_derived_arm_delta() -> None:
 
     paired = _paired_pass_comparison(with_skill, without_skill)
 
-    assert paired["paired_rate_delta"] == 0.3333
-    assert paired["paired_rate_delta"] == _count_derived_pass_rate_delta(with_skill, without_skill)
+    assert paired["paired_rate_delta"] == pytest.approx(1 / 3)
+    assert paired["paired_rate_delta"] == pytest.approx(
+        _count_derived_pass_rate_delta(with_skill, without_skill),
+        abs=0.0001,
+    )
+
+
+@pytest.mark.parametrize(("skill_only", "direction"), [(True, 1), (False, -1)])
+def test_paired_delta_preserves_small_nonzero_direction(skill_only: bool, direction: int) -> None:
+    pair_count = 25_000
+    case_ids = [f"case-{index}" for index in range(pair_count)]
+    with_skill_cases = {case_id: {"passed": False} for case_id in case_ids}
+    without_skill_cases = {case_id: {"passed": False} for case_id in case_ids}
+    (with_skill_cases if skill_only else without_skill_cases)[case_ids[0]]["passed"] = True
+
+    paired = _paired_pass_comparison(
+        {"total_cases": pair_count, "cases": with_skill_cases},
+        {"total_cases": pair_count, "cases": without_skill_cases},
+    )
+
+    assert paired["paired_rate_delta"] == pytest.approx(direction / pair_count)
+    assert math.copysign(1.0, paired["paired_rate_delta"]) == direction
 
 
 def test_mcnemar_exact_preserves_machine_readable_value_beyond_float_range() -> None:
@@ -296,6 +331,36 @@ def test_large_exact_pairing_respects_integer_string_safety_limit(
         assert exact["p_value_exact_omitted_reason"] == "decimal_digit_limit"
         assert exact["minimum_attainable_p_value_exact"] is None
         assert exact["minimum_attainable_p_value_exact_omitted_reason"] == "decimal_digit_limit"
+
+
+def test_large_exact_pairing_respects_active_integer_string_limit_in_subprocess() -> None:
+    code = """
+from skillevaluator.tier3.harbor.collector import _paired_pass_comparison
+
+pair_count = 2_200
+with_skill_cases = {f"case-{index}": {"passed": True} for index in range(pair_count)}
+without_skill_cases = {case_id: {"passed": False} for case_id in with_skill_cases}
+paired = _paired_pass_comparison(
+    {"total_cases": pair_count, "cases": with_skill_cases},
+    {"total_cases": pair_count, "cases": without_skill_cases},
+)
+exact = paired["mcnemar_exact"]
+assert exact["p_value_exact"] is None
+assert exact["p_value_exact_omitted"] is True
+assert exact["p_value_exact_omitted_reason"] == "decimal_digit_limit"
+assert exact["minimum_attainable_p_value_exact"] is None
+assert exact["minimum_attainable_p_value_exact_omitted"] is True
+assert exact["minimum_attainable_p_value_exact_omitted_reason"] == "decimal_digit_limit"
+"""
+    environment = {**os.environ, "PYTHONINTMAXSTRDIGITS": "640"}
+
+    subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
 
 
 def test_paired_pass_comparison_does_not_issue_exact_test_for_partial_pairing() -> None:

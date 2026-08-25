@@ -249,9 +249,13 @@ exact test could attain with the observed number of discordant pairs. When that
 minimum is above 0.05, the report labels the test resolution-limited at that
 threshold. This is a mathematical resolution limit, not evidence of no effect;
 with five or fewer discordant pairs, a two-sided exact result cannot fall below
-0.05 regardless of direction. The JSON preserves compact decimal and reduced
-rational representations of both probabilities; its numeric approximation is
-`null`, rather than a false zero, if binary floating-point conversion underflows.
+0.05 regardless of direction. The JSON always preserves compact decimal text
+for both probabilities. It also records a reduced rational in each `*_exact`
+field when the numerator and denominator fit both SkillEvaluator's 4,300-digit
+safety cap and Python's active integer-string conversion limit. Otherwise that
+field is `null`, `*_omitted` is `true`, and `*_omitted_reason` is
+`"decimal_digit_limit"`. The numeric approximation is `null`, rather than a
+false zero, if binary floating-point conversion underflows.
 
 These uncertainty fields describe the cases in one configured run. They do not
 make heterogeneous cases independent, correct dataset leakage, or promote a

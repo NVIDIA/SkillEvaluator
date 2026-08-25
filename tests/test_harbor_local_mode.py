@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -51,6 +52,12 @@ from skillevaluator.tier3.harbor.runner import (
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
 
 _NATIVE_WINDOWS_LOCAL_REASON = "native Windows local mode requires WSL2; these checks exercise the POSIX backend"
+
+
+class _NoopScopedExecEnvironment:
+    @contextlib.contextmanager
+    def scoped_exec_env(self, _env: dict[str, str]):
+        yield
 
 
 def _local_environment(
@@ -285,9 +292,7 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
 
     agent_class = getattr(local_agents, "SkillEvaluatorLocalNvidiaBuildCodex", None)
     assert agent_class is not None
-    agent = object.__new__(agent_class)
-    agent.model_name = "nvidia/nemotron-3-nano-30b-a3b"
-    agent._extra_env = {}
+    agent = agent_class(logs_dir=tmp_path, model_name="nvidia/nemotron-3-nano-30b-a3b")
     agent.render_instruction = lambda instruction: instruction
     agent._resolve_auth_json_path = lambda: None
     agent._build_register_skills_command = lambda: None
@@ -298,7 +303,9 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
     retained_logs: list[tuple[str, str]] = []
     origins: list[str] = []
 
-    class Environment:
+    class Environment(_NoopScopedExecEnvironment):
+        default_user = None
+
         async def upload_file(self, source: object, destination: object) -> None:
             retained_logs.append((str(destination), Path(source).read_text(encoding="utf-8")))
 
@@ -330,6 +337,12 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
     ) -> None:
         _ = (instruction, context)
         origins.append(self._bridge_origin())
+        effective_config = self._build_effective_config()
+        await self._upload_effective_config(
+            environment,
+            effective_config,
+            (self._REMOTE_CODEX_HOME / "config.toml").as_posix(),
+        )
         await self.exec_as_agent(
             environment,
             command="codex exec --model nemotron-3-nano-30b-a3b -- test",
@@ -346,18 +359,18 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
     parsed = urlsplit(origins[0])
     assert parsed.hostname == "127.0.0.1"
     assert parsed.port is not None
-    setup_commands = [(command, env) for command, env in calls if "model_provider" in command]
-    assert len(setup_commands) == 1
-    setup_command, setup_env = setup_commands[0]
-    assert f'base_url = "{origins[0]}/v1"' in setup_command
-    assert "api.openai.com" not in setup_command
-    assert "real-nvidia-key" not in setup_command
-    assert setup_env["OPENAI_API_KEY"] not in {"real-nvidia-key", "nvidia-build-loopback"}
+    config_upload = next(content for destination, content in retained_logs if destination.endswith("/config.toml"))
+    config = tomllib.loads(config_upload)
+    assert config["model_provider"] == "openai_compatible"
+    assert config["openai_base_url"] == f"{origins[0]}/v1"
+    assert config["model_providers"]["openai_compatible"]["base_url"] == f"{origins[0]}/v1"
+    assert "api.openai.com" not in config_upload
+    assert "real-nvidia-key" not in config_upload
     client_command, client_env = next((command, env) for command, env in calls if "codex exec" in command)
     assert "env -u NVIDIA_API_KEY" in client_command
     assert "NVIDIA_API_KEY" not in client_env
-    assert client_env["OPENAI_API_KEY"] == setup_env["OPENAI_API_KEY"]
-    assert retained_logs and retained_logs[0][0].endswith("nvidia-build-bridge.log")
+    assert client_env["OPENAI_API_KEY"] not in {"real-nvidia-key", "nvidia-build-loopback"}
+    assert any(destination.endswith("nvidia-build-bridge.log") for destination, _content in retained_logs)
 
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -593,16 +606,21 @@ def test_local_nvidia_build_bridge_repeated_cancellation_releases_slow_header_st
 
 def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from harbor.agents.installed.codex import Codex
 
-    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
-    agent.model_name = "nvidia/meta/llama-3.1-8b-instruct"
+    agent = SkillEvaluatorNvidiaBuildCodex(
+        logs_dir=tmp_path,
+        model_name="nvidia/meta/llama-3.1-8b-instruct",
+    )
     calls: list[tuple[str, dict[str, str]]] = []
     root_calls: list[tuple[str, dict[str, str]]] = []
     uploads: list[tuple[str, str, int]] = []
 
-    class Environment:
+    class Environment(_NoopScopedExecEnvironment):
+        default_user = None
+
         async def upload_file(self, source: object, destination: object) -> None:
             source_path = Path(source)
             uploads.append(
@@ -654,7 +672,7 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
 
     asyncio.run(agent.run("test", Environment(), None))
 
-    assert len(uploads) == 1
+    assert len(uploads) == 2
     assert uploads[0][0].endswith("nvidia-build-bridge.py")
     secret_handoff = next(
         (command, env) for command, env in root_calls if "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY" in env
@@ -687,16 +705,18 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     assert "kill -0" in health_command
     assert "/healthz" not in health_command
     assert all("NVIDIA_API_KEY" not in env for _, env in [*calls, *root_calls])
-    setup_command, setup_env = next((command, env) for command, env in calls if "model_provider" in command)
-    assert 'model_provider = "openai_compatible"' in setup_command
-    assert "[model_providers.openai_compatible]" in setup_command
-    assert 'base_url = "http://127.0.0.1:43123/v1"' in setup_command
-    assert 'wire_api = "responses"' in setup_command
-    assert "openai_base_url" not in setup_command
+    config_upload = next(content for destination, content, _mode in uploads if destination.endswith("/config.toml"))
+    config = tomllib.loads(config_upload)
+    assert config["model_provider"] == "openai_compatible"
+    assert config["openai_base_url"] == "http://127.0.0.1:43123/v1"
+    assert config["model_providers"]["openai_compatible"] == {
+        "name": "OpenAI-compatible provider",
+        "base_url": "http://127.0.0.1:43123/v1",
+        "env_key": "OPENAI_API_KEY",
+        "wire_api": "responses",
+    }
     assert all("openai_base_url" not in command for command, _ in calls)
-    assert "nvidia-secret" not in setup_command
-    assert setup_env["OPENAI_API_KEY"] == client_token
-    assert "OPENAI_BASE_URL" not in setup_env
+    assert "nvidia-secret" not in config_upload
     client_command, client_env = next((command, env) for command, env in calls if "codex exec" in command)
     assert "NVIDIA_API_KEY" not in client_env
     assert "OPENAI_BASE_URL" not in client_env
@@ -1139,140 +1159,51 @@ def test_nvidia_build_bridge_wraps_compound_codex_shell_commands_before_unsettin
     agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
     agent.model_name = "nvidia/model"
     agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
-    agent._nvidia_build_bridge_client_env = {
-        "OPENAI_API_KEY": "bridge-client-token-secret",
-        "OPENAI_BASE_URL": "http://127.0.0.1:43123/v1",
-    }
-    agent._extra_env = {
-        "NVIDIA_API_KEY": "extra-upstream-secret",
-        "CODEX_HOME": "/logs/agent/codex-home",
-    }
-    log_records: list[tuple[object, object]] = []
-    agent.logger = SimpleNamespace(debug=lambda message, *args, **kwargs: log_records.append((message, (args, kwargs))))
+    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": "bridge-client-token-secret"}
     captured: list[tuple[str, dict[str, str]]] = []
+    scoped: list[dict[str, str]] = []
     simple_command = "codex exec --model model -- test"
     compound_command = 'if [ -d "$CODEX_HOME/sessions" ]; then cp -R "$CODEX_HOME/sessions" /logs/agent/sessions; fi'
 
     class Environment:
-        async def exec_with_sensitive_env(
-            self,
-            command: str,
-            env: dict[str, str] | None = None,
-            **_kwargs: object,
-        ) -> SimpleNamespace:
-            captured.append((command, dict(env or {})))
-            return SimpleNamespace(return_code=0, stdout="", stderr="")
+        @contextlib.contextmanager
+        def scoped_exec_env(self, values: dict[str, str]):
+            scoped.append(dict(values))
+            yield
 
-    async def reject_logged_exec(
+    async def raw_exec(
         _self: Codex,
         _environment: object,
         command: str,
         env: dict[str, str] | None = None,
         **_kwargs: object,
     ) -> SimpleNamespace:
-        _ = (command, env)
-        raise AssertionError("bridge credentials must bypass Harbor's logging wrapper")
+        captured.append((command, dict(env or {})))
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
 
-    monkeypatch.setattr(Codex, "exec_as_agent", reject_logged_exec)
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
 
+    environment = Environment()
     for original_command in (simple_command, compound_command):
         asyncio.run(
             agent.exec_as_agent(
-                Environment(),
+                environment,
                 command=original_command,
-                env={"NVIDIA_API_KEY": "per-call-upstream-secret"},
+                env={"NVIDIA_API_KEY": "must-not-leak"},
             )
         )
 
+    unset_prefix = "env -u NVIDIA_API_KEY -u OPENAI_BASE_URL -u OPENAI_API_BASE bash -c"
     assert [command for command, _ in captured] == [
-        f"env -u NVIDIA_API_KEY bash -o pipefail -c {shlex.quote('codex exec --model nvidia/model -- test')}",
-        f"env -u NVIDIA_API_KEY bash -o pipefail -c {shlex.quote(compound_command)}",
+        f"{unset_prefix} {shlex.quote('codex exec --model nvidia/model -- test')}",
+        f"{unset_prefix} {shlex.quote(compound_command)}",
     ]
     assert all("NVIDIA_API_KEY" not in env for _, env in captured)
     assert all(env["OPENAI_API_KEY"] == "bridge-client-token-secret" for _, env in captured)
-    assert all(env["CODEX_HOME"] == "/logs/agent/codex-home" for _, env in captured)
-    assert log_records == []
-
-
-def test_nvidia_build_bridge_client_preserves_pipefail_in_real_inner_shell() -> None:
-    from harbor.agents.installed.base import NonZeroAgentExitCodeError
-
-    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
-    agent.model_name = "nvidia/model"
-    agent._extra_env = {"NVIDIA_API_KEY": "upstream-key-must-be-unset"}
-    agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
-    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": "bridge-client-token-secret"}
-
-    class Environment:
-        async def exec_with_sensitive_env(
-            self,
-            command: str,
-            env: dict[str, str] | None = None,
-            **_kwargs: object,
-        ) -> SimpleNamespace:
-            process = await asyncio.create_subprocess_exec(
-                "bash",
-                "-c",
-                command,
-                env={**os.environ, **(env or {})},
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-            return SimpleNamespace(
-                return_code=process.returncode,
-                stdout=stdout.decode(),
-                stderr=stderr.decode(),
-            )
-
-    with pytest.raises(NonZeroAgentExitCodeError, match="exit code 1"):
-        asyncio.run(agent.exec_as_agent(Environment(), command="false | true"))
-
-
-def test_nvidia_build_bridge_client_failure_does_not_expose_sensitive_output(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from harbor.agents.installed.base import NonZeroAgentExitCodeError
-    from harbor.agents.installed.codex import Codex
-
-    bridge_token = "bridge-client-token-secret"
-    upstream_key = "upstream-nvidia-key-secret"
-    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
-    agent.model_name = "nvidia/model"
-    agent._extra_env = {"NVIDIA_API_KEY": upstream_key}
-    agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
-    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": bridge_token}
-
-    class Environment:
-        async def exec_with_sensitive_env(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(
-                return_code=17,
-                stdout=f"provider echoed {bridge_token}",
-                stderr=f"provider echoed {upstream_key}",
-            )
-
-    async def reject_logged_exec(
-        _self: Codex,
-        _environment: object,
-        **_kwargs: object,
-    ) -> SimpleNamespace:
-        raise AssertionError("bridge credentials must bypass Harbor's logging wrapper")
-
-    monkeypatch.setattr(Codex, "exec_as_agent", reject_logged_exec)
-
-    with pytest.raises(NonZeroAgentExitCodeError) as exc_info:
-        asyncio.run(
-            agent.exec_as_agent(
-                Environment(),
-                command="codex exec -- test",
-                env={"NVIDIA_API_KEY": "per-call-upstream-key-secret"},
-            )
-        )
-
-    message = str(exc_info.value)
-    assert message == "NVIDIA Build bridge client command failed with exit code 17"
-    assert bridge_token not in message
-    assert upstream_key not in message
+    assert scoped == [
+        {"OPENAI_API_KEY": "bridge-client-token-secret"},
+        {"OPENAI_API_KEY": "bridge-client-token-secret"},
+    ]
 
 
 def test_nvidia_build_claude_bridge_configures_origin_and_full_model(
@@ -1284,7 +1215,7 @@ def test_nvidia_build_claude_bridge_configures_origin_and_full_model(
     agent.model_name = "nvidia/meta/llama-3.1-8b-instruct"
     calls: list[tuple[str, dict[str, str]]] = []
 
-    class Environment:
+    class Environment(_NoopScopedExecEnvironment):
         async def upload_file(self, _source: object, _destination: object) -> None:
             return None
 

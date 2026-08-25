@@ -2605,6 +2605,47 @@ def test_harbor_failure_detail_redacts_runtime_secrets_without_streaming(
     assert "<redacted>" in detail
 
 
+def test_harbor_failure_detail_redacts_before_tail_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    secret = "SYNTHETIC_SECRET_ABCDEF"
+    monkeypatch.setattr(runner, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["harbor", "run"],
+            17,
+            stdout="",
+            stderr="prefix|" + secret + "x" * 1988,
+        ),
+    )
+
+    ok, detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="codex",
+        job_name="demo-codex-with",
+        env_mode="docker",
+        model="gpt-5",
+        jobs_dir=tmp_path,
+        run_env={"CUSTOM_RUNTIME_VALUE": secret},
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+
+    assert ok is False
+    assert secret not in detail
+    assert "CRET_ABCDEF" not in detail
+    assert "<redacted>" in detail
+
+
 def test_command_does_not_relabel_runtime_failure_as_configuration_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

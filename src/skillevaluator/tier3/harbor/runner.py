@@ -1285,8 +1285,9 @@ def _run_harbor(
             expected_total_trials=expected_total_trials,
         )
     output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
-    detail = output[-2000:] or f"harbor run exited {result.returncode}"
-    return False, redact_progress_detail(detail, secret_values=set(run_env.values()))
+    safe_output = redact_progress_detail(output, secret_values=set(run_env.values()))
+    detail = safe_output[-2000:] or f"harbor run exited {result.returncode}"
+    return False, detail
 
 
 def _validate_harbor_job_result(

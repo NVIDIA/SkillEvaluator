@@ -56,9 +56,10 @@ def test_secure_docker_exec_streams_environment_without_host_file_or_argv_values
         on_output: object | None = None,
         *,
         additional_secret_values: set[str] | None = None,
+        exact_secret_values: set[str] | None = None,
         stop_main_on_interrupt: bool = False,
     ):
-        del check, timeout_sec, on_output
+        del check, timeout_sec, on_output, exact_secret_values
         assert stop_main_on_interrupt is ("if ! ." in " ".join(command))
         if stdin_data is not None:
             handoff_payloads.append(stdin_data.decode("utf-8"))
@@ -116,6 +117,8 @@ def test_secure_docker_exec_redacts_persistent_and_per_call_credentials_from_all
     environment._enable_egress_control = False
     environment._egress_control_services_compose_path = None
     environment._compose_env_vars = lambda **_kwargs: {"PATH": "/usr/bin"}
+    environment._compose_infra_env_vars = dict
+    environment._windows_container_name = None
 
     async def fake_upload_file(_source_path: Path | str, _target_path: str) -> None:
         return None
@@ -279,9 +282,17 @@ def test_secure_docker_exec_fails_closed_when_final_secret_cleanup_fails(monkeyp
         on_output: object | None = None,
         *,
         additional_secret_values: set[str] | None = None,
+        exact_secret_values: set[str] | None = None,
         stop_main_on_interrupt: bool = False,
     ):
-        del check, timeout_sec, stdin_data, on_output, additional_secret_values
+        del (
+            check,
+            timeout_sec,
+            stdin_data,
+            on_output,
+            additional_secret_values,
+            exact_secret_values,
+        )
         assert stop_main_on_interrupt is ("if ! ." in " ".join(command))
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 

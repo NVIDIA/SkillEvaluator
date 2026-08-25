@@ -164,6 +164,16 @@ def _related_paths(finding: object) -> list[str]:
     return paths
 
 
+def _adaptive_unsigned_percent_decimals(percentage: float) -> int:
+    """Return the existing bounded precision policy for one unsigned percentage."""
+    if percentage in {0.0, 100.0}:
+        return 0
+    if 0 < percentage < 1 or 99 < percentage < 100:
+        distance_from_endpoint = min(percentage, 100 - percentage)
+        return max(2, min(6, math.ceil(-math.log10(distance_from_endpoint))))
+    return 0
+
+
 def _adaptive_percent(value: object, signed: bool = False) -> str:
     """Format percentages without rounding narrow nonzero effects to zero or endpoints."""
     try:
@@ -181,13 +191,47 @@ def _adaptive_percent(value: object, signed: bool = False) -> str:
             decimals = max(2, min(6, math.ceil(-math.log10(magnitude))))
         return f"{percentage:+.{decimals}f}%"
 
-    if percentage in {0.0, 100.0}:
-        return f"{percentage:.0f}%"
-    if 0 < percentage < 1 or 99 < percentage < 100:
-        distance_from_endpoint = min(percentage, 100 - percentage)
-        decimals = max(2, min(6, math.ceil(-math.log10(distance_from_endpoint))))
-        return f"{percentage:.{decimals}f}%"
-    return f"{percentage:.0f}%"
+    decimals = _adaptive_unsigned_percent_decimals(percentage)
+    return f"{percentage:.{decimals}f}%"
+
+
+def _adaptive_interval_percent(interval: object) -> str:
+    """Format a percentage interval with shared precision and visible bounds."""
+    if not isinstance(interval, dict):
+        return "—"
+    try:
+        lower = float(interval["lower"]) * 100
+        upper = float(interval["upper"]) * 100
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return "—"
+    if not math.isfinite(lower) or not math.isfinite(upper) or lower > upper:
+        return "—"
+
+    decimals = max(
+        _adaptive_unsigned_percent_decimals(lower),
+        _adaptive_unsigned_percent_decimals(upper),
+    )
+    if lower != upper:
+        for candidate in range(decimals, 7):
+            if f"{lower:.{candidate}f}" != f"{upper:.{candidate}f}":
+                decimals = candidate
+                break
+        else:
+            # Preserve a distinct interval narrower than the six-decimal
+            # display budget by rounding its bounds outward at that budget.
+            decimals = 6
+            scale = 10**decimals
+            lower = math.floor(lower * scale) / scale
+            upper = math.ceil(upper * scale) / scale
+
+    def _bound(value: float) -> str:
+        # Exact mathematical endpoints remain compact even when the other
+        # bound needs additional precision.
+        if value in {0.0, 100.0}:
+            return f"{value:.0f}%"
+        return f"{value:.{decimals}f}%"
+
+    return f"{_bound(lower)}\N{EN DASH}{_bound(upper)}"
 
 
 class PackageLoader(BaseLoader):
@@ -251,6 +295,7 @@ class HTMLReporter(ReporterBase):
         environment = Environment(loader=loader, autoescape=True)
         environment.filters["related_paths"] = _related_paths
         environment.filters["adaptive_percent"] = _adaptive_percent
+        environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         return environment
 
     @staticmethod

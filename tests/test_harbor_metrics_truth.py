@@ -8,9 +8,11 @@ import os
 import subprocess
 import sys
 import time
+from fractions import Fraction
 
 import pytest
 
+from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor.collector import (
     _compute_lift,
     _condition_execution_summary,
@@ -21,6 +23,7 @@ from skillevaluator.tier3.harbor.collector import (
     _paired_pass_comparison,
     _pass_rate_delta,
     _pass_summary,
+    _probability_text,
     _wilson_score_interval,
 )
 from skillevaluator.tier3.harbor.metrics import (
@@ -138,6 +141,19 @@ def test_wilson_interval_reports_bounded_case_rate_uncertainty(
 
 def test_wilson_interval_is_unavailable_without_cases() -> None:
     assert _wilson_score_interval(0, 0) is None
+
+
+@pytest.mark.parametrize("total", [1, 2, 3, 10, 1_000, 100_000])
+def test_wilson_interval_contains_observed_mathematical_endpoints_exactly(total: int) -> None:
+    zero_passes = _wilson_score_interval(0, total)
+    all_passes = _wilson_score_interval(total, total)
+
+    assert zero_passes is not None
+    assert all_passes is not None
+    assert zero_passes["lower"] == 0.0
+    assert zero_passes["lower"] <= 0.0 <= zero_passes["upper"]
+    assert all_passes["upper"] == 1.0
+    assert all_passes["lower"] <= 1.0 <= all_passes["upper"]
 
 
 def test_wilson_interval_preserves_endpoint_uncertainty_beyond_four_decimal_places() -> None:
@@ -300,6 +316,40 @@ def test_mcnemar_exact_preserves_machine_readable_value_beyond_float_range() -> 
     assert exact["minimum_attainable_p_value"] is None
     assert exact["minimum_attainable_p_value_text"] != "0"
     assert exact["minimum_attainable_p_value_exact"] == exact["p_value_exact"]
+
+
+def test_probability_text_is_fast_and_nonzero_beyond_decimal_exponent_range() -> None:
+    probability = collector_module._minimum_attainable_mcnemar_probability(3_321_957)
+
+    started = time.perf_counter()
+    rendered = _probability_text(probability)
+    elapsed = time.perf_counter() - started
+
+    mantissa, separator, exponent = rendered.partition("e")
+    assert separator == "e"
+    assert float(mantissa) > 0.0
+    assert int(exponent) < -1_000_000
+    assert elapsed < 2.0
+
+
+def test_complete_one_sided_pairing_formats_identical_probability_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Fraction] = []
+    original = collector_module._probability_text
+
+    def _counted_probability_text(probability: Fraction) -> str:
+        calls.append(probability)
+        return original(probability)
+
+    monkeypatch.setattr(collector_module, "_probability_text", _counted_probability_text)
+    with_skill_cases = {f"case-{index}": {"passed": True} for index in range(8)}
+    without_skill_cases = {case_id: {"passed": False} for case_id in with_skill_cases}
+
+    _paired_pass_comparison(
+        {"total_cases": 8, "cases": with_skill_cases},
+        {"total_cases": 8, "cases": without_skill_cases},
+    )
+
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(

@@ -17,7 +17,6 @@ import re
 import shutil
 import stat
 import sys
-from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -1960,8 +1959,11 @@ def _wilson_score_interval(successes: int, total: int) -> dict[str, Any] | None:
     return {
         "method": "wilson_score",
         "confidence_level": 0.95,
-        "lower": max(0.0, center - margin),
-        "upper": min(1.0, center + margin),
+        # At the mathematical endpoints, ``center +/- margin`` can leave a
+        # one-ulp residual on the wrong side of the observed proportion.  Pin
+        # those endpoints exactly so the reported interval contains 0 and 1.
+        "lower": 0.0 if successes == 0 else max(0.0, center - margin),
+        "upper": 1.0 if successes == total else min(1.0, center + margin),
     }
 
 
@@ -1994,11 +1996,24 @@ def _probability_float(probability: Fraction) -> float | None:
 
 
 def _probability_text(probability: Fraction) -> str:
-    """Return a compact decimal representation without binary-float underflow."""
-    with localcontext() as context:
-        context.prec = 10
-        decimal = Decimal(probability.numerator) / Decimal(probability.denominator)
-    return format(decimal, ".10g")
+    """Return a bounded nonzero decimal representation for an exact probability."""
+    approximate = _probability_float(probability)
+    if approximate is not None:
+        return format(approximate, ".10g")
+
+    # ``Decimal(numerator) / Decimal(denominator)`` both scales with the full
+    # integer width and underflows at Decimal's default Emin.  For probabilities
+    # already below binary-float range, derive a scientific mantissa from the
+    # integer logarithms instead.  The work and output size are bounded by the
+    # operands' bit lengths, and a nonzero Fraction can never be rendered as 0.
+    log10_probability = (math.log2(probability.numerator) - math.log2(probability.denominator)) * math.log10(2.0)
+    exponent = math.floor(log10_probability)
+    mantissa = 10.0 ** (log10_probability - exponent)
+    mantissa_text = format(mantissa, ".10g")
+    if mantissa_text == "10":
+        mantissa_text = "1"
+        exponent += 1
+    return f"{mantissa_text}e{exponent:+d}"
 
 
 _MAX_EXACT_PROBABILITY_INTEGER_DIGITS = 4_300
@@ -2161,15 +2176,21 @@ def _paired_pass_comparison(
         minimum_attainable_probability = _minimum_attainable_mcnemar_probability(discordant)
         exact_probability_float = _probability_float(exact_probability)
         minimum_attainable_float = _probability_float(minimum_attainable_probability)
+        exact_probability_text = _probability_text(exact_probability)
+        minimum_attainable_text = (
+            exact_probability_text
+            if minimum_attainable_probability == exact_probability
+            else _probability_text(minimum_attainable_probability)
+        )
         result["mcnemar_exact"] = {
             "method": "two_sided_exact_binomial",
             "null_hypothesis": "equal marginal pass probabilities",
             "p_value": exact_probability_float,
-            "p_value_text": _probability_text(exact_probability),
+            "p_value_text": exact_probability_text,
             **_exact_probability_fields("p_value_exact", exact_probability),
             "p_value_numeric_underflow": exact_probability_float is None,
             "minimum_attainable_p_value": minimum_attainable_float,
-            "minimum_attainable_p_value_text": _probability_text(minimum_attainable_probability),
+            "minimum_attainable_p_value_text": minimum_attainable_text,
             **_exact_probability_fields(
                 "minimum_attainable_p_value_exact",
                 minimum_attainable_probability,

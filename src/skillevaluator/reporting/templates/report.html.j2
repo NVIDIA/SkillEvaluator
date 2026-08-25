@@ -2599,7 +2599,7 @@
                             <td><strong>{{ name }}</strong></td>
                             <td>With skill</td>
                             <td>{{ "%.0f%%" | format((wp.rate or 0.0) * 100) }}</td>
-                            <td>{% if wi %}{{ wi.lower | adaptive_percent }}–{{ wi.upper | adaptive_percent }}{% else %}—{% endif %}</td>
+                            <td>{% if wi %}{{ wi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ wp.passed_cases or 0 }} of {{ wp.total_cases or 0 }}</td>
                             <td>{{ wp.attempts_used or 0 }} of {{ wp.max_attempts_possible or 0 }}</td>
                             <td style="color:{{ 'var(--success-color)' if (lf.delta or 0) >= tier3_lift_pass_threshold else ('var(--danger-color)' if (lf.delta or 0) <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
@@ -2612,7 +2612,7 @@
                             <td></td>
                             <td>Without skill</td>
                             <td>{{ "%.0f%%" | format((bp.rate or 0.0) * 100) }}</td>
-                            <td>{% if bi %}{{ bi.lower | adaptive_percent }}–{{ bi.upper | adaptive_percent }}{% else %}—{% endif %}</td>
+                            <td>{% if bi %}{{ bi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ bp.passed_cases or 0 }} of {{ bp.total_cases or 0 }}</td>
                             <td>{{ bp.attempts_used or 0 }} of {{ bp.max_attempts_possible or 0 }}</td>
                             <td>baseline</td>

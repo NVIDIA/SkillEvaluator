@@ -28,6 +28,7 @@ from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.html import PackageLoader, _compact_json
+from skillevaluator.tier3.harbor.collector import _wilson_score_interval
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
 
@@ -1417,6 +1418,45 @@ def test_pass_at_k_render_preserves_sub_basis_point_endpoint_uncertainty() -> No
     assert "0%\u20130.004%" in html
     assert "99.996%\u2013100%" in html
     assert "Paired pass-rate delta: +0.004%" in html
+
+
+def test_pass_at_k_render_preserves_distinct_central_high_n_wilson_bounds() -> None:
+    interval = _wilson_score_interval(50_000, 100_000)
+    assert interval is not None
+    payload = build_agent_eval_payload(
+        "central-interval-precision-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 200_000,
+                "scored_attempts": 200_000,
+                "overall_with_skill": 0.5,
+                "overall_without_skill": 0.5,
+                "pass_with_skill": {
+                    "rate": 0.5,
+                    "rate_interval": interval,
+                    "passed_cases": 50_000,
+                    "total_cases": 100_000,
+                },
+                "pass_without_skill": {
+                    "rate": 0.5,
+                    "rate_interval": interval,
+                    "passed_cases": 50_000,
+                    "total_cases": 100_000,
+                },
+                "pass_lift": {"delta": 0.0},
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert "49.7%\u201350.3%" in html
+    assert "50%\u201350%" not in html
 
 
 def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:

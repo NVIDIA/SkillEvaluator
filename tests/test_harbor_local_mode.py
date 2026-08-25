@@ -1416,7 +1416,7 @@ def test_nvidia_build_bridge_wraps_compound_codex_shell_commands_before_unsettin
             )
         )
 
-    unset_prefix = "env -u NVIDIA_API_KEY -u OPENAI_BASE_URL -u OPENAI_API_BASE bash -c"
+    unset_prefix = "env -u NVIDIA_API_KEY -u OPENAI_BASE_URL -u OPENAI_API_BASE bash -o pipefail -c"
     assert [command for command, _ in captured] == [
         f"{unset_prefix} {shlex.quote('codex exec --model nvidia/model -- test')}",
         f"{unset_prefix} {shlex.quote(compound_command)}",

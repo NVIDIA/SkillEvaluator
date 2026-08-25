@@ -464,9 +464,9 @@ class _NvidiaBuildBridgeAgent:
             # The selected secure Docker environment streams ``env=`` values
             # over Compose stdin. Materialize both secrets only inside the
             # not-yet-exposed task container, then discard the transient names.
-            # Do not route this through BaseInstalledAgent._exec: Harbor 0.13.2
-            # attaches that helper's raw ``env`` mapping to DEBUG LogRecords,
-            # which structured/custom handlers may serialize.
+            # Route this through the selected environment's sensitive-exec
+            # transport so neither bridge capability enters process arguments
+            # or the agent's longer-lived execution environment.
             handoff_result = await sensitive_exec(
                 command=(
                     "set -eu; umask 077; "
@@ -593,7 +593,7 @@ class _NvidiaBuildBridgeAgent:
         with environment.scoped_exec_env(client_env):
             return await super().exec_as_agent(
                 environment,
-                command=f"env {unset_args} bash -c {shlex.quote(routed_command)}",
+                command=f"env {unset_args} bash -o pipefail -c {shlex.quote(routed_command)}",
                 env=routed_env,
                 cwd=cwd,
                 timeout_sec=timeout_sec,

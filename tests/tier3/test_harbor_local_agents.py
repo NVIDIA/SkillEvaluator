@@ -12,6 +12,7 @@ import pytest
 
 pytest.importorskip("harbor")
 
+from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.installed.codex import Codex
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.task.config import EnvironmentConfig, MCPServerConfig
@@ -498,7 +499,7 @@ def test_nvidia_build_codex_bridge_scope_wins_real_harbor_env_merge_and_resets(
     assert not external_secret_values.intersection(child_env.values())
 
     command = environment.commands[-1]
-    assert "env -u NVIDIA_API_KEY -u OPENAI_BASE_URL -u OPENAI_API_BASE bash -c env" in command
+    assert "env -u NVIDIA_API_KEY -u OPENAI_BASE_URL -u OPENAI_API_BASE bash -o pipefail -c env" in command
     assert "bridge-client-token" not in command
     assert not any(value in command for value in external_values.values())
 
@@ -541,6 +542,41 @@ def test_nvidia_build_claude_client_scope_wins_outer_agent_env(
     assert "external-anthropic-key" not in child_env.values()
     assert "external-model" not in child_env.values()
     assert "bridge-client-token" not in environment.commands[-1]
+
+
+@pytest.mark.parametrize(
+    ("agent_type", "client_env"),
+    (
+        (SkillEvaluatorNvidiaBuildCodex, {"OPENAI_API_KEY": "bridge-client-token"}),
+        (
+            SkillEvaluatorNvidiaBuildClaudeCode,
+            {
+                "ANTHROPIC_API_KEY": "bridge-client-token",
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:43123",
+                "ANTHROPIC_MODEL": "nvidia/model",
+            },
+        ),
+    ),
+)
+def test_nvidia_build_bridge_preserves_pipeline_failure_status(
+    tmp_path: Path,
+    agent_type: type[SkillEvaluatorNvidiaBuildCodex] | type[SkillEvaluatorNvidiaBuildClaudeCode],
+    client_env: dict[str, str],
+) -> None:
+    environment = _MergingRecordingEnvironment(tmp_path)
+    agent = agent_type(logs_dir=tmp_path, model_name="nvidia/model")
+    agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
+    agent._nvidia_build_bridge_client_env = client_env
+
+    with pytest.raises(NonZeroAgentExitCodeError):
+        asyncio.run(
+            agent.exec_as_agent(
+                environment,
+                command="false | tee /dev/null",
+            )
+        )
+
+    assert "bash -o pipefail -c" in environment.commands[-1]
 
 
 def test_local_codex_preserves_full_gateway_model_name(monkeypatch, tmp_path) -> None:

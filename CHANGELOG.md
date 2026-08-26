@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Schema and frontmatter parsing accept a leading UTF-8 BOM, matching the
+  unicode scanner's "benign BOM" note
+  ([#91](https://github.com/NVIDIA/SkillEvaluator/issues/91)).
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

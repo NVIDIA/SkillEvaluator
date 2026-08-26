@@ -257,7 +257,10 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
@@ -266,6 +269,14 @@
             "cwsandbox",
             "wandb",
             "use-computer",
+            "cua-cloud",
+            "blaxel",
+            "opensandbox",
+            "beam",
+            "skypilot",
+            "hf-sandbox",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -274,6 +285,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "multiple": true,
@@ -324,7 +345,10 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
@@ -333,6 +357,14 @@
             "cwsandbox",
             "wandb",
             "use-computer",
+            "cua-cloud",
+            "blaxel",
+            "opensandbox",
+            "beam",
+            "skypilot",
+            "hf-sandbox",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -341,6 +373,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "default": "False",
@@ -610,7 +652,10 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
@@ -619,6 +664,14 @@
             "cwsandbox",
             "wandb",
             "use-computer",
+            "cua-cloud",
+            "blaxel",
+            "opensandbox",
+            "beam",
+            "skypilot",
+            "hf-sandbox",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -627,6 +680,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         }
       ]
     },
@@ -1469,6 +1532,332 @@
               "type": "text"
             },
             {
+              "default": "False",
+              "is_flag": true,
+              "name": "fail_fast",
+              "opts": [
+                "--fail-fast"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "continue_on_failure",
+              "opts": [
+                "--continue-on-failure",
+                "-c"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "llm",
+              "opts": [
+                "--llm",
+                "--tier1-llm"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-llm",
+                "--no-tier1-llm"
+              ],
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "llm_verify",
+              "opts": [
+                "--llm-verify"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "70",
+              "name": "min_score",
+              "opts": [
+                "--min-score"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "profile",
+              "opts": [
+                "--profile"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "external",
+              "opts": [
+                "--external"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "policy_path",
+              "opts": [
+                "--policy"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
+              "default": "True",
+              "is_flag": true,
+              "name": "dedup",
+              "opts": [
+                "--dedup",
+                "--tier2"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-dedup",
+                "--no-tier2"
+              ],
+              "type": "boolean"
+            },
+            {
+              "is_flag": true,
+              "name": "block_on_dedup",
+              "opts": [
+                "--block-on-dedup"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-block-on-dedup"
+              ],
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "agent_eval",
+              "opts": [
+                "--agent-eval",
+                "--tier3"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "is_flag": true,
+              "name": "block_on_agent_eval",
+              "opts": [
+                "--block-on-agent-eval"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-block-on-agent-eval"
+              ],
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "autopilot",
+              "opts": [
+                "--autopilot"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "codex",
+              "name": "agents",
+              "opts": [
+                "--agents",
+                "-a"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "docker",
+                "daytona",
+                "e2b",
+                "modal",
+                "runloop",
+                "langsmith",
+                "ec2",
+                "gke",
+                "ack",
+                "openshift",
+                "novita",
+                "apple-container",
+                "singularity",
+                "islo",
+                "tensorlake",
+                "cwsandbox",
+                "wandb",
+                "use-computer",
+                "cua-cloud",
+                "blaxel",
+                "opensandbox",
+                "beam",
+                "skypilot",
+                "hf-sandbox",
+                "hyperbrowser",
+                "vercel",
+                "local"
+              ],
+              "default": "docker",
+              "name": "env_mode",
+              "opts": [
+                "--env-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwarg",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "skip_baseline",
+              "opts": [
+                "--skip-baseline"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "n_concurrent",
+              "opts": [
+                "--n-concurrent"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "max_agents",
+              "opts": [
+                "--max-agents"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "n_attempts",
+              "opts": [
+                "--n-attempts"
+              ],
+              "param_type": "option",
+              "type": "integer"
+            },
+            {
+              "name": "pass_threshold",
+              "opts": [
+                "--pass-threshold"
+              ],
+              "param_type": "option",
+              "type": "float"
+            },
+            {
+              "is_flag": true,
+              "name": "stop_on_pass",
+              "opts": [
+                "--stop-on-pass"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-stop-on-pass"
+              ],
+              "type": "boolean"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "multiple": true,
+              "name": "agent_model",
+              "opts": [
+                "--agent-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "default",
+                "default_plus_custom",
+                "custom_only"
+              ],
+              "name": "grading_mode",
+              "opts": [
+                "--grading-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "multiple": true,
+              "name": "include_skills",
+              "opts": [
+                "--include-skills"
+              ],
+              "param_type": "option",
+              "type": "path"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "copy_repo",
+              "opts": [
+                "--copy-repo"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "timeout_multiplier",
+              "opts": [
+                "--timeout-multiplier"
+              ],
+              "param_type": "option",
+              "type": "float"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "harbor_keep_jobs",
+              "opts": [
+                "--harbor-keep-jobs"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -2056,7 +2445,10 @@
                 "modal",
                 "runloop",
                 "langsmith",
+                "ec2",
                 "gke",
+                "ack",
+                "openshift",
                 "novita",
                 "apple-container",
                 "singularity",
@@ -2065,6 +2457,14 @@
                 "cwsandbox",
                 "wandb",
                 "use-computer",
+                "cua-cloud",
+                "blaxel",
+                "opensandbox",
+                "beam",
+                "skypilot",
+                "hf-sandbox",
+                "hyperbrowser",
+                "vercel",
                 "local"
               ],
               "default": "docker",
@@ -2073,6 +2473,16 @@
                 "--env-mode"
               ],
               "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwarg",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
             },
             {
               "multiple": true,
@@ -2123,7 +2533,10 @@
                 "modal",
                 "runloop",
                 "langsmith",
+                "ec2",
                 "gke",
+                "ack",
+                "openshift",
                 "novita",
                 "apple-container",
                 "singularity",
@@ -2132,6 +2545,14 @@
                 "cwsandbox",
                 "wandb",
                 "use-computer",
+                "cua-cloud",
+                "blaxel",
+                "opensandbox",
+                "beam",
+                "skypilot",
+                "hf-sandbox",
+                "hyperbrowser",
+                "vercel",
                 "local"
               ],
               "default": "docker",
@@ -2140,6 +2561,16 @@
                 "--env-mode"
               ],
               "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwarg",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
             },
             {
               "default": "False",
@@ -3106,7 +3537,10 @@
             "modal",
             "runloop",
             "langsmith",
+            "ec2",
             "gke",
+            "ack",
+            "openshift",
             "novita",
             "apple-container",
             "singularity",
@@ -3115,6 +3549,14 @@
             "cwsandbox",
             "wandb",
             "use-computer",
+            "cua-cloud",
+            "blaxel",
+            "opensandbox",
+            "beam",
+            "skypilot",
+            "hf-sandbox",
+            "hyperbrowser",
+            "vercel",
             "local"
           ],
           "default": "docker",
@@ -3123,6 +3565,16 @@
             "--env-mode"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwarg",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "default": "False",

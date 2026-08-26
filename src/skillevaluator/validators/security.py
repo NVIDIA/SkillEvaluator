@@ -122,6 +122,7 @@ _SKILLSPECTOR_LLM_FAILURE_MARKERS = (
 )
 _LLM_VERDICTS = frozenset({"true_positive", "false_positive", "uncertain"})
 _LLM_CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
+_COMMENT_SKIP_EXTENSIONS = frozenset({".py", ".sh", ".yaml", ".yml"})
 
 
 def _skillspector_llm_stderr_failed(stderr: str) -> bool:
@@ -1523,6 +1524,13 @@ class SecurityValidator(ValidatorBase):
                 compiled.append((category, regex, exceptions, pattern_def))
         return compiled
 
+    @staticmethod
+    def _is_code_comment_line(file_path: Path, stripped: str) -> bool:
+        """Return True for # or // comments in code and YAML, not Markdown headings."""
+        if file_path.suffix.lower() not in _COMMENT_SKIP_EXTENSIONS:
+            return False
+        return stripped.startswith(("#", "//"))
+
     def _scan_lines_for_pattern(
         self,
         lines: list[str],
@@ -1540,7 +1548,7 @@ class SecurityValidator(ValidatorBase):
         author_emails = author_emails or {}
         for line_num, line in enumerate(lines, 1):
             stripped = line.strip()
-            if stripped.startswith(("#", "//")):
+            if self._is_code_comment_line(file_path, stripped):
                 continue
 
             scan_line = line

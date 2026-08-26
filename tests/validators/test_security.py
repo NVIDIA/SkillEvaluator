@@ -185,6 +185,74 @@ Contact: john.doe@personal-email.com for support.
         all_findings = result.errors + result.warnings
         assert any("email" in f.lower() for f in all_findings), f"Expected email detection. Findings: {all_findings}"
 
+    def test_detects_email_in_markdown_heading(self, tmp_path: Path):
+        """ATX headings in SKILL.md are scanned, not treated as code comments."""
+        skill_dir = tmp_path / "heading-email-skill"
+        skill_dir.mkdir()
+
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text("""---
+name: heading-email-skill
+description: A skill with an email in a Markdown heading
+---
+
+# Contact: jane@acme.com
+""")
+
+        validator = SecurityValidator()
+        result = validator.validate_pii_only(skill_dir)
+
+        all_findings = result.errors + result.warnings
+        assert any("email" in f.lower() for f in all_findings), (
+            f"Expected email detection in Markdown heading. Findings: {all_findings}"
+        )
+
+    def test_detects_email_on_markdown_body_line(self, tmp_path: Path):
+        """The same non-placeholder email on a body line remains flagged."""
+        skill_dir = tmp_path / "body-email-skill"
+        skill_dir.mkdir()
+
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text("""---
+name: body-email-skill
+description: A skill with an email on a Markdown body line
+---
+
+# Contact
+
+Body: jane@acme.com
+""")
+
+        validator = SecurityValidator()
+        result = validator.validate_pii_only(skill_dir)
+
+        all_findings = result.errors + result.warnings
+        assert any("email" in f.lower() for f in all_findings), (
+            f"Expected email detection on Markdown body line. Findings: {all_findings}"
+        )
+
+    def test_python_comment_email_is_not_flagged(self, tmp_path: Path):
+        """Python hash comments remain skipped so they are not newly flagged as PII."""
+        skill_dir = tmp_path / "py-comment-skill"
+        skill_dir.mkdir()
+
+        (skill_dir / "SKILL.md").write_text("""---
+name: py-comment-skill
+description: A skill whose Python helper only mentions email in a comment
+---
+
+# Helper
+
+See helper.py.
+""")
+        (skill_dir / "helper.py").write_text("# Contact: jane@acme.com\n")
+
+        validator = SecurityValidator()
+        result = validator.validate_pii_only(skill_dir)
+
+        email_findings = [finding for finding in result.errors + result.warnings if "email" in finding.lower()]
+        assert email_findings == [], f"Python comment emails should stay skipped. Findings: {email_findings}"
+
     def test_detects_a_non_placeholder_corporate_email(self, tmp_path: Path):
         """Organization-owned domains must not bypass generic email detection."""
         skill_dir = tmp_path / "corporate-email-skill"

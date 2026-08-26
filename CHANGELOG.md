@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- PII scanning no longer treats Markdown ATX headings as code comments, so
+  emails in headings such as `# Contact: ...` are flagged
+  ([#88](https://github.com/NVIDIA/SkillEvaluator/issues/88)).
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,10 @@ _HARBOR_KEYS = {
     "agents",
 }
 HARBOR_TASK_SOURCES = {"auto", "evals_json", "native_harbor"}
+# Harbor 0.22 multiplies its 600-second default verifier/build timeout by
+# this value. Keep that mandatory lifecycle timeout finite at every public
+# SkillEvaluator boundary.
+MAX_HARBOR_TIMEOUT_MULTIPLIER = sys.float_info.max / 600.0
 _AGENT_KEYS = {"model"}
 _RESOURCE_KEYS = {"cpus", "memory_mb", "storage_mb"}
 _SKILL_WORKSPACE_KEYS = {"mode", "include"}
@@ -171,7 +176,11 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             harbor["max_agents"] = _int_at_least(harbor_raw["max_agents"], 1, config_path, "harbor.max_agents")
         if "timeout_multiplier" in harbor_raw:
             harbor["timeout_multiplier"] = _float_greater_than(
-                harbor_raw["timeout_multiplier"], 0.0, config_path, "harbor.timeout_multiplier"
+                harbor_raw["timeout_multiplier"],
+                0.0,
+                config_path,
+                "harbor.timeout_multiplier",
+                maximum=MAX_HARBOR_TIMEOUT_MULTIPLIER,
             )
         if "agent_runtime_preflight" in harbor_raw:
             harbor["agent_runtime_preflight"] = _bool(
@@ -260,18 +269,33 @@ def _int_at_least(value: Any, minimum: int, config_path: Path, field: str) -> in
 def _float_between(value: Any, minimum: float, maximum: float, config_path: Path, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise EvalsConfigError(f"{config_path}: {field} must be a number")
-    value = float(value)
-    if not minimum <= value <= maximum:
+    try:
+        value = float(value)
+    except OverflowError:
+        raise EvalsConfigError(f"{config_path}: {field} must be between {minimum} and {maximum}") from None
+    if not math.isfinite(value) or not minimum <= value <= maximum:
         raise EvalsConfigError(f"{config_path}: {field} must be between {minimum} and {maximum}")
     return value
 
 
-def _float_greater_than(value: Any, minimum: float, config_path: Path, field: str) -> float:
+def _float_greater_than(
+    value: Any,
+    minimum: float,
+    config_path: Path,
+    field: str,
+    *,
+    maximum: float | None = None,
+) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise EvalsConfigError(f"{config_path}: {field} must be a number")
-    value = float(value)
-    if value <= minimum:
-        raise EvalsConfigError(f"{config_path}: {field} must be > {minimum}")
+    try:
+        value = float(value)
+    except OverflowError:
+        raise EvalsConfigError(f"{config_path}: {field} must be a finite number > {minimum}") from None
+    if maximum is not None and value > maximum:
+        raise EvalsConfigError(f"{config_path}: {field} must yield finite Harbor timeouts")
+    if not math.isfinite(value) or value <= minimum:
+        raise EvalsConfigError(f"{config_path}: {field} must be a finite number > {minimum}")
     return value
 
 

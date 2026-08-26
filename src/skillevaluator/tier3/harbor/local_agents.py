@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.opencode import OpenCode
@@ -278,6 +279,7 @@ class SkillEvaluatorLocalOpenCode(OpenCode):
             return
 
         instruction = self.render_instruction(instruction)
+        self._instruction = instruction
         env = {key: os.environ[key] for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if key in os.environ}
         env = self._confined_project_env(env)
 
@@ -304,6 +306,9 @@ class SkillEvaluatorLocalOpenCode(OpenCode):
             ),
             env=env,
         )
+
+        if messages := self._error_messages():
+            raise NonZeroAgentExitCodeError("OpenCode emitted error event(s): " + "; ".join(messages[:3]))
 
     async def exec_as_agent(
         self,

@@ -44,6 +44,7 @@ from harbor.environments.base import (
 )
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
 
+from skillevaluator.tier3.harbor.progress import secret_values_from_environment
 from skillevaluator.tier3.harbor.secure_copy import (
     _absolute_lexical,
     copy_file_secure,
@@ -55,7 +56,6 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
     read_nvidia_build_key_from_stdin,
 )
 from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget
-from skillevaluator.utils.redaction import credential_uri_secret_values
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
 SECURE_DOCKER_ENV_IMPORT_PATH = (
@@ -228,14 +228,12 @@ def _sensitive_environment_values(environment: Mapping[str, str]) -> set[str]:
 
 def _credential_uri_environment_values(environment: Mapping[str, str]) -> set[str]:
     """Return operational URI values containing authority user information."""
-    protected: set[str] = set()
-    for name, value in environment.items():
-        if not value:
-            continue
-        is_proxy = name.upper().endswith("_PROXY")
-        if is_proxy or "://" in value:
-            protected.update(credential_uri_secret_values(value, allow_schemeless=is_proxy))
-    return protected
+    candidates = {
+        name: value
+        for name, value in environment.items()
+        if value and (name.upper().endswith("_PROXY") or "://" in value)
+    }
+    return secret_values_from_environment(candidates)
 
 
 def _compose_client_credential_values(environment: Mapping[str, str]) -> set[str]:
@@ -1895,6 +1893,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         merged_environment = self._merge_env(env)
         environment_args, subprocess_environment = _secure_exec_arguments(merged_environment)
         exact_secret_values = _sensitive_environment_values(merged_environment)
+        exact_secret_values.update(_credential_uri_environment_values(merged_environment))
 
         exec_command = ["exec"]
         effective_cwd = cwd or self.task_env_config.workdir
@@ -1925,6 +1924,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             main_names.update(environment)
             main_values.update(_eligible_secret_values(environment.values()))
             main_values.update(_sensitive_environment_values(environment))
+            main_values.update(_credential_uri_environment_values(environment))
 
         include(getattr(self, "_compose_task_env", {}))
         include(getattr(self, "_persistent_env", {}))
@@ -2864,6 +2864,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             carrier_names = set(carrier_environment)
             secret_values = set(_eligible_secret_values(validated_environment.values()))
             exact_secret_values = _sensitive_environment_values(validated_environment)
+            exact_secret_values.update(_credential_uri_environment_values(validated_environment))
             secret_values.update(exact_secret_values)
             main_names, main_values = self._main_only_compose_environment()
             with self._compose_environment_scrub_scope(
@@ -3097,6 +3098,9 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         secret_values.update(_eligible_secret_values(carrier_overrides.values()))
         secret_values.update(_eligible_secret_values(compose_model_environment.values()))
         secret_values.update(_compose_client_credential_values(compose_client_environment))
+        secret_values.update(_credential_uri_environment_values(effective_env_overrides))
+        secret_values.update(_credential_uri_environment_values(carrier_overrides))
+        secret_values.update(_credential_uri_environment_values(compose_model_environment))
         secret_values.update(
             _eligible_secret_values(
                 additional_secret_values or (),
@@ -3379,6 +3383,7 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
         merged = _host_handoff_environment(merged)
         secret_values = set(_eligible_secret_values(merged.values()))
         secret_values.update(_sensitive_environment_values(merged))
+        secret_values.update(_credential_uri_environment_values(merged))
         if secret_values:
             # Fail before writing or uploading a handoff if no structurally
             # safe output marker can represent these values.

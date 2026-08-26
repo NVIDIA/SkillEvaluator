@@ -648,6 +648,47 @@ def test_final_result_projects_real_multi_agent_aggregate_errors_without_losing_
     assert set(report_data.load_agent_data(run_dir)) == set(agents)
 
 
+def test_final_result_projection_preserves_aggregate_hidden_child_error_count(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_json(run_dir / "opencode" / "with-skill" / "summary.json", {})
+    _write_json(run_dir / "opencode" / "without-skill" / "summary.json", {})
+    child_summaries = [
+        {
+            "execution_status": "failed",
+            "execution_errors": ["shared visible error"],
+            "execution_error_details_total": hidden_total,
+            "execution_error_details_shown": 1,
+            "execution_error_details_truncated": True,
+            "expected_attempts": 1,
+            "scored_attempts": 0,
+        }
+        for hidden_total in (300, 2)
+    ]
+    agent = harbor_collector._aggregate_execution(child_summaries)
+    agent["conditions"] = {
+        "with_skill": child_summaries[0],
+        "without_skill": child_summaries[1],
+    }
+    result: dict[str, Any] = {
+        "agents": {"opencode": agent},
+        **harbor_collector._aggregate_execution([agent]),
+    }
+    result["error"] = list(result["execution_errors"])
+
+    result_path = run_dir / "result.json"
+    harbor_runner._write_final_result(result_path, result)
+
+    persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["execution_error_details_total"] == 302
+    assert result["execution_error_details_truncated"] is True
+    assert persisted["execution_error_details_total"] == 302
+    assert persisted["execution_error_details_shown"] == 1
+    assert persisted["execution_error_details_truncated"] is True
+    assert persisted["agents"]["opencode"]["execution_error_details_total"] == 302
+    assert persisted["agents"]["opencode"]["execution_error_details_truncated"] is True
+
+
 def test_result_artifact_reference_rejects_intermediate_symlink(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _write_json(run_dir / "inside" / "summary.json", {"scores": {}})

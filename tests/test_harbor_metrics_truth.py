@@ -33,6 +33,8 @@ from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    LEGACY_METRIC_SET,
+    LEGACY_METRICS,
     MAX_CUSTOM_METRIC_NAME_BYTES,
     MAX_CUSTOM_METRICS,
     CustomMetricContractError,
@@ -43,6 +45,7 @@ from skillevaluator.tier3.harbor.metrics import (
     metric_set_for_reward,
     metric_value,
     overall_score,
+    rewards_have_mixed_metric_contracts,
 )
 
 
@@ -206,6 +209,24 @@ def test_explicit_custom_metric_set_cannot_spoof_canonical_metrics() -> None:
     assert metric_set == DEFAULT_METRIC_SET
     assert metrics == DEFAULT_METRICS
     assert scores == dict.fromkeys(DEFAULT_METRICS, 1.0)
+
+
+@pytest.mark.parametrize(
+    "rewards",
+    [
+        [
+            {"metric_set": DEFAULT_METRIC_SET, **dict.fromkeys(DEFAULT_METRICS, 1.0)},
+            {"metric_set": LEGACY_METRIC_SET, **dict.fromkeys(LEGACY_METRICS, 1.0)},
+        ],
+        [
+            {"metric_set": "domain-grader-v1", "overall": 1.0},
+            {"metric_set": "domain-grader-v2", "overall": 1.0},
+        ],
+    ],
+    ids=("default-v1-and-v2", "distinct-custom-contracts"),
+)
+def test_distinct_reward_metric_set_contracts_are_mixed(rewards: list[dict[str, object]]) -> None:
+    assert rewards_have_mixed_metric_contracts(rewards) is True
 
 
 def test_overall_score_requires_a_complete_finite_metric_set() -> None:

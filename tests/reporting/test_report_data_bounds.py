@@ -11,8 +11,10 @@ from uuid import UUID
 
 import pytest
 
+from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.metrics import CUSTOM_ONLY_METRIC_SET, DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 
 def _write_summary(agent_dir: Path) -> None:
@@ -417,6 +419,181 @@ def test_excess_trials_are_capped_in_name_order(
 
     assert [reward["entry_id"] for reward in agents["codex"]["rewards"]] == ["case-a", "case-b"]
     assert any(reason["code"] == "trial_limit" and reason["limit"] == 2 for reason in _reasons(agents["codex"]))
+
+
+def test_report_uses_persisted_mixed_contract_flag_when_reward_sample_is_truncated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(report_data, "_MAX_TRIALS_PER_CONDITION", 1)
+    run_dir = tmp_path / "results"
+    agent_dir = run_dir / "opencode"
+    summary_path = agent_dir / "with-skill" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "scores": dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "custom_scores": {"domain_quality": 0.0},
+                "overall_score": 0.5,
+                "metric_set": DEFAULT_METRIC_SET,
+                "metrics": list(DEFAULT_METRICS),
+                "dimensions": {},
+                "num_trials": 2,
+                "num_reward_rows": 2,
+                "mixed_metric_contracts": True,
+                "pass_at_k": {},
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "job_failure": "",
+                "trial_failures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_trial(
+        agent_dir,
+        "a-standard",
+        {
+            "entry_id": "case-standard",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+            "overall": 1.0,
+        },
+    )
+    _write_trial(
+        agent_dir,
+        "z-custom",
+        {
+            "entry_id": "case-custom",
+            "metric_set": CUSTOM_ONLY_METRIC_SET,
+            "overall": 0.0,
+            "custom_metrics": {"domain_quality": 0.0},
+        },
+    )
+
+    loaded = report_data.load_agent_data(run_dir)["opencode"]
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    result = agent_eval_result_from_directory(skill_dir, run_dir, use_llm_judge=False)
+
+    assert loaded["rewards_complete"] is False
+    assert [reward["entry_id"] for reward in loaded["rewards"]] == ["case-standard"]
+    assert loaded["mixed_metric_contracts_with_skill"] is True
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    assert payload["agents"]["opencode"]["with_skill"] == 0.5
+    assert payload["overall_score"] == 0.5
+
+
+def test_report_preserves_collector_declared_hidden_execution_error_count(tmp_path: Path) -> None:
+    run_dir = tmp_path / "results"
+    agent_dir = run_dir / "opencode"
+    summary_path = agent_dir / "with-skill" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "scores": {},
+                "metrics": [],
+                "overall_score": 0.0,
+                "num_trials": 0,
+                "num_reward_rows": 0,
+                "pass_at_k": {},
+                "execution_status": "failed",
+                "execution_errors": ["visible collector diagnostic"],
+                "execution_error_details_total": 300,
+                "execution_error_details_shown": 1,
+                "execution_error_details_truncated": True,
+                "expected_attempts": 300,
+                "scored_attempts": 0,
+                "job_failure": "",
+                "trial_failures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = report_data.load_agent_data(run_dir)["opencode"]
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    result = agent_eval_result_from_directory(skill_dir, run_dir, use_llm_judge=False)
+
+    assert loaded["conditions"]["with_skill"]["execution_error_details_total"] == 300
+    assert loaded["conditions"]["with_skill"]["execution_error_details_shown"] == 1
+    assert loaded["conditions"]["with_skill"]["execution_error_details_truncated"] is True
+    assert loaded["execution_error_details_total"] == 300
+    assert loaded["execution_error_details_shown"] == 1
+    assert loaded["execution_error_details_truncated"] is True
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    assert payload["agents"]["opencode"]["execution_error_details_total"] == 300
+    assert payload["agents"]["opencode"]["execution_error_details_shown"] == 1
+    assert payload["agents"]["opencode"]["execution_error_details_truncated"] is True
+    assert payload["summary"]["execution_error_details_total"] == 300
+    assert payload["summary"]["execution_error_details_shown"] == 1
+    assert payload["summary"]["execution_error_details_truncated"] is True
+    assert payload["execution_error_details_total"] == 300
+    assert payload["execution_error_details_shown"] == 1
+    assert payload["execution_error_details_truncated"] is True
+
+
+def test_legacy_mixed_contract_summary_without_flag_uses_reward_inference(tmp_path: Path) -> None:
+    run_dir = tmp_path / "results"
+    agent_dir = run_dir / "opencode"
+    summary_path = agent_dir / "with-skill" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "scores": dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "custom_scores": {"domain_quality": 0.0},
+                "overall_score": 0.5,
+                "metric_set": DEFAULT_METRIC_SET,
+                "metrics": list(DEFAULT_METRICS),
+                "dimensions": {},
+                "num_trials": 2,
+                "num_reward_rows": 2,
+                "pass_at_k": {},
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "job_failure": "",
+                "trial_failures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_trial(
+        agent_dir,
+        "case-standard",
+        {
+            "entry_id": "case-standard",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+            "overall": 1.0,
+        },
+    )
+    _write_trial(
+        agent_dir,
+        "case-custom",
+        {
+            "entry_id": "case-custom",
+            "metric_set": CUSTOM_ONLY_METRIC_SET,
+            "overall": 0.0,
+            "custom_metrics": {"domain_quality": 0.0},
+        },
+    )
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+
+    result = agent_eval_result_from_directory(skill_dir, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    assert result.metadata["agent_eval"]["agents"]["opencode"]["with_skill"] == 0.5
 
 
 def test_staged_tasks_and_dataset_records_are_capped_deterministically(

@@ -216,7 +216,7 @@ harbor:
     memory_mb: 4096
   runtime_env:
     - SERVICE_API_TOKEN          # expands to ${SERVICE_API_TOKEN} at run time
-  pre_agent_setup:
+  pre_agent_setup:               # with-skill-only runs (--skip-baseline)
     - service-cli auth login --token "$SERVICE_API_TOKEN"
     - service-cli whoami >/dev/null
   agents:
@@ -242,12 +242,12 @@ grading:
 | `harbor.stop_on_pass` | boolean | Stop a case's remaining attempts after the first pass. Requires `n_attempts` > 1. |
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
-| `harbor.timeout_multiplier` | number > 0 | Scales task timeouts. |
+| `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Bounded one-task smoke run that checks agent runtime readiness before the full evaluation. Default: `true`. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
-| `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. Alias: `setup_commands`. |
+| `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. This skill-owned code is allowed only for with-skill-only runs (`--skip-baseline`); paired runs reject it so setup cannot distinguish or alter the baseline arm. Alias: `setup_commands`. Both spellings normalize to the same policy. |
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
 
 | `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |

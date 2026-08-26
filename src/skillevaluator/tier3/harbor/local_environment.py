@@ -32,6 +32,7 @@ from skillevaluator.tier3.harbor.local_runtime import (
     runtime_command_roots,
     validate_runtime_root,
 )
+from skillevaluator.tier3.harbor.progress import secret_values_from_environment
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget, StreamingLogRedactor
 from skillevaluator.tier3.output_provenance import output_provenance_key_path
@@ -148,6 +149,16 @@ _SENSITIVE_HOST_PATH_RES = (
     _SENSITIVE_HOME_SUBPATH_RE,
     _SENSITIVE_ABSOLUTE_PATH_RE,
 )
+
+
+def _credential_uri_environment_values(environment: dict[str, str]) -> set[str]:
+    """Extract only credential URI/proxy values beyond local's name policy."""
+    candidates = {
+        name: value
+        for name, value in environment.items()
+        if value and (name.upper().endswith("_PROXY") or "://" in value)
+    }
+    return secret_values_from_environment(candidates)
 
 
 class _StreamCallbackOutput:
@@ -1589,6 +1600,8 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 or (len(value) >= _MIN_LEGACY_SECRET_VALUE_LENGTH and _LEGACY_SECRET_ENV_NAME_RE.search(key))
             )
         )
+        secret_values.update(_credential_uri_environment_values(merged))
+        secret_values.update(_credential_uri_environment_values(exec_env))
         return secret_values
 
     @staticmethod

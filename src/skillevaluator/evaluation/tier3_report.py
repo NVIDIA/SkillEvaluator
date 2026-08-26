@@ -581,16 +581,21 @@ def build_agent_eval_payload(
     from skillevaluator.tier3.harbor.report_data import (
         build_dataset_snapshot,
         deduplicate_dataset_entries,
-        metrics_for_agents,
+        metrics_for_condition,
     )
 
-    metrics = metrics_for_agents(agents)
     report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]
         model = _agent_model(name, info, run_config)
-        agent_payloads[name] = _build_agent(name, info, metrics, model)
+        agent_payloads[name] = _build_agent(
+            name,
+            info,
+            metrics_for_condition(info, "with_skill"),
+            metrics_for_condition(info, "without_skill"),
+            model,
+        )
 
     if not agent_payloads:
         return None
@@ -610,6 +615,7 @@ def build_agent_eval_payload(
             str(error) for agent in agent_payloads.values() for error in agent.get("execution_errors", []) if error
         )
     )
+    execution_error_details = _aggregate_execution_error_details(agent_payloads, len(execution_errors))
     statuses = [agent.get("execution_status") for agent in agent_payloads.values()]
     if statuses and all(status == "succeeded" for status in statuses):
         execution_status = "succeeded"
@@ -671,6 +677,7 @@ def build_agent_eval_payload(
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": sum(
             _as_nonnegative_int(agent.get("expected_attempts")) for agent in agent_payloads.values()
         ),
@@ -719,6 +726,7 @@ def build_agent_eval_payload(
         "composite_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": summary["expected_attempts"],
         "scored_attempts": summary["scored_attempts"],
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
@@ -1113,6 +1121,9 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "environment",
             "runtime_seconds",
             "execution_status",
+            "execution_error_details_total",
+            "execution_error_details_shown",
+            "execution_error_details_truncated",
             "expected_attempts",
             "scored_attempts",
         }
@@ -1121,6 +1132,12 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
     compact_summary["best_agent"] = str(summary.get("best_agent") or payload.get("best_agent") or "")[:256]
     compact_summary["agents_run"] = [str(name)[:256] for name in (summary.get("agents_run") or [])[:64]]
     compact_summary["execution_errors"] = [str(error)[:1024] for error in (summary.get("execution_errors") or [])[:16]]
+    compact_summary.update(
+        _aggregate_execution_error_details(
+            {"summary": summary},
+            len(compact_summary["execution_errors"]),
+        )
+    )
 
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
     compact = {
@@ -1136,6 +1153,9 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "composite_lift": payload.get("composite_lift"),
         "execution_status": payload.get("execution_status"),
         "execution_errors": compact_summary["execution_errors"],
+        "execution_error_details_total": compact_summary.get("execution_error_details_total", 0),
+        "execution_error_details_shown": compact_summary.get("execution_error_details_shown", 0),
+        "execution_error_details_truncated": compact_summary.get("execution_error_details_truncated", False),
         "expected_attempts": payload.get("expected_attempts", 0),
         "scored_attempts": payload.get("scored_attempts", 0),
         "runtime_seconds": payload.get("runtime_seconds", 0.0),
@@ -1184,7 +1204,8 @@ def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
 def _build_agent(
     name: str,
     info: dict[str, Any],
-    metrics: list[str],
+    with_metrics: list[str],
+    baseline_metrics: list[str],
     model: str | None,
 ) -> dict[str, Any]:
     with_scores = info.get("with_skill") or {}
@@ -1197,7 +1218,7 @@ def _build_agent(
     if not baseline_quality_available:
         without_scores = {}
 
-    evaluators = _build_evaluators(metrics, with_scores, without_scores, lift_data)
+    evaluators = _build_evaluators(with_metrics, with_scores, without_scores, lift_data)
     dimensions = _build_dimensions(
         with_scores,
         without_scores,
@@ -1206,19 +1227,40 @@ def _build_agent(
     )
     overall_ws = _mean([d["with_skill"] for d in dimensions])
     overall_bl = _mean([d["baseline"] for d in dimensions])
-    if overall_ws is None and not metrics and with_quality_available:
+    with_mixed_contract = with_quality_available and _condition_has_mixed_metric_contracts(
+        info,
+        flag="mixed_metric_contracts_with_skill",
+        rewards="rewards",
+    )
+    baseline_mixed_contract = baseline_quality_available and _condition_has_mixed_metric_contracts(
+        info,
+        flag="mixed_metric_contracts_without_skill",
+        rewards="rewards_baseline",
+    )
+    if with_mixed_contract or (overall_ws is None and not with_metrics and with_quality_available):
+        # Custom-only runs have no dimension mean. For mixed condition
+        # contracts, the dimension mean covers only standard rows and can
+        # overstate Harbor's logical attempt score used by pass@k. In both
+        # cases, prefer the collector-owned logical overall.
         overall_ws = _finite_float(info.get("overall_with_skill"))
         if overall_ws is None and info.get("rewards_complete") is not False:
             overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
-    if overall_bl is None and not metrics and baseline_quality_available:
+    if baseline_mixed_contract or (overall_bl is None and not baseline_metrics and baseline_quality_available):
         overall_bl = _finite_float(info.get("overall_without_skill"))
         if overall_bl is None and info.get("rewards_baseline_complete") is not False:
             overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
     overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
 
-    trials = _normalize_trials(info.get("rewards") or [], metrics)
-    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)
-    _attach_baseline_pairs(trials, baseline_trials, metrics)
+    trials = _normalize_trials(info.get("rewards") or [], with_metrics)
+    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
+    _attach_baseline_pairs(trials, baseline_trials, with_metrics)
+
+    execution_errors = (
+        [str(error) for error in info.get("execution_errors", [])]
+        if isinstance(info.get("execution_errors"), list)
+        else []
+    )
+    execution_error_details = _aggregate_execution_error_details({name: info}, len(execution_errors))
 
     return {
         "name": name,
@@ -1228,9 +1270,8 @@ def _build_agent(
             if info.get("execution_status") in {"succeeded", "failed", "skipped", "unknown"}
             else "unknown"
         ),
-        "execution_errors": [str(error) for error in info.get("execution_errors", [])]
-        if isinstance(info.get("execution_errors"), list)
-        else [],
+        "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": _as_nonnegative_int(info.get("expected_attempts")),
         "scored_attempts": _as_nonnegative_int(info.get("scored_attempts")),
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
@@ -2831,6 +2872,22 @@ def _logical_group_entry_identity_is_consistent(group: list[dict[str, Any]]) -> 
     return isinstance(entry_id, str) and bool(entry_id) and all(item.get("entry_id") == entry_id for item in group)
 
 
+def _condition_has_mixed_metric_contracts(
+    info: dict[str, Any],
+    *,
+    flag: str,
+    rewards: str,
+) -> bool:
+    """Prefer collector-owned contract truth while retaining legacy inference."""
+    explicit = info.get(flag)
+    if isinstance(explicit, bool):
+        return explicit
+
+    from skillevaluator.tier3.harbor.metrics import rewards_have_mixed_metric_contracts
+
+    return rewards_have_mixed_metric_contracts(info.get(rewards))
+
+
 def _logical_reward_mean(rewards: Any, field: str) -> float | None:
     """Average a persisted reward field once per logical Harbor trial."""
     if not isinstance(rewards, list):
@@ -2853,6 +2910,16 @@ def _as_float(value: Any) -> float:
 
 def _as_nonnegative_int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _aggregate_execution_error_details(
+    summaries: dict[str, dict[str, Any]],
+    displayed_count: int,
+) -> dict[str, Any]:
+    """Aggregate hidden diagnostic occurrences without duplicating display text."""
+    from skillevaluator.tier3.harbor.report_data import aggregate_execution_error_details
+
+    return aggregate_execution_error_details(summaries.values(), displayed_count)
 
 
 __all__ = [

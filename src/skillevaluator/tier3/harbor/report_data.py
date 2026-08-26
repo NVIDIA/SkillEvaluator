@@ -55,6 +55,7 @@ __all__ = (
     "DATASET_SNAPSHOT_MAX_DEPTH",
     "DATASET_SNAPSHOT_MAX_NODES",
     "DatasetSnapshotContractError",
+    "aggregate_execution_error_details",
     "build_dataset_snapshot",
     "dataset_snapshot_manifest",
     "deduplicate_dataset_entries",
@@ -65,6 +66,7 @@ __all__ = (
     "load_staged_harbor_dataset",
     "logical_trial_reward_groups",
     "metrics_for_agents",
+    "metrics_for_condition",
     "summarize_dataset_entries",
 )
 
@@ -497,14 +499,22 @@ def _metrics_for_rewards(rewards: list[dict[str, Any]]) -> list[str]:
     return []
 
 
-def _skill_evaluator_metrics_for_agent(agent_info: dict[str, Any]) -> list[str]:
-    configured = agent_info.get("metrics_with_skill")
+def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[str]:
+    """Return the standard metric contract declared by one agent condition."""
+    if condition == "with_skill":
+        metrics_key, scores_key, rewards_key = "metrics_with_skill", "with_skill", "rewards"
+    elif condition == "without_skill":
+        metrics_key, scores_key, rewards_key = "metrics_without_skill", "without_skill", "rewards_baseline"
+    else:
+        return []
+
+    configured = agent_info.get(metrics_key)
     if isinstance(configured, list):
         return [str(metric) for metric in configured]
-    scores = agent_info.get("with_skill", {})
+    scores = agent_info.get(scores_key, {})
     if isinstance(scores, dict) and "security" in scores:
         return list(DEFAULT_METRICS)
-    rewards = agent_info.get("rewards", [])
+    rewards = agent_info.get(rewards_key, [])
     return _metrics_for_rewards(rewards) if isinstance(rewards, list) else []
 
 
@@ -512,7 +522,7 @@ def metrics_for_agents(agents: dict[str, dict[str, Any]]) -> list[str]:
     """Return the canonical default or legacy metric set represented by agents."""
     saw_metrics = False
     for info in agents.values():
-        metrics = _skill_evaluator_metrics_for_agent(info)
+        metrics = metrics_for_condition(info, "with_skill")
         if metrics:
             saw_metrics = True
         if "security" in metrics:
@@ -538,6 +548,54 @@ def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict
 
 def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _execution_error_details(data: dict[str, Any], displayed_count: int) -> dict[str, Any]:
+    """Normalize bounded execution-error detail metadata around visible errors."""
+    raw_total = data.get("execution_error_details_total")
+    declared_total = (
+        raw_total
+        if isinstance(raw_total, int) and not isinstance(raw_total, bool) and 0 <= raw_total <= _MAX_JSON_SAFE_INTEGER
+        else displayed_count
+    )
+    raw_shown = data.get("execution_error_details_shown")
+    declared_shown = (
+        raw_shown
+        if isinstance(raw_shown, int) and not isinstance(raw_shown, bool) and 0 <= raw_shown <= _MAX_JSON_SAFE_INTEGER
+        else displayed_count
+    )
+    declared_total = max(declared_total, declared_shown, displayed_count)
+    truncated = data.get("execution_error_details_truncated") is True
+    if truncated and declared_total <= displayed_count:
+        declared_total = min(_MAX_JSON_SAFE_INTEGER, displayed_count + 1)
+    return {
+        "execution_error_details_total": declared_total,
+        "execution_error_details_shown": displayed_count,
+        "execution_error_details_truncated": truncated or displayed_count < declared_total,
+    }
+
+
+def aggregate_execution_error_details(
+    summaries: Iterable[dict[str, Any]],
+    displayed_count: int,
+) -> dict[str, Any]:
+    """Sum condition occurrence counts while deduplicating only displayed text."""
+    total = 0
+    child_truncated = False
+    for summary in summaries:
+        raw_errors = summary.get("execution_errors")
+        visible_count = len([error for error in raw_errors if error]) if isinstance(raw_errors, list) else 0
+        details = _execution_error_details(summary, visible_count)
+        total = min(_MAX_JSON_SAFE_INTEGER, total + details["execution_error_details_total"])
+        child_truncated = child_truncated or details["execution_error_details_truncated"]
+    total = max(total, displayed_count)
+    if child_truncated and total <= displayed_count:
+        total = min(_MAX_JSON_SAFE_INTEGER, displayed_count + 1)
+    return {
+        "execution_error_details_total": total,
+        "execution_error_details_shown": displayed_count,
+        "execution_error_details_truncated": child_truncated or displayed_count < total,
+    }
 
 
 def _trajectory_token_counter(value: Any) -> int | None:
@@ -615,6 +673,13 @@ def load_agent_data(
                     overall_key = "overall_with_skill" if variant == "with-skill" else "overall_without_skill"
                     if "overall_score" in data:
                         agent_info[overall_key] = data.get("overall_score")
+                    mixed_contract_key = (
+                        "mixed_metric_contracts_with_skill"
+                        if variant == "with-skill"
+                        else "mixed_metric_contracts_without_skill"
+                    )
+                    if isinstance(data.get("mixed_metric_contracts"), bool):
+                        agent_info[mixed_contract_key] = data["mixed_metric_contracts"]
                     dimension_key = "dimensions_with_skill" if variant == "with-skill" else "dimensions_without_skill"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})
@@ -643,6 +708,7 @@ def load_agent_data(
                     condition_execution[key] = {
                         "execution_status": status,
                         "execution_errors": condition_errors,
+                        **_execution_error_details(data, len(condition_errors)),
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
                     }
@@ -769,11 +835,13 @@ def load_agent_data(
             execution_status = "skipped"
         else:
             execution_status = "succeeded"
+        public_execution_errors = list(dict.fromkeys(execution_errors))
         agent_info.update(
             {
                 "conditions": condition_execution,
                 "execution_status": execution_status,
-                "execution_errors": list(dict.fromkeys(execution_errors)),
+                "execution_errors": public_execution_errors,
+                **aggregate_execution_error_details(active_conditions, len(public_execution_errors)),
                 "expected_attempts": sum(
                     _nonnegative_counter(condition.get("expected_attempts")) for condition in active_conditions
                 ),

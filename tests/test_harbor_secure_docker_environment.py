@@ -1854,6 +1854,55 @@ def test_sidecar_sensitive_named_values_redact_exact_short_and_long_output(
     assert result.return_code == 7
 
 
+def test_sidecar_exec_redacts_schemeless_proxy_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    process = _BufferedAndStreamedComposeProcess(
+        [b"proxy rejected sidecar-user with sidecar-password\n"],
+        return_code=7,
+    )
+    callback_chunks: list[str] = []
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> _BufferedAndStreamedComposeProcess:
+        return process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    async def exercise() -> ExecResult:
+        with environment.scoped_output_callback(on_output):
+            return await environment.service_exec(
+                "emit-proxy-failure",
+                service="helper",
+                env={"HTTPS_PROXY": "sidecar-user:sidecar-password@proxy.invalid:8443"},
+            )
+
+    result = asyncio.run(exercise())
+    rendered = "".join(callback_chunks) + (result.stdout or "") + (result.stderr or "")
+
+    assert result.return_code == 7
+    assert "sidecar-user" not in rendered
+    assert "sidecar-password" not in rendered
+
+
+def test_sidecar_main_only_redaction_values_include_proxy_components(tmp_path: Path) -> None:
+    environment = _initialized_secure_docker_environment(
+        tmp_path,
+        persistent_env={
+            "HTTPS_PROXY": "main-user:main-password@proxy.invalid:8443",
+        },
+    )
+
+    names, values = environment._main_only_compose_environment()
+
+    assert "HTTPS_PROXY" in names
+    assert {"main-user", "main-password"} <= values
+
+
 def test_sidecar_service_exec_uses_only_explicit_workdir_and_user(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5929,6 +5978,182 @@ def test_secure_public_exec_streams_redacted_handoff_secrets(
         assert secret not in callback_output
         assert secret not in (result.stdout or "")
         assert secret not in rendered_commands
+
+
+@pytest.mark.parametrize(
+    "proxy_uri",
+    [
+        "https://secure%2Duser:secure%2Dpassword@proxy.invalid:8443",
+        "secure-user:secure-password@proxy.invalid:8443",
+    ],
+    ids=["percent-encoded", "schemeless"],
+)
+def test_secure_public_exec_redacts_detached_proxy_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_uri: str,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    handoff_process = _BufferedComposeProcess(stdout=b"", return_code=0)
+    main_process = _BufferedAndStreamedComposeProcess(
+        [b"proxy rejected secure-user with secure-password\n"],
+        return_code=7,
+    )
+    callback_chunks: list[str] = []
+
+    async def remove_handoff(_remote_path: str) -> None:
+        return None
+
+    async def create_subprocess(
+        *args: object,
+        **_kwargs: object,
+    ) -> _BufferedComposeProcess | _BufferedAndStreamedComposeProcess:
+        if 'umask 077; cat > "$1"' in args or "chmod" in args or "chown" in args:
+            return handoff_process
+        return main_process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    monkeypatch.setattr(environment, "_remove_handoff", remove_handoff)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    async def exercise() -> ExecResult:
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                "emit-proxy-failure",
+                env={"HTTPS_PROXY": proxy_uri},
+            )
+
+    result = asyncio.run(exercise())
+    rendered = "".join(callback_chunks) + (result.stdout or "") + (result.stderr or "")
+
+    assert result.return_code == 7
+    assert "secure-user" not in rendered
+    assert "secure-password" not in rendered
+
+
+def test_secure_public_exec_output_limit_redacts_detached_proxy_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    diagnostic = b"ordinary-output-" * 10 + b"proxy rejected secure-limit-user with secure-limit-password\n"
+    handoff_process = _BufferedComposeProcess(stdout=b"", return_code=0)
+    main_process = _BufferedAndStreamedComposeProcess([diagnostic, b"overflow"])
+    callback_chunks: list[str] = []
+
+    async def remove_handoff(_remote_path: str) -> None:
+        return None
+
+    async def create_subprocess(
+        *args: object,
+        **_kwargs: object,
+    ) -> _BufferedComposeProcess | _BufferedAndStreamedComposeProcess:
+        if 'umask 077; cat > "$1"' in args or "chmod" in args or "chown" in args:
+            return handoff_process
+        return main_process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def contain(
+        contained_process: asyncio.subprocess.Process,
+        communication: asyncio.Task[object],
+        **_kwargs: object,
+    ) -> None:
+        contained_process.terminate()
+        with contextlib.suppress(BaseException):
+            await communication
+
+    monkeypatch.setattr(stream_redaction_module, "MAX_COMMAND_OUTPUT_BYTES", len(diagnostic), raising=False)
+    monkeypatch.setattr(environment, "_remove_handoff", remove_handoff)
+    monkeypatch.setattr(environment, "_contain_main_and_reap_compose", contain)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    async def exercise() -> ExecResult:
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                "emit-proxy-failure",
+                env={
+                    "HTTPS_PROXY": "https://secure-limit-user:secure-limit-password@proxy.invalid:8443",
+                },
+            )
+
+    with pytest.raises(CommandOutputLimitError) as caught:
+        asyncio.run(exercise())
+
+    rendered = "".join(callback_chunks) + str(caught.value)
+    assert "ordinary-output" in "".join(callback_chunks)
+    assert "secure-limit-user" not in rendered
+    assert "secure-limit-password" not in rendered
+
+
+def test_secure_public_exec_timeout_redacts_detached_proxy_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    handoff_process = _BufferedComposeProcess(stdout=b"", return_code=0)
+    callback_chunks: list[str] = []
+
+    class OutputThenHangingProcess(_HangingComposeProcess):
+        def __init__(self) -> None:
+            super().__init__(pid=8844)
+            stream = _FeedableStream()
+            stream.feed_data(b"proxy rejected secure-timeout-user with secure-timeout-password\n")
+            self.stdout = stream
+
+        def terminate(self) -> None:
+            self.stdout.feed_eof()
+            super().terminate()
+
+    main_process = OutputThenHangingProcess()
+
+    async def remove_handoff(_remote_path: str) -> None:
+        return None
+
+    async def create_subprocess(
+        *args: object,
+        **_kwargs: object,
+    ) -> _BufferedComposeProcess | OutputThenHangingProcess:
+        if 'umask 077; cat > "$1"' in args or "chmod" in args or "chown" in args:
+            return handoff_process
+        return main_process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def contain(
+        contained_process: OutputThenHangingProcess,
+        communication: asyncio.Task[object],
+        **_kwargs: object,
+    ) -> None:
+        contained_process.terminate()
+        with contextlib.suppress(BaseException):
+            await communication
+
+    monkeypatch.setattr(environment, "_remove_handoff", remove_handoff)
+    monkeypatch.setattr(environment, "_contain_main_and_reap_compose", contain)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    async def exercise() -> ExecResult:
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                "emit-proxy-failure",
+                env={
+                    "HTTPS_PROXY": "https://secure-timeout-user:secure-timeout-password@proxy.invalid:8443",
+                },
+                timeout_sec=0.05,
+            )
+
+    with pytest.raises(RuntimeError, match="timed out") as caught:
+        asyncio.run(exercise())
+
+    rendered = "".join(callback_chunks) + str(caught.value)
+    assert "proxy rejected" in "".join(callback_chunks)
+    assert "secure-timeout-user" not in rendered
+    assert "secure-timeout-password" not in rendered
 
 
 def test_secure_handoff_scope_scrubs_compose_client_environment_and_resets(

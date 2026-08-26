@@ -17,7 +17,7 @@ from types import ModuleType
 
 import pytest
 
-from skillevaluator.tier3.harbor.adapter import _write_test_sh
+from skillevaluator.tier3.harbor.adapter import _EVALUATOR_TESTS_SUBDIR, _write_test_sh
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     MAX_CUSTOM_METRIC_NAME_BYTES,
@@ -500,9 +500,11 @@ def test_generated_standard_grading_scripts_stop_after_evaluator_failure(
     task_dir = tmp_path / grading_mode
     _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=grading_mode == "default_plus_custom")
     tests_dir = task_dir / "tests"
-    (tests_dir / "eval.py").write_text("raise SystemExit(7)\n", encoding="utf-8")
+    evaluator_dir = tests_dir / _EVALUATOR_TESTS_SUBDIR
+    evaluator_dir.mkdir()
+    (evaluator_dir / "eval.py").write_text("raise SystemExit(7)\n", encoding="utf-8")
     marker = task_dir / "custom-ran"
-    (tests_dir / "custom_grader_runner.py").write_text(
+    (evaluator_dir / "custom_grader_runner.py").write_text(
         "from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('ran')\n",
         encoding="utf-8",
     )
@@ -517,13 +519,17 @@ def test_generated_custom_only_script_accepts_overall_only_custom_reward(tmp_pat
     task_dir = tmp_path / "custom-only"
     _write_test_sh(task_dir, grading_mode="custom_only", custom_grader=True)
     tests_dir = task_dir / "tests"
-    shutil.copy2(_CUSTOM_RUNNER_TEMPLATE, tests_dir / "custom_grader_runner.py")
+    evaluator_dir = tests_dir / _EVALUATOR_TESTS_SUBDIR
+    evaluator_dir.mkdir()
+    shutil.copy2(_CUSTOM_RUNNER_TEMPLATE, evaluator_dir / "custom_grader_runner.py")
     marker = task_dir / "custom-ran"
+    (tests_dir / "custom_helper.py").write_text("OVERALL = 0.75\n", encoding="utf-8")
     (tests_dir / "grader.py").write_text(
         "import json, os\n"
         "from pathlib import Path\n"
+        "from custom_helper import OVERALL\n"
         f"Path({str(marker)!r}).write_text('ran')\n"
-        "Path(os.environ['HARBOR_REWARD_JSON']).write_text(json.dumps({'overall': 0.75}))\n",
+        "Path(os.environ['HARBOR_REWARD_JSON']).write_text(json.dumps({'overall': OVERALL}))\n",
         encoding="utf-8",
     )
     verifier_dir = task_dir / "verifier"
@@ -802,7 +808,9 @@ def test_generated_custom_only_script_rejects_invalid_overall_score(
     task_dir = tmp_path / f"custom-only-{source}"
     _write_test_sh(task_dir, grading_mode="custom_only", custom_grader=True)
     tests_dir = task_dir / "tests"
-    shutil.copy2(_CUSTOM_RUNNER_TEMPLATE, tests_dir / "custom_grader_runner.py")
+    evaluator_dir = tests_dir / _EVALUATOR_TESTS_SUBDIR
+    evaluator_dir.mkdir()
+    shutil.copy2(_CUSTOM_RUNNER_TEMPLATE, evaluator_dir / "custom_grader_runner.py")
     grader_lines = [
         "import json, os",
         "from pathlib import Path",

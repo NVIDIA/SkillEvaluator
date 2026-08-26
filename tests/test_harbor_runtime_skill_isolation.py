@@ -17,7 +17,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from harbor.models.task.config import TaskConfig
+from harbor.models.task.config import TaskConfig, TaskOS
+from harbor.models.task.paths import TaskPaths
+from harbor.models.task.task import Task
+from harbor.models.task.verifier_mode import resolve_effective_verifier_env_config
+from harbor.models.trajectories import Trajectory
+from harbor.models.trial.paths import TrialPaths
+from harbor.trial.trial import Trial
+from harbor.verifier.verifier import Verifier
 
 import skillevaluator.tier3.harbor.adapter as adapter_module
 from skillevaluator.tier3.harbor.adapter import (
@@ -229,12 +236,13 @@ def test_native_tasks_project_runtime_skills_without_root_evals(tmp_path: Path) 
     assert "SKILL_EVAL_JUDGE_MODEL" not in task_config["environment"].get("env", {})
 
 
-@pytest.mark.parametrize("name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
-@pytest.mark.parametrize("grading_mode", ["default", "custom_only"])
-def test_native_tasks_preserve_authored_judge_model_in_verifier_env(
+@pytest.mark.parametrize(
+    "name",
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+)
+def test_native_custom_only_preserves_authored_judge_controls_in_verifier_env(
     tmp_path: Path,
     name: str,
-    grading_mode: str,
 ) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
     _write_minimal_native_task(target)
@@ -247,19 +255,99 @@ def test_native_tasks_preserve_authored_judge_model_in_verifier_env(
 
     task = stage_native_harbor_tasks(
         target,
-        tmp_path / f"native-verifier-{grading_mode}-{name.lower()}",
-        grading_mode=grading_mode,
-        verifier_env={
-            "SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}",
-            name: f"${{{name}}}",
-        },
+        tmp_path / f"native-custom-only-verifier-{name.lower()}",
+        grading_mode="custom_only",
     )[0]
 
     task_config = tomllib.loads((task / "task.toml").read_text(encoding="utf-8"))
-    expected = {name: "skill-model"}
-    if grading_mode == "default":
-        expected["SKILL_EVAL_LLM_PROVIDER"] = "${SKILL_EVAL_LLM_PROVIDER}"
-    assert task_config["verifier"]["env"] == expected
+    assert task_config["verifier"]["env"] == {name: "skill-model"}
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize("scope", ["task", "step"])
+@pytest.mark.parametrize(
+    "name",
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+)
+def test_native_standard_grading_rejects_task_owned_judge_controls(
+    tmp_path: Path,
+    grading_mode: str,
+    scope: str,
+    name: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    authored_config = (
+        f'\n[verifier.env]\n{name} = "task-selected-model"\n'
+        if scope == "task"
+        else f'\n[[steps]]\nname = "step-one"\n\n[steps.verifier.env]\n{name} = "task-selected-model"\n'
+    )
+    task_toml.write_text(task_toml.read_text(encoding="utf-8") + authored_config, encoding="utf-8")
+    output_dir = tmp_path / f"native-standard-{grading_mode}-{scope}-{name.lower()}"
+
+    with pytest.raises(ValueError, match=r"standard grading.*environment control"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode=grading_mode,
+            verifier_env={name: f"${{{name}}}"},
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("scope", ["task", "step"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "OPENAI_API_KEY",
+        "SKILL_EVAL_LLM_PROVIDER",
+        "LLM_JUDGE_MODEL",
+        "SKILL_EVAL_JUDGE_MODEL",
+        "LLM_JUDGE_FALLBACK_MODELS",
+    ],
+)
+def test_native_standard_grading_allows_exact_operator_staged_control_placeholders(
+    tmp_path: Path,
+    scope: str,
+    name: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    authored_config = (
+        f'\n[verifier.env]\n{name} = "${{{name}}}"\n'
+        if scope == "task"
+        else f'\n[[steps]]\nname = "step-one"\n\n[steps.verifier.env]\n{name} = "${{{name}}}"\n'
+    )
+    task_toml.write_text(task_toml.read_text(encoding="utf-8") + authored_config, encoding="utf-8")
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / f"native-operator-placeholder-{scope}-{name.lower()}",
+        grading_mode="default",
+        verifier_env={name: f"${{{name}}}"},
+    )
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    environment = config.verifier.env if scope == "task" else config.steps[0].verifier.env
+    assert environment[name] == f"${{{name}}}"
+
+
+def test_native_standard_grading_injects_operator_staged_judge_fallback(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-operator-fallback",
+        grading_mode="default",
+        verifier_env={"LLM_JUDGE_FALLBACK_MODELS": "${LLM_JUDGE_FALLBACK_MODELS}"},
+    )
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    assert config.verifier.env["LLM_JUDGE_FALLBACK_MODELS"] == "${LLM_JUDGE_FALLBACK_MODELS}"
 
 
 @pytest.mark.parametrize(
@@ -530,6 +618,11 @@ def test_native_tasks_allow_staged_verifier_env_interpolation_in_separate_verifi
         '    ports: ["18080:80"]\n'
     )
     (verifier_context / "docker-compose.yaml").write_text(compose_text, encoding="utf-8")
+    if verifier_scope == "step":
+        # Harbor 0.22 resolves an existing separate step verifier context as a
+        # complete overlay, so it must provide its own test script instead of
+        # falling back to the task-level tests/test.sh.
+        (verifier_context / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
     staged_task = stage_native_harbor_tasks(
         target,
@@ -571,57 +664,30 @@ def test_native_task_reuses_existing_exact_provider_placeholder_when_injecting(t
     }
 
 
-@pytest.mark.parametrize("name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
-@pytest.mark.parametrize(
-    ("authored_config", "expected_path"),
-    [
-        (
-            '[verifier]\ntimeout_sec = 180.0\n\n[verifier.environment]\nworkdir = "/workspace"\n\n'
-            '[verifier.environment.env]\n{name} = "skill-model"\n',
-            ("verifier", "environment", "env"),
-        ),
-        (
-            '[[steps]]\nname = "step-one"\n\n[steps.verifier.env]\n{name} = "skill-model"\n',
-            ("steps", 0, "verifier", "env"),
-        ),
-        (
-            '[[steps]]\nname = "step-one"\n\n[steps.verifier.environment]\nworkdir = "/workspace"\n\n'
-            '[steps.verifier.environment.env]\n{name} = "skill-model"\n',
-            ("steps", 0, "verifier", "environment", "env"),
-        ),
-    ],
-)
-def test_native_tasks_preserve_judge_model_controls_in_nested_verifier_envs(
+@pytest.mark.parametrize("scope", ["task", "step"])
+def test_native_standard_grading_preserves_harmless_verifier_environment(
     tmp_path: Path,
-    name: str,
-    authored_config: str,
-    expected_path: tuple[str | int, ...],
+    scope: str,
 ) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
     _write_minimal_native_task(target)
     task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
-    task_toml.write_text(
-        task_toml.read_text(encoding="utf-8") + "\n" + authored_config.format(name=name),
-        encoding="utf-8",
+    authored_config = (
+        '\n[verifier.env]\nTASK_FEATURE_FLAG = "enabled"\n'
+        if scope == "task"
+        else '\n[[steps]]\nname = "step-one"\n\n[steps.verifier.env]\nTASK_FEATURE_FLAG = "enabled"\n'
+    )
+    task_toml.write_text(task_toml.read_text(encoding="utf-8") + authored_config, encoding="utf-8")
+
+    [task] = stage_native_harbor_tasks(
+        target,
+        tmp_path / f"native-harmless-verifier-environment-{scope}",
+        grading_mode="default",
     )
 
-    task = stage_native_harbor_tasks(
-        target,
-        tmp_path / "native-nested-verifier-control",
-        verifier_env={
-            "SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}",
-            "SKILL_EVAL_JUDGE_MODEL": "${SKILL_EVAL_JUDGE_MODEL}",
-        },
-    )[0]
-
-    value: object = tomllib.loads((task / "task.toml").read_text(encoding="utf-8"))
-    for segment in expected_path:
-        value = value[segment]  # type: ignore[index]
-    assert value == {name: "skill-model"}
-    task_config = tomllib.loads((task / "task.toml").read_text(encoding="utf-8"))
-    assert task_config["verifier"]["env"] == {
-        "SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}",
-    }
+    config = TaskConfig.model_validate_toml((task / "task.toml").read_text(encoding="utf-8"))
+    environment = config.verifier.env if scope == "task" else config.steps[0].verifier.env
+    assert environment == {"TASK_FEATURE_FLAG": "enabled"}
 
 
 def test_native_task_staging_uses_one_private_evals_snapshot(
@@ -2343,6 +2409,662 @@ def test_native_task_inline_healthcheck_conflicts_with_pre_agent_setup(tmp_path:
         )
 
 
+@pytest.mark.parametrize("task_source", ["generated", "native"])
+def test_direct_baseline_staging_rejects_pre_agent_setup_before_output_mutation(
+    tmp_path: Path,
+    task_source: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    if task_source == "native":
+        _write_minimal_native_task(target)
+    output_dir = tmp_path / f"{task_source}-baseline-setup"
+    stager = generate_harbor_tasks if task_source == "generated" else stage_native_harbor_tasks
+
+    with pytest.raises(ValueError, match=r"pre_agent_setup/setup_commands.*baseline"):
+        stager(
+            target,
+            output_dir,
+            with_skill=False,
+            pre_agent_setup=["echo ready"],
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("healthcheck_scope", ["environment", "step"])
+def test_native_baseline_rejects_authored_agent_phase_healthchecks(
+    tmp_path: Path,
+    healthcheck_scope: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8")
+    if healthcheck_scope == "environment":
+        source = source.replace(
+            "[environment]\n",
+            '[environment]\nhealthcheck = { command = "test ! -e /workspace/skills/target-skill/SKILL.md" }\n',
+        )
+    else:
+        source += '\n[[steps]]\nname = "step-one"\n\n[steps.healthcheck]\ncommand = "true"\n'
+    config = TaskConfig.model_validate_toml(source)
+    if healthcheck_scope == "environment":
+        assert config.environment.healthcheck is not None
+    else:
+        assert config.steps is not None and config.steps[0].healthcheck is not None
+    task_toml.write_text(source, encoding="utf-8")
+    output_dir = tmp_path / f"native-baseline-{healthcheck_scope}-healthcheck"
+
+    with pytest.raises(ValueError, match=rf"{healthcheck_scope} healthcheck.*baseline"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            with_skill=False,
+            grading_mode="custom_only",
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("trajectory_scope", "relative_path"),
+    [
+        ("single-step", Path("trajectory.json")),
+        ("first-step", Path("steps/step-one/trajectory.json")),
+    ],
+)
+def test_native_baseline_rejects_effective_task_shipped_prior_trajectory_before_output_mutation(
+    tmp_path: Path,
+    trajectory_scope: str,
+    relative_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    if trajectory_scope == "first-step":
+        source = task_toml.read_text(encoding="utf-8") + '\n[[steps]]\nname = "step-one"\n'
+        TaskConfig.model_validate_toml(source)
+        task_toml.write_text(source, encoding="utf-8")
+        step_dir = native_task / "steps" / "step-one"
+        step_dir.mkdir(parents=True)
+        (step_dir / "instruction.md").write_text("Continue from the supplied context.\n", encoding="utf-8")
+
+    prior = {
+        "schema_version": "ATIF-v1.7",
+        "session_id": "prior-session",
+        "trajectory_id": "prior-trajectory",
+        "agent": {"name": "codex", "version": "test"},
+        "steps": [
+            {
+                "step_id": 1,
+                "source": "agent",
+                "message": "Prior task-owned context",
+                "tool_calls": [],
+            }
+        ],
+    }
+    Trajectory.model_validate(prior)
+    trajectory_path = native_task / relative_path
+    trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+    trajectory_path.write_text(json.dumps(prior), encoding="utf-8")
+
+    config = TaskConfig.model_validate_toml(task_toml.read_text(encoding="utf-8"))
+    paths = TaskPaths(native_task)
+    effective_path = paths.step_trajectory_path(config.steps[0].name) if config.steps else paths.trajectory_path
+    assert effective_path == trajectory_path
+
+    baseline_dir = tmp_path / f"native-baseline-{trajectory_scope}-trajectory"
+    with pytest.raises(ValueError, match=r"prior trajectory.*paired baseline"):
+        stage_native_harbor_tasks(
+            target,
+            baseline_dir,
+            with_skill=False,
+        )
+
+    assert not baseline_dir.exists()
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / f"native-with-skill-{trajectory_scope}-trajectory",
+        with_skill=True,
+    )
+    assert (staged / relative_path).read_text(encoding="utf-8") == json.dumps(prior)
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize(
+    ("scope", "variable", "value"),
+    [
+        ("environment", "SKILL_EVAL_LLM_BASE_URL", "https://task-controlled.example/v1"),
+        ("verifier", "HARBOR_TESTS_DIR", "/workspace/task-controlled-tests"),
+        ("step-verifier", "BASH_ENV", "/workspace/task-controlled-bootstrap"),
+        ("environment", "PATH", "/workspace/task-controlled-bin:/usr/bin:/bin"),
+        ("verifier", "HTTPS_PROXY", "http://task-controlled-proxy:8080"),
+        ("step-verifier", "SSL_CERT_FILE", "/workspace/task-controlled-ca.pem"),
+        ("step-verifier", "SHELLOPTS", "xtrace"),
+    ],
+)
+def test_native_standard_grading_rejects_task_controlled_verifier_environment_surfaces(
+    tmp_path: Path,
+    grading_mode: str,
+    scope: str,
+    variable: str,
+    value: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    source = task_toml.read_text(encoding="utf-8")
+    assignment = f'{variable} = "{value}"\n'
+    if scope == "environment":
+        source = source.replace("[environment]\n", f"[environment.env]\n{assignment}")
+    elif scope == "verifier":
+        source += f"\n[verifier.env]\n{assignment}"
+    else:
+        source += f'\n[[steps]]\nname = "step-one"\n\n[steps.verifier.env]\n{assignment}'
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    output_dir = tmp_path / f"native-{grading_mode}-{scope}-env"
+
+    with pytest.raises(ValueError, match=r"standard grading.*environment control"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode=grading_mode,
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize("collect_scope", ["task", "step"])
+def test_native_standard_grading_rejects_post_agent_collect_hooks(
+    tmp_path: Path,
+    grading_mode: str,
+    collect_scope: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    source = task_toml.read_text(encoding="utf-8")
+    if collect_scope == "task":
+        source += '\n[[verifier.collect]]\ncommand = "cp /workspace/result /logs/agent/trajectory.json"\n'
+    else:
+        source += (
+            '\n[[steps]]\nname = "step-one"\n\n'
+            '[[steps.verifier.collect]]\ncommand = "cp /workspace/result /logs/agent/trajectory.json"\n'
+        )
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    output_dir = tmp_path / f"native-{grading_mode}-{collect_scope}-collect"
+
+    with pytest.raises(ValueError, match=r"collect hook.*standard grading"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode=grading_mode,
+        )
+
+    assert not output_dir.exists()
+
+
+def test_native_custom_only_preserves_task_and_step_collect_hooks(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8") + (
+        '\n[[verifier.collect]]\ncommand = "cp /workspace/task-state /logs/agent/task-state"\n\n'
+        '[[steps]]\nname = "step-one"\n\n'
+        '[[steps.verifier.collect]]\ncommand = "cp /workspace/step-state /logs/agent/step-state"\n'
+    )
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    tests_dir = native_task / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test.sh").write_text("#!/bin/sh\nprintf 1 > /logs/verifier/reward.txt\n", encoding="utf-8")
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-custom-only-collect",
+        grading_mode="custom_only",
+    )
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    assert [hook.command for hook in config.verifier.collect] == ["cp /workspace/task-state /logs/agent/task-state"]
+    assert config.steps is not None
+    assert [hook.command for hook in config.steps[0].verifier.collect] == [
+        "cp /workspace/step-state /logs/agent/step-state"
+    ]
+
+
+def test_native_custom_only_accepts_step_local_test_scripts_without_top_level_tests(
+    tmp_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8") + '\n[[steps]]\nname = "step-one"\n'
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    step_dir = native_task / "steps" / "step-one"
+    step_dir.mkdir(parents=True)
+    (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+    step_test = step_dir / "tests" / "test.sh"
+    step_test.parent.mkdir()
+    step_test.write_text("#!/bin/sh\nprintf 1 > /logs/verifier/reward.txt\n", encoding="utf-8")
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-custom-only-step-tests",
+        grading_mode="custom_only",
+    )
+
+    assert not (staged / "tests" / "test.sh").exists()
+    assert (staged / "steps" / "step-one" / "tests" / "test.sh").read_text(encoding="utf-8") == (
+        "#!/bin/sh\nprintf 1 > /logs/verifier/reward.txt\n"
+    )
+
+
+def test_native_custom_only_rejects_top_level_fallback_hidden_by_existing_separate_step_context(
+    tmp_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8") + (
+        '\n[[steps]]\nname = "step-one"\n\n[steps.verifier]\nenvironment_mode = "separate"\n'
+    )
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    top_level_tests = native_task / "tests"
+    top_level_tests.mkdir()
+    (top_level_tests / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    step_tests = native_task / "steps" / "step-one" / "tests"
+    step_tests.mkdir(parents=True)
+    (step_tests.parent / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+    (step_tests / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+
+    harbor_task = Task(native_task, disable_verification=True)
+    assert harbor_task.config.steps is not None
+    build_context = Trial._verifier_env_build_context(
+        SimpleNamespace(task=harbor_task),
+        harbor_task.config.steps[0],
+    )
+    assert build_context.resolve() == step_tests.resolve()
+    assert not (build_context / "test.sh").exists()
+    output_dir = tmp_path / "native-custom-only-testless-separate-step-context"
+
+    with pytest.raises(FileNotFoundError, match=r"Harbor-resolvable test script for every verifier pass"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode="custom_only",
+        )
+
+    assert not output_dir.exists()
+
+
+def test_native_custom_only_accepts_top_level_fallback_for_separate_step_without_step_context(
+    tmp_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8") + (
+        '\n[[steps]]\nname = "step-one"\n\n[steps.verifier]\nenvironment_mode = "separate"\n'
+    )
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    tests_dir = native_task / "tests"
+    tests_dir.mkdir()
+    authored_test = "#!/bin/sh\nprintf 1 > /logs/verifier/reward.txt\n"
+    (tests_dir / "test.sh").write_text(authored_test, encoding="utf-8")
+    step_dir = native_task / "steps" / "step-one"
+    step_dir.mkdir(parents=True)
+    (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+
+    harbor_task = Task(native_task, disable_verification=True)
+    assert harbor_task.config.steps is not None
+    build_context = Trial._verifier_env_build_context(
+        SimpleNamespace(task=harbor_task),
+        harbor_task.config.steps[0],
+    )
+    assert build_context.resolve() == tests_dir.resolve()
+    assert (build_context / "test.sh").is_file()
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-custom-only-top-level-separate-fallback",
+        grading_mode="custom_only",
+    )
+
+    assert (staged / "tests" / "test.sh").read_text(encoding="utf-8") == authored_test
+    assert not (staged / "steps" / "step-one" / "tests").exists()
+
+
+def test_native_custom_only_native_test_preserves_authored_skill_evaluator_package(
+    tmp_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_tests = target / "evals" / "harbor" / "case-001" / "tests"
+    authored_payload = native_tests / "skill_evaluator"
+    authored_payload.mkdir(parents=True)
+    helper = authored_payload / "custom_helper.py"
+    helper.write_text("CUSTOM_VALUE = 7\n", encoding="utf-8")
+    (native_tests / "test.sh").write_text(
+        '#!/bin/sh\npython3 -c "from skill_evaluator.custom_helper import CUSTOM_VALUE; assert CUSTOM_VALUE == 7"\n',
+        encoding="utf-8",
+    )
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-custom-only-authored-payload",
+        grading_mode="custom_only",
+    )
+
+    staged_payload = staged / "tests" / "skill_evaluator"
+    assert (staged_payload / "custom_helper.py").read_text(encoding="utf-8") == "CUSTOM_VALUE = 7\n"
+    assert not (staged_payload / "eval.py").exists()
+    assert not (staged_payload / "log_converters.py").exists()
+    assert not (staged_payload / "custom_grader_runner.py").exists()
+
+
+def test_native_standard_grader_runs_from_replaced_isolated_payload_directory(
+    tmp_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_tests = target / "evals" / "harbor" / "case-001" / "tests"
+    native_tests.mkdir()
+    marker = tmp_path / "shadow-module-imported"
+    (native_tests / "ipaddress.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\n",
+        encoding="utf-8",
+    )
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-isolated-standard-verifier",
+        grading_mode="default",
+    )
+
+    evaluator_dir = staged / "tests" / "skill_evaluator"
+    assert (staged / "tests" / "ipaddress.py").is_file()
+    assert (evaluator_dir / "eval.py").is_file()
+    test_sh = (staged / "tests" / "test.sh").read_text(encoding="utf-8")
+    assert 'python3 -I "${evaluator_dir}/eval.py"' in test_sh
+
+    agent_logs = tmp_path / "isolated-agent-logs"
+    verifier_logs = tmp_path / "isolated-verifier-logs"
+    agent_logs.mkdir()
+    verifier_logs.mkdir()
+    (agent_logs / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.7",
+                "session_id": "isolated-verifier",
+                "trajectory_id": "isolated-verifier",
+                "agent": {"name": "codex", "version": "test"},
+                "steps": [{"step_id": 1, "source": "agent", "message": "done", "tool_calls": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["bash", str(staged / "tests" / "test.sh")],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HARBOR_TESTS_DIR": str(staged / "tests"),
+            "HARBOR_LOGS_DIR": str(tmp_path),
+            "HARBOR_AGENT_LOGS_DIR": str(agent_logs),
+            "HARBOR_VERIFIER_DIR": str(verifier_logs),
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "Required LLM judging failed" in completed.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "overlay_relative",
+    [Path("setup.sh"), Path(".agents/skills/renamed-target/SKILL.md")],
+)
+def test_native_baseline_rejects_every_configured_step_workdir_projection(
+    tmp_path: Path,
+    overlay_relative: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8") + '\n[[steps]]\nname = "step-one"\n'
+    config = TaskConfig.model_validate_toml(source)
+    assert config.steps is not None and config.steps[0].name == "step-one"
+    task_toml.write_text(source, encoding="utf-8")
+    projected = native_task / "steps" / "step-one" / "workdir" / overlay_relative
+    projected.parent.mkdir(parents=True)
+    projected.write_text("authored step payload\n", encoding="utf-8")
+    output_dir = tmp_path / f"native-baseline-workdir-{overlay_relative.name}"
+
+    with pytest.raises(ValueError, match=r"step workdir.*baseline"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            with_skill=False,
+            grading_mode="custom_only",
+        )
+
+    assert not output_dir.exists()
+
+
+def test_native_with_skill_staging_preserves_authored_healthchecks_and_step_workdir(
+    tmp_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8").replace(
+        "[environment]\n",
+        '[environment]\nhealthcheck = { command = "true" }\n',
+    )
+    source += '\n[[steps]]\nname = "step-one"\n\n[steps.healthcheck]\ncommand = "true"\n'
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    step_dir = native_task / "steps" / "step-one"
+    step_dir.mkdir(parents=True)
+    (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+    workdir_file = step_dir / "workdir" / "fixture.txt"
+    workdir_file.parent.mkdir()
+    workdir_file.write_text("with-skill fixture\n", encoding="utf-8")
+
+    staged = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-with-skill-authored-setup",
+        with_skill=True,
+        grading_mode="custom_only",
+    )[0]
+
+    staged_config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    assert staged_config.environment.healthcheck is not None
+    assert staged_config.steps is not None and staged_config.steps[0].healthcheck is not None
+    assert (staged / "steps" / "step-one" / "workdir" / "fixture.txt").read_text(encoding="utf-8") == (
+        "with-skill fixture\n"
+    )
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize("overlay_relative", [Path("test.sh"), Path("README.md")])
+def test_native_standard_grading_rejects_any_nonempty_step_tests_overlay(
+    tmp_path: Path,
+    grading_mode: str,
+    overlay_relative: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8") + '\n[[steps]]\nname = "step-one"\n'
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    (native_task / "tests").mkdir()
+    (native_task / "tests" / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    step_dir = native_task / "steps" / "step-one"
+    step_dir.mkdir(parents=True)
+    (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+    overlay = step_dir / "tests" / overlay_relative
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("authored verifier overlay\n", encoding="utf-8")
+
+    harbor_task = Task(native_task, disable_verification=True)
+    verifier = Verifier(
+        harbor_task,
+        TrialPaths(tmp_path / "trial"),
+        SimpleNamespace(os=TaskOS.LINUX),
+        step_name="step-one",
+    )
+    test_sources, _selected_source, _selected_script = verifier._resolve_tests()
+    assert test_sources == [native_task / "tests", step_dir / "tests"]
+    output_dir = tmp_path / f"native-{grading_mode}-{overlay_relative.name}-overlay"
+
+    with pytest.raises(ValueError, match=r"step tests.*SkillEvaluator standard grading"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode=grading_mode,
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+def test_native_standard_grading_allows_empty_step_tests_directory(
+    tmp_path: Path,
+    grading_mode: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    source = task_toml.read_text(encoding="utf-8") + '\n[[steps]]\nname = "step-one"\n'
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+    step_dir = native_task / "steps" / "step-one"
+    (step_dir / "tests").mkdir(parents=True)
+    (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+
+    staged = stage_native_harbor_tasks(
+        target,
+        tmp_path / f"native-{grading_mode}-empty-step-tests",
+        grading_mode=grading_mode,
+    )[0]
+
+    assert (staged / "steps" / "step-one" / "tests").is_dir()
+    assert not any((staged / "steps" / "step-one" / "tests").iterdir())
+    assert (staged / "tests" / "test.sh").is_file()
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+@pytest.mark.parametrize("verifier_scope", ["task-explicit", "task-implicit", "step-explicit", "step-implicit"])
+def test_native_standard_grading_rejects_every_effective_separate_verifier_context(
+    tmp_path: Path,
+    grading_mode: str,
+    verifier_scope: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    header = 'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n[metadata]\nentry_id = "case-001"\n\n'
+    if verifier_scope == "task-explicit":
+        source = header + '[verifier]\nenvironment_mode = "separate"\n\n[environment]\n'
+    elif verifier_scope == "task-implicit":
+        source = header + '[verifier.environment]\nworkdir = "/workspace"\n\n[environment]\n'
+    elif verifier_scope == "step-explicit":
+        source = (
+            header
+            + '[[steps]]\nname = "step-one"\n\n[steps.verifier]\nenvironment_mode = "separate"\n\n[environment]\n'
+        )
+    else:
+        source = (
+            header
+            + '[[steps]]\nname = "step-one"\n\n[steps.verifier.environment]\nworkdir = "/workspace"\n\n[environment]\n'
+        )
+    config = TaskConfig.model_validate_toml(source)
+    step = config.steps[0] if config.steps else None
+    assert resolve_effective_verifier_env_config(config, step) is not None
+    task_toml.write_text(source, encoding="utf-8")
+    if step is not None:
+        step_dir = native_task / "steps" / step.name
+        step_dir.mkdir(parents=True)
+        (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+    output_dir = tmp_path / f"native-{grading_mode}-{verifier_scope}"
+
+    with pytest.raises(ValueError, match=r"separate verifier.*SkillEvaluator standard grading"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode=grading_mode,
+        )
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("windows_scope", ["agent", "task-verifier", "step-verifier"])
+def test_native_tasks_reject_every_effective_windows_execution_path(
+    tmp_path: Path,
+    windows_scope: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    header = 'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n[metadata]\nentry_id = "case-001"\n\n'
+    if windows_scope == "agent":
+        source = header + '[environment]\nos = "windows"\n'
+    elif windows_scope == "task-verifier":
+        source = header + '[verifier.environment]\nos = "windows"\n\n[environment]\nos = "linux"\n'
+    else:
+        source = (
+            header
+            + '[[steps]]\nname = "step-one"\n\n[steps.verifier.environment]\nos = "windows"\n\n'
+            + '[environment]\nos = "linux"\n'
+        )
+    config = TaskConfig.model_validate_toml(source)
+    step = config.steps[0] if config.steps else None
+    if windows_scope == "agent":
+        assert config.environment.os == TaskOS.WINDOWS
+    else:
+        effective_verifier = resolve_effective_verifier_env_config(config, step)
+        assert effective_verifier is not None and effective_verifier.os == TaskOS.WINDOWS
+    task_toml.write_text(source, encoding="utf-8")
+    if step is not None:
+        step_dir = native_task / "steps" / step.name
+        step_dir.mkdir(parents=True)
+        (step_dir / "instruction.md").write_text("Run step one.\n", encoding="utf-8")
+    output_dir = tmp_path / f"native-windows-{windows_scope}"
+
+    with pytest.raises(ValueError, match=r"Native Harbor.*Windows.*OS-aware"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode="custom_only",
+        )
+
+    assert not output_dir.exists()
+
+
 @pytest.mark.parametrize("name", ["BASH_ENV", "BASH_FUNC_hidden%%"])
 def test_generated_tasks_reject_runtime_process_loader_environment(tmp_path: Path, name: str) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
@@ -3817,6 +4539,45 @@ def test_native_projection_does_not_read_task_directory_on_another_device(
 
     assert adapter_module._native_projection_entry_ids(native_root) == ()
     assert not read_task_config
+
+
+def test_native_identity_helpers_preserve_numeric_zero_entry_id(tmp_path: Path) -> None:
+    native_root = tmp_path / "evals" / "harbor"
+    task_dir = native_root / "directory-selector"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.toml").write_text(
+        'schema_version = "1.4"\n\n[task]\nname = "publisher/display-name"\n\n[metadata]\nentry_id = 0\n',
+        encoding="utf-8",
+    )
+
+    assert adapter_module._native_entry_id(task_dir) == "0"
+    assert adapter_module._native_projection_entry_ids(native_root) == ("0",)
+
+
+@pytest.mark.parametrize("entry_id", [True, 1.5], ids=["boolean", "noninteger-number"])
+def test_native_identity_helper_rejects_non_case_id_metadata_scalars(
+    tmp_path: Path,
+    entry_id: object,
+) -> None:
+    import toml
+
+    native_root = tmp_path / "evals" / "harbor"
+    task_dir = native_root / "directory-selector"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.toml").write_text(
+        toml.dumps(
+            {
+                "schema_version": "1.4",
+                "task": {"name": "publisher/display-name"},
+                "metadata": {"entry_id": entry_id},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="case id"):
+        adapter_module._native_entry_id(task_dir)
+    assert adapter_module._native_projection_entry_ids(native_root) == ("directory-selector",)
 
 
 def test_link_or_reparse_check_accepts_missing_windows_file_attributes(tmp_path: Path) -> None:

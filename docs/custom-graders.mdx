@@ -203,6 +203,41 @@ Two rules keep BYOT predictable:
   and baseline copies of `evals/harbor/` under the results directory for each
   run; the files you author stay untouched.
 
+The staged task also has explicit compatibility boundaries:
+
+- Native task projection is currently POSIX-only. A Windows agent environment,
+  or any task/step verifier whose effective environment is Windows, is rejected
+  before staging in every grading mode.
+- `default` and `default_plus_custom` keep SkillEvaluator's standard grader in
+  the shared verifier environment. Effective separate-verifier contexts and
+  non-empty `steps/<step-name>/tests/` overlays are rejected. Task or step
+  collect hooks and task-controlled `HARBOR_*`, executable-search, shell,
+  process-loader, proxy/TLS, discovery, evaluator-provider, or judge-model
+  environment controls are also rejected. An exact `${NAME}` assignment for a
+  provider or judge control is accepted in task/step `verifier.env` only when
+  the operator explicitly staged that same name; unrelated verifier variables
+  remain available. An operator-set `LLM_JUDGE_FALLBACK_MODELS` value is
+  forwarded only to the standard verifier job, never to the agent environment
+  or a `custom_only` run. SkillEvaluator's Python verifier runs in isolated mode
+  from a replaced `tests/skill_evaluator/` payload so authored helper modules
+  cannot shadow its imports.
+- Use `custom_only` when the native task must own those surfaces. A shared
+  multi-step verifier can use a step-local test script or fall back to the
+  top-level test. A separate step verifier uses
+  `steps/<step-name>/tests/` as its image context whenever that directory
+  exists, so that context must contain its own test script; top-level fallback
+  works only when the step tests directory is absent. When every native
+  `custom_only` verifier pass already resolves an authored test script and no
+  native `tests/grader.py` or `tests/grader.sh` selects SkillEvaluator's custom
+  runner, staging preserves an authored `tests/skill_evaluator/` directory.
+- A paired baseline rejects authored top-level or step healthchecks,
+  `steps/<step-name>/workdir/` projections, Harbor's effective task-shipped
+  prior trajectory (`trajectory.json` for a single-step task or the first
+  step's `trajectory.json`), and skill-owned `harbor.pre_agent_setup` /
+  `setup_commands`. Those surfaces can seed or observe agent behavior before
+  the evaluated skill runs. They remain available for a with-skill-only
+  `--skip-baseline` run.
+
 ## Validate the contract
 
 Check your `evals/` tree and the Harbor task and reward contract before
@@ -257,11 +292,14 @@ layout and the machine-readable contract.
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="grading.mode=custom_only requires evals/grader.py or evals/grader.sh">
-    `custom_only` refuses to run without a grader. Scaffold one with
+  <Accordion title="grading.mode=custom_only requires a grader or native test script">
+    `custom_only` refuses to run without a grader or a Harbor-resolvable native
+    test script for every verifier pass. Scaffold a grader with
     `skillevaluator init-custom-grader ./my-skill --mode custom_only`, or for
-    a native Harbor task provide `tests/grader.py` or `tests/test.sh` in the
-    case directory.
+    a native Harbor task provide `tests/grader.py`, a top-level `tests/test.sh`,
+    or step-local test scripts. A separate step verifier whose own `tests/`
+    directory exists must put the script in that directory because Harbor uses
+    it as the verifier image context.
   </Accordion>
   <Accordion title="custom_only requires a numeric overall score">
     In `custom_only` mode your grader must write a numeric `overall` between

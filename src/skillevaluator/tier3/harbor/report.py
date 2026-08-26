@@ -26,6 +26,7 @@ from skillevaluator.tier3.harbor.metrics import (
     extract_custom_metrics,
     metric_set_for_reward,
     metric_value,
+    score_value,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.utils.redaction import redact_sensitive_data
@@ -116,12 +117,20 @@ def _load_trial_rewards(
 
 def _pick_best_agent(
     agents_data: dict[str, dict[str, Any]],
+    persisted_agents: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Select the agent with the highest overall with-skill score."""
     best_agent = ""
     best_score = -1.0
     for agent, data in agents_data.items():
         if not _findings_eligible(data):
+            continue
+        persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
+        overall = score_value(persisted.get("overall_with_skill")) if isinstance(persisted, dict) else None
+        if overall is not None:
+            if overall > best_score:
+                best_score = overall
+                best_agent = agent
             continue
         with_scores = data.get("with_skill", {})
         if not isinstance(with_scores, dict) or not with_scores:
@@ -1046,8 +1055,9 @@ def display_findings_report(
     for agent in report_agents:
         _remove_stale_findings_artifact(results_dir, agent)
 
+    loaded_agents = report_data.load_agent_data(results_dir)
     if len(harbor_agents) > 1:
-        best_agent = _pick_best_agent(agents_data)
+        best_agent = _pick_best_agent(agents_data, loaded_agents)
         if best_agent:
             best_agent_label = _agent_model_label(best_agent, harbor_result, agents_data)
             console.print(
@@ -1066,7 +1076,6 @@ def display_findings_report(
     ):
         return set()
 
-    loaded_agents = report_data.load_agent_data(results_dir)
     agent_reports: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
     for agent in report_agents:
         agent_data = agents_data.get(agent)

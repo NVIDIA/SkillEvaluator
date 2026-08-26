@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.evaluation.tier3_report import (
+    agent_eval_result_from_directory,
+    render_agent_eval_html_report,
+)
 from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor import report, report_data
 from skillevaluator.tier3.harbor.collector import (
@@ -153,6 +156,7 @@ def _collect(
     *,
     skip_baseline: bool,
     case_ids: list[str],
+    pass_threshold: float = 0.50,
 ) -> dict[str, object]:
     return collect_harbor_results(
         skill_name="demo",
@@ -160,6 +164,7 @@ def _collect(
         output_dir=tmp_path / "results",
         jobs_dir=tmp_path / "jobs",
         skip_baseline=skip_baseline,
+        pass_threshold=pass_threshold,
         expected_cases=len(case_ids),
         expected_case_ids=case_ids,
         expected_trials=len(case_ids),
@@ -977,6 +982,325 @@ def test_mixed_step_fallback_uses_one_overall_across_collector_and_report(tmp_pa
     assert summary["overall_score"] == 0.6
     assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.6
     assert trial["overall"] == 0.6
+
+
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_paired_mixed_step_fallback_keeps_report_and_html_aligned_with_logical_overall(
+    tmp_path: Path,
+    reverse_rows: bool,
+) -> None:
+    def write_job(condition: str, standard_score: float, custom_score: float) -> None:
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{condition}"
+        trial_name = "case-001__attempt"
+        trial_dir = job_dir / trial_name
+        rows = [
+            {
+                "entry_id": "case-001",
+                "metric_set": DEFAULT_METRIC_SET,
+                **dict.fromkeys(DEFAULT_METRICS, standard_score),
+            },
+            {
+                "entry_id": "case-001",
+                "metric_set": CUSTOM_ONLY_METRIC_SET,
+                "overall": custom_score,
+                "domain_quality": custom_score,
+            },
+        ]
+        if reverse_rows:
+            rows.reverse()
+        step_results: list[dict[str, object]] = []
+        for index, reward in enumerate(rows, start=1):
+            step_name = f"step-{index}"
+            verifier_dir = trial_dir / "steps" / step_name / "verifier"
+            verifier_dir.mkdir(parents=True)
+            (verifier_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+            step_results.append({"step_name": step_name, "verifier_result": {"rewards": reward}})
+        (trial_dir / "result.json").write_text(
+            json.dumps({"trial_name": trial_name, "task_name": "case-001", "step_results": step_results}),
+            encoding="utf-8",
+        )
+        _write_complete_job_result(job_dir, [trial_name])
+
+    write_job("with", 1.0, 0.2)
+    write_job("without", 0.6, 0.2)
+    result = _collect(
+        tmp_path,
+        skip_baseline=False,
+        case_ids=["case-001"],
+        pass_threshold=0.75,
+    )
+
+    agent = result["agents"]["opencode"]
+    assert agent["pass_at_k"]["with_skill"]["rate"] == 0.0
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.6
+    assert agent["pass_at_k"]["without_skill"]["rate"] == 0.0
+    assert agent["pass_at_k"]["without_skill"]["cases"]["case-001"]["best_score"] == 0.4
+
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    report_result = agent_eval_result_from_directory(
+        skill_dir,
+        tmp_path / "results",
+        use_llm_judge=False,
+    )
+    assert report_result is not None
+    report_payload = report_result.metadata["agent_eval"]
+    assert report_payload["overall_score"] == 0.6
+    assert report_payload["overall_lift"] == 0.2
+    # The report verdict remains the documented dimension-only quality gate;
+    # pass@k independently applies the configured per-attempt threshold.
+    assert report_payload["verdict"] == "pass"
+    assert report_payload["agents"]["opencode"]["with_skill"] == 0.6
+    assert report_payload["agents"]["opencode"]["baseline"] == 0.4
+    assert report_payload["agents"]["opencode"]["lift"] == 0.2
+
+    html_path = render_agent_eval_html_report(
+        skill_dir,
+        tmp_path / "results",
+        use_llm_judge=False,
+    )
+    payload_match = re.search(
+        r'<script type="application/json" id="tier3-full">(.*?)</script>',
+        html_path.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert payload_match is not None
+    html_payload = json.loads(payload_match.group(1))
+    assert html_payload["overall_score"] == 0.6
+    assert html_payload["overall_lift"] == 0.2
+    assert html_payload["verdict"] == "pass"
+    assert html_payload["pass_at_k"]["with_skill"]["rate"] == 0.0
+
+
+@pytest.mark.parametrize("reverse_trials", [False, True])
+def test_paired_mixed_contracts_across_logical_trials_keep_report_aligned_with_collector_overall(
+    tmp_path: Path,
+    reverse_trials: bool,
+) -> None:
+    def write_job(condition: str, standard_score: float, custom_score: float) -> None:
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{condition}"
+        trials = [
+            (
+                "case-001",
+                {
+                    "entry_id": "case-001",
+                    "metric_set": DEFAULT_METRIC_SET,
+                    **dict.fromkeys(DEFAULT_METRICS, standard_score),
+                    "overall": standard_score,
+                },
+            ),
+            (
+                "case-002",
+                {
+                    "entry_id": "case-002",
+                    "metric_set": CUSTOM_ONLY_METRIC_SET,
+                    "overall": custom_score,
+                    "domain_quality": custom_score,
+                },
+            ),
+        ]
+        if reverse_trials:
+            trials.reverse()
+        trial_names: list[str] = []
+        for entry_id, reward in trials:
+            trial_name = f"{entry_id}__attempt"
+            trial_names.append(trial_name)
+            trial_dir = job_dir / trial_name
+            trial_dir.mkdir(parents=True)
+            (trial_dir / "result.json").write_text(
+                json.dumps(
+                    {
+                        "trial_name": trial_name,
+                        "task_name": entry_id,
+                        "verifier_result": {"rewards": reward},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _write_reward(job_dir, trial_name, reward)
+        _write_complete_job_result(job_dir, trial_names)
+
+    write_job("with", 1.0, 0.0)
+    write_job("without", 0.6, 0.0)
+    result = _collect(
+        tmp_path,
+        skip_baseline=False,
+        case_ids=["case-001", "case-002"],
+        pass_threshold=0.75,
+    )
+
+    agent = result["agents"]["opencode"]
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 1.0
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-002"]["best_score"] == 0.0
+    with_summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    without_summary = json.loads(
+        (tmp_path / "results" / "opencode" / "without-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert with_summary["overall_score"] == 0.5
+    assert without_summary["overall_score"] == 0.3
+    assert with_summary["mixed_metric_contracts"] is True
+    assert without_summary["mixed_metric_contracts"] is True
+
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    report_result = agent_eval_result_from_directory(
+        skill_dir,
+        tmp_path / "results",
+        use_llm_judge=False,
+    )
+    assert report_result is not None
+    report_payload = report_result.metadata["agent_eval"]
+    assert report_payload["overall_score"] == 0.5
+    assert report_payload["overall_lift"] == 0.2
+    # Verdicts remain the documented dimension-only quality gate even though
+    # the headline score spans both standard and custom logical trials.
+    assert report_payload["verdict"] == "pass"
+    assert report_payload["agents"]["opencode"]["with_skill"] == 0.5
+    assert report_payload["agents"]["opencode"]["baseline"] == 0.3
+    assert report_payload["agents"]["opencode"]["lift"] == 0.2
+
+    html_path = render_agent_eval_html_report(
+        skill_dir,
+        tmp_path / "results",
+        use_llm_judge=False,
+    )
+    payload_match = re.search(
+        r'<script type="application/json" id="tier3-full">(.*?)</script>',
+        html_path.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert payload_match is not None
+    html_payload = json.loads(payload_match.group(1))
+    assert html_payload["overall_score"] == 0.5
+    assert html_payload["overall_lift"] == 0.2
+    assert html_payload["verdict"] == "pass"
+
+
+@pytest.mark.parametrize("reverse_trials", [False, True])
+def test_default_v1_v2_mix_keeps_collector_and_report_aligned_with_logical_overall(
+    tmp_path: Path,
+    reverse_trials: bool,
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trials: list[tuple[str, dict[str, object]]] = [
+        (
+            "case-v2",
+            {
+                "entry_id": "case-v2",
+                "metric_set": DEFAULT_METRIC_SET,
+                **dict.fromkeys(DEFAULT_METRICS, 0.0),
+            },
+        ),
+        (
+            "case-v1",
+            {
+                "entry_id": "case-v1",
+                "metric_set": LEGACY_METRIC_SET,
+                **dict.fromkeys(LEGACY_METRICS, 1.0),
+            },
+        ),
+    ]
+    if reverse_trials:
+        trials.reverse()
+    trial_names = []
+    for entry_id, reward in trials:
+        trial_name = f"{entry_id}__attempt"
+        trial_names.append(trial_name)
+        _write_reward(job_dir, trial_name, reward)
+    _write_complete_job_result(job_dir, trial_names)
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        case_ids=["case-v2", "case-v1"],
+    )
+
+    agent = result["agents"]["opencode"]
+    assert agent["pass_at_k"]["with_skill"]["rate"] == 0.5
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["mixed_metric_contracts"] is True
+    assert summary["overall_score"] == 0.5
+    assert summary["scores"] == {
+        "security": 0.0,
+        "skill_execution": 0.5,
+        "skill_efficiency": 0.5,
+        "accuracy": 0.5,
+        "goal_accuracy": 0.5,
+        "behavior_check": 0.5,
+    }
+    assert summary["dimensions"]["security"] == {
+        "score": 0.0,
+        "sources": {"security": 1.0},
+    }
+
+    loaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    assert loaded["mixed_metric_contracts_with_skill"] is True
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    report_result = agent_eval_result_from_directory(
+        skill_dir,
+        tmp_path / "results",
+        use_llm_judge=False,
+    )
+    assert report_result is not None
+    report_payload = report_result.metadata["agent_eval"]
+    assert report_payload["overall_score"] == 0.5
+    assert report_payload["agents"]["opencode"]["with_skill"] == 0.5
+    assert report_payload["verdict"] == "fail"
+    dimensions = {
+        dimension["id"]: dimension["with_skill"] for dimension in report_payload["agents"]["opencode"]["dimensions"]
+    }
+    assert dimensions == {
+        "security": 0.0,
+        "correctness": 0.5,
+        "discoverability": 0.5,
+        "effectiveness": 0.5,
+        "efficiency": 0.5,
+    }
+    trials_by_case = {trial["entry_id"]: trial for trial in report_payload["agents"]["opencode"]["trials"]}
+    assert "security" not in trials_by_case["case-v1"]["scores"]
+    assert trials_by_case["case-v1"]["overall"] == 1.0
+
+    html_path = render_agent_eval_html_report(
+        skill_dir,
+        tmp_path / "results",
+        use_llm_judge=False,
+    )
+    payload_match = re.search(
+        r'<script type="application/json" id="tier3-full">(.*?)</script>',
+        html_path.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert payload_match is not None
+    html_payload = json.loads(payload_match.group(1))
+    assert html_payload["overall_score"] == 0.5
+    assert html_payload["dimensions"] == report_payload["dimensions"]
+
+
+def test_standard_contract_with_custom_metrics_is_not_marked_as_mixed(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    reward = {
+        **_default_reward("case-001", 1.0),
+        "custom_metrics": {"domain_quality": 0.4},
+    }
+    _write_reward(job_dir, trial_name, reward)
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded"
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["custom_scores"] == {"domain_quality": 0.4}
+    assert summary["mixed_metric_contracts"] is False
+    loaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    assert loaded["mixed_metric_contracts_with_skill"] is False
 
 
 def test_result_only_mixed_step_fallback_keeps_rows_for_consistent_overall(tmp_path: Path) -> None:
@@ -3685,6 +4009,83 @@ def test_findings_do_not_follow_external_reward_symlink(
     assert rendered == set()
     assert suggestion_called is False
     assert not (agent_dir / "findings.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("agent_specs", "expected_best"),
+    [
+        ([("standard", "standard", 0.8), ("custom", "custom", 0.9)], "custom"),
+        ([("custom-low", "custom", 0.6), ("custom-high", "custom", 0.9)], "custom-high"),
+    ],
+    ids=("standard-and-custom", "custom-only"),
+)
+def test_findings_multi_agent_ranks_persisted_condition_overall_across_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_specs: list[tuple[str, str, float]],
+    expected_best: str,
+) -> None:
+    agents: dict[str, dict[str, object]] = {}
+    for agent, contract, score in agent_specs:
+        condition_dir = tmp_path / agent / "with-skill"
+        trial_dir = condition_dir / "trials" / "case-001__attempt"
+        trial_dir.mkdir(parents=True)
+        if contract == "standard":
+            scores = dict.fromkeys(DEFAULT_METRICS, score)
+            custom_scores: dict[str, float] = {}
+            metrics = list(DEFAULT_METRICS)
+            reward: dict[str, object] = _default_reward("case-001", score)
+        else:
+            scores = {}
+            custom_scores = {"domain_quality": score}
+            metrics = []
+            reward = {
+                "entry_id": "case-001",
+                "metric_set": CUSTOM_ONLY_METRIC_SET,
+                "overall": score,
+                "custom_metrics": {"domain_quality": score},
+                "custom_details": {"domain_quality": {"reason": "contract-grounded evidence"}},
+            }
+        (condition_dir / "summary.json").write_text(
+            json.dumps(
+                {
+                    "agent": agent,
+                    "scores": scores,
+                    "custom_scores": custom_scores,
+                    "overall_score": score,
+                    "metrics": metrics,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                    "num_trials": 1,
+                    "num_reward_rows": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (trial_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        agents[agent] = {
+            "execution_status": "succeeded",
+            "with_skill": scores,
+            "custom_with_skill": custom_scores,
+            "conditions": {"with_skill": {"execution_status": "succeeded"}},
+        }
+
+    monkeypatch.setattr(report, "_generate_suggestions_structured", lambda *_args, **_kwargs: [])
+
+    rendered = report.display_findings_report(
+        {"agents": agents},
+        "demo",
+        [agent for agent, _contract, _score in agent_specs],
+        tmp_path,
+    )
+
+    assert rendered
+    for agent, _contract, _score in agent_specs:
+        artifact = json.loads((tmp_path / agent / "findings.json").read_text(encoding="utf-8"))
+        expected_mode = "passing_next_steps" if agent == expected_best else "not_generated"
+        assert artifact["suggestion_mode"] == expected_mode
 
 
 def test_findings_multi_agent_selects_and_writes_only_successful_agent(tmp_path: Path, monkeypatch) -> None:

@@ -388,6 +388,68 @@ def test_report_metric_discovery_honors_explicit_custom_only_declaration() -> No
     )
 
 
+def test_best_agent_compares_standard_and_custom_only_agent_overall_scores() -> None:
+    payload = build_agent_eval_payload(
+        "mixed-agent-contracts",
+        {
+            "standard-agent": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "metrics_with_skill": list(DEFAULT_METRICS),
+                "overall_with_skill": 0.8,
+                "rewards": [
+                    {
+                        "entry_id": "standard-case",
+                        "metric_set": "skill-evaluator-default-v2",
+                        **dict.fromkeys(DEFAULT_METRICS, 0.8),
+                        "overall": 0.8,
+                    }
+                ],
+            },
+            "custom-agent": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {},
+                "metrics_with_skill": [],
+                "overall_with_skill": 0.9,
+                "without_skill": {},
+                "metrics_without_skill": [],
+                "overall_without_skill": 0.4,
+                "rewards": [
+                    {
+                        "entry_id": "custom-case",
+                        "metric_set": "custom-only",
+                        "overall": 0.9,
+                        "custom_metrics": {"task_quality": 0.9},
+                    }
+                ],
+                "rewards_baseline": [
+                    {
+                        "entry_id": "custom-case",
+                        "metric_set": "custom-only",
+                        "overall": 0.4,
+                        "custom_metrics": {"task_quality": 0.4},
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["agents"]["standard-agent"]["with_skill"] == 0.8
+    assert payload["agents"]["custom-agent"]["with_skill"] == 0.9
+    assert payload["agents"]["custom-agent"]["baseline"] == 0.4
+    assert payload["agents"]["custom-agent"]["lift"] == 0.5
+    assert payload["best_agent"] == "custom-agent"
+    assert payload["overall_score"] == 0.9
+
+
 def test_case_grounded_harbor_links_win_over_positional_fallback() -> None:
     evidence_links = [
         {"url": "https://harbor.example.test/case-1", "entry_id": "case-1", "label": "case-1"},

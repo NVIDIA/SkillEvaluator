@@ -285,6 +285,44 @@ def test_local_output_limit_fails_closed_and_reaps_process_group(
     assert overflow_value not in str(caught.value)
 
 
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_output_limit_redacts_detached_proxy_components_from_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    diagnostic = "proxy rejected local-limit-user with local-limit-password\n"
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def exercise() -> None:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            await environment.exec(
+                f"printf %s {shlex.quote(diagnostic)}; sleep 0.05; printf overflow",
+                env={
+                    "HTTPS_PROXY": "https://local-limit-user:local-limit-password@proxy.invalid:8443",
+                },
+            )
+
+    monkeypatch.setattr(
+        stream_redaction_module,
+        "MAX_COMMAND_OUTPUT_BYTES",
+        len(diagnostic.encode()),
+        raising=False,
+    )
+
+    with pytest.raises(CommandOutputLimitError) as caught:
+        asyncio.run(exercise())
+
+    rendered = "".join(callback_chunks) + str(caught.value)
+    assert "proxy rejected" in "".join(callback_chunks)
+    assert "local-limit-user" not in rendered
+    assert "local-limit-password" not in rendered
+
+
 def test_streaming_log_redactor_preserves_nested_known_pattern_starts() -> None:
     jwt_secret = ".".join(("eyJ" + "A" * 20, "B" * 20, "C" * 20))
     raw = "ask-" + ("a" * 19 + "A1") + "--" + jwt_secret + "☃"
@@ -1833,6 +1871,42 @@ def test_local_streamed_nonzero_exit_preserves_output_and_return_code(tmp_path: 
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize(
+    "proxy_uri",
+    [
+        "https://local-user:local-password@proxy.invalid:8443",
+        "https://local%2Duser:local%2Dpassword@proxy.invalid:8443",
+        "local-user:local-password@proxy.invalid:8443",
+    ],
+    ids=["uri", "percent-encoded", "schemeless"],
+)
+def test_local_nonzero_exit_redacts_detached_proxy_components_from_callback_and_result(
+    tmp_path: Path,
+    proxy_uri: str,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                "printf 'proxy rejected local-user with local-password\\n'; exit 7",
+                env={"HTTPS_PROXY": proxy_uri},
+            )
+
+    result = asyncio.run(exercise())
+    rendered = "".join(text for text, _stream in callback_chunks) + (result.stdout or "") + (result.stderr or "")
+
+    assert result.return_code == 7
+    assert "local-user" not in rendered
+    assert "local-password" not in rendered
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_real_local_exec_redacts_merged_secrets_across_byte_and_line_boundaries(
     tmp_path: Path,
 ) -> None:
@@ -2598,6 +2672,36 @@ def test_streamed_timeout_callback_matches_result_and_contains_descendants(tmp_p
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_timeout_redacts_detached_proxy_components_from_callback_and_result(
+    tmp_path: Path,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                "printf 'proxy rejected local-timeout-user with local-timeout-password\\n'; sleep 30",
+                env={
+                    "HTTPS_PROXY": "https://local-timeout-user:local-timeout-password@proxy.invalid:8443",
+                },
+                timeout_sec=0.1,
+            )
+
+    result = asyncio.run(exercise())
+    rendered = "".join(text for text, _stream in callback_chunks) + (result.stdout or "") + (result.stderr or "")
+
+    assert result.return_code == 124
+    assert "local-timeout-user" not in rendered
+    assert "local-timeout-password" not in rendered
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 @pytest.mark.parametrize("with_callback", [False, True])
 def test_timeout_diagnostic_cannot_synthesize_sensitive_value(
     tmp_path: Path,
@@ -3200,7 +3304,9 @@ def test_streamed_exec_escalates_after_launcher_exits_with_term_ignoring_descend
     async def exercise() -> object | None:
         await environment.start()
         with environment.scoped_output_callback(on_output):
-            task = asyncio.create_task(environment.exec(command, timeout_sec=0.2 if lifecycle == "timeout" else None))
+            # Leave enough startup margin for loaded CI hosts to launch the
+            # stdin bootstrap and create the descendant before timeout cleanup.
+            task = asyncio.create_task(environment.exec(command, timeout_sec=1.0 if lifecycle == "timeout" else None))
             for _ in range(500):
                 if child_pid_path.exists():
                     break
@@ -4962,8 +5068,10 @@ def test_rewrite_env_values_does_not_add_shell_quotes(tmp_path: Path) -> None:
 
 def test_local_opencode_confines_project_discovery_to_the_run_workspace(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     agent = object.__new__(SkillEvaluatorLocalOpenCode)
+    agent.logs_dir = tmp_path
     agent.model_name = "nvidia/openai/gpt-oss-120b"
     agent.mcp_servers = []
     agent._opencode_config = {}

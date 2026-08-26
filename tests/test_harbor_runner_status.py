@@ -61,6 +61,57 @@ def test_published_execution_errors_count_distinct_details_beyond_truncation() -
     assert len(published) == 1
 
 
+def test_launch_error_overlay_preserves_hidden_collector_count_and_adds_new_diagnostics() -> None:
+    result = {
+        "execution_status": "failed",
+        "execution_errors": ["shared visible error"],
+        "execution_error_details_total": 302,
+        "execution_error_details_shown": 1,
+        "execution_error_details_truncated": True,
+        "error": ["shared visible error"],
+    }
+
+    runner._merge_launch_execution_errors(
+        result,
+        ["shared visible error", "new launch diagnostic"],
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["execution_errors"] == ["shared visible error", "new launch diagnostic"]
+    assert result["execution_error_details_total"] == 303
+    assert result["execution_error_details_shown"] == 2
+    assert result["execution_error_details_truncated"] is True
+    assert result["error"] == ["shared visible error"]
+
+
+@pytest.mark.parametrize(
+    ("declared_total", "expected_total", "expected_truncated"),
+    [
+        (True, 2, False),
+        (-1, 2, False),
+        (1.5, 2, False),
+        ((1 << 60), (1 << 53) - 1, True),
+    ],
+    ids=["bool", "negative", "float", "above-json-safe-integer"],
+)
+def test_launch_error_overlay_bounds_declared_integer_metadata(
+    declared_total: object,
+    expected_total: int,
+    expected_truncated: bool,
+) -> None:
+    result = {
+        "execution_errors": ["collector diagnostic"],
+        "execution_error_details_total": declared_total,
+        "execution_error_details_truncated": False,
+    }
+
+    runner._merge_launch_execution_errors(result, ["launch diagnostic"])
+
+    assert result["execution_error_details_total"] == expected_total
+    assert result["execution_error_details_shown"] == 2
+    assert result["execution_error_details_truncated"] is expected_truncated
+
+
 @pytest.mark.parametrize("return_code", [0, 7])
 def test_bounded_harbor_process_preserves_exit_and_combined_diagnostic_tail(
     return_code: int,
@@ -1087,6 +1138,9 @@ def _write_current_harbor_attempt(
     root_completed: int,
     root_total: int = 1,
     result_id: int = 20,
+    task_selector: str = "case",
+    task_name: str | None = None,
+    reward: float = 1.0,
 ) -> None:
     from datetime import UTC, datetime
     from uuid import UUID
@@ -1100,14 +1154,14 @@ def _write_current_harbor_attempt(
     trial_result = TrialResult.model_validate(
         {
             "id": UUID(int=result_id),
-            "task_name": f"nvidia/{trial_name}",
+            "task_name": task_name or f"nvidia/{trial_name}",
             "trial_name": trial_name,
             "trial_uri": trial_dir.as_uri(),
-            "task_id": {"path": str(job_dir / "task" / "case")},
+            "task_id": {"path": str(job_dir / "task" / task_selector)},
             "source": "with",
             "task_checksum": "harbor-0.22-aggregate-fixture",
             "config": {
-                "task": {"path": str(job_dir / "task" / "case"), "source": "with"},
+                "task": {"path": str(job_dir / "task" / task_selector), "source": "with"},
                 "trial_name": trial_name,
                 "trials_dir": str(job_dir),
             },
@@ -1117,7 +1171,7 @@ def _write_current_harbor_attempt(
                 "model_info": {"name": "test-model"},
             },
             "agent_result": {},
-            "verifier_result": {"rewards": {"reward": 1.0}},
+            "verifier_result": {"rewards": {"reward": reward}},
             "started_at": now,
             "finished_at": now,
         }
@@ -1210,6 +1264,41 @@ def test_merge_attempt_jobs_bounds_long_aggregate_trial_names_by_utf8_bytes(
     assert len(merged_names) == 1
     assert len(merged_names[0].encode("utf-8")) <= 224
     assert "attempt001" in merged_names[0]
+
+
+def test_long_stop_on_pass_merge_carries_runner_attempt_ordinal_into_collection(tmp_path: Path) -> None:
+    selector = "selector-attempt9"
+    logical_entry_id = "logical-attempt7"
+    jobs_dir = tmp_path / "jobs"
+    job_name = f"{'s' * 170}-opencode-with-{selector}-attempt002"
+    job_dir = jobs_dir / job_name
+    _write_current_harbor_attempt(
+        job_dir,
+        trial_name=f"{selector}__AbCd123",
+        root_completed=1,
+        task_selector=selector,
+        task_name="publisher/display-attempt5",
+        reward=1.0,
+    )
+    runner._merge_attempt_jobs([job_dir], jobs_dir / "demo-opencode-with")
+
+    result = collector.collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        n_attempts=3,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=[logical_entry_id],
+        case_id_by_task_selector={selector: logical_entry_id},
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["expected_attempts"] == 2
+    assert result["scored_attempts"] == 1
+    assert any("Missing scored attempts" in error for error in result["execution_errors"])
 
 
 def test_merge_attempt_jobs_long_name_digest_avoids_cross_source_collisions(tmp_path: Path) -> None:
@@ -1521,6 +1610,150 @@ def test_run_harbor_fails_closed_with_redacted_tail_on_output_overflow(
     assert "useful failure tail" in detail
     assert secret not in detail
     assert "redacted" in detail.lower()
+
+
+@pytest.mark.parametrize(
+    "proxy_uri",
+    [
+        "https://runner-user:runner-password@proxy.invalid:8443",
+        "https://runner%2Duser:runner%2Dpassword@proxy.invalid:8443",
+        "runner-user:runner-password@proxy.invalid:8443",
+    ],
+    ids=["uri", "percent-encoded", "schemeless"],
+)
+def test_run_harbor_redacts_detached_proxy_components_and_persisted_launch_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    proxy_uri: str,
+) -> None:
+    exposed = ("runner-user", "runner-password")
+    captured_secret_values: set[str] = set()
+
+    def bounded_process(*_args: object, **kwargs: object) -> runner._BoundedHarborProcessResult:
+        captured_secret_values.update(kwargs["secret_values"])  # type: ignore[arg-type]
+        return runner._BoundedHarborProcessResult(
+            returncode=7,
+            output_tail=f"proxy rejected {exposed[0]} with {exposed[1]}",
+            output_exceeded=False,
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "build_harbor_run_command",
+        lambda **_kwargs: [sys.executable, "-c", "pass"],
+    )
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", bounded_process)
+
+    ok, detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="demo-opencode-with",
+        env_mode="docker",
+        model="nvidia/model",
+        jobs_dir=tmp_path,
+        run_env={"HTTPS_PROXY": proxy_uri},
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+
+    assert ok is False
+    assert set(exposed) <= captured_secret_values
+    assert all(value not in detail for value in exposed)
+
+    persisted = {"execution_status": "failed", "execution_errors": []}
+    runner._merge_launch_execution_errors(persisted, [f"launch failed: {detail}"])
+    persisted_path = tmp_path / "persisted-launch-error.json"
+    persisted_path.write_text(json.dumps(persisted), encoding="utf-8")
+    persisted_text = persisted_path.read_text(encoding="utf-8")
+    assert all(value not in persisted_text for value in exposed)
+
+
+def test_run_harbor_real_subprocess_redacts_percent_decoded_proxy_components(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "build_harbor_run_command",
+        lambda **_kwargs: [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('proxy rejected process-user with process-password\\n'); raise SystemExit(7)",
+        ],
+    )
+
+    ok, detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="demo-opencode-with",
+        env_mode="docker",
+        model="nvidia/model",
+        jobs_dir=tmp_path,
+        run_env={
+            "HTTPS_PROXY": "https://process%2Duser:process%2Dpassword@proxy.invalid:8443",
+        },
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+
+    assert ok is False
+    assert "proxy rejected" in detail
+    assert "process-user" not in detail
+    assert "process-password" not in detail
+
+
+@pytest.mark.parametrize("failure_path", ["nonzero", "output-limit", "timeout"])
+def test_run_harbor_redacts_detached_proxy_components_on_failure_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_path: str,
+) -> None:
+    proxy_uri = "https://failure-user:failure-password@proxy.invalid:8443"
+    diagnostic = "proxy failure for failure-user with failure-password"
+
+    def bounded_process(*_args: object, **_kwargs: object) -> runner._BoundedHarborProcessResult:
+        if failure_path == "timeout":
+            raise runner._HarborRunTimeoutError(f"Harbor run timed out. Last output: {diagnostic}")
+        return runner._BoundedHarborProcessResult(
+            returncode=7 if failure_path == "nonzero" else -9,
+            output_tail=diagnostic,
+            output_exceeded=failure_path == "output-limit",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "build_harbor_run_command",
+        lambda **_kwargs: [sys.executable, "-c", "pass"],
+    )
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", bounded_process)
+
+    ok, detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="demo-opencode-with",
+        env_mode="docker",
+        model="nvidia/model",
+        jobs_dir=tmp_path,
+        run_env={"HTTPS_PROXY": proxy_uri},
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+
+    assert ok is False
+    assert "failure-user" not in detail
+    assert "failure-password" not in detail
 
 
 def test_run_harbor_reports_timeout_after_bounded_runner_contains_tree(

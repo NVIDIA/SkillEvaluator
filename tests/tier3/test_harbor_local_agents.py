@@ -682,6 +682,50 @@ def test_local_opencode_supports_nvidia_provider_without_harbor_patch(monkeypatc
     assert any(env.get("OPENAI_BASE_URL") == "https://provider.example/v1" for env in envs)
 
 
+def test_local_opencode_nvidia_error_event_raises(monkeypatch, tmp_path) -> None:
+    async def fake_exec_as_agent(_environment, command, **_kwargs):
+        if "opencode run" in command:
+            (tmp_path / "opencode.txt").write_text(
+                '{"type":"error","error":{"data":{"message":"temporary backend failure"}}}\n',
+                encoding="utf-8",
+            )
+
+    agent = SkillEvaluatorLocalOpenCode(logs_dir=tmp_path, model_name="nvidia/test")
+    monkeypatch.setattr(agent, "exec_as_agent", fake_exec_as_agent)
+
+    with pytest.raises(
+        NonZeroAgentExitCodeError,
+        match=r"OpenCode emitted error event\(s\): temporary backend failure",
+    ):
+        asyncio.run(agent.run("do the thing", environment=object(), context=object()))
+
+
+def test_local_opencode_nvidia_trajectory_falls_back_to_instruction_when_user_event_is_missing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    async def fake_exec_as_agent(_environment, command, **_kwargs):
+        _ = command
+
+    agent = SkillEvaluatorLocalOpenCode(logs_dir=tmp_path, model_name="nvidia/test")
+    monkeypatch.setattr(agent, "exec_as_agent", fake_exec_as_agent)
+
+    asyncio.run(agent.run("do the thing", environment=object(), context=object()))
+    trajectory = agent._convert_events_to_trajectory(
+        [
+            {"type": "step_start", "sessionID": "session-1", "timestamp": 1},
+            {"type": "text", "part": {"type": "text", "text": "done"}},
+            {"type": "step_finish", "part": {"tokens": {}, "cost": 0}},
+        ]
+    )
+
+    assert trajectory is not None
+    assert [(step.source, step.message) for step in trajectory.steps] == [
+        ("user", "do the thing"),
+        ("agent", "done"),
+    ]
+
+
 def test_local_opencode_non_nvidia_fallback_renders_prompt_once(monkeypatch, tmp_path) -> None:
     commands: list[str] = []
     render_count = 0

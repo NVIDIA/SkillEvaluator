@@ -48,6 +48,7 @@ from skillevaluator.tier3.harbor.metrics import (
     metric_set_for_reward,
     metric_value,
     overall_score,
+    rewards_have_mixed_metric_contracts,
     score_definition,
     score_value,
 )
@@ -60,6 +61,7 @@ logger = logging.getLogger(__name__)
 DISPLAY_METRICS = DEFAULT_METRICS
 _LOGICAL_ATTEMPT_SENTINEL = object()
 _CUSTOM_METRIC_CONTRACT_MARKER = "_skill_evaluator_custom_metric_contract_error"
+TRUNCATED_AGGREGATE_ATTEMPT_PREFIX = "__skillevaluator_attempt"
 _MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
 DIAGNOSTIC_ARTIFACT_HARD_MAX_BYTES = 64 * 1024 * 1024
@@ -330,13 +332,53 @@ def _published_trial_label(value: object, *, alias_ordinal: int | None = None) -
 def _validated_expected_case_ids(expected_case_ids: list[str] | None) -> list[str]:
     """Validate caller-owned case identities before generated outputs are reset."""
     validated: list[str] = []
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     for case_id in expected_case_ids or []:
         if not _identity_text_is_publishable(case_id):
             raise ValueError("Expected case identity violates the bounded publication contract")
-        if case_id not in seen:
-            seen.add(case_id)
-            validated.append(case_id)
+        collision_key = case_id.casefold()
+        if collision_key in seen:
+            raise ValueError(
+                "Expected case identities must be unique without cross-platform collisions: "
+                f"{case_id!r} conflicts with {seen[collision_key]!r}"
+            )
+        seen[collision_key] = case_id
+        validated.append(case_id)
+    return validated
+
+
+def _validated_case_id_by_task_selector(
+    case_id_by_task_selector: dict[str, str] | None,
+    expected_case_ids: list[str],
+) -> dict[str, str] | None:
+    """Copy one trusted staged-selector mapping after rejecting ambiguity."""
+    if case_id_by_task_selector is None:
+        return None
+
+    validated: dict[str, str] = {}
+    seen_selectors: dict[str, str] = {}
+    seen_case_ids: dict[str, str] = {}
+    for selector, case_id in case_id_by_task_selector.items():
+        if not _identity_text_is_publishable(selector) or not _identity_text_is_publishable(case_id):
+            raise ValueError("Task selector mapping violates the bounded publication contract")
+        selector_key = selector.casefold()
+        if selector_key in seen_selectors:
+            raise ValueError(
+                "Task selector mapping contains duplicate or cross-platform colliding selectors: "
+                f"{selector!r} conflicts with {seen_selectors[selector_key]!r}"
+            )
+        case_id_key = case_id.casefold()
+        if case_id_key in seen_case_ids:
+            raise ValueError(
+                "Task selector mapping must contain unique logical case identities without cross-platform collisions: "
+                f"{case_id!r} conflicts with {seen_case_ids[case_id_key]!r}"
+            )
+        seen_selectors[selector_key] = selector
+        seen_case_ids[case_id_key] = case_id
+        validated[selector] = case_id
+
+    if expected_case_ids and set(validated.values()) != set(expected_case_ids):
+        raise ValueError("Task selector mapping must match the expected logical case identities")
     return validated
 
 
@@ -3214,7 +3256,10 @@ def _merge_constituent_default_reward_failure(
     )
 
 
-def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
+def _extract_rewards(
+    job_dir: Path,
+    case_id_by_task_selector: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """Extract reward.json from all trials in a job directory."""
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
@@ -3242,10 +3287,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
         data["_started_at"] = result.get("started_at")
-        if not data.get("entry_id"):
-            entry_id = _entry_id_from_harbor_result(result)
-            if entry_id:
-                data["entry_id"] = entry_id
+        _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -3278,15 +3320,14 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
                 if step_name:
                     data["_step_name"] = step_name
                 result_file = trial_dir / "result.json"
+                result: dict[str, Any] = {}
                 if result_file.exists():
-                    result = _read_json(result_file)
-                    if isinstance(result, dict):
+                    loaded_result = _read_json(result_file)
+                    if isinstance(loaded_result, dict):
+                        result = loaded_result
                         _merge_constituent_default_reward_failure(data, result, trial_dir)
                         data["_started_at"] = result.get("started_at")
-                        if not data.get("entry_id"):
-                            entry_id = _entry_id_from_harbor_result(result)
-                            if entry_id:
-                                data["entry_id"] = entry_id
+                _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
                 if traj_file.exists():
                     data["_has_trajectory"] = True
@@ -3333,10 +3374,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
                 data["_trial_root_name"] = trial_dir.name
                 data["_step_name"] = step_name
                 data["_started_at"] = result.get("started_at")
-                if not data.get("entry_id"):
-                    entry_id = _entry_id_from_harbor_result(result)
-                    if entry_id:
-                        data["entry_id"] = entry_id
+                _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
                 if traj_file.exists():
                     data["_has_trajectory"] = True
@@ -3351,10 +3389,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
         data["_started_at"] = result.get("started_at")
-        if not data.get("entry_id"):
-            entry_id = _entry_id_from_harbor_result(result)
-            if entry_id:
-                data["entry_id"] = entry_id
+        _apply_harbor_result_case_identity(data, result, case_id_by_task_selector)
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -3641,16 +3676,14 @@ def _harbor_result_rewards(result: dict[str, Any]) -> dict[str, Any] | None:
     return aggregated or None
 
 
-def _entry_id_from_harbor_result(result: dict[str, Any]) -> str:
-    task_name = result.get("task_name")
-    if isinstance(task_name, str) and task_name.strip():
-        return task_name.strip().rsplit("/", 1)[-1]
-
+def _task_selector_from_harbor_result(result: dict[str, Any]) -> str:
+    """Return one consistent staged selector, never ``[task].name``."""
+    task_paths: list[str] = []
     task_id = result.get("task_id")
     if isinstance(task_id, dict):
         task_path = task_id.get("path")
         if isinstance(task_path, str) and task_path.strip():
-            return Path(task_path).name
+            task_paths.append(task_path.strip())
 
     config = result.get("config")
     if isinstance(config, dict):
@@ -3658,9 +3691,114 @@ def _entry_id_from_harbor_result(result: dict[str, Any]) -> str:
         if isinstance(task, dict):
             task_path = task.get("path")
             if isinstance(task_path, str) and task_path.strip():
-                return Path(task_path).name
+                task_paths.append(task_path.strip())
+
+    if not task_paths or any(task_path != task_paths[0] for task_path in task_paths):
+        return ""
+    return Path(task_paths[0]).name
+
+
+def _entry_id_from_harbor_result(
+    result: dict[str, Any],
+    case_id_by_task_selector: dict[str, str] | None = None,
+) -> str:
+    if case_id_by_task_selector is None:
+        # Preserve the legacy collector contract for direct callers and older
+        # artifacts: Harbor's task_name is the logical/display identity they
+        # supplied. New runner paths pass an explicit trusted selector map and
+        # never use this authored field as logical truth.
+        task_name = result.get("task_name")
+        if isinstance(task_name, str) and task_name.strip():
+            return task_name.strip().rsplit("/", 1)[-1]
+
+    selector = _task_selector_from_harbor_result(result)
+    if selector:
+        return case_id_by_task_selector.get(selector, "") if case_id_by_task_selector is not None else selector
+
+    # A trusted mapping deliberately keeps authored ``[task].name`` separate
+    # from logical identity. Harbor 0.22 normally persists ``task_id.path``;
+    # if it is absent, fail coverage instead of guessing from a display name.
+    if case_id_by_task_selector is not None:
+        return ""
 
     return ""
+
+
+def _positive_attempt_ordinal(value: object) -> int | None:
+    """Return a positive integer attempt ordinal without accepting booleans."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        ordinal = int(value)
+        return ordinal if ordinal > 0 else None
+    return None
+
+
+def _trusted_attempt_ordinal(trial_root_name: object, task_selector: str) -> int | None:
+    """Read an ordinal only from runner-owned or exact legacy selector structure."""
+    if not isinstance(trial_root_name, str) or not trial_root_name or not task_selector:
+        return None
+
+    # stop_on_pass aggregates are named ``<job>-<selector>-attemptNNN__<child>``.
+    # Consume the complete trusted selector before reading the runner-owned
+    # suffix so attempt-like text inside any authored identity is inert.
+    aggregate_marker = f"-{task_selector}-attempt"
+    marker_index = trial_root_name.rfind(aggregate_marker)
+    if marker_index >= 0:
+        tail = trial_root_name[marker_index + len(aggregate_marker) :]
+        ordinal_text, separator, child_name = tail.partition("__")
+        if separator and child_name:
+            return _positive_attempt_ordinal(ordinal_text)
+
+    # Long aggregate names carry the anchored runner attempt behind an exact
+    # digest suffix because the complete selector marker may not fit within a
+    # portable filesystem component. Harbor 0.22 native trial names use a
+    # seven-character ShortUUID and cannot produce this aggregate shape.
+    truncated_match = re.fullmatch(
+        rf".+{re.escape(TRUNCATED_AGGREGATE_ATTEMPT_PREFIX)}0*(?P<ordinal>[1-9][0-9]*)__[0-9a-f]{{16}}",
+        trial_root_name,
+        flags=re.IGNORECASE,
+    )
+    if truncated_match:
+        return _positive_attempt_ordinal(truncated_match.group("ordinal"))
+
+    # Harbor 0.13-era local trials used ``<selector>_attemptNNN``. Matching the
+    # complete trusted selector keeps compatibility without guessing from an
+    # arbitrary occurrence of ``attempt`` in the selector or display name.
+    legacy_marker = f"{task_selector}_attempt"
+    if trial_root_name.startswith(legacy_marker):
+        return _positive_attempt_ordinal(trial_root_name[len(legacy_marker) :])
+    return None
+
+
+def _apply_harbor_result_case_identity(
+    data: dict[str, Any],
+    result: dict[str, Any],
+    case_id_by_task_selector: dict[str, str] | None,
+) -> None:
+    """Apply trusted staged identity, or retain legacy reward fallback."""
+    data.pop("_attempt_ordinal", None)
+    data.pop("_trusted_task_selector", None)
+    task_selector = _task_selector_from_harbor_result(result)
+    if task_selector:
+        data["_trusted_task_selector"] = task_selector
+        attempt_ordinal = _trusted_attempt_ordinal(data.get("_trial_root_name"), task_selector)
+        if attempt_ordinal is not None:
+            data["_attempt_ordinal"] = attempt_ordinal
+    entry_id = _entry_id_from_harbor_result(result, case_id_by_task_selector)
+    if case_id_by_task_selector is not None:
+        if entry_id:
+            data["entry_id"] = entry_id
+            data.pop("_trusted_case_identity_unresolved", None)
+        else:
+            # A grader-authored identity is not authoritative. If Harbor's
+            # persisted selector is missing, unknown, or internally
+            # inconsistent, make the reward diagnostic-only so coverage fails
+            # instead of allowing it to impersonate an expected case.
+            data.pop("entry_id", None)
+            data["_trusted_case_identity_unresolved"] = True
+    elif entry_id and not data.get("entry_id"):
+        data["entry_id"] = entry_id
 
 
 def _overall_score(reward: dict[str, Any]) -> float | None:
@@ -3879,6 +4017,8 @@ def _strip_attempt_suffix(value: str) -> str:
 
 def _reward_identity_is_publishable(reward: dict[str, Any]) -> bool:
     """Validate the effective case identity before score aggregation."""
+    if reward.get("_trusted_case_identity_unresolved") is True:
+        return False
     entry_id = reward.get("entry_id")
     if entry_id not in (None, ""):
         return _identity_text_is_publishable(entry_id)
@@ -3903,6 +4043,8 @@ def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) ->
 
 
 def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None) -> str:
+    if reward.get("_trusted_case_identity_unresolved") is True:
+        return "unknown"
     if isinstance(reward.get("entry_id"), str) and reward["entry_id"]:
         return _canonical_case_id(reward["entry_id"], expected_case_ids)
     trial_name = reward.get("_trial_name")
@@ -3914,19 +4056,41 @@ def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None)
 def _attempt_sort_key(reward: dict[str, Any]) -> tuple[int, int | str, str, str]:
     """Sort attempts by explicit attempt label, then Harbor start time."""
     trial_name = str(reward.get("_trial_name") or "")
-    match = re.search(r"attempt(\d+)", trial_name)
-    if match:
-        return (0, int(match.group(1)), str(reward.get("_started_at") or ""), trial_name)
+    attempt_ordinal = _attempt_ordinal(reward)
+    if attempt_ordinal is not None:
+        return (0, attempt_ordinal, str(reward.get("_started_at") or ""), trial_name)
     started_at = str(reward.get("_started_at") or "")
     return (1 if started_at else 2, started_at, "", trial_name)
 
 
 def _attempt_ordinal(reward: dict[str, Any]) -> int | None:
-    """Return an explicit Harbor attempt ordinal when the trial names carry one."""
+    """Return a carried ordinal or one unambiguous legacy suffix."""
+    if (attempt_ordinal := _positive_attempt_ordinal(reward.get("_attempt_ordinal"))) is not None:
+        return attempt_ordinal
+    if reward.get("_trusted_task_selector") is not None:
+        return None
+    entry_id = reward.get("entry_id")
+    if not isinstance(entry_id, str) or not entry_id:
+        return None
     for key in ("_trial_root_name", "_trial_name"):
-        match = re.search(r"attempt0*(\d+)", str(reward.get(key) or ""), flags=re.IGNORECASE)
-        if match:
-            return int(match.group(1))
+        trial_name = str(reward.get(key) or "")
+        if trial_name == entry_id:
+            continue
+        match = re.fullmatch(
+            r"(?P<base>.+?)(?:__|_)attempt0*(?P<ordinal>\d+)",
+            trial_name,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        # Harbor 0.13 trial names embedded the logical task name immediately
+        # before ``_attemptNNN`` (sometimes behind a generated job prefix).
+        # Requiring that relationship preserves those artifacts without
+        # interpreting an authored selector/display name such as
+        # ``selector_attempt2`` as attempt two for an unrelated logical case.
+        base = match.group("base")
+        if base == entry_id or base.endswith((f"-{entry_id}", f"_{entry_id}")):
+            return _positive_attempt_ordinal(match.group("ordinal"))
     return None
 
 
@@ -3953,6 +4117,10 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             "_started_at": first.get("_started_at"),
             "_logical_attempt_sentinel": _LOGICAL_ATTEMPT_SENTINEL,
         }
+        if first.get("_trusted_task_selector") is not None:
+            logical_reward["_trusted_task_selector"] = first["_trusted_task_selector"]
+        if (attempt_ordinal := _attempt_ordinal(first)) is not None:
+            logical_reward["_attempt_ordinal"] = attempt_ordinal
         if metric_set:
             logical_reward["metric_set"] = metric_set
         for metric in metrics:
@@ -5470,23 +5638,49 @@ def _condition_execution_summary(
 
 
 def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate execution status while retaining hidden child error counts.
+
+    Published error strings are deduplicated for display, but the total is an
+    occurrence count summed from child summaries. Hidden child strings cannot
+    be compared for uniqueness, so collapsing the total to the visible sample
+    would falsely erase declared diagnostics.
+    """
     active = [summary for summary in summaries if summary.get("execution_status") != "skipped"]
     all_errors = list(
         dict.fromkeys(str(error) for summary in active for error in summary.get("execution_errors", []) if error)
     )
     errors = all_errors[:PUBLISHED_EXECUTION_ERRORS_MAX]
+    declared_total = 0
+    child_truncated = False
+    for summary in active:
+        raw_errors = summary.get("execution_errors")
+        visible_count = len([error for error in raw_errors if error]) if isinstance(raw_errors, list) else 0
+        raw_total = summary.get("execution_error_details_total")
+        child_total = (
+            raw_total
+            if isinstance(raw_total, int)
+            and not isinstance(raw_total, bool)
+            and 0 <= raw_total <= _MAX_JSON_SAFE_INTEGER
+            else visible_count
+        )
+        child_total = max(child_total, visible_count)
+        was_truncated = summary.get("execution_error_details_truncated") is True
+        if was_truncated and child_total <= visible_count:
+            child_total = min(_MAX_JSON_SAFE_INTEGER, visible_count + 1)
+        declared_total = min(_MAX_JSON_SAFE_INTEGER, declared_total + child_total)
+        child_truncated = child_truncated or was_truncated
     if not active:
         status = "skipped"
-    elif errors or any(summary.get("execution_status") != "succeeded" for summary in active):
+    elif declared_total or any(summary.get("execution_status") != "succeeded" for summary in active):
         status = "failed"
     else:
         status = "succeeded"
     return {
         "execution_status": status,
         "execution_errors": errors,
-        "execution_error_details_total": len(all_errors),
+        "execution_error_details_total": declared_total,
         "execution_error_details_shown": len(errors),
-        "execution_error_details_truncated": len(errors) < len(all_errors),
+        "execution_error_details_truncated": child_truncated or len(errors) < declared_total,
         "expected_attempts": sum(int(summary.get("expected_attempts", 0) or 0) for summary in active),
         "scored_attempts": sum(int(summary.get("scored_attempts", 0) or 0) for summary in active),
     }
@@ -5504,6 +5698,7 @@ def collect_harbor_results(
     stop_on_pass: bool = False,
     expected_cases: int | None = None,
     expected_case_ids: list[str] | None = None,
+    case_id_by_task_selector: dict[str, str] | None = None,
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     env_mode: str | None = None,
@@ -5519,6 +5714,10 @@ def collect_harbor_results(
     if expected_trials is None:
         expected_trials = expected_total_trials
     expected_case_ids = _validated_expected_case_ids(expected_case_ids)
+    case_id_by_task_selector = _validated_case_id_by_task_selector(
+        case_id_by_task_selector,
+        expected_case_ids,
+    )
 
     all_results: dict[str, Any] = {
         "agents": {},
@@ -5546,6 +5745,7 @@ def collect_harbor_results(
         with_collected_rewards: list[dict[str, Any]] = []
         with_rewards: list[dict[str, Any]] = []
         with_logical_rewards: list[dict[str, Any]] = []
+        with_mixed_metric_contracts = False
         with_scores: dict[str, float] = {}
         with_custom_scores: dict[str, float] = {}
         with_pass: dict[str, Any] = {}
@@ -5563,9 +5763,12 @@ def collect_harbor_results(
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
             with_trial_failures = _extract_trial_failures(with_job_dir)
             preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
-            with_collected_rewards = _extract_rewards(with_job_dir) if with_job_ok or preserve_partial else []
+            with_collected_rewards = (
+                _extract_rewards(with_job_dir, case_id_by_task_selector) if with_job_ok or preserve_partial else []
+            )
             with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
             with_logical_rewards = _logical_attempt_rewards(with_rewards)
+            with_mixed_metric_contracts = rewards_have_mixed_metric_contracts(with_rewards)
             with_trial_failures.extend(invalid_score_failures)
             with_scores, with_metric_set, with_metrics = average_metrics(with_logical_rewards)
             all_results["metric_set"] = with_metric_set
@@ -5623,6 +5826,7 @@ def collect_harbor_results(
                     "dimensions": dimension_scores(with_scores),
                     "num_trials": len(with_logical_rewards),
                     "num_reward_rows": len(with_collected_rewards),
+                    "mixed_metric_contracts": with_mixed_metric_contracts,
                     "pass_at_k": _public_pass_summary(with_pass),
                     **with_execution,
                     "job_failure": with_job_failure,
@@ -5662,6 +5866,7 @@ def collect_harbor_results(
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,
+                    "mixed_metric_contracts": False,
                     "pass_at_k": {},
                     "job_failure": with_job_failure,
                     "trial_failures": [],
@@ -5696,6 +5901,7 @@ def collect_harbor_results(
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,
+                    "mixed_metric_contracts": False,
                     "pass_at_k": {},
                     **with_execution,
                     "job_failure": with_job_failure,
@@ -5706,6 +5912,7 @@ def collect_harbor_results(
         without_collected_rewards: list[dict[str, Any]] = []
         without_rewards: list[dict[str, Any]] = []
         without_logical_rewards: list[dict[str, Any]] = []
+        without_mixed_metric_contracts = False
         without_scores: dict[str, float] = {}
         without_custom_scores: dict[str, float] = {}
         without_pass: dict[str, Any] = {}
@@ -5728,10 +5935,13 @@ def collect_harbor_results(
                 without_trial_failures = _extract_trial_failures(without_job_dir)
                 preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
                 without_collected_rewards = (
-                    _extract_rewards(without_job_dir) if without_job_ok or preserve_partial else []
+                    _extract_rewards(without_job_dir, case_id_by_task_selector)
+                    if without_job_ok or preserve_partial
+                    else []
                 )
                 without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
                 without_logical_rewards = _logical_attempt_rewards(without_rewards)
+                without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
                 without_scores, without_metric_set, without_metrics = average_metrics(without_logical_rewards)
                 without_custom_scores = average_custom_metrics(without_logical_rewards)
@@ -5788,6 +5998,7 @@ def collect_harbor_results(
                         "dimensions": dimension_scores(without_scores),
                         "num_trials": len(without_logical_rewards),
                         "num_reward_rows": len(without_collected_rewards),
+                        "mixed_metric_contracts": without_mixed_metric_contracts,
                         "pass_at_k": _public_pass_summary(without_pass),
                         **without_execution,
                         "job_failure": without_job_failure,
@@ -5827,6 +6038,7 @@ def collect_harbor_results(
                         "dimensions": {},
                         "num_trials": 0,
                         "num_reward_rows": 0,
+                        "mixed_metric_contracts": False,
                         "pass_at_k": {},
                         "job_failure": without_job_failure,
                         "trial_failures": [],
@@ -5862,6 +6074,7 @@ def collect_harbor_results(
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,
+                    "mixed_metric_contracts": False,
                     "pass_at_k": {},
                     **without_execution,
                     "job_failure": without_job_failure,

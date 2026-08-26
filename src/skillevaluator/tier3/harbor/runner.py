@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -22,7 +23,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
@@ -42,14 +43,20 @@ from skillevaluator.provider_config import (
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
+from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.evals_config import (
+    MAX_HARBOR_TIMEOUT_MULTIPLIER,
     EvalsConfigError,
     encode_environment_kwarg,
     load_evals_config,
     validate_environment_kwargs,
 )
 from skillevaluator.tier3.harbor.adapter import (
+    _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
+    _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES,
+    _VERIFIER_JUDGE_CONTROL_ENV_VARS,
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
+    _native_entry_id,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
     find_evals_file,
@@ -61,6 +68,7 @@ from skillevaluator.tier3.harbor.adapter import (
 )
 from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle, RetentionOutcome
 from skillevaluator.tier3.harbor.collector import (
+    TRUNCATED_AGGREGATE_ATTEMPT_PREFIX,
     collect_harbor_results,
     harbor_job_passed,
     validate_harbor_job_result,
@@ -120,6 +128,7 @@ PUBLISHED_EXECUTION_ERROR_MAX_CHARS = 4096
 PUBLISHED_EXECUTION_ERROR_MAX_SERIALIZED_BYTES = 4096
 PUBLISHED_EXECUTION_ERRORS_MAX_SERIALIZED_BYTES = 64 * 1024
 _EXECUTION_ERROR_TRUNCATION_MARKER = "...<truncated>"
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 FINAL_RESULT_MAX_BYTES = 2 * 1024 * 1024
 FINAL_RESULT_MAX_DEPTH = 64
 FINAL_RESULT_MAX_NODES = 50_000
@@ -509,6 +518,40 @@ def _published_execution_errors(errors: list[object]) -> tuple[list[str], int]:
     return published, len(seen_details)
 
 
+def _merge_launch_execution_errors(result: dict[str, Any], launch_errors: list[object]) -> None:
+    """Overlay launch diagnostics without discarding hidden collector counts."""
+    raw_existing = result.get("execution_errors", [])
+    if isinstance(raw_existing, list):
+        existing: list[object] = raw_existing
+    elif raw_existing:
+        existing = [raw_existing]
+    else:
+        existing = []
+
+    _, observed_existing_total = _published_execution_errors(existing)
+    execution_errors, observed_combined_total = _published_execution_errors([*existing, *launch_errors])
+    new_launch_total = max(0, observed_combined_total - observed_existing_total)
+
+    raw_declared_total = result.get("execution_error_details_total")
+    if isinstance(raw_declared_total, int) and not isinstance(raw_declared_total, bool) and raw_declared_total >= 0:
+        declared_total = min(raw_declared_total, _MAX_JSON_SAFE_INTEGER)
+    else:
+        declared_total = observed_existing_total
+    declared_total = max(declared_total, observed_existing_total)
+
+    collector_truncated = result.get("execution_error_details_truncated") is True
+    error_total = min(_MAX_JSON_SAFE_INTEGER, declared_total + new_launch_total)
+
+    result["execution_status"] = "failed"
+    result["execution_errors"] = execution_errors
+    result["execution_error_details_total"] = error_total
+    result["execution_error_details_shown"] = len(execution_errors)
+    result["execution_error_details_truncated"] = collector_truncated or len(execution_errors) < error_total
+    # ``execution_errors`` is authoritative; ``error`` remains a compact
+    # list-shaped compatibility alias for older callers.
+    result["error"] = execution_errors[:1]
+
+
 def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> dict[str, Any]:
     """Persist immutable dataset and evaluator identity before staging cleanup."""
     entries = load_staged_harbor_dataset(run_dir)
@@ -854,84 +897,12 @@ _BEDROCK_HOST_ENV_VARS = _AWS_HOST_ENV_VARS | {
     "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
 }
 _RUNTIME_ENV_HOST_CONTROL_NAMES = (
-    frozenset(
-        {
-            "ALL_PROXY",
-            "BASHOPTS",
-            "BASH_ENV",
-            "CDPATH",
-            "CLAUDE_CODE_DISABLE_POLICY_SKILLS",
-            "CLAUDE_CONFIG_DIR",
-            "CLASSPATH",
-            "COMSPEC",
-            "CODEX_HOME",
-            "CURL_CA_BUNDLE",
-            "ENV",
-            "GCONV_PATH",
-            "GEMINI_CLI_HOME",
-            "HOME",
-            "HOSTALIASES",
-            "HTTPS_PROXY",
-            "HTTP_PROXY",
-            "IFS",
-            "JAVA_TOOL_OPTIONS",
-            "LOCPATH",
-            "LUA_CPATH",
-            "LUA_INIT",
-            "LUA_PATH",
-            "NLSPATH",
-            "NO_PROXY",
-            "OPENCODE_CONFIG_DIR",
-            "PATHEXT",
-            "PATH",
-            "PERL5LIB",
-            "PERL5OPT",
-            "REQUESTS_CA_BUNDLE",
-            "RES_OPTIONS",
-            "RUBYOPT",
-            "RUBYLIB",
-            "SHELLOPTS",
-            "SSLKEYLOGFILE",
-            "SSL_CERT_DIR",
-            "SSL_CERT_FILE",
-            "SSH_AUTH_SOCK",
-            "SYSTEMROOT",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-            "USERPROFILE",
-            "WINDIR",
-            "XDG_CONFIG_HOME",
-            "XDG_RUNTIME_DIR",
-            "ZDOTDIR",
-            "_JAVA_OPTIONS",
-            "all_proxy",
-            "http_proxy",
-            "https_proxy",
-            "no_proxy",
-        }
-    )
+    _RUNTIME_PROCESS_CONTROL_ENV_NAMES
     | _BEDROCK_HOST_ENV_VARS
-    | _VERIFIER_JUDGE_MODEL_ENV_VARS
+    | _VERIFIER_JUDGE_CONTROL_ENV_VARS
     | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
 )
-_RUNTIME_ENV_HOST_CONTROL_PREFIXES = (
-    "AWS_",
-    "BASH_FUNC_",
-    "COMPOSE_",
-    "DOCKER_",
-    "DYLD_",
-    "GIT_",
-    "HARBOR_",
-    "LD_",
-    "NODE_",
-    "OTEL_",
-    "PIP_",
-    "PYTHON",
-    "SKILL_EVAL_",
-    "SKILLEVALUATOR_",
-    "UV_",
-)
+_RUNTIME_ENV_HOST_CONTROL_PREFIXES = _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES
 _OPERATOR_OWNED_AGENT_ENV = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -1086,6 +1057,34 @@ def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[s
     return None
 
 
+def _validated_timeout_multiplier(value: object) -> float:
+    """Return one finite positive timeout scale accepted by every entry point."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("timeout_multiplier must be a finite number greater than 0")
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise ValueError("timeout_multiplier must be a finite number greater than 0") from None
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError("timeout_multiplier must be a finite number greater than 0")
+    if normalized > MAX_HARBOR_TIMEOUT_MULTIPLIER:
+        raise ValueError("timeout_multiplier must yield finite Harbor timeouts")
+    return normalized
+
+
+def _validated_pass_threshold(value: object) -> float:
+    """Return one finite unit-interval attempt threshold."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("pass_threshold must be a finite number between 0.0 and 1.0")
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise ValueError("pass_threshold must be a finite number between 0.0 and 1.0") from None
+    if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
+        raise ValueError("pass_threshold must be a finite number between 0.0 and 1.0")
+    return normalized
+
+
 def build_harbor_run_command(
     *,
     dataset_path: str | Path,
@@ -1109,6 +1108,7 @@ def build_harbor_run_command(
     """Build a Harbor invocation for a built-in environment type or local mode."""
     if env_mode not in HARBOR_ENV_MODES:
         raise ValueError(f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}")
+    timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     if agent_import_path and env_mode not in {"docker", ENV_MODE_LOCAL}:
         raise ValueError("agent_import_path is supported only with --env docker or local")
     validated_environment_kwargs = validate_environment_kwargs(
@@ -1205,7 +1205,7 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
         "SKILL_EVAL_LLM_MODEL": config.model,
     }
     environment.update(
-        {name: value for name in _VERIFIER_JUDGE_MODEL_ENV_VARS if (value := os.environ.get(name, "").strip())}
+        {name: value for name in _VERIFIER_JUDGE_CONTROL_ENV_VARS if (value := os.environ.get(name, "").strip())}
     )
     if config.provider == "anthropic":
         environment["ANTHROPIC_API_KEY"] = config.api_key or ""
@@ -1895,23 +1895,37 @@ def _job_judge_override(provider_env: Mapping[str, str], grading_mode: str) -> t
 
 def _job_judge_verifier_env(provider_env: Mapping[str, str], grading_mode: str) -> dict[str, str]:
     """Return placeholder-based judge overrides for Harbor's verifier job layer."""
-    selected = _job_judge_override(provider_env, grading_mode)
-    if selected is None:
+    if grading_mode == "custom_only":
         return {}
-    source, _value = selected
-    # Harbor resolves every task-authored placeholder before verifier startup.
-    # Override both spellings from the selected host source so a stale alias
-    # cannot fail resolution or survive task/step/job environment merging.
-    return dict.fromkeys(sorted(_VERIFIER_JUDGE_MODEL_ENV_VARS), f"${{{source}}}")
+    environment = {
+        name: f"${{{name}}}"
+        for name in _VERIFIER_JUDGE_CONTROL_ENV_VARS - _VERIFIER_JUDGE_MODEL_ENV_VARS
+        if provider_env.get(name)
+    }
+    selected = _job_judge_override(provider_env, grading_mode)
+    if selected is not None:
+        source, _value = selected
+        # Harbor resolves every task-authored placeholder before verifier startup.
+        # Override both spellings from the selected host source so a stale alias
+        # cannot fail resolution or survive task/step/job environment merging.
+        environment.update(dict.fromkeys(sorted(_VERIFIER_JUDGE_MODEL_ENV_VARS), f"${{{source}}}"))
+    return environment
 
 
 def _job_judge_subprocess_env(provider_env: Mapping[str, str], grading_mode: str) -> dict[str, str]:
     """Make both aliases resolvable while Harbor constructs verifier environments."""
-    selected = _job_judge_override(provider_env, grading_mode)
-    if selected is None:
+    if grading_mode == "custom_only":
         return {}
-    _source, value = selected
-    return dict.fromkeys(_VERIFIER_JUDGE_MODEL_ENV_VARS, value)
+    environment = {
+        name: provider_env[name]
+        for name in _VERIFIER_JUDGE_CONTROL_ENV_VARS - _VERIFIER_JUDGE_MODEL_ENV_VARS
+        if provider_env.get(name)
+    }
+    selected = _job_judge_override(provider_env, grading_mode)
+    if selected is not None:
+        _source, value = selected
+        environment.update(dict.fromkeys(_VERIFIER_JUDGE_MODEL_ENV_VARS, value))
+    return environment
 
 
 def _agent_credentials(
@@ -2085,7 +2099,7 @@ def _resolve_agent_runtime_plan(
     provider_env = {
         name: value
         for name, value in _provider_environment(provider).items()
-        if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
+        if name not in _VERIFIER_JUDGE_CONTROL_ENV_VARS
     }
     plans: dict[str, AgentRuntimePlan] = {}
     for agent in agents:
@@ -2165,11 +2179,62 @@ def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> flo
                 data = tomllib.loads(task_file.read_text(encoding="utf-8"))
             except (OSError, tomllib.TOMLDecodeError):
                 continue
-            agent = data.get("agent") if isinstance(data, dict) else None
-            value = agent.get("timeout_sec") if isinstance(agent, dict) else None
-            if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
-                timeouts.append(float(value))
-    return round(max(timeouts) * timeout_multiplier, 3) if timeouts else None
+            for timeout_field, value in _explicit_harbor_timeout_values(data):
+                scaled = _scaled_harbor_timeout(
+                    value,
+                    timeout_multiplier,
+                    task_file=task_file,
+                    field=timeout_field,
+                )
+                if timeout_field.endswith("agent.timeout_sec") and scaled > 0:
+                    timeouts.append(scaled)
+    return round(max(timeouts), 3) if timeouts else None
+
+
+def _explicit_harbor_timeout_values(
+    value: object,
+) -> Iterator[tuple[str, object]]:
+    """Yield explicit task bases scaled by Harbor's global multiplier."""
+    if not isinstance(value, dict):
+        return
+
+    for section_name, field_name in (
+        ("agent", "timeout_sec"),
+        ("verifier", "timeout_sec"),
+        ("environment", "build_timeout_sec"),
+    ):
+        section = value.get(section_name)
+        if isinstance(section, dict) and field_name in section:
+            yield f"{section_name}.{field_name}", section[field_name]
+
+    steps = value.get("steps")
+    if not isinstance(steps, list):
+        return
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        for section_name in ("agent", "verifier"):
+            section = step.get(section_name)
+            if isinstance(section, dict) and "timeout_sec" in section:
+                yield f"steps.{index}.{section_name}.timeout_sec", section["timeout_sec"]
+
+
+def _scaled_harbor_timeout(
+    value: object,
+    timeout_multiplier: float,
+    *,
+    task_file: Path,
+    field: str,
+) -> float:
+    """Scale one staged timeout without allowing Harbor to receive infinity."""
+    try:
+        base = float(value)
+        scaled = base * timeout_multiplier
+    except (OverflowError, TypeError, ValueError):
+        raise ValueError(f"{task_file}: {field} produces a non-finite Harbor timeout") from None
+    if not math.isfinite(base) or not math.isfinite(scaled):
+        raise ValueError(f"{task_file}: {field} produces a non-finite Harbor timeout")
+    return scaled
 
 
 def _model_for_agent(
@@ -2537,6 +2602,11 @@ def _run_harbor(
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
 ) -> tuple[bool, str]:
+    # Preserve the historical exact-value protection for every selected child
+    # value, and additionally protect detached credential URI/proxy userinfo
+    # (including percent-decoded and schemeless proxy components).
+    secret_values = set(run_env.values())
+    secret_values.update(secret_values_from_environment(run_env))
     command = build_harbor_run_command(
         dataset_path=dataset,
         agent=agent,
@@ -2564,16 +2634,14 @@ def _run_harbor(
             timeout_seconds=_HARBOR_RUN_TIMEOUT_SECONDS,
             max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
             diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
-            secret_values=set(run_env.values()),
+            secret_values=secret_values,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
-        secret_values = set(run_env.values())
         detail = _redact_harbor_diagnostic(exc, secret_values=secret_values)
         if not detail:
             detail = _redact_harbor_diagnostic(type(exc).__name__, secret_values=secret_values)
         return False, detail
     if result.output_exceeded:
-        secret_values = set(run_env.values())
         safe_tail = redact_progress_detail(result.output_tail, secret_values=secret_values)
         detail = f"harbor run output exceeded the {_HARBOR_RUN_OUTPUT_MAX_BYTES}-byte safety limit"
         if safe_tail:
@@ -2590,9 +2658,8 @@ def _run_harbor(
             return True, validation_detail
         return False, _redact_harbor_diagnostic(
             validation_detail,
-            secret_values=set(run_env.values()),
+            secret_values=secret_values,
         )
-    secret_values = set(run_env.values())
     safe_output = redact_progress_detail(result.output_tail, secret_values=secret_values)
     detail = safe_output[-2000:] or f"harbor run exited {result.returncode}"
     return False, _redact_harbor_diagnostic(detail, secret_values=secret_values)
@@ -2728,9 +2795,14 @@ def _aggregate_trial_name(
     raw_name = f"{job_name}__{child_name}"
     if len(raw_name.encode("utf-8")) > _AGGREGATE_TRIAL_NAME_MAX_BYTES:
         digest = hashlib.sha256(f"{source_index}\0{raw_name}".encode()).hexdigest()[:16]
-        attempt_match = re.search(r"attempt0*\d+", raw_name, flags=re.IGNORECASE)
-        attempt = attempt_match.group(0) if attempt_match else "attempt"
-        suffix = f"__{attempt}__{digest}"
+        # stop_on_pass owns the final ``-attemptNNN`` job-name component.
+        # Derive the carried label only from that anchored structure so an
+        # attempt-like task selector or child trial name cannot impersonate it.
+        attempt_match = re.fullmatch(r".+-attempt(0*[1-9][0-9]*)", job_name, flags=re.IGNORECASE)
+        attempt_marker = (
+            f"{TRUNCATED_AGGREGATE_ATTEMPT_PREFIX}{attempt_match.group(1)}" if attempt_match else "__attempt"
+        )
+        suffix = f"{attempt_marker}__{digest}"
         name = _utf8_prefix(raw_name, _AGGREGATE_TRIAL_NAME_MAX_BYTES - len(suffix.encode())) + suffix
     else:
         name = raw_name
@@ -3406,15 +3478,29 @@ def _run_harbor_eval_impl(
     if not isinstance(max_agents, int) or max_agents < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid agent concurrency"))
         return {"error": ["max_agents must be >= 1"]}
-    if not isinstance(pass_threshold, (int, float)) or not 0 <= float(pass_threshold) <= 1:
+    try:
+        timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid timeout multiplier"))
+        return {"error": [str(exc)]}
+    try:
+        pass_threshold = _validated_pass_threshold(pass_threshold)
+    except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid pass threshold"))
-        return {"error": ["pass_threshold must be between 0.0 and 1.0"]}
+        return {"error": [str(exc)]}
     if grading_mode not in {"default", "default_plus_custom", "custom_only"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid grading mode"))
         return {"error": ["grading.mode must be default, default_plus_custom, or custom_only"]}
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
+    if not skip_baseline and harbor_config.get("pre_agent_setup"):
+        detail = (
+            "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
+            "use --skip-baseline for a with-skill-only run"
+        )
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
 
     reporter.emit(ProgressEvent(stage="configuration", state="ready", detail="evaluation config validated"))
     reporter.emit(ProgressEvent(stage="model-resolution", state="running"))
@@ -3457,7 +3543,7 @@ def _run_harbor_eval_impl(
     if env_mode in {"ack", "opensandbox"} and agents:
         preflight_agent = agents[0]
         runtime_provider_env = {
-            name: value for name, value in provider_env.items() if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
+            name: value for name, value in provider_env.items() if name not in _VERIFIER_JUDGE_CONTROL_ENV_VARS
         }
         prerequisite_subprocess_env = _harbor_subprocess_environment(
             env_mode=env_mode,
@@ -3707,7 +3793,12 @@ def _run_harbor_eval_impl(
         "agents": model_resolution,
     }
     verifier_env = {**configured_runtime_env, **provider_env}
-    staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
+    staged_verifier_env = {
+        name: f"${{{name}}}"
+        for name in verifier_env
+        if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
+        and not (grading_mode == "custom_only" and name in _VERIFIER_JUDGE_CONTROL_ENV_VARS)
+    }
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
     job_judge_subprocess_env = _job_judge_subprocess_env(provider_env, grading_mode)
 
@@ -3840,7 +3931,8 @@ def _run_harbor_eval_impl(
                 )
             )
     agent_task_dirs: dict[str, tuple[Path, Path | None]] = {}
-    expected_task_names: list[str] | None = None
+    expected_task_selectors: list[str] | None = None
+    expected_case_id_by_task_selector: dict[str, str] | None = None
     reporter.emit(
         ProgressEvent(
             stage="with-skill-tasks",
@@ -3873,11 +3965,17 @@ def _run_harbor_eval_impl(
                 agent_workdir=harbor_config.get("agent_workdir"),
                 evaluator_skill_path=evaluator_skill_path,
             )
-            task_names = [task.name for task in task_paths]
-            if expected_task_names is None:
-                expected_task_names = task_names
-            elif task_names != expected_task_names:
-                raise ValueError(f"Generated task cases differ for agent {agent}")
+            task_selectors = validate_case_ids(task.name for task in task_paths)
+            logical_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
+            case_id_by_task_selector = dict(zip(task_selectors, logical_case_ids, strict=True))
+            if expected_task_selectors is None:
+                expected_task_selectors = task_selectors
+                expected_case_id_by_task_selector = case_id_by_task_selector
+            elif (
+                task_selectors != expected_task_selectors
+                or case_id_by_task_selector != expected_case_id_by_task_selector
+            ):
+                raise ValueError(f"Generated task identities differ for agent {agent}")
             agent_task_dirs[agent] = (with_dir, without_dir)
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
         if not skip_baseline:
@@ -3894,7 +3992,7 @@ def _run_harbor_eval_impl(
         for agent in agents:
             without_dir = agent_task_dirs[agent][1]
             if without_dir is not None:
-                emitter(
+                baseline_task_paths = emitter(
                     skill_path,
                     without_dir,
                     with_skill=False,
@@ -3914,6 +4012,16 @@ def _run_harbor_eval_impl(
                     evaluator_skill_path=evaluator_skill_path,
                     _baseline_alias_validation=baseline_alias_validation,
                 )
+                baseline_task_selectors = validate_case_ids(task.name for task in baseline_task_paths)
+                baseline_logical_case_ids = validate_case_ids(_native_entry_id(task) for task in baseline_task_paths)
+                baseline_case_id_by_task_selector = dict(
+                    zip(baseline_task_selectors, baseline_logical_case_ids, strict=True)
+                )
+                if (
+                    baseline_task_selectors != expected_task_selectors
+                    or baseline_case_id_by_task_selector != expected_case_id_by_task_selector
+                ):
+                    raise ValueError(f"Baseline task identities differ for agent {agent}")
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))
         else:
@@ -3922,19 +4030,25 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return _persist_pre_execution_failure([str(exc)])
 
-    task_names = expected_task_names or []
+    task_selectors = expected_task_selectors or []
+    case_id_by_task_selector = expected_case_id_by_task_selector or {}
+    case_ids = [case_id_by_task_selector[selector] for selector in task_selectors]
     try:
-        dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
+        dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
     except DatasetSnapshotContractError as exc:
         return _persist_pre_execution_failure([str(exc)])
-    expected_trials = len(task_names) * n_attempts
+    expected_trials = len(task_selectors) * n_attempts
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
     preflight_trials = len(agents) if agent_runtime_preflight else 0
-    task_timeout_seconds = _task_timeout_plan(
-        [paths[0] for paths in agent_task_dirs.values()],
-        float(timeout_multiplier),
-    )
+    try:
+        task_timeout_seconds = _task_timeout_plan(
+            [paths[0] for paths in agent_task_dirs.values()],
+            float(timeout_multiplier),
+        )
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid staged timeout"))
+        return _persist_pre_execution_failure([str(exc)])
     reporter.start(
         Tier3RunPlan(
             skill_name=skill_path.name,
@@ -3942,8 +4056,8 @@ def _run_harbor_eval_impl(
             agents=tuple(agents),
             agent_models=tuple((agent, model_resolution[agent]["model"]) for agent in agents),
             provider=provider.provider,
-            task_count=len(task_names),
-            case_count=len(task_names),
+            task_count=len(task_selectors),
+            case_count=len(case_ids),
             attempts=n_attempts,
             baseline=not skip_baseline,
             concurrency=n_concurrent,
@@ -4029,7 +4143,7 @@ def _run_harbor_eval_impl(
             expected_trials=expected_trials,
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
-            task_names=task_names,
+            task_names=task_selectors,
             verifier_env=job_judge_verifier_env,
             environment_kwargs=effective_environment_kwargs,
         )
@@ -4098,8 +4212,9 @@ def _run_harbor_eval_impl(
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
-            expected_cases=len(task_names),
-            expected_case_ids=task_names,
+            expected_cases=len(case_ids),
+            expected_case_ids=case_ids,
+            case_id_by_task_selector=case_id_by_task_selector,
             # Early-stopped cases legitimately use fewer trials than the
             # n_attempts maximum; per-case coverage is validated instead.
             expected_trials=None if stop_on_pass else expected_trials,
@@ -4142,22 +4257,7 @@ def _run_harbor_eval_impl(
         result=results,
     )
     if errors:
-        raw_execution_errors = results.get("execution_errors", [])
-        if isinstance(raw_execution_errors, list):
-            existing_execution_errors: list[object] = raw_execution_errors
-        elif raw_execution_errors:
-            existing_execution_errors = [raw_execution_errors]
-        else:
-            existing_execution_errors = []
-        execution_errors, error_total = _published_execution_errors([*existing_execution_errors, *errors])
-        results["execution_status"] = "failed"
-        results["execution_errors"] = execution_errors
-        results["execution_error_details_total"] = error_total
-        results["execution_error_details_shown"] = len(execution_errors)
-        results["execution_error_details_truncated"] = len(execution_errors) < error_total
-        # ``execution_errors`` is authoritative; ``error`` remains a compact
-        # list-shaped compatibility alias for older callers.
-        results["error"] = execution_errors[:1]
+        _merge_launch_execution_errors(results, errors)
     reporter.emit(ProgressEvent(stage="report", state="running"))
     try:
         (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")

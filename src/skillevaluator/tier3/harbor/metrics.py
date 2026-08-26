@@ -275,6 +275,18 @@ def metric_set_for_reward(reward: dict[str, Any]) -> tuple[str, tuple[str, ...]]
     return DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 
+def rewards_have_mixed_metric_contracts(rewards: object) -> bool:
+    """Return whether physical reward rows declare distinct metric contracts."""
+    if not isinstance(rewards, list):
+        return False
+    contracts = {
+        str(reward.get("metric_set") or reward.get("metric_set_version") or metric_set_for_reward(reward)[0])
+        for reward in rewards
+        if isinstance(reward, dict)
+    }
+    return len(contracts) > 1
+
+
 def metric_set_for_rewards(rewards: list[dict[str, Any]]) -> tuple[str, tuple[str, ...]]:
     """Return the metric set for a collection, preferring the new SkillEvaluator set."""
     declared = {str(reward.get("metric_set") or reward.get("metric_set_version") or "") for reward in rewards}

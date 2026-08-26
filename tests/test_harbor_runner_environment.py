@@ -245,7 +245,10 @@ def test_skill_config_cannot_control_evaluator_or_judge_routing(name: str) -> No
     assert errors and "host process" in errors[0]
 
 
-@pytest.mark.parametrize("name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
+@pytest.mark.parametrize(
+    "name",
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+)
 @pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])
 @pytest.mark.parametrize(
     ("configured", "expected"),
@@ -339,6 +342,22 @@ def test_standard_judge_override_occupies_the_highest_precedence_verifier_key(
     expected: dict[str, str],
 ) -> None:
     assert runner._job_judge_verifier_env(provider_env, "default") == expected
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
+def test_standard_judge_fallback_is_forwarded_only_through_the_verifier_job(
+    grading_mode: str,
+) -> None:
+    provider_env = {"LLM_JUDGE_FALLBACK_MODELS": "fallback-one,fallback-two"}
+
+    assert runner._job_judge_verifier_env(provider_env, grading_mode) == {
+        "LLM_JUDGE_FALLBACK_MODELS": "${LLM_JUDGE_FALLBACK_MODELS}",
+    }
+    assert runner._job_judge_subprocess_env(provider_env, grading_mode) == {
+        "LLM_JUDGE_FALLBACK_MODELS": "fallback-one,fallback-two",
+    }
+    assert runner._job_judge_verifier_env(provider_env, "custom_only") == {}
+    assert runner._job_judge_subprocess_env(provider_env, "custom_only") == {}
 
 
 @pytest.mark.parametrize(
@@ -994,9 +1013,12 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     provider = _provider("nv_build")
     emitted: list[tuple[str, bool, dict[str, str], dict[str, str]]] = []
     launched: dict[str, tuple[str, str, dict[str, str], dict[str, str]]] = {}
+    launched_task_selectors: dict[str, list[str]] = {}
+    collected: dict[str, object] = {}
 
     monkeypatch.setenv("LLM_JUDGE_MODEL", "legacy-judge-model")
     monkeypatch.setenv("SKILL_EVAL_JUDGE_MODEL", "judge-model")
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "fallback-one,fallback-two")
 
     monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
     monkeypatch.setattr(
@@ -1010,6 +1032,11 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     def emit(_skill, target, *, with_skill, runtime_env, **_kwargs):
         task = target / "case-001"
         task.mkdir(parents=True)
+        (task / "task.toml").write_text(
+            'schema_version = "1.3"\n\n[task]\nname = "publisher/presentation-name"\n\n'
+            '[metadata]\nentry_id = "logical-case-001"\n',
+            encoding="utf-8",
+        )
         emitted.append(
             (
                 str(target.relative_to(tmp_path / "results")),
@@ -1022,6 +1049,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
 
     def launch(**kwargs):
         assert (kwargs["jobs_dir"].parent / "dataset_snapshot.json").is_file()
+        launched_task_selectors[kwargs["agent"]] = list(kwargs["task_names"])
         launched[kwargs["agent"]] = (
             str(kwargs["with_skill"].relative_to(tmp_path / "results")),
             str(kwargs["baseline"].relative_to(tmp_path / "results")),
@@ -1045,7 +1073,10 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     monkeypatch.setattr(
         runner,
         "collect_harbor_results",
-        lambda **_kwargs: {"execution_status": "complete", "execution_errors": [], "metrics": [], "agents": {}},
+        lambda **kwargs: (
+            collected.update(kwargs)
+            or {"execution_status": "complete", "execution_errors": [], "metrics": [], "agents": {}}
+        ),
     )
     monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kwargs: tmp_path / "report.html")
     result = runner.run_harbor_eval(
@@ -1080,16 +1111,23 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     for _path, _with_skill, runtime_env, verifier_env in emitted:
         assert "LLM_JUDGE_MODEL" not in runtime_env
         assert "SKILL_EVAL_JUDGE_MODEL" not in runtime_env
+        assert "LLM_JUDGE_FALLBACK_MODELS" not in runtime_env
         assert "LLM_JUDGE_MODEL" not in verifier_env
         assert "SKILL_EVAL_JUDGE_MODEL" not in verifier_env
+        assert verifier_env["LLM_JUDGE_FALLBACK_MODELS"] == "${LLM_JUDGE_FALLBACK_MODELS}"
     assert launched["opencode"][0].endswith("_harbor-tasks/opencode/with")
     assert launched["claude-code"][1].endswith("_harbor-tasks/claude-code/without")
+    assert launched_task_selectors == {"opencode": ["case-001"], "claude-code": ["case-001"]}
+    assert collected["expected_case_ids"] == ["logical-case-001"]
+    assert collected["case_id_by_task_selector"] == {"case-001": "logical-case-001"}
     assert launched["opencode"][2]["LLM_JUDGE_MODEL"] == "legacy-judge-model"
     assert launched["opencode"][2]["SKILL_EVAL_JUDGE_MODEL"] == "legacy-judge-model"
+    assert launched["opencode"][2]["LLM_JUDGE_FALLBACK_MODELS"] == "fallback-one,fallback-two"
     assert "ANTHROPIC_API_KEY" not in launched["opencode"][2]
     assert "OPENAI_API_KEY" not in launched["opencode"][2]
     assert launched["claude-code"][2]["NVIDIA_API_KEY"] == "provider-key"
     assert launched["opencode"][3] == {
+        "LLM_JUDGE_FALLBACK_MODELS": "${LLM_JUDGE_FALLBACK_MODELS}",
         "LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}",
         "SKILL_EVAL_JUDGE_MODEL": "${LLM_JUDGE_MODEL}",
     }
@@ -1105,9 +1143,12 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
 
 
 @pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
-@pytest.mark.parametrize("judge_alias", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
+@pytest.mark.parametrize(
+    "judge_alias",
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+)
 @pytest.mark.parametrize("judge_scope", ["task", "step"])
-def test_native_runtime_judge_selection_skips_fallback_probe_through_real_staging(
+def test_native_runtime_rejects_task_owned_judge_selection_through_real_staging(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     grading_mode: str,
@@ -1199,29 +1240,10 @@ def test_native_runtime_judge_selection_skips_fallback_probe_through_real_stagin
         agent_runtime_preflight=False,
     )
 
-    assert "error" not in result
-    assert probed_models == ["nvidia/nemotron-3-nano-30b-a3b"]
-    assert result["execution_status"] == "complete"
-    assert result["report_status"] == "complete"
+    assert result["execution_status"] == "failed"
+    assert any("standard grading" in error and "environment control" in error for error in result["error"])
     assert result["run_config"]["task_source"] == "native_harbor"
-    assert result["run_config"]["judge"]["catalog_verification"] == "inconclusive"
-    assert result["run_config"]["judge"]["effective_model_source"] == "native_harbor_runtime"
-    assert result["run_config"]["credential_validation"]["status"] == "degraded"
-    standard_target = next(
-        target
-        for target in result["run_config"]["credential_validation"]["targets"]
-        if target["labels"] == ["standard grader"]
-    )
-    assert standard_target["status"] == "inconclusive"
-    assert standard_target["model"] is None
-
-    assert len(staged_tasks) == 1
-    staged_config = tomllib.loads((staged_tasks[0] / "task.toml").read_text(encoding="utf-8"))
-    if judge_scope == "task":
-        staged_judge_env = staged_config["verifier"]["env"]
-    else:
-        staged_judge_env = staged_config["steps"][0]["verifier"]["env"]
-    assert staged_judge_env[judge_alias] == "authored-native-judge"
+    assert staged_tasks == []
 
 
 def test_custom_only_native_verifier_placeholders_use_task_fallbacks_not_standard_override(
@@ -1254,6 +1276,7 @@ def test_custom_only_native_verifier_placeholders_use_task_fallbacks_not_standar
 
     monkeypatch.setenv("LLM_JUDGE_MODEL", "standard-legacy-model")
     monkeypatch.setenv("SKILL_EVAL_JUDGE_MODEL", "standard-canonical-model")
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "standard-fallback-one,standard-fallback-two")
     monkeypatch.setattr(runner, "resolve_llm_provider", lambda: _provider("nv_build"))
     monkeypatch.setattr(
         runner,
@@ -1308,6 +1331,8 @@ def test_custom_only_native_verifier_placeholders_use_task_fallbacks_not_standar
     )
     authored_env = task_config["verifier"]["env"]
     run_env = launched["run_env"]
+    assert "LLM_JUDGE_FALLBACK_MODELS" not in authored_env
+    assert "LLM_JUDGE_FALLBACK_MODELS" not in run_env
     task_fallbacks = {
         "LLM_JUDGE_MODEL": "task-legacy-model",
         "SKILL_EVAL_JUDGE_MODEL": "task-canonical-model",
@@ -1752,6 +1777,163 @@ def test_direct_run_returns_configuration_error_for_cyclic_environment_kwargs(
     assert result == {"error": ["Invalid --environment-kwarg: must not contain cyclic values"]}
 
 
+@pytest.mark.parametrize("timeout_multiplier", [float("nan"), float("inf"), float("-inf")])
+def test_direct_run_rejects_nonfinite_timeout_multiplier_before_creating_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    timeout_multiplier: float,
+) -> None:
+    monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "evals_json"}}, None),
+    )
+
+    result = runner._run_harbor_eval_impl(
+        tmp_path,
+        ["opencode"],
+        timeout_multiplier=timeout_multiplier,
+        output_dir=tmp_path / "results",
+        _evaluator_skill_path=tmp_path,
+    )
+
+    assert result == {"error": ["timeout_multiplier must be a finite number greater than 0"]}
+    assert not (tmp_path / "results").exists()
+
+
+def test_direct_run_rejects_overflowing_timeout_multiplier_before_creating_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "evals_json"}}, None),
+    )
+
+    result = runner._run_harbor_eval_impl(
+        tmp_path,
+        ["opencode"],
+        timeout_multiplier=10**1000,
+        output_dir=tmp_path / "results",
+        _evaluator_skill_path=tmp_path,
+    )
+
+    assert result == {"error": ["timeout_multiplier must be a finite number greater than 0"]}
+    assert not (tmp_path / "results").exists()
+
+
+def test_direct_run_rejects_finite_multiplier_that_overflows_default_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "evals_json"}}, None),
+    )
+
+    result = runner._run_harbor_eval_impl(
+        tmp_path,
+        ["opencode"],
+        timeout_multiplier=1e308,
+        output_dir=tmp_path / "results",
+        _evaluator_skill_path=tmp_path,
+    )
+
+    assert result == {"error": ["timeout_multiplier must yield finite Harbor timeouts"]}
+    assert not (tmp_path / "results").exists()
+
+
+def test_direct_run_rejects_overflowing_pass_threshold_before_creating_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
+    monkeypatch.setattr(
+        runner,
+        "load_evals_config",
+        lambda _path: ({"harbor": {"task_source": "evals_json"}}, None),
+    )
+
+    result = runner._run_harbor_eval_impl(
+        tmp_path,
+        ["opencode"],
+        pass_threshold=10**1000,
+        output_dir=tmp_path / "results",
+        _evaluator_skill_path=tmp_path,
+    )
+
+    assert result == {"error": ["pass_threshold must be a finite number between 0.0 and 1.0"]}
+    assert not (tmp_path / "results").exists()
+
+
+@pytest.mark.parametrize("setup_key", ["pre_agent_setup", "setup_commands"])
+def test_paired_run_rejects_normalized_skill_owned_setup_before_environment_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    setup_key: str,
+) -> None:
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  {setup_key}: echo ready\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
+
+    def unexpected_preflight(**_kwargs: object) -> list[str]:
+        pytest.fail("paired skill-owned setup reached environment preflight")
+
+    monkeypatch.setattr(runner, "_check_prerequisites", unexpected_preflight)
+
+    result = runner._run_harbor_eval_impl(
+        skill,
+        ["opencode"],
+        output_dir=tmp_path / "results",
+        _evaluator_skill_path=skill,
+    )
+
+    assert result == {
+        "error": [
+            "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
+            "use --skip-baseline for a with-skill-only run"
+        ]
+    }
+    assert not (tmp_path / "results").exists()
+
+
+@pytest.mark.parametrize("setup_key", ["pre_agent_setup", "setup_commands"])
+def test_skip_baseline_keeps_normalized_skill_owned_setup_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    setup_key: str,
+) -> None:
+    skill = tmp_path / "skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  {setup_key}: echo ready\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: ["preflight sentinel"])
+
+    result = runner._run_harbor_eval_impl(
+        skill,
+        ["opencode"],
+        skip_baseline=True,
+        output_dir=tmp_path / "results",
+        _evaluator_skill_path=skill,
+    )
+
+    assert result == {"error": ["preflight sentinel"]}
+
+
 @pytest.mark.parametrize(
     ("env_mode", "selected_name"),
     [
@@ -1875,6 +2057,7 @@ def test_runtime_env_rejects_host_process_control_names() -> None:
         "BASH_ENV",
         "BASH_FUNC_hidden%%",
         "NODE_OPTIONS",
+        "LLM_JUDGE_FALLBACK_MODELS",
         "DOCKER_HOST",
         "COMPOSE_FILE",
         "HARBOR_HOME",

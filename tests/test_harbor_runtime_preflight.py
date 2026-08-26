@@ -725,6 +725,32 @@ def test_task_timeout_plan_uses_largest_staged_timeout(tmp_path: Path) -> None:
     assert runner._task_timeout_plan([root], 2.0) == 600.0
 
 
+@pytest.mark.parametrize(
+    "task_toml",
+    [
+        "[agent]\ntimeout_sec = 900.0\n",
+        "[verifier]\ntimeout_sec = 900.0\n",
+        "[environment]\nbuild_timeout_sec = 900.0\n",
+        '[[steps]]\nname = "one"\n[steps.agent]\ntimeout_sec = 900.0\n',
+        '[[steps]]\nname = "one"\n[steps.verifier]\ntimeout_sec = 900.0\n',
+    ],
+    ids=["agent", "verifier", "environment-build", "step-agent", "step-verifier"],
+)
+def test_task_timeout_plan_rejects_staged_timeout_product_overflow(
+    tmp_path: Path,
+    task_toml: str,
+) -> None:
+    from skillevaluator.tier3.evals_config import MAX_HARBOR_TIMEOUT_MULTIPLIER
+    from skillevaluator.tier3.harbor import runner
+
+    task = tmp_path / "tasks" / "case-1"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text(task_toml, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-finite Harbor timeout"):
+        runner._task_timeout_plan([task.parent], MAX_HARBOR_TIMEOUT_MULTIPLIER)
+
+
 def test_model_probe_delegates_to_shared_catalog_client_without_exposing_key(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

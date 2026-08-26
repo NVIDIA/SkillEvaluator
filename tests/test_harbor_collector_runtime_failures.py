@@ -840,6 +840,41 @@ def test_complete_low_score_is_execution_success(tmp_path: Path) -> None:
     assert "error" not in results
 
 
+def test_aggregate_execution_preserves_hidden_child_error_occurrence_counts() -> None:
+    summaries = [
+        {
+            "execution_status": "failed",
+            "execution_errors": ["shared visible error"],
+            "execution_error_details_total": 300,
+            "execution_error_details_shown": 1,
+            "execution_error_details_truncated": True,
+            "expected_attempts": 2,
+            "scored_attempts": 0,
+        },
+        {
+            "execution_status": "failed",
+            "execution_errors": ["shared visible error"],
+            "execution_error_details_total": 2,
+            "execution_error_details_shown": 1,
+            "execution_error_details_truncated": True,
+            "expected_attempts": 3,
+            "scored_attempts": 1,
+        },
+    ]
+
+    aggregate = collector_module._aggregate_execution(summaries)
+
+    assert aggregate == {
+        "execution_status": "failed",
+        "execution_errors": ["shared visible error"],
+        "execution_error_details_total": 302,
+        "execution_error_details_shown": 1,
+        "execution_error_details_truncated": True,
+        "expected_attempts": 5,
+        "scored_attempts": 1,
+    }
+
+
 def test_incomplete_default_reward_is_unscored_and_reported(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"
@@ -1471,6 +1506,7 @@ def _write_reward(
     trial_name: str | None = None,
     include_entry_id: bool = True,
     result_task_name: str | None = None,
+    result_task_path: str | None = None,
 ) -> None:
     trial = jobs_dir / f"demo-opencode-{variant}" / (trial_name or f"{case_id}_attempt{attempt:03d}")
     verifier_dirs = [trial / "steps" / step / "verifier" for step in steps] or [trial / "verifier"]
@@ -1488,9 +1524,15 @@ def _write_reward(
     for verifier_dir in verifier_dirs:
         verifier_dir.mkdir(parents=True, exist_ok=True)
         (verifier_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
-    if result_task_name is not None:
+    if result_task_name is not None or result_task_path is not None:
+        result: dict[str, object] = {"trial_name": trial.name}
+        if result_task_name is not None:
+            result["task_name"] = result_task_name
+        if result_task_path is not None:
+            result["task_id"] = {"path": result_task_path}
+            result["config"] = {"task": {"path": result_task_path}}
         (trial / "result.json").write_text(
-            json.dumps({"trial_name": trial.name, "task_name": result_task_name}),
+            json.dumps(result),
             encoding="utf-8",
         )
 
@@ -1614,6 +1656,266 @@ def test_result_derived_case_ids_exercise_partial_pairing_through_collector(tmp_
     assert paired["with_skill_unpaired_case_ids"] == ["with-only"]
     assert paired["without_skill_unpaired_case_ids"] == ["without-only"]
     assert "mcnemar_exact" not in paired
+
+
+def test_legacy_result_identity_prefers_task_name_without_trusted_selector_mapping() -> None:
+    result = {
+        "task_name": "publisher/logical-native-id",
+        "task_id": {"path": "/trusted/staging/native-selector"},
+        "config": {"task": {"path": "/trusted/staging/native-selector"}},
+    }
+
+    assert collector_module._entry_id_from_harbor_result(result) == "logical-native-id"
+
+
+@pytest.mark.parametrize("separator", ["-", "_"])
+def test_attempt_like_legacy_identities_are_not_generated_attempt_suffixes(separator: str) -> None:
+    reward = {
+        "entry_id": f"logical{separator}attempt7",
+        "_trial_root_name": f"selector{separator}attempt2",
+        "_trial_name": f"display{separator}attempt9",
+    }
+
+    assert collector_module._attempt_ordinal(reward) is None
+
+
+def test_legacy_truncated_name_with_unbound_attempt_text_is_not_trusted() -> None:
+    trial_name = f"truncated-selector__attempt9__{'a' * 16}"
+
+    assert collector_module._trusted_attempt_ordinal(trial_name, "selector-attempt9") is None
+
+
+def test_trusted_task_selector_mapping_does_not_parse_attempt_like_identities_as_ordinals(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    for variant, score in (("with", 1.0), ("without", 0.0)):
+        _write_reward(
+            jobs_dir,
+            variant=variant,
+            case_id="reward-attempt4",
+            attempt=1,
+            score=score,
+            # Harbor 0.22 trial names contain the task selector plus a random
+            # suffix, not a semantic attempt ordinal.
+            trial_name="selector-attempt2__AbCd123",
+            result_task_name="publisher/display-attempt9",
+            result_task_path=f"/trusted/staging/{variant}/selector-attempt2",
+        )
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(
+        tmp_path,
+        n_attempts=1,
+        expected_cases=1,
+        expected_case_ids=["logical-attempt7"],
+        case_id_by_task_selector={"selector-attempt2": "logical-attempt7"},
+    )
+
+    assert result["execution_status"] == "succeeded"
+    pass_at_k = result["agents"]["opencode"]["pass_at_k"]
+    assert list(pass_at_k["with_skill"]["cases"]) == ["logical-attempt7"]
+    assert list(pass_at_k["without_skill"]["cases"]) == ["logical-attempt7"]
+    assert pass_at_k["lift"]["paired_comparison"]["pairing_status"] == "complete"
+    for variant in ("with-skill", "without-skill"):
+        [trial] = (tmp_path / "results" / "opencode" / variant / "trials").iterdir()
+        persisted = json.loads((trial / "reward.json").read_text(encoding="utf-8"))
+        assert persisted["entry_id"] == "logical-attempt7"
+
+
+def test_trusted_task_selector_mapping_uses_structural_attempt_for_custom_only_stop_on_pass(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_names: list[str] = []
+    for attempt, score, suffix in ((1, 0.0, "AbCd123"), (2, 1.0, "EfGh456")):
+        trial_name = f"demo-opencode-with-selector-attempt2-attempt{attempt:03d}__selector-attempt2__{suffix}"
+        trial_names.append(trial_name)
+        verifier_dir = job_dir / trial_name / "verifier"
+        verifier_dir.mkdir(parents=True)
+        (verifier_dir / "reward.json").write_text(
+            json.dumps(
+                {
+                    "overall": score,
+                    "metric_set": "custom_only",
+                    "custom_metrics": {"native_quality": {"score": score}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (job_dir / trial_name / "result.json").write_text(
+            json.dumps(
+                {
+                    "trial_name": trial_name,
+                    "task_name": "publisher/display-attempt9",
+                    "task_id": {"path": "/trusted/staging/selector-attempt2"},
+                    "config": {"task": {"path": "/trusted/staging/selector-attempt2"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+    _write_complete_job_result(job_dir, trial_names)
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=3,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["logical-attempt7"],
+        case_id_by_task_selector={"selector-attempt2": "logical-attempt7"},
+    )
+
+    assert result["execution_status"] == "succeeded"
+    assert result["expected_attempts"] == 2
+    assert result["scored_attempts"] == 2
+    with_skill = result["agents"]["opencode"]["pass_at_k"]["with_skill"]
+    assert list(with_skill["cases"]) == ["logical-attempt7"]
+    case = with_skill["cases"]["logical-attempt7"]
+    assert case["first_pass_attempt"] == 2
+    assert case["attempts_used"] == 2
+    assert case["attempts_skipped"] == 1
+
+
+def test_unknown_trusted_selector_cannot_score_as_grader_authored_logical_case(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="logical-id",
+        attempt=1,
+        score=1.0,
+        result_task_name="publisher/logical-id",
+        result_task_path="/trusted/staging/unexpected-selector",
+    )
+    _write_variant_job_results(jobs_dir, variants=("with",))
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=1,
+        expected_cases=1,
+        expected_case_ids=["logical-id"],
+        case_id_by_task_selector={"expected-selector": "logical-id"},
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["scored_attempts"] == 0
+    assert result["agents"]["opencode"]["pass_at_k"]["with_skill"] == {}
+    [persisted_reward_path] = (tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json")
+    persisted_reward = json.loads(persisted_reward_path.read_text(encoding="utf-8"))
+    assert persisted_reward["entry_id"] == "unknown"
+    assert persisted_reward["evaluation_status"] == "failed"
+
+
+@pytest.mark.parametrize("trial_result_state", ["missing", "malformed", "oversized"])
+def test_trusted_selector_mapping_rejects_sidecar_reward_without_readable_trial_result(
+    tmp_path: Path,
+    trial_result_state: str,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "expected-selector_attempt001"
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="logical-id",
+        attempt=1,
+        score=1.0,
+        trial_name=trial_name,
+    )
+    trial_result = jobs_dir / "demo-opencode-with" / trial_name / "result.json"
+    if trial_result_state == "malformed":
+        trial_result.write_text("{not-json", encoding="utf-8")
+    elif trial_result_state == "oversized":
+        trial_result.write_text(
+            "x" * (collector_module.DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES + 1),
+            encoding="utf-8",
+        )
+    _write_variant_job_results(jobs_dir, variants=("with",))
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=1,
+        expected_cases=1,
+        expected_case_ids=["logical-id"],
+        case_id_by_task_selector={"expected-selector": "logical-id"},
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["scored_attempts"] == 0
+    assert result["agents"]["opencode"]["pass_at_k"]["with_skill"] == {}
+    [persisted_reward_path] = (tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json")
+    persisted_reward = json.loads(persisted_reward_path.read_text(encoding="utf-8"))
+    assert persisted_reward["entry_id"] == "unknown"
+    assert persisted_reward["evaluation_status"] == "failed"
+
+
+def test_task_selector_mapping_rejects_duplicate_logical_case_ids(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unique logical case identities"):
+        _collect(
+            tmp_path,
+            expected_case_ids=["logical-id"],
+            case_id_by_task_selector={"selector-a": "logical-id", "selector-b": "logical-id"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("expected_case_ids", "mapping"),
+    [
+        (["logical-a", "logical-b"], {"Selector": "logical-a", "selector": "logical-b"}),
+        (["Logical", "logical"], {"selector-a": "Logical", "selector-b": "logical"}),
+        (["logical-id", "logical-id"], {"selector": "logical-id"}),
+    ],
+    ids=["selector-collision", "logical-id-collision", "duplicate-expected-id"],
+)
+def test_task_selector_mapping_rejects_cross_platform_identity_ambiguity(
+    tmp_path: Path,
+    expected_case_ids: list[str],
+    mapping: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError, match=r"duplicate|collid|unique"):
+        _collect(
+            tmp_path,
+            expected_case_ids=expected_case_ids,
+            case_id_by_task_selector=mapping,
+        )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"task_id": {"path": "/trusted/staging/unexpected-selector"}},
+        {},
+        {
+            "task_id": {"path": "/trusted/staging/expected-selector"},
+            "config": {"task": {"path": "/trusted/staging/conflicting-selector"}},
+        },
+        {
+            "task_id": {"path": "/trusted/first/expected-selector"},
+            "config": {"task": {"path": "/trusted/second/expected-selector"}},
+        },
+    ],
+    ids=[
+        "unknown-selector",
+        "missing-selector",
+        "conflicting-selector-sources",
+        "same-basename-conflicting-paths",
+    ],
+)
+def test_trusted_task_selector_mapping_invalidates_unresolved_authored_identity(
+    result: dict[str, object],
+) -> None:
+    reward: dict[str, object] = {
+        "entry_id": "logical-id",
+        "overall": 1.0,
+    }
+
+    collector_module._apply_harbor_result_case_identity(
+        reward,
+        result,
+        {"expected-selector": "logical-id"},
+    )
+
+    assert reward.get("entry_id") != "logical-id"
+    assert collector_module._reward_identity_is_publishable(reward) is False
 
 
 def test_stop_on_pass_records_skipped_attempts_in_pass_summary(tmp_path: Path) -> None:

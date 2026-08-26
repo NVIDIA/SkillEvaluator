@@ -127,6 +127,40 @@ def test_native_environment_is_forwarded_to_harbor() -> None:
     assert command[command.index("--env") + 1] == "e2b"
 
 
+@pytest.mark.parametrize("timeout_multiplier", [float("nan"), float("inf"), float("-inf")])
+def test_harbor_command_rejects_nonfinite_timeout_multiplier(timeout_multiplier: float) -> None:
+    with pytest.raises(ValueError, match="timeout_multiplier must be a finite number greater than 0"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="nonfinite-timeout",
+            env_mode="docker",
+            timeout_multiplier=timeout_multiplier,
+        )
+
+
+def test_harbor_command_rejects_overflowing_timeout_multiplier() -> None:
+    with pytest.raises(ValueError, match="timeout_multiplier must be a finite number greater than 0"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="overflowing-timeout",
+            env_mode="docker",
+            timeout_multiplier=10**1000,
+        )
+
+
+def test_harbor_command_rejects_finite_multiplier_that_overflows_default_timeouts() -> None:
+    with pytest.raises(ValueError, match="must yield finite Harbor timeouts"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="finite-overflowing-timeout",
+            env_mode="docker",
+            timeout_multiplier=1e308,
+        )
+
+
 def test_native_environment_kwargs_round_trip_through_real_harbor_parser() -> None:
     from harbor.cli.utils import parse_kwargs
 

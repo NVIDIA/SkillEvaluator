@@ -69,6 +69,55 @@ grading:
     assert config["grading"]["mode"] == "default_plus_custom"
 
 
+@pytest.mark.parametrize("value", [".nan", ".inf", "-.inf"])
+def test_load_evals_config_rejects_nonfinite_timeout_multiplier(tmp_path, value):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  timeout_multiplier: {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.timeout_multiplier.*finite"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_overflowing_timeout_multiplier(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  timeout_multiplier: {10**1000}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.timeout_multiplier.*finite"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_finite_multiplier_that_overflows_default_timeouts(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  timeout_multiplier: 1.0e+308\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.timeout_multiplier.*finite Harbor timeouts"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_overflowing_pass_threshold(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"schema_version: 1\nharbor:\n  pass_threshold: {10**1000}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalsConfigError, match=r"harbor\.pass_threshold.*between"):
+        load_evals_config(skill)
+
+
 def test_load_evals_config_missing_is_empty(tmp_path):
     skill = tmp_path / "skill"
     (skill / "evals").mkdir(parents=True)

@@ -105,6 +105,7 @@ EVALS_SPEC: list[EntrySpec] = [
             "passthrough_env and setup_commands are accepted as compatibility aliases for runtime_env and pre_agent_setup.",
             "Supported skill_workspace keys: mode (isolated|group), include.",
             "Supported grading keys: mode (default|default_plus_custom|custom_only).",
+            "pre_agent_setup/setup_commands is allowed only with --skip-baseline; paired runs reject skill-owned setup code.",
             "CLI flags override config values.",
         ],
         example="""\

@@ -615,9 +615,7 @@ def test_merge_recursively_materializes_refs_inside_embedded_subagent(tmp_path: 
 
     _write_multistep_trial(tmp_path, (("only", root),), resume_trajectory=False)
     agent_dir = tmp_path / "steps" / "only" / "agent"
-    (agent_dir / "trajectory.child-cont.json").write_text(
-        json.dumps(child_continuation), encoding="utf-8"
-    )
+    (agent_dir / "trajectory.child-cont.json").write_text(json.dumps(child_continuation), encoding="utf-8")
     (agent_dir / "trajectory.grandchild.json").write_text(json.dumps(grandchild), encoding="utf-8")
 
     merged = _merged_step_trajectory(tmp_path)
@@ -629,9 +627,7 @@ def test_merge_recursively_materializes_refs_inside_embedded_subagent(tmp_path: 
     assert embedded_child["extra"]["harbor_continuation"]["segment_count"] == 2
     assert "continued_trajectory_ref" not in embedded_child
     assert [step["message"] for step in embedded_child["steps"]] == ["child root", "nested delegate"]
-    nested_ref = embedded_child["steps"][1]["observation"]["results"][0][
-        "subagent_trajectory_ref"
-    ][0]
+    nested_ref = embedded_child["steps"][1]["observation"]["results"][0]["subagent_trajectory_ref"][0]
     assert "trajectory_path" not in nested_ref
     assert nested_ref["trajectory_id"] == embedded_child["subagent_trajectories"][0]["trajectory_id"]
 
@@ -861,9 +857,7 @@ def test_materialize_prefers_embedded_subagent_when_ref_also_has_missing_path(tm
         "results": [
             {
                 "content": "child",
-                "subagent_trajectory_ref": [
-                    {"trajectory_id": "child", "trajectory_path": "missing-sidecar.json"}
-                ],
+                "subagent_trajectory_ref": [{"trajectory_id": "child", "trajectory_path": "missing-sidecar.json"}],
             }
         ]
     }
@@ -904,9 +898,7 @@ def test_materialize_reuses_embedded_alias_for_path_only_missing_sidecar(
         "results": [
             {
                 "content": "child",
-                "subagent_trajectory_ref": [dual_key, path_only]
-                if dual_key_first
-                else [path_only, dual_key],
+                "subagent_trajectory_ref": [dual_key, path_only] if dual_key_first else [path_only, dual_key],
             }
         ]
     }
@@ -981,9 +973,7 @@ def test_materialize_reuses_supplied_id_for_same_path_regardless_of_ref_order(
         cost_usd=0.1,
     )
     for step, ref in zip(root["steps"], refs, strict=True):
-        step["observation"] = {
-            "results": [{"content": "child", "subagent_trajectory_ref": [ref]}]
-        }
+        step["observation"] = {"results": [{"content": "child", "subagent_trajectory_ref": [ref]}]}
     child = _trajectory(
         "child-session",
         ("child",),
@@ -1029,9 +1019,7 @@ def test_materialize_mixed_embedded_and_path_refs_share_one_canonical_child(tmp_
         {"trajectory_path": "trajectory.child.json"},
     )
     for step, ref in zip(root["steps"], refs, strict=True):
-        step["observation"] = {
-            "results": [{"content": "child", "subagent_trajectory_ref": [ref]}]
-        }
+        step["observation"] = {"results": [{"content": "child", "subagent_trajectory_ref": [ref]}]}
     sidecar = dict(child)
     sidecar.pop("trajectory_id")
     (tmp_path / "trajectory.json").write_text(json.dumps(root), encoding="utf-8")
@@ -1421,8 +1409,7 @@ def test_merge_scopes_same_embedded_id_from_independent_step_parents(tmp_path: P
         "child two",
     ]
     refs = [
-        step["observation"]["results"][0]["subagent_trajectory_ref"][0]["trajectory_id"]
-        for step in merged["steps"]
+        step["observation"]["results"][0]["subagent_trajectory_ref"][0]["trajectory_id"] for step in merged["steps"]
     ]
     assert refs == embedded_ids
     for source_step, child in zip(("one", "two"), merged["subagent_trajectories"], strict=True):
@@ -1831,9 +1818,7 @@ def test_embedded_secret_only_id_collisions_are_remapped_without_oracle(tmp_path
             children.append(child)
             refs.append({"trajectory_id": source_id})
         root["subagent_trajectories"] = children
-        root["steps"][0]["observation"] = {
-            "results": [{"content": "children", "subagent_trajectory_ref": refs}]
-        }
+        root["steps"][0]["observation"] = {"results": [{"content": "children", "subagent_trajectory_ref": refs}]}
         (agent_dir / "trajectory.json").write_text(json.dumps(root), encoding="utf-8")
 
         materialized, _ = _materialize_trajectory_file(agent_dir, "trajectory.json")
@@ -1931,9 +1916,7 @@ def test_embedded_sibling_continuations_receive_distinct_parent_local_ids(tmp_pa
         refs.append({"trajectory_id": child["trajectory_id"]})
         (tmp_path / f"continuation-{suffix}.json").write_text(json.dumps(continuation), encoding="utf-8")
     root["subagent_trajectories"] = children
-    root["steps"][0]["observation"] = {
-        "results": [{"content": "children", "subagent_trajectory_ref": refs}]
-    }
+    root["steps"][0]["observation"] = {"results": [{"content": "children", "subagent_trajectory_ref": refs}]}
     (tmp_path / "trajectory.json").write_text(json.dumps(root), encoding="utf-8")
 
     materialized, _ = _materialize_trajectory_file(tmp_path, "trajectory.json")

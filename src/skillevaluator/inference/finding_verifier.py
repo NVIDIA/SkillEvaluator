@@ -107,12 +107,29 @@ class FindingVerifier(LLMClient):
         return "\n".join(parts)
 
     @staticmethod
+    def _resolved_inside_skill(path: Path, skill_root: Path) -> Path | None:
+        """Return *path* resolved only if it is a file inside *skill_root*."""
+        try:
+            resolved = path.resolve()
+            if not resolved.is_file() or not resolved.is_relative_to(skill_root):
+                return None
+            return resolved
+        except (OSError, ValueError, RuntimeError):
+            return None
+
+    @staticmethod
     def _read_file_context(skill_path: Path, file_path: str) -> str | None:
-        """Read up to 100 lines from a file for LLM context."""
+        """Read up to 100 lines from a file under the skill root for LLM context."""
+        if not file_path:
+            return None
+        skill_root = skill_path.resolve()
         candidates = [skill_path / file_path, Path(file_path)]
         for path in candidates:
+            resolved = FindingVerifier._resolved_inside_skill(path, skill_root)
+            if resolved is None:
+                continue
             try:
-                lines = path.read_text(encoding="utf-8", errors="ignore").split("\n")[:100]
+                lines = resolved.read_text(encoding="utf-8", errors="ignore").split("\n")[:100]
                 return "\n".join(lines)
             except (OSError, ValueError):
                 continue

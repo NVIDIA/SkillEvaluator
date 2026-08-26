@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Gitleaks path allowlist now skips test/example/fixture/mock directories
+  instead of any path containing those substrings, so files like `latest.py`
+  are scanned.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

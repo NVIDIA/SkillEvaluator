@@ -202,6 +202,35 @@ class TestGitleaksArtifactExclusion:
             assert pattern in paths, f"gitleaks allowlist missing artifact dir {name!r}"
 
 
+class TestGitleaksTestPathAllowlist:
+    def test_config_skips_test_directories_not_substring_names(self):
+        config_path = SecretsValidator()._create_gitleaks_config()
+        try:
+            config = tomllib.loads(config_path.read_text())
+        finally:
+            config_path.unlink(missing_ok=True)
+
+        paths = config["allowlist"]["paths"]
+        assert r"(^|/)(tests?|examples?|fixtures?|mocks?)(/|$)" in paths
+        assert r"(.*)?test(.*)?" not in paths
+
+        compiled = [re.compile(p) for p in paths]
+
+        def skipped(relpath: str) -> bool:
+            return any(pat.search(relpath) for pat in compiled)
+
+        assert skipped("tests/helper.py")
+        assert skipped("test/helper.py")
+        assert skipped("examples/sample.json")
+        assert skipped("fixtures/data.json")
+        assert skipped("mocks/client.py")
+        assert not skipped("scripts/latest.py")
+        assert not skipped("attestation.py")
+        assert not skipped("skills/data-latest/prod.py")
+        assert not skipped("scripts/prod.py")
+        assert not skipped("contest/score.py")
+
+
 # =============================================================================
 # SKILLSPECTOR ISSUES UNDER ARTIFACT DIRS ARE DROPPED
 # =============================================================================

@@ -163,6 +163,10 @@ tags = ["nvidia", "api-key"]
         Tier 1 artifact dirs (evals/, results/, versions/, ...) hold Tier 3
         output snapshots that routinely carry harvested test credentials;
         gitleaks has to skip them via config since it takes no exclude flag.
+
+        Test/example/fixture/mock skips are directory path components, not
+        substrings. ``(.*)?test(.*)?`` would also skip ``latest`` and
+        ``attestation``.
         """
         artifact_paths = "\n".join(f"    '''(^|/){re.escape(name)}(/|$)'''," for name in sorted(SCAN_EXCLUDED_DIRS))
         config = f"""
@@ -172,10 +176,7 @@ useDefault = true
 [allowlist]
 description = "SkillEvaluator allowlist"
 paths = [
-    '''(.*)?test(.*)?''',
-    '''(.*)?example(.*)?''',
-    '''(.*)?fixture(.*)?''',
-    '''(.*)?mock(.*)?''',
+    '''(^|/)(tests?|examples?|fixtures?|mocks?)(/|$)''',
 {artifact_paths}
 ]
 regexes = [

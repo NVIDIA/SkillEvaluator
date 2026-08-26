@@ -3734,7 +3734,7 @@ def _positive_attempt_ordinal(value: object) -> int | None:
     return None
 
 
-def _trusted_attempt_ordinal(trial_root_name: object, task_selector: str) -> int | None:
+def _structural_attempt_ordinal(trial_root_name: object, task_selector: str) -> int | None:
     """Read an ordinal only from runner-owned or exact legacy selector structure."""
     if not isinstance(trial_root_name, str) or not trial_root_name or not task_selector:
         return None
@@ -3782,7 +3782,7 @@ def _apply_harbor_result_case_identity(
     task_selector = _task_selector_from_harbor_result(result)
     if task_selector:
         data["_trusted_task_selector"] = task_selector
-        attempt_ordinal = _trusted_attempt_ordinal(data.get("_trial_root_name"), task_selector)
+        attempt_ordinal = _structural_attempt_ordinal(data.get("_trial_root_name"), task_selector)
         if attempt_ordinal is not None:
             data["_attempt_ordinal"] = attempt_ordinal
     entry_id = _entry_id_from_harbor_result(result, case_id_by_task_selector)

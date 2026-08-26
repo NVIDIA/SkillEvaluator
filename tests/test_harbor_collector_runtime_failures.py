@@ -1682,7 +1682,7 @@ def test_attempt_like_legacy_identities_are_not_generated_attempt_suffixes(separ
 def test_legacy_truncated_name_with_unbound_attempt_text_is_not_trusted() -> None:
     trial_name = f"truncated-selector__attempt9__{'a' * 16}"
 
-    assert collector_module._trusted_attempt_ordinal(trial_name, "selector-attempt9") is None
+    assert collector_module._structural_attempt_ordinal(trial_name, "selector-attempt9") is None
 
 
 def test_trusted_task_selector_mapping_does_not_parse_attempt_like_identities_as_ordinals(tmp_path: Path) -> None:
@@ -1719,6 +1719,7 @@ def test_trusted_task_selector_mapping_does_not_parse_attempt_like_identities_as
         [trial] = (tmp_path / "results" / "opencode" / variant / "trials").iterdir()
         persisted = json.loads((trial / "reward.json").read_text(encoding="utf-8"))
         assert persisted["entry_id"] == "logical-attempt7"
+        assert not any(key.startswith("_") for key in persisted)
 
 
 def test_trusted_task_selector_mapping_uses_structural_attempt_for_custom_only_stop_on_pass(tmp_path: Path) -> None:

@@ -10,10 +10,16 @@ All notable changes to SkillEvaluator are documented in this file.
   LiteLLM 1.92-1.93 window. Existing SkillEvaluator agent and environment
   options now use Harbor's unified selectors; installed Codex adapters preserve
   merged user and MCP configuration; Docker and local execution stream redacted
-  callbacks; and Docker supports stdin plus isolated sidecar operations without
+  callbacks under a shared 16 MiB per-command output limit, while the parent
+  Harbor orchestration process has a separate 16 MiB combined stdout/stderr
+  limit; and Docker supports stdin plus isolated sidecar operations without
   exposing environment values on Compose argv. Generated schema 1.3 and
   unmodified native task schemas remain compatible, while collection accepts
   Harbor 0.22 job, trial, reward, and ATIF v1.7 artifacts.
+- Exposed Harbor 0.22's complete 26-backend environment set alongside local
+  mode. Non-secret backend constructor options can be supplied with repeatable,
+  operator-only `--environment-kwarg` / `--ek` flags; skill-owned configuration,
+  credentials, and sandbox-policy overrides remain outside that surface.
 
 ### Fixed
 
@@ -21,6 +27,10 @@ All notable changes to SkillEvaluator are documented in this file.
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission
   markers.
+- Tier 3 collection now fails closed on unsafe reward identities and malformed
+  custom-metric contracts, publishes exact truncation metadata for bounded
+  case and failure-detail samples, and keeps findings, attribution, and
+  per-trial JSON inside the report loader's artifact envelope.
 
 ## 0.2.1 - 2026-08-24
 

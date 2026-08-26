@@ -136,6 +136,7 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
     assert jobs["tier2-windows"]["runs-on"] == "windows-latest"
     assert "tests/embedding" in _runs(jobs["tier2-macos"])
     assert "tests/embedding" in _runs(jobs["tier2-windows"])
+    assert "tests/test_harbor_runner_status.py" in _runs(jobs["tier2-windows"])
     assert jobs["tier3-macos"]["runs-on"] == "macos-latest"
     assert "tests/test_tier3_progress.py" in _runs(jobs["tier3-macos"])
     assert jobs["native-windows-local-mode"]["runs-on"] == "windows-latest"
@@ -227,6 +228,8 @@ def test_changed_workflows_pin_every_action_to_a_commit() -> None:
 
 def test_changed_workflows_do_not_persist_checkout_credentials() -> None:
     for workflow_name in ("ci.yml", "security.yml"):
-        checkout_steps = [step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")]
+        checkout_steps = [
+            step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")
+        ]
         assert checkout_steps
         assert all(step.get("with", {}).get("persist-credentials") == "false" for step in checkout_steps)

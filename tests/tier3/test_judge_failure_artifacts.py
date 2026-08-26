@@ -20,7 +20,11 @@ import pytest
 from skillevaluator.tier3.harbor.adapter import _write_test_sh
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
+    MAX_CUSTOM_METRIC_NAME_BYTES,
+    MAX_CUSTOM_METRICS,
     RESERVED_METRIC_NAMES,
+    custom_metric_name_is_publishable,
+    extract_custom_metrics,
     metric_set_for_reward,
     overall_score,
 )
@@ -283,12 +287,199 @@ def test_evaluation_failure_fields_are_reserved_metadata() -> None:
     expected = {"evaluation_status", "evaluation_errors"}
 
     assert expected <= RESERVED_METRIC_NAMES
-    assert expected <= custom_grader_runner.RESERVED
+    assert custom_grader_runner.RESERVED == RESERVED_METRIC_NAMES
     assert custom_grader_runner._extract_custom_metrics(
         {"evaluation_status": 1.0, "evaluation_errors": 0.5, "domain_score": 0.75}
     ) == {"domain_score": 0.75}
     with pytest.raises(RuntimeError, match="collides with reserved"):
         custom_grader_runner._extract_custom_metrics({"custom_metrics": {"evaluation_status": 0.5}})
+
+
+@pytest.mark.parametrize("malformed", [None, 0.5, "quality", [0.5]])
+def test_custom_grader_runner_rejects_malformed_custom_metrics_container(malformed: object) -> None:
+    with pytest.raises(RuntimeError, match=r"container.*JSON object"):
+        custom_grader_runner._extract_custom_metrics({"custom_metrics": malformed, "quality": 0.8, "overall": 0.8})
+
+
+@pytest.mark.parametrize(
+    "invalid_score",
+    [math.nan, math.inf, -math.inf, -0.01, 1.01, 1e308, 10**400],
+    ids=[
+        "nan",
+        "positive-infinity",
+        "negative-infinity",
+        "negative",
+        "above-one",
+        "huge-finite",
+        "unrepresentable-integer",
+    ],
+)
+def test_custom_grader_runner_rejects_invalid_overall_and_custom_scores(
+    invalid_score: float | int,
+) -> None:
+    assert custom_grader_runner._score_from_reward({"overall": invalid_score}) is None
+    assert custom_grader_runner._extract_custom_metrics(
+        {"custom_metrics": {"invalid": invalid_score, "valid": 0.5}}
+    ) == {"valid": 0.5}
+    assert custom_grader_runner._numeric_reward_payload(
+        {"invalid": invalid_score, "valid": 0.5},
+        overall=invalid_score,
+    ) == {"valid": 0.5}
+
+
+def test_custom_grader_runner_enforces_metric_publication_contract_before_artifacts() -> None:
+    assert custom_grader_runner.MAX_CUSTOM_METRICS == MAX_CUSTOM_METRICS
+    assert custom_grader_runner.MAX_CUSTOM_METRIC_NAME_BYTES == MAX_CUSTOM_METRIC_NAME_BYTES
+    assert custom_grader_runner._extract_custom_metrics(
+        {
+            "custom_metrics": {
+                "quality": 0.8,
+                "sk-abcdefghijk": 0.7,
+                "quality_sk-abcdefghijk": 0.6,
+                "api_key_quality": 0.5,
+                "secret_handling": 0.9,
+            }
+        }
+    ) == {"quality": 0.8, "secret_handling": 0.9}
+
+    with pytest.raises(RuntimeError, match="name exceeds"):
+        custom_grader_runner._extract_custom_metrics(
+            {"custom_metrics": {"x" * (MAX_CUSTOM_METRIC_NAME_BYTES + 1): 0.5}}
+        )
+    with pytest.raises(RuntimeError, match="count exceeds"):
+        custom_grader_runner._extract_custom_metrics(
+            {"custom_metrics": {f"metric_{index:03d}": 0.5 for index in range(MAX_CUSTOM_METRICS + 1)}}
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "quality",
+        "secret_handling",
+        "token_efficiency",
+        "token_count",
+        "tokens",
+        "total_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "max_tokens",
+        "last_token_usage",
+        "api_key_quality",
+        "passwords_quality",
+        "tokens_quality",
+        "privatekey_quality",
+        "sessiontoken_quality",
+        "sk-abcdefghijk",
+        "quality_sk-abcdefghijk",
+        "quality_nvapi-abcdefghijk",
+        "quality_crsr_0123456789abcdef",
+        "quality_SK-ABCDEFGHIJK",
+        "quality_NVAPI-ABCDEFGHIJK",
+        "quality_CRSR_0123456789ABCDEF",
+        "quality_ghp_" + ("a" * 36),
+        "quality_gho_" + ("a" * 36),
+        "quality_ghu_" + ("a" * 36),
+        "quality_ghs_" + ("a" * 36),
+        "quality_ghs_" + ("a" * 18) + ".-_" + ("b" * 18),
+        "quality_ghr_" + ("a" * 36),
+        "qualityghp_" + ("a" * 36),
+        "qualitygho_" + ("a" * 36) + "suffix",
+        "quality_github_pat_" + ("a" * 30),
+        "quality_" + "".join(("xoxb-", "1234567890-abcdefghijklmnopqrstuvwx")),  # noqa: FLY002
+        "quality_" + "AIza" + ("A" * 35),
+        "quality_AIzA" + ("A" * 35),
+        "quality_glpat-" + ("a" * 20),
+        "https://user:pass@example.com",
+        " x",
+        "x" * (MAX_CUSTOM_METRIC_NAME_BYTES + 1),
+    ],
+)
+def test_custom_grader_runner_metric_name_policy_matches_collector(name: str) -> None:
+    assert custom_grader_runner._metric_name_is_publishable(name) is custom_metric_name_is_publishable(name)
+
+
+def test_custom_grader_runner_sanitizer_removes_unsafe_dict_valued_implicit_metric() -> None:
+    credential_metrics = [
+        "api_key_quality",
+        "ghp_" + ("a" * 36),
+        "gho_" + ("a" * 36),
+        "ghu_" + ("a" * 36),
+        "ghs_" + ("a" * 36),
+        "ghs_" + ("a" * 18) + ".-_" + ("b" * 18),
+        "ghr_" + ("a" * 36),
+        "qualityghp_" + ("a" * 36),
+        "qualitygho_" + ("a" * 36) + "suffix",
+        "github_pat_" + ("a" * 30),
+        "".join(("xoxb-", "1234567890-abcdefghijklmnopqrstuvwx")),  # noqa: FLY002
+        "AIza" + ("A" * 35),
+        "glpat-" + ("a" * 20),
+    ]
+    unsafe_metrics = {name: {"score": 0.6, "reason": "must not survive"} for name in credential_metrics}
+    reward = {
+        "overall": 0.75,
+        **unsafe_metrics,
+        "quality": {"score": 0.8, "reason": "bounded evidence"},
+    }
+    custom_metrics = custom_grader_runner._extract_custom_metrics(reward)
+
+    assert custom_metrics == {"quality": 0.8}
+    assert custom_grader_runner._sanitized_custom_reward(reward, custom_metrics) == {
+        "overall": 0.75,
+        "quality": {"score": 0.8, "reason": "bounded evidence"},
+    }
+
+
+def test_custom_grader_runner_sanitizer_limits_both_detail_containers_to_validated_metrics() -> None:
+    reward = {
+        "overall": 0.75,
+        "custom_metrics": {"quality": 0.8, "api_key_quality": 0.6},
+        "details": {
+            "quality": {"reason": "bounded evidence"},
+            "api_key_quality": {"reason": "must not survive"},
+        },
+        "custom_details": {
+            "quality": {"report": "bounded evidence"},
+            "api_key_quality": {"report": "must not survive"},
+        },
+    }
+    custom_metrics = custom_grader_runner._extract_custom_metrics(reward)
+
+    assert custom_metrics == {"quality": 0.8}
+    assert custom_grader_runner._sanitized_custom_reward(reward, custom_metrics) == {
+        "overall": 0.75,
+        "custom_metrics": {"quality": 0.8},
+        "details": {"quality": {"reason": "bounded evidence"}},
+        "custom_details": {"quality": {"report": "bounded evidence"}},
+    }
+
+
+@pytest.mark.parametrize(
+    "rejected_value",
+    [{"reason": "nonnumeric"}, "nonnumeric", None],
+    ids=("dict", "string", "null"),
+)
+def test_custom_grader_runner_sanitizer_removes_nonnumeric_credential_shaped_keys(
+    rejected_value: object,
+) -> None:
+    rejected_name = "quality_sk-abcdefghijk"
+    reward = {
+        "overall": 0.75,
+        "custom_metrics": {"quality": 0.8},
+        rejected_name: rejected_value,
+    }
+    custom_metrics = custom_grader_runner._extract_custom_metrics(reward)
+
+    assert custom_metrics == {"quality": 0.8}
+    assert rejected_name not in custom_grader_runner._sanitized_custom_reward(reward, custom_metrics)
+
+
+@pytest.mark.parametrize(
+    "invalid_score",
+    ["nan", "inf", "-inf", "-0.01", "1.01", "1e308", str(10**400)],
+)
+def test_custom_grader_runner_rejects_invalid_text_overall_scores(invalid_score: str) -> None:
+    assert custom_grader_runner._score_from_text(invalid_score) is None
 
 
 def _run_generated_test_sh(task_dir: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -357,3 +548,299 @@ def test_generated_custom_only_script_accepts_overall_only_custom_reward(tmp_pat
     assert marker.read_text(encoding="utf-8") == "ran"
     assert json.loads(reward_json.read_text(encoding="utf-8")) == {"overall": 0.75}
     assert reward_txt.read_text(encoding="utf-8") == "0.75"
+
+
+@pytest.mark.parametrize("mode", ["default_plus_custom", "custom_only"])
+def test_generated_custom_grader_rejects_metric_overflow_before_retaining_raw_names(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    tests_dir = tmp_path / "tests"
+    verifier_dir = tmp_path / "verifier"
+    tests_dir.mkdir()
+    verifier_dir.mkdir()
+    raw_names = [f"metric_{index:03d}" for index in range(MAX_CUSTOM_METRICS + 1)]
+    (tests_dir / "grader.py").write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        f"payload = {{'overall': 0.75, 'custom_metrics': {dict.fromkeys(raw_names, 0.5)!r}}}\n"
+        "Path(os.environ['HARBOR_REWARD_JSON']).write_text(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
+    reward_json = verifier_dir / "reward.json"
+    reward_txt = verifier_dir / "reward.txt"
+    skill_evaluator_reward = verifier_dir / "skill_evaluator_reward.json"
+    custom_reward = verifier_dir / "custom_reward.json"
+    if mode == "default_plus_custom":
+        skill_evaluator_reward.write_text(
+            json.dumps(
+                {
+                    "metric_set": DEFAULT_METRIC_SET,
+                    **dict.fromkeys(RESERVED_METRIC_NAMES & set(custom_grader_runner.DEFAULT_METRICS), 1.0),
+                    "overall": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        reward_txt.write_text("1.0", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(_CUSTOM_RUNNER_TEMPLATE), "--mode", mode],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HARBOR_TESTS_DIR": str(tests_dir),
+            "HARBOR_VERIFIER_DIR": str(verifier_dir),
+            "HARBOR_REWARD_JSON": str(reward_json),
+            "HARBOR_REWARD_TXT": str(reward_txt),
+            "HARBOR_SKILL_EVALUATOR_REWARD_JSON": str(skill_evaluator_reward),
+            "HARBOR_CUSTOM_REWARD_JSON": str(custom_reward),
+            "HARBOR_GRADER": str(tests_dir / "grader.py"),
+            "HARBOR_GRADER_SH": str(tests_dir / "grader.sh"),
+        },
+    )
+
+    assert completed.returncode != 0
+    retained_text = custom_reward.read_text(encoding="utf-8")
+    retained = json.loads(retained_text)
+    assert retained["overall"] == 0.0
+    assert "count exceeds" in retained["error"]
+    assert all(name not in retained_text for name in raw_names)
+    assert json.loads(reward_json.read_text(encoding="utf-8")) == {"overall": 0.0}
+
+
+@pytest.mark.parametrize("mode", ["default_plus_custom", "custom_only"])
+def test_generated_custom_grader_omits_unsafe_dict_valued_metric_from_every_artifact(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    tests_dir = tmp_path / "tests"
+    verifier_dir = tmp_path / "verifier"
+    tests_dir.mkdir()
+    verifier_dir.mkdir()
+    credential_metrics = [
+        "api_key_quality",
+        "ghp_" + ("a" * 36),
+        "gho_" + ("a" * 36),
+        "ghu_" + ("a" * 36),
+        "ghs_" + ("a" * 36),
+        "ghs_" + ("a" * 18) + ".-_" + ("b" * 18),
+        "ghr_" + ("a" * 36),
+        "qualityghp_" + ("a" * 36),
+        "qualitygho_" + ("a" * 36) + "suffix",
+        "github_pat_" + ("a" * 30),
+        "".join(("xoxb-", "1234567890-abcdefghijklmnopqrstuvwx")),  # noqa: FLY002
+        "AIza" + ("A" * 35),
+        "glpat-" + ("a" * 20),
+    ]
+    unsafe_metrics = {name: {"score": 0.6, "reason": "must not survive"} for name in credential_metrics}
+    detail_only_name = "detail_only_not_a_metric"
+    custom_details = {
+        "quality": {"report": "bounded evidence"},
+        credential_metrics[0]: {"report": "must not survive"},
+        detail_only_name: {"report": "must not survive"},
+    }
+    (tests_dir / "grader.py").write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "payload = {'overall': 0.75, "
+        f"**{unsafe_metrics!r}, "
+        "'quality': {'score': 0.8, 'reason': 'bounded evidence'}, "
+        f"'custom_details': {custom_details!r}}}\n"
+        "Path(os.environ['HARBOR_REWARD_JSON']).write_text(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
+    reward_json = verifier_dir / "reward.json"
+    reward_txt = verifier_dir / "reward.txt"
+    skill_evaluator_reward = verifier_dir / "skill_evaluator_reward.json"
+    custom_reward = verifier_dir / "custom_reward.json"
+    if mode == "default_plus_custom":
+        skill_evaluator_reward.write_text(
+            json.dumps(
+                {
+                    "metric_set": DEFAULT_METRIC_SET,
+                    **dict.fromkeys(custom_grader_runner.DEFAULT_METRICS, 1.0),
+                    "overall": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        reward_txt.write_text("1.0", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(_CUSTOM_RUNNER_TEMPLATE), "--mode", mode],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HARBOR_TESTS_DIR": str(tests_dir),
+            "HARBOR_VERIFIER_DIR": str(verifier_dir),
+            "HARBOR_REWARD_JSON": str(reward_json),
+            "HARBOR_REWARD_TXT": str(reward_txt),
+            "HARBOR_SKILL_EVALUATOR_REWARD_JSON": str(skill_evaluator_reward),
+            "HARBOR_CUSTOM_REWARD_JSON": str(custom_reward),
+            "HARBOR_GRADER": str(tests_dir / "grader.py"),
+            "HARBOR_GRADER_SH": str(tests_dir / "grader.sh"),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    for artifact in (reward_json, custom_reward, skill_evaluator_reward):
+        if not artifact.exists():
+            continue
+        text = artifact.read_text(encoding="utf-8")
+        assert all(name not in text for name in credential_metrics)
+        assert detail_only_name not in text
+        assert "must not survive" not in text
+    assert json.loads(reward_json.read_text(encoding="utf-8"))["quality"] == 0.8
+    custom_payload = json.loads(custom_reward.read_text(encoding="utf-8"))
+    assert custom_payload["quality"]["score"] == 0.8
+    assert custom_payload["custom_details"] == {"quality": {"report": "bounded evidence"}}
+
+
+@pytest.mark.parametrize("mode", ["default_plus_custom", "custom_only"])
+def test_generated_custom_grader_mixed_metric_surfaces_match_collector_without_credential_drift(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    tests_dir = tmp_path / "tests"
+    verifier_dir = tmp_path / "verifier"
+    tests_dir.mkdir()
+    verifier_dir.mkdir()
+    credential_metrics = [
+        "api_key_quality",
+        "ghp_" + ("a" * 36),
+        "gho_" + ("a" * 36),
+        "ghu_" + ("a" * 36),
+        "ghs_" + ("a" * 36),
+        "ghs_" + ("a" * 18) + ".-_" + ("b" * 18),
+        "ghr_" + ("a" * 36),
+        "qualityghp_" + ("a" * 36),
+        "qualitygho_" + ("a" * 36) + "suffix",
+        "github_pat_" + ("a" * 30),
+        "".join(("xoxb-", "1234567890-abcdefghijklmnopqrstuvwx")),  # noqa: FLY002
+        "AIza" + ("A" * 35),
+        "glpat-" + ("a" * 20),
+        "quality_sk-abcdefghijk_nonnumeric_dict",
+        "quality_nvapi-abcdefghijk_nonnumeric_string",
+        "quality_crsr_0123456789abcdef_nonnumeric_null",
+    ]
+    unsafe_metrics = {name: {"score": 0.6, "reason": "must not survive"} for name in credential_metrics}
+    unsafe_metrics.update(
+        {
+            "quality_sk-abcdefghijk_nonnumeric_dict": {"reason": "must not survive"},
+            "quality_nvapi-abcdefghijk_nonnumeric_string": "must not survive",
+            "quality_crsr_0123456789abcdef_nonnumeric_null": None,
+        }
+    )
+    (tests_dir / "grader.py").write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "payload = {'overall': 0.75, 'custom_metrics': {'quality': 0.8}, "
+        "'domain_score': {'score': 0.7, 'reason': 'bounded evidence'}, "
+        f"**{unsafe_metrics!r}}}\n"
+        "Path(os.environ['HARBOR_REWARD_JSON']).write_text(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
+    reward_json = verifier_dir / "reward.json"
+    reward_txt = verifier_dir / "reward.txt"
+    skill_evaluator_reward = verifier_dir / "skill_evaluator_reward.json"
+    custom_reward = verifier_dir / "custom_reward.json"
+    if mode == "default_plus_custom":
+        skill_evaluator_reward.write_text(
+            json.dumps(
+                {
+                    "metric_set": DEFAULT_METRIC_SET,
+                    **dict.fromkeys(custom_grader_runner.DEFAULT_METRICS, 1.0),
+                    "overall": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        reward_txt.write_text("1.0", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(_CUSTOM_RUNNER_TEMPLATE), "--mode", mode],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HARBOR_TESTS_DIR": str(tests_dir),
+            "HARBOR_VERIFIER_DIR": str(verifier_dir),
+            "HARBOR_REWARD_JSON": str(reward_json),
+            "HARBOR_REWARD_TXT": str(reward_txt),
+            "HARBOR_SKILL_EVALUATOR_REWARD_JSON": str(skill_evaluator_reward),
+            "HARBOR_CUSTOM_REWARD_JSON": str(custom_reward),
+            "HARBOR_GRADER": str(tests_dir / "grader.py"),
+            "HARBOR_GRADER_SH": str(tests_dir / "grader.sh"),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    custom_payload = json.loads(custom_reward.read_text(encoding="utf-8"))
+    harbor_payload = json.loads(reward_json.read_text(encoding="utf-8"))
+    expected = {"domain_score": 0.7, "quality": 0.8}
+    assert extract_custom_metrics(custom_payload) == expected
+    assert extract_custom_metrics(harbor_payload) == expected
+    for artifact in (reward_json, custom_reward, skill_evaluator_reward):
+        if artifact.exists():
+            text = artifact.read_text(encoding="utf-8")
+            assert all(name not in text for name in credential_metrics)
+
+
+@pytest.mark.parametrize("source", ["reward_json", "reward_txt"])
+@pytest.mark.parametrize("invalid_score", ["nan", "inf", "-inf", "-0.01", "1.01", "1e308"])
+def test_generated_custom_only_script_rejects_invalid_overall_score(
+    tmp_path: Path,
+    source: str,
+    invalid_score: str,
+) -> None:
+    task_dir = tmp_path / f"custom-only-{source}"
+    _write_test_sh(task_dir, grading_mode="custom_only", custom_grader=True)
+    tests_dir = task_dir / "tests"
+    shutil.copy2(_CUSTOM_RUNNER_TEMPLATE, tests_dir / "custom_grader_runner.py")
+    grader_lines = [
+        "import json, os",
+        "from pathlib import Path",
+        "reward_json = Path(os.environ['HARBOR_REWARD_JSON'])",
+        "reward_txt = Path(os.environ['HARBOR_REWARD_TXT'])",
+    ]
+    if source == "reward_json":
+        grader_lines.append(f"reward_json.write_text(json.dumps({{'overall': float({invalid_score!r})}}))")
+    else:
+        grader_lines.extend(
+            [
+                "reward_json.write_text('{}')",
+                f"reward_txt.write_text({invalid_score!r})",
+            ]
+        )
+    (tests_dir / "grader.py").write_text("\n".join(grader_lines) + "\n", encoding="utf-8")
+    verifier_dir = task_dir / "verifier"
+    verifier_dir.mkdir()
+    reward_json = verifier_dir / "reward.json"
+    reward_txt = verifier_dir / "reward.txt"
+    custom_reward_json = verifier_dir / "custom_reward.json"
+
+    completed = _run_generated_test_sh(
+        task_dir,
+        {
+            "HARBOR_TESTS_DIR": str(tests_dir),
+            "HARBOR_VERIFIER_DIR": str(verifier_dir),
+            "HARBOR_REWARD_JSON": str(reward_json),
+            "HARBOR_REWARD_TXT": str(reward_txt),
+            "HARBOR_CUSTOM_REWARD_JSON": str(custom_reward_json),
+            "HARBOR_GRADER": str(tests_dir / "grader.py"),
+            "HARBOR_GRADER_SH": str(tests_dir / "grader.sh"),
+        },
+    )
+
+    assert completed.returncode != 0
+    failure = json.loads(custom_reward_json.read_text(encoding="utf-8"))
+    assert failure["overall"] == 0.0
+    assert "between 0.0 and 1.0" in failure["error"]
+    assert json.loads(reward_json.read_text(encoding="utf-8")) == {"overall": 0.0}
+    assert reward_txt.read_text(encoding="utf-8") == "0.0"

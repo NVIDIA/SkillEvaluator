@@ -54,6 +54,8 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
 )
+from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget
+from skillevaluator.utils.redaction import credential_uri_secret_values
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
 SECURE_DOCKER_ENV_IMPORT_PATH = (
@@ -93,14 +95,18 @@ _WINDOWS_TAR_MAX_FILESYSTEM_ENTRIES = 100_000
 _WINDOWS_TAR_MAX_PATH_BYTES = 8 * 1024 * 1024
 _WINDOWS_TAR_MAX_PATH_COMPONENTS = 1_000_000
 _WINDOWS_TAR_MAX_DEPTH = 128
+_WINDOWS_TAR_MAX_LEADING_CURRENT_COMPONENTS = 8
+_WINDOWS_TAR_MAX_MEMBER_PATH_BYTES = 128 * 1024
 _WINDOWS_TAR_MAX_EXTENSION_BYTES = 1024 * 1024
 _WINDOWS_TAR_MAX_TOTAL_EXTENSION_BYTES = 8 * 1024 * 1024
+_WINDOWS_TAR_MAX_EXTENSION_CHAIN = 32
+_WINDOWS_TAR_MAX_PAX_RECORDS_PER_HEADER = 4096
 _WINDOWS_ARTIFACT_DISK_RESERVE_BYTES = 512 * 1024 * 1024
 _WINDOWS_ARTIFACT_ENTRY_DISK_BYTES = 64 * 1024
 _WINDOWS_ARTIFACT_INODE_RESERVE = 1024
 _TAR_BLOCK_BYTES = 512
 _WINDOWS_RESERVED_NAME_RE = re.compile(
-    r"(?:con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])",
+    r"(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])",
     re.IGNORECASE,
 )
 _REDACTION_LABEL = "[REDACTED]"
@@ -218,6 +224,25 @@ def _eligible_secret_values(
 def _sensitive_environment_values(environment: Mapping[str, str]) -> set[str]:
     """Return exact values whose component-aware names mark them sensitive."""
     return {value for name, value in environment.items() if value and _SENSITIVE_ENV_NAME_RE.search(name)}
+
+
+def _credential_uri_environment_values(environment: Mapping[str, str]) -> set[str]:
+    """Return operational URI values containing authority user information."""
+    protected: set[str] = set()
+    for name, value in environment.items():
+        if not value:
+            continue
+        is_proxy = name.upper().endswith("_PROXY")
+        if is_proxy or "://" in value:
+            protected.update(credential_uri_secret_values(value, allow_schemeless=is_proxy))
+    return protected
+
+
+def _compose_client_credential_values(environment: Mapping[str, str]) -> set[str]:
+    """Return credential-bearing values used by the Docker Compose client."""
+    protected = _credential_uri_environment_values(environment)
+    protected.update(value for name, value in environment.items() if value and name.upper() == "DOCKER_AUTH_CONFIG")
+    return protected
 
 
 def _value_contains_protected_value(value: str, protected_value: str) -> bool:
@@ -793,6 +818,52 @@ class _WindowsFilesystemReserve:
     minimum_free_bytes: int
 
 
+def _prescan_local_pax_payload(payload: bytes) -> int | None:
+    """Validate bounded PAX framing and return its effective size override."""
+    position = 0
+    record_count = 0
+    size_override: int | None = None
+    while position < len(payload):
+        if payload[position] == 0:
+            if any(payload[position:]):
+                raise ValueError
+            break
+
+        # Python's tarfile parser accepts one to twenty decimal digits followed
+        # by a space. Mirror that framing without building its raw-header list.
+        space = payload.find(b" ", position, min(len(payload), position + 21))
+        if space < 0:
+            raise ValueError
+        length_digits = payload[position:space]
+        if not length_digits or len(length_digits) > 20 or not length_digits.isdigit():
+            raise ValueError
+        record_length = int(length_digits)
+        record_end = position + record_length
+        if record_length < 5 or record_end > len(payload) or payload[record_end - 1] != 0x0A:
+            raise ValueError
+
+        equals = payload.find(b"=", space + 1, record_end - 1)
+        if equals <= space + 1:
+            raise ValueError
+        record_count += 1
+        if record_count > _WINDOWS_TAR_MAX_PAX_RECORDS_PER_HEADER:
+            raise ValueError
+
+        keyword = payload[space + 1 : equals]
+        if keyword.startswith(b"GNU.sparse."):
+            raise ValueError
+        if keyword == b"size":
+            raw_size = payload[equals + 1 : record_end - 1]
+            # POSIX pax size is an unsigned decimal. Bounding its spelling
+            # avoids turning a tiny metadata record into a large integer parse;
+            # twenty digits already covers every practical host file offset.
+            if not raw_size or len(raw_size) > 20 or not raw_size.isdigit():
+                raise ValueError
+            size_override = int(raw_size)
+        position = record_end
+    return size_override
+
+
 def _prescan_uncompressed_tar_archive(archive_path: Path) -> None:
     """Bound tar metadata before ``tarfile`` is allowed to allocate it."""
     extension_types = {
@@ -805,6 +876,8 @@ def _prescan_uncompressed_tar_archive(archive_path: Path) -> None:
     archive_size = archive_path.stat().st_size
     raw_members = 0
     extension_bytes = 0
+    extension_chain = 0
+    pending_pax_size: int | None = None
     saw_zero_block = False
     with archive_path.open("rb") as archive:
         while archive.tell() < archive_size:
@@ -812,6 +885,8 @@ def _prescan_uncompressed_tar_archive(archive_path: Path) -> None:
             if len(header) != _TAR_BLOCK_BYTES:
                 raise ValueError
             if not any(header):
+                if extension_chain:
+                    raise ValueError
                 if saw_zero_block:
                     while remainder := archive.read(64 * 1024):
                         if any(remainder):
@@ -838,16 +913,40 @@ def _prescan_uncompressed_tar_archive(archive_path: Path) -> None:
             # stdlib parser, creating multiplicative CPU and memory cost.
             if member.type == tarfile.XGLTYPE:
                 raise ValueError
-            if member.type in extension_types:
+            is_extension = member.type in extension_types
+            if is_extension:
+                extension_chain += 1
+                if extension_chain > _WINDOWS_TAR_MAX_EXTENSION_CHAIN:
+                    raise ValueError
                 if member.size > _WINDOWS_TAR_MAX_EXTENSION_BYTES:
                     raise ValueError
                 extension_bytes += member.size
                 if extension_bytes > _WINDOWS_TAR_MAX_TOTAL_EXTENSION_BYTES:
                     raise ValueError
-            padded_size = ((member.size + _TAR_BLOCK_BYTES - 1) // _TAR_BLOCK_BYTES) * _TAR_BLOCK_BYTES
+            else:
+                extension_chain = 0
+            effective_size = member.size
+            if not is_extension and pending_pax_size is not None:
+                # ``TarInfo._proc_pax`` recalculates the next raw-header offset
+                # only for regular or unsupported member types. With stacked
+                # extension headers, the outermost (first) local pax value is
+                # applied last and therefore wins.
+                if member.isreg() or member.type not in tarfile.SUPPORTED_TYPES:
+                    effective_size = pending_pax_size
+                pending_pax_size = None
+            padded_size = ((effective_size + _TAR_BLOCK_BYTES - 1) // _TAR_BLOCK_BYTES) * _TAR_BLOCK_BYTES
             if archive.tell() + padded_size > archive_size:
                 raise ValueError
-            archive.seek(padded_size, os.SEEK_CUR)
+            if member.type in {tarfile.XHDTYPE, tarfile.SOLARIS_XHDTYPE}:
+                payload = archive.read(member.size)
+                if len(payload) != member.size:
+                    raise ValueError
+                size_override = _prescan_local_pax_payload(payload)
+                if pending_pax_size is None:
+                    pending_pax_size = size_override
+                archive.seek(padded_size - member.size, os.SEEK_CUR)
+            else:
+                archive.seek(padded_size, os.SEEK_CUR)
     raise ValueError
 
 
@@ -859,14 +958,26 @@ def _validated_windows_tar_member(
     name = member.name
     if not name or "\x00" in name or "\\" in name:
         raise ValueError
+    try:
+        raw_name_bytes = len(name.encode("utf-8", errors="strict"))
+    except UnicodeEncodeError:
+        raise ValueError from None
+    if raw_name_bytes > _WINDOWS_TAR_MAX_MEMBER_PATH_BYTES:
+        raise ValueError
     declared = PurePosixPath(name)
     if declared.is_absolute():
         raise ValueError
 
     spelling = name[:-1] if member.isdir() and name.endswith("/") else name
     raw_parts = spelling.split("/")
-    while raw_parts and raw_parts[0] == ".":
-        raw_parts.pop(0)
+    if len(raw_parts) > _WINDOWS_TAR_MAX_DEPTH + _WINDOWS_TAR_MAX_LEADING_CURRENT_COMPONENTS:
+        raise ValueError
+    first_component = 0
+    while first_component < len(raw_parts) and raw_parts[first_component] == ".":
+        first_component += 1
+    if first_component > _WINDOWS_TAR_MAX_LEADING_CURRENT_COMPONENTS:
+        raise ValueError
+    raw_parts = raw_parts[first_component:]
     if any(part in {"", ".", ".."} for part in raw_parts):
         raise ValueError
     if not raw_parts:
@@ -1090,11 +1201,7 @@ def _extract_regular_tar_archive(
         ordered_keys = sorted(member_kinds)
         for index, key in enumerate(ordered_keys[:-1]):
             following = ordered_keys[index + 1]
-            if (
-                member_kinds[key] == "file"
-                and len(following) > len(key)
-                and following[: len(key)] == key
-            ):
+            if member_kinds[key] == "file" and len(following) > len(key) and following[: len(key)] == key:
                 raise ValueError
 
         # Count implicit parent directories without retaining every prefix.
@@ -1153,7 +1260,7 @@ def _extract_regular_tar_archive(
         ):
             raise ValueError
         return usage
-    except (OSError, tarfile.TarError, UnicodeError, ValueError):
+    except (OSError, RecursionError, tarfile.TarError, UnicodeError, ValueError):
         raise RuntimeError("unsafe Windows container download archive") from None
 
 
@@ -1180,12 +1287,13 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         stdin_data: bytes | None = None,
         on_output: OutputCallback,
     ) -> ExecResult:
-        """Stream bounded chunks without asyncio's newline-size limit."""
+        """Stream output within one hard raw-byte budget."""
         stdout_stream = process.stdout
         if stdout_stream is None:
             raise RuntimeError("Streaming requires a captured stdout pipe")
-        chunks: list[bytes] = []
+        output = bytearray()
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        output_budget = CommandOutputByteBudget()
 
         async def write_stdin() -> None:
             if stdin_data is None:
@@ -1200,7 +1308,8 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
 
         async def read_stdout_and_wait() -> None:
             while raw_chunk := await stdout_stream.read(64 * 1024):
-                chunks.append(raw_chunk)
+                output_budget.consume(raw_chunk)
+                output.extend(raw_chunk)
                 if text := decoder.decode(raw_chunk):
                     await on_output(text, "stdout")
                 await asyncio.sleep(0)
@@ -1210,9 +1319,18 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
 
         async def read_and_wait() -> None:
             if stdin_data is not None:
-                async with asyncio.TaskGroup() as task_group:
-                    task_group.create_task(write_stdin())
-                    task_group.create_task(read_stdout_and_wait())
+                tasks = [
+                    asyncio.create_task(write_stdin()),
+                    asyncio.create_task(read_stdout_and_wait()),
+                ]
+                try:
+                    await asyncio.gather(*tasks)
+                except BaseException:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
             else:
                 await read_stdout_and_wait()
 
@@ -1229,7 +1347,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 await DockerEnvironment._terminate_process(process)
             raise
 
-        stdout = b"".join(chunks).decode(errors="replace")
+        stdout = output.decode(errors="replace")
         return ExecResult(
             stdout=stdout or None,
             stderr=None,
@@ -2225,11 +2343,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                     target,
                     kind="file",
                 )
-                required_entries = (
-                    source_usage.entries
-                    + existing_target_usage.entries
-                    + parent_usage.entries
-                )
+                required_entries = source_usage.entries + existing_target_usage.entries + parent_usage.entries
                 _require_windows_artifact_resources(
                     target.parent,
                     source_usage.estimated_disk_bytes
@@ -2339,21 +2453,13 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         if executable is None:
             raise RuntimeError(f"required host transfer executable {command[0]!r} was not found")
         initial_free_bytes, spool_budget = _windows_artifact_disk_budget(output_path.parent)
-        reserved_bytes = (
-            initial_free_bytes - spool_budget
-            if minimum_free_bytes is None
-            else minimum_free_bytes
-        )
+        reserved_bytes = initial_free_bytes - spool_budget if minimum_free_bytes is None else minimum_free_bytes
         spool_budget = max(0, initial_free_bytes - reserved_bytes)
         if spool_budget <= 0:
             raise RuntimeError("insufficient temporary disk space for secure Windows container transfer")
         diagnostic_protected_values = set(protected_values)
         diagnostic_protected_values.update(_sensitive_environment_values(process_environment))
-        diagnostic_protected_values.update(
-            value
-            for name, value in process_environment.items()
-            if value and name.upper().endswith("_PROXY") and "@" in value
-        )
+        diagnostic_protected_values.update(_credential_uri_environment_values(process_environment))
         full_command = [executable, *command[1:]]
         loop = asyncio.get_running_loop()
         total_deadline = loop.time() + total_timeout_sec
@@ -2466,7 +2572,9 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                             "a late-process reaper was installed"
                         )
                     if isinstance(primary_error, TimeoutError):
-                        raise RuntimeError("secure Windows container transfer process creation timed out") from primary_error
+                        raise RuntimeError(
+                            "secure Windows container transfer process creation timed out"
+                        ) from primary_error
                     if isinstance(primary_error, _WindowsTransferTotalTimeout):
                         raise RuntimeError(
                             "secure Windows container transfer command exceeded its total time limit"
@@ -2491,10 +2599,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                         while chunk := await stream.read(64 * 1024):
                             claimed_bytes = spooled_bytes + len(chunk)
                             free_bytes = shutil.disk_usage(output_path.parent).free
-                            if (
-                                claimed_bytes > spool_budget
-                                or free_bytes < reserved_bytes + len(chunk)
-                            ):
+                            if claimed_bytes > spool_budget or free_bytes < reserved_bytes + len(chunk):
                                 raise _WindowsTransferDiskBudgetExceeded
                             view = memoryview(chunk)
                             while view:
@@ -2591,14 +2696,15 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                         (len(secret.encode("utf-8", errors="surrogatepass")) for secret in eligible_secrets),
                         default=0,
                     )
-                    if maximum_secret_bytes > _WINDOWS_TRANSFER_STDERR_MAX_BYTES:
-                        detail = "[transfer diagnostics omitted because a protected value exceeds the safe window]"
-                    else:
-                        read_limit = (
-                            _WINDOWS_TRANSFER_STDERR_MAX_BYTES
-                            + maximum_secret_bytes
-                            + 4
+                    if maximum_secret_bytes > _WINDOWS_TRANSFER_STDERR_MAX_BYTES or (
+                        eligible_secrets and stderr_size > _WINDOWS_TRANSFER_STDERR_MAX_BYTES
+                    ):
+                        detail = (
+                            "[transfer diagnostics omitted because protected values "
+                            "cannot be redacted safely after truncation]"
                         )
+                    else:
+                        read_limit = _WINDOWS_TRANSFER_STDERR_MAX_BYTES
                         stderr_file.seek(max(0, stderr_size - read_limit))
                         stderr = stderr_file.read(read_limit)
                         detail = _redact(
@@ -2607,12 +2713,10 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                             include_short=True,
                         )
                         truncated = stderr_size > len(stderr) or len(detail) > _WINDOWS_TRANSFER_STDERR_MAX_BYTES
-                        detail = detail[-_WINDOWS_TRANSFER_STDERR_MAX_BYTES :]
+                        detail = detail[-_WINDOWS_TRANSFER_STDERR_MAX_BYTES:]
                         if truncated:
                             detail = "[earlier transfer diagnostics truncated]\n" + detail
-                    raise RuntimeError(
-                        "secure Windows container transfer command failed: " + detail
-                    )
+                    raise RuntimeError("secure Windows container transfer command failed: " + detail)
         except BaseException:
             if output_created:
                 with contextlib.suppress(OSError):
@@ -2688,11 +2792,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             # ``copytree_secure(..., dirs_exist_ok=True)`` builds one merged
             # stage plus a rollback snapshot of an existing destination. The
             # extracted source remains live until publication completes.
-            required_entries = (
-                usage.entries
-                + 2 * existing_target_usage.entries
-                + parent_usage.entries
-            )
+            required_entries = usage.entries + 2 * existing_target_usage.entries + parent_usage.entries
             _require_windows_artifact_resources(
                 target.parent,
                 usage.estimated_disk_bytes
@@ -2990,9 +3090,13 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             process_environment = self._compose_env_vars(include_os_env=True)
             process_environment.update(effective_env_overrides)
 
+        compose_client_environment = {
+            name: value for name, value in process_environment.items() if self._is_compose_client_operational_name(name)
+        }
         secret_values = set(_eligible_secret_values(effective_env_overrides.values()))
         secret_values.update(_eligible_secret_values(carrier_overrides.values()))
         secret_values.update(_eligible_secret_values(compose_model_environment.values()))
+        secret_values.update(_compose_client_credential_values(compose_client_environment))
         secret_values.update(
             _eligible_secret_values(
                 additional_secret_values or (),
@@ -3005,6 +3109,20 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             secret_values,
             include_short=True,
         )
+
+        async def discard_output(_text: str, _stream: OutputStream) -> None:
+            return None
+
+        async def collect_bounded_output(
+            active_process: asyncio.subprocess.Process,
+        ) -> ExecResult:
+            return await self._collect_streamed_output(
+                active_process,
+                timeout_sec=None,
+                stdin_data=stdin_data,
+                on_output=discard_output,
+            )
+
         creation = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *full_command,
@@ -3019,7 +3137,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             process = await asyncio.shield(creation)
         except asyncio.CancelledError as primary_error:
             process = await _await_task_uninterruptibly(creation, preserve_cancellation=False)
-            communication = asyncio.create_task(process.communicate())
+            communication = asyncio.create_task(collect_bounded_output(process))
             cleanup = asyncio.create_task(
                 self._contain_main_and_reap_compose(
                     process,
@@ -3041,21 +3159,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         callback_error: asyncio.Future[BaseException] | None = None
 
         if on_output is None:
-
-            async def collect_buffered_output() -> ExecResult:
-                if stdin_data is None:
-                    stdout_bytes, stderr_bytes = await process.communicate()
-                else:
-                    stdout_bytes, stderr_bytes = await process.communicate(input=stdin_data)
-                stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else None
-                stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else None
-                return ExecResult(
-                    stdout=stdout,
-                    stderr=stderr,
-                    return_code=process.returncode or 0,
-                )
-
-            communication = asyncio.create_task(collect_buffered_output())
+            communication = asyncio.create_task(collect_bounded_output(process))
         else:
             callback_error = asyncio.get_running_loop().create_future()
             stream_redactor = _StreamingSecretRedactor(

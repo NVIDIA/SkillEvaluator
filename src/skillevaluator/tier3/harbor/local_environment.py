@@ -33,7 +33,7 @@ from skillevaluator.tier3.harbor.local_runtime import (
     validate_runtime_root,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
-from skillevaluator.tier3.harbor.stream_redaction import StreamingLogRedactor
+from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget, StreamingLogRedactor
 from skillevaluator.tier3.output_provenance import output_provenance_key_path
 
 _SAFE_HOST_ENV = frozenset(
@@ -101,6 +101,18 @@ _LEGACY_SECRET_ENV_NAME_RE = re.compile(
     r"(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)",
     re.IGNORECASE,
 )
+# Compact credential names remain high-signal even without underscore token
+# boundaries. Deliberately omit a bare KEY suffix so ordinary names such as
+# MONKEY and KEYBOARD do not cause short public values to be rewritten.
+_COMPACT_SENSITIVE_ENV_NAME_RE = re.compile(
+    r"(?:^|_)[A-Z0-9]*(?:API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|TOKEN|SECRET|PASSWORD|"
+    r"CREDENTIALS?|AUTHENTICATION|AUTHORIZATION|BEARER)(?:_|$)",
+    re.IGNORECASE,
+)
+# Before Harbor 0.22, local output used the broad legacy name matcher above.
+# Retain protection for credential-sized values while avoiding corruption from
+# common short variables such as MONKEY=banana and KEYBOARD=clacky.
+_MIN_LEGACY_SECRET_VALUE_LENGTH = 8
 _SHELL_WRITE_REDIRECT_RE = re.compile(r"(?:^|\s)(?:\d?>{1,2}|&>)\s*([^\s;&|]+)")
 _SHELL_WRITE_COMMAND_RE = re.compile(r"(?:^|[;&|]\s*)(?:tee|touch|mkdir|cp|mv)\b(?P<args>[^;&|]*)")
 _BACKGROUND_AMPERSAND_RE = re.compile(r"(?<![&>])&(?![&>])")
@@ -153,15 +165,15 @@ class _StreamCallbackOutput:
             "stdout": StreamingLogRedactor(secret_values),
             "stderr": StreamingLogRedactor(secret_values),
         }
-        self._raw_chunks: dict[OutputStream, list[bytes]] = {"stdout": [], "stderr": []}
+        self._raw_output: dict[OutputStream, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
         self._delivery_cancelled = False
         self._active_deliveries: set[asyncio.Task[None]] = set()
 
     def append_raw(self, chunk: bytes, stream: OutputStream) -> None:
-        self._raw_chunks[stream].append(chunk)
+        self._raw_output[stream].extend(chunk)
 
     def raw_output(self, stream: OutputStream) -> bytes:
-        return b"".join(self._raw_chunks[stream])
+        return bytes(self._raw_output[stream])
 
     def abandon_delivery(self) -> None:
         """Prevent timeout cleanup from re-entering a stuck callback."""
@@ -874,9 +886,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             callback_error = asyncio.get_running_loop().create_future()
             callback_output = _StreamCallbackOutput(output_callback, callback_error, output_secret_values)
         communication = asyncio.create_task(
-            proc.communicate(input=env_payload)
-            if output_callback is None
-            else self._collect_streamed_output(
+            self._collect_streamed_output(
                 proc,
                 env_payload,
                 callback_output,
@@ -1050,11 +1060,12 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
     async def _collect_streamed_output(
         proc: asyncio.subprocess.Process,
         stdin_data: bytes,
-        callback_output: _StreamCallbackOutput,
+        callback_output: _StreamCallbackOutput | None,
     ) -> tuple[bytes, bytes]:
-        """Drain both process streams while preserving ``communicate`` results."""
+        """Drain both streams within one combined hard raw-byte budget."""
         if proc.stdin is None or proc.stdout is None or proc.stderr is None:
             raise RuntimeError("local subprocess pipe invariant violated")
+        output_budget = CommandOutputByteBudget()
 
         async def write_stdin() -> None:
             try:
@@ -1074,28 +1085,37 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             stream: OutputStream,
         ) -> bytes:
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            chunks: list[bytes] = []
+            output = bytearray()
 
             while chunk := await reader.read(64 * 1024):
-                chunks.append(chunk)
-                callback_output.append_raw(chunk, stream)
-                if text := decoder.decode(chunk):
-                    await callback_output.feed(text, stream)
+                output_budget.consume(chunk)
+                output.extend(chunk)
+                if callback_output is not None:
+                    callback_output.append_raw(chunk, stream)
+                    if text := decoder.decode(chunk):
+                        await callback_output.feed(text, stream)
                 # A callback coroutine is allowed to complete synchronously;
                 # still give command timeout/cancellation and the other stream
                 # a scheduling point after each bounded read.
                 await asyncio.sleep(0)
-            if text := decoder.decode(b"", final=True):
+            if callback_output is not None and (text := decoder.decode(b"", final=True)):
                 await callback_output.feed(text, stream)
-            return b"".join(chunks)
+            return bytes(output)
 
-        _, stdout, stderr, _ = await asyncio.gather(
-            write_stdin(),
-            drain_stream(proc.stdout, "stdout"),
-            drain_stream(proc.stderr, "stderr"),
-            proc.wait(),
-        )
-        return stdout, stderr
+        stdin_task = asyncio.create_task(write_stdin())
+        stdout_task = asyncio.create_task(drain_stream(proc.stdout, "stdout"))
+        stderr_task = asyncio.create_task(drain_stream(proc.stderr, "stderr"))
+        wait_task = asyncio.create_task(proc.wait())
+        tasks = (stdin_task, stdout_task, stderr_task, wait_task)
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return stdout_task.result(), stderr_task.result()
 
     async def exec_with_sensitive_env(
         self,
@@ -1552,12 +1572,22 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         secret_values = {
             value
             for key, value in merged.items()
-            if value and (_SENSITIVE_ENV_NAME_RE.search(key) or _LEGACY_SECRET_ENV_NAME_RE.search(key))
+            if value
+            and (
+                _SENSITIVE_ENV_NAME_RE.search(key)
+                or _COMPACT_SENSITIVE_ENV_NAME_RE.search(key)
+                or (len(value) >= _MIN_LEGACY_SECRET_VALUE_LENGTH and _LEGACY_SECRET_ENV_NAME_RE.search(key))
+            )
         }
         secret_values.update(
             value
             for key, value in exec_env.items()
-            if value and (_SENSITIVE_ENV_NAME_RE.search(key) or _LEGACY_SECRET_ENV_NAME_RE.search(key))
+            if value
+            and (
+                _SENSITIVE_ENV_NAME_RE.search(key)
+                or _COMPACT_SENSITIVE_ENV_NAME_RE.search(key)
+                or (len(value) >= _MIN_LEGACY_SECRET_VALUE_LENGTH and _LEGACY_SECRET_ENV_NAME_RE.search(key))
+            )
         )
         return secret_values
 

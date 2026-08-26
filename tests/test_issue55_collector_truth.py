@@ -29,6 +29,9 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
+    MAX_CUSTOM_METRIC_NAME_BYTES,
+    MAX_CUSTOM_METRICS,
+    extract_custom_metrics,
     overall_score,
 )
 
@@ -405,6 +408,76 @@ def test_authoritative_multistep_reward_rejects_invalid_default_constituent_with
     assert len(failure["reason"]) <= 2048
 
 
+def test_authoritative_final_strategy_accepts_incomplete_intermediate_standard_reward(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    _write_authoritative_multistep_result(
+        job_dir,
+        trial_name,
+        aggregate=_default_reward("case-001", 1.0),
+        step_rewards=[
+            {"metric_set": DEFAULT_METRIC_SET, "accuracy": 0.2},
+            _default_reward("case-001", 1.0),
+        ],
+    )
+
+    [extracted] = _extract_rewards(job_dir)
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert extracted.get("evaluation_status") != "failed"
+    assert result["execution_status"] == "succeeded"
+    assert result["agents"]["opencode"]["conditions"]["with_skill"]["scored_attempts"] == 1
+
+
+def test_authoritative_mean_strategy_treats_missing_step_metric_keys_as_zero(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    aggregate = _default_reward("case-001", 0.5)
+    aggregate["accuracy"] = 0.6
+    _write_authoritative_multistep_result(
+        job_dir,
+        trial_name,
+        aggregate=aggregate,
+        step_rewards=[
+            {"metric_set": DEFAULT_METRIC_SET, "accuracy": 0.2},
+            _default_reward("case-001", 1.0),
+        ],
+    )
+
+    [extracted] = _extract_rewards(job_dir)
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert extracted.get("evaluation_status") != "failed"
+    assert result["execution_status"] == "succeeded"
+    assert result["agents"]["opencode"]["conditions"]["with_skill"]["scored_attempts"] == 1
+
+
+@pytest.mark.parametrize(("strategy", "aggregate_score"), [("final", 1.0), ("mean", 0.5)])
+@pytest.mark.parametrize("empty_rewards", [None, {}], ids=["missing", "empty"])
+def test_authoritative_strategies_accept_successful_empty_intermediate_verifier_rewards(
+    tmp_path: Path,
+    strategy: str,
+    aggregate_score: float,
+    empty_rewards: dict[str, object] | None,
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = _write_authoritative_multistep_result(
+        job_dir,
+        trial_name,
+        aggregate=_default_reward("case-001", aggregate_score),
+        step_rewards=[{}, _default_reward("case-001", 1.0)],
+    )
+    payload = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    payload["step_results"][0]["verifier_result"] = {} if empty_rewards is None else {"rewards": empty_rewards}
+    (trial_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded", strategy
+    assert result["agents"]["opencode"]["conditions"]["with_skill"]["scored_attempts"] == 1
+
+
 @pytest.mark.parametrize("status_location", ["result", "verifier", "reward"])
 def test_authoritative_root_failed_status_is_never_scored(tmp_path: Path, status_location: str) -> None:
     job_dir = tmp_path / "jobs" / "demo-opencode-with"
@@ -700,6 +773,36 @@ def test_custom_only_step_fallback_remains_scoreable(tmp_path: Path) -> None:
     assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
 
 
+def test_legacy_reward_alias_step_fallback_remains_custom_only_and_scoreable(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "case-001",
+                "step_results": [
+                    {
+                        "step_name": "custom",
+                        "verifier_result": {"rewards": {"reward": 0.8}},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["with_skill"] == {}
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.8
+
+
 def test_custom_only_authoritative_reward_ignores_standard_judge_sidecar_scan_bound(tmp_path: Path) -> None:
     job_dir = tmp_path / "jobs" / "demo-opencode-with"
     trial_dir = _write_authoritative_multistep_result(
@@ -720,7 +823,7 @@ def test_custom_only_authoritative_reward_ignores_standard_judge_sidecar_scan_bo
     assert agent["custom_with_skill"] == {"domain_quality": 0.8}
 
 
-def test_nested_custom_only_step_fallback_preserves_custom_metrics(tmp_path: Path) -> None:
+def test_flat_custom_only_step_fallback_preserves_custom_metrics(tmp_path: Path) -> None:
     job_dir = tmp_path / "jobs" / "demo-opencode-with"
     trial_name = "case-001__attempt"
     trial_dir = job_dir / trial_name
@@ -736,7 +839,7 @@ def test_nested_custom_only_step_fallback_preserves_custom_metrics(tmp_path: Pat
                         "verifier_result": {
                             "rewards": {
                                 "metric_set": CUSTOM_ONLY_METRIC_SET,
-                                "metrics": {"domain_quality": {"score": 0.9}},
+                                "domain_quality": 0.9,
                                 "overall": 0.75,
                             }
                         },
@@ -755,6 +858,178 @@ def test_nested_custom_only_step_fallback_preserves_custom_metrics(tmp_path: Pat
     assert agent["with_skill"] == {}
     assert agent["custom_with_skill"] == {"domain_quality": 0.9}
     assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
+
+
+def test_rootless_multistep_custom_metric_average_zero_fills_missing_keys(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "case-001",
+                "step_results": [
+                    {
+                        "step_name": "first",
+                        "verifier_result": {"rewards": {"overall": 1.0, "quality": 1.0}},
+                    },
+                    {
+                        "step_name": "second",
+                        "verifier_result": {"rewards": {"overall": 1.0}},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["custom_with_skill"] == {"quality": 0.5}
+    assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
+
+
+def test_declared_custom_only_step_fallback_cannot_spoof_reserved_metrics(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "case-001",
+                "step_results": [
+                    {
+                        "step_name": "custom",
+                        "verifier_result": {
+                            "rewards": {
+                                "metric_set": CUSTOM_ONLY_METRIC_SET,
+                                **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                                "overall": 0.1,
+                                "domain_quality": 0.2,
+                            }
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["with_skill"] == {}
+    assert agent["custom_with_skill"] == {"domain_quality": 0.2}
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.1
+
+
+def test_mixed_step_fallback_uses_one_overall_across_collector_and_report(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    step_rewards = [
+        {
+            "entry_id": "case-001",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        },
+        {
+            "entry_id": "case-001",
+            "metric_set": CUSTOM_ONLY_METRIC_SET,
+            "overall": 0.2,
+            "domain_quality": 0.4,
+        },
+    ]
+    step_results: list[dict[str, object]] = []
+    for index, reward in enumerate(step_rewards, start=1):
+        step_name = f"step-{index}"
+        verifier_dir = trial_dir / "steps" / step_name / "verifier"
+        verifier_dir.mkdir(parents=True)
+        (verifier_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        step_results.append({"step_name": step_name, "verifier_result": {"rewards": reward}})
+    (trial_dir / "result.json").write_text(
+        json.dumps({"trial_name": trial_name, "task_name": "case-001", "step_results": step_results}),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    loaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    from skillevaluator.evaluation.tier3_report import _normalize_trials
+
+    [trial] = _normalize_trials(loaded["rewards"], list(DEFAULT_METRICS))
+    assert result["execution_status"] == "succeeded"
+    assert agent["with_skill"] == dict.fromkeys(DEFAULT_METRICS, 1.0)
+    assert summary["overall_score"] == 0.6
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.6
+    assert trial["overall"] == 0.6
+
+
+def test_result_only_mixed_step_fallback_keeps_rows_for_consistent_overall(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    step_rewards = [
+        {
+            "entry_id": "case-001",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        },
+        {
+            "entry_id": "case-001",
+            "metric_set": CUSTOM_ONLY_METRIC_SET,
+            "overall": 0.2,
+            "domain_quality": 0.4,
+        },
+    ]
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "case-001",
+                "step_results": [
+                    {
+                        "step_name": f"step-{index}",
+                        "verifier_result": {"rewards": reward},
+                    }
+                    for index, reward in enumerate(step_rewards, start=1)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    loaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    from skillevaluator.evaluation.tier3_report import _normalize_trials
+
+    [trial] = _normalize_trials(loaded["rewards"], list(DEFAULT_METRICS))
+    assert result["execution_status"] == "succeeded"
+    assert summary["num_reward_rows"] == 2
+    assert summary["overall_score"] == 0.6
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.6
+    assert trial["overall"] == 0.6
 
 
 def test_step_fallback_aggregates_each_logical_trial_before_cross_trial_average(
@@ -789,14 +1064,16 @@ def test_step_fallback_aggregates_each_logical_trial_before_cross_trial_average(
     agent = result["agents"]["opencode"]
     assert result["execution_status"] == "succeeded"
     assert agent["conditions"]["with_skill"]["scored_attempts"] == 2
-    # The public count remains the number of persisted reward rows for backward
-    # compatibility; scoring and pass@k use one aggregate per logical trial.
-    assert agent["num_trials_with"] == 4
+    # Public denominators and scoring both count Harbor attempts rather than
+    # physical verifier rows.  The raw row count remains in the private summary
+    # so bounded report loading can still detect truncation or missing files.
+    assert agent["num_trials_with"] == 2
     assert agent["with_skill"] == dict.fromkeys(DEFAULT_METRICS, 0.8)
     summary = json.loads(
         (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
     )
-    assert summary["num_trials"] == 4
+    assert summary["num_trials"] == 2
+    assert summary["num_reward_rows"] == 4
     assert len(list((tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json"))) == 4
 
     # Findings use bounded raw rows for evidence, but their score must remain
@@ -836,7 +1113,7 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
                 reward = {
                     "entry_id": case_id,
                     "metric_set": CUSTOM_ONLY_METRIC_SET,
-                    "metrics": {"domain_quality": {"score": score}},
+                    "domain_quality": score,
                     "overall": score,
                 }
                 if case_id == "case-a":
@@ -887,6 +1164,7 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
     assert domain_finding["score"] == agent["custom_with_skill"]["domain_quality"]
     assert domain_finding["severity"] == "ok"
 
+    monkeypatch.setattr(report_data, "_MAX_TRIALS_PER_CONDITION", 512)
     skill_dir = tmp_path / "demo-skill"
     skill_dir.mkdir()
     report_path = render_agent_eval_html_report(
@@ -910,12 +1188,15 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
     assert report_payload["agents"]["opencode"]["with_skill"] == 0.8
     assert report_payload["agents"]["opencode"]["baseline"] == 0.7
     assert report_payload["agents"]["opencode"]["lift"] == 0.1
-    assert report_payload["agents"]["opencode"]["num_trials"] == 4
-    assert report_payload["agents"]["opencode"]["num_trials_baseline"] == 4
+    assert report_payload["agents"]["opencode"]["num_trials"] == 2
+    assert report_payload["agents"]["opencode"]["num_trials_baseline"] == 2
+    assert len(report_payload["agents"]["opencode"]["trials"]) == 2
+    assert len(report_payload["agents"]["opencode"]["trials_baseline"]) == 2
 
     # A legacy summary has no canonical overall. When its raw rows are
     # truncated, the report must show unavailable rather than publish the
     # partial first logical trial as a numeric headline.
+    monkeypatch.setattr(report_data, "_MAX_TRIALS_PER_CONDITION", 3)
     for variant in ("with-skill", "without-skill"):
         summary_path = tmp_path / "results" / "opencode" / variant / "summary.json"
         legacy_summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -972,7 +1253,10 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
         ),
         (
             _default_reward("case-001", 0.8),
-            [_default_reward("case-001", 0.7), {"overall": 0.9, "domain_quality": 1.0}],
+            [
+                _default_reward("case-001", 0.7),
+                {**_default_reward("case-001", 0.8), "domain_quality": 1.0},
+            ],
             {},
         ),
         (
@@ -981,7 +1265,7 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
             {},
         ),
     ],
-    ids=("custom-only", "mixed-default-and-custom", "complete-default"),
+    ids=("custom-only", "default-with-custom-metric", "complete-default"),
 )
 def test_authoritative_multistep_reward_preserves_complete_custom_topologies(
     tmp_path: Path,
@@ -1004,6 +1288,176 @@ def test_authoritative_multistep_reward_preserves_complete_custom_topologies(
     assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
     assert agent["custom_with_skill"] == expected_custom_scores
     assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
+
+
+def test_authoritative_root_preserves_flat_numeric_custom_metric(tmp_path: Path) -> None:
+    aggregate: dict[str, object] = {"overall": 0.75, "quality": 0.8}
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_authoritative_multistep_result(
+        job_dir,
+        "case-001__attempt",
+        aggregate=aggregate,
+        step_rewards=[dict(aggregate)],
+    )
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
+    assert agent["custom_with_skill"] == {"quality": 0.8}
+
+
+@pytest.mark.parametrize(
+    "invalid_surface",
+    [
+        {"custom_metrics": {"quality": 0.8}},
+        {"metrics": {"quality": 0.8}},
+        {"quality": {"score": 0.8}},
+    ],
+    ids=("custom-metrics-container", "metrics-container", "dict-score"),
+)
+def test_authoritative_root_rejects_nonnumeric_reward_shapes(
+    tmp_path: Path,
+    invalid_surface: dict[str, object],
+) -> None:
+    aggregate = {"overall": 0.75, **invalid_surface}
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_authoritative_multistep_result(
+        job_dir,
+        "case-001__attempt",
+        aggregate=aggregate,
+        step_rewards=[dict(aggregate)],
+    )
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert agent["custom_with_skill"] == {}
+
+
+@pytest.mark.parametrize("surface", ["custom_metrics", "metrics"])
+def test_authoritative_root_omits_unsafe_names_from_nested_harbor_reward_details(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    credential = "ghp_" + ("a" * 36)
+    oversized = "x" * (MAX_CUSTOM_METRIC_NAME_BYTES + 1)
+    invalid = "invalid_quality"
+    raw_metrics: dict[str, object] = {
+        credential: 0.6,
+        oversized: 0.7,
+        invalid: 1.1,
+        "quality": 0.8,
+    }
+    aggregate: dict[str, object] = {"overall": 0.75}
+    aggregate[surface] = (
+        raw_metrics if surface == "custom_metrics" else {name: {"score": score} for name, score in raw_metrics.items()}
+    )
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_authoritative_multistep_result(
+        job_dir,
+        "case-001__attempt",
+        aggregate=aggregate,
+        step_rewards=[dict(aggregate)],
+    )
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "failed"
+    reward_path = next((tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json"))
+    persisted_text = reward_path.read_text(encoding="utf-8")
+    json.loads(persisted_text)
+    assert credential not in persisted_text
+    assert oversized not in persisted_text
+    assert invalid not in persisted_text
+
+
+@pytest.mark.parametrize("root_kind", ["custom-only", "default"])
+def test_authoritative_root_rejects_invalid_constituent_custom_metric_contract(
+    tmp_path: Path,
+    root_kind: str,
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    if root_kind == "default":
+        aggregate = _default_reward("case-001", 1.0)
+        step_reward = _default_reward("case-001", 1.0)
+    else:
+        aggregate = {"overall": 0.75, "domain_quality": 0.8}
+        step_reward = {"overall": 0.75}
+    step_reward.update({f"metric_{index:03d}": 1.0 for index in range(MAX_CUSTOM_METRICS + 1)})
+    _write_authoritative_multistep_result(
+        job_dir,
+        "case-001__attempt",
+        aggregate=aggregate,
+        step_rewards=[step_reward],
+    )
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    reward_path = next((tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json"))
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"))
+    assert persisted["evaluation_status"] == "failed"
+    assert "custom metric" in json.dumps(persisted["evaluation_errors"]).casefold()
+
+
+def test_authoritative_root_rejects_union_of_valid_constituent_custom_metrics(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    left_count = MAX_CUSTOM_METRICS // 2 + 1
+    right_count = MAX_CUSTOM_METRICS - left_count + 1
+    _write_authoritative_multistep_result(
+        job_dir,
+        "case-001__attempt",
+        aggregate={"overall": 0.75},
+        step_rewards=[
+            {
+                "overall": 0.75,
+                **{f"left_{index:03d}": 1.0 for index in range(left_count)},
+            },
+            {
+                "overall": 0.75,
+                **{f"right_{index:03d}": 1.0 for index in range(right_count)},
+            },
+        ],
+    )
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert agent["custom_with_skill"] == {}
+
+
+def test_authoritative_root_rejects_reserved_constituent_custom_metric_name(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_authoritative_multistep_result(
+        job_dir,
+        "case-001__attempt",
+        aggregate={"overall": 0.75},
+        step_rewards=[
+            {
+                "overall": 0.75,
+                "custom_metrics": {"security": 0.5, "quality": 0.8},
+            }
+        ],
+    )
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert agent["custom_with_skill"] == {}
 
 
 def _create_step_entries(trial_dir: Path, names: list[str], *, directories: bool) -> None:
@@ -1522,6 +1976,855 @@ def test_mixed_failed_condition_suppresses_published_quality_and_paired_artifact
         assert dimension["verdict"] is None
         assert "0.00" not in str(dimension["explanation"])
         assert all("0.00" not in bullet for bullet in dimension["reasoning_bullets"])
+
+
+def test_missing_with_job_never_aliases_without_skill_job(tmp_path: Path) -> None:
+    without_job = tmp_path / "jobs" / "demo-opencode-without"
+    trial_name = "case-001__attempt"
+    _write_reward(without_job, trial_name, _default_reward("case-001", 0.2))
+    _write_complete_job_result(without_job, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert agent["with_skill"] == {}
+    assert agent["job_failures"]["with_skill"] == ("Harbor job directory was not created: demo-opencode-with")
+    assert agent["conditions"]["without_skill"]["execution_status"] == "succeeded"
+    assert agent["conditions"]["without_skill"]["scored_attempts"] == 1
+    assert agent["without_skill"] == dict.fromkeys(DEFAULT_METRICS, 0.2)
+    assert not (tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name).exists()
+    assert (tmp_path / "results" / "opencode" / "without-skill" / "trials" / trial_name).exists()
+
+
+@pytest.mark.parametrize("physical_trial_root", ["case-a__x", "CASE-A__x"])
+def test_persisted_step_trial_name_never_collides_with_physical_trial_root(
+    tmp_path: Path,
+    physical_trial_root: str,
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_reward(job_dir, "case-a/steps/x", _default_reward("case-a", 0.2))
+    _write_reward(job_dir, physical_trial_root, _default_reward("case-b", 0.8))
+    _write_complete_job_result(job_dir, ["case-a", physical_trial_root])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-a", "case-b"])
+
+    assert result["execution_status"] == "succeeded"
+    trials_dir = tmp_path / "results" / "opencode" / "with-skill" / "trials"
+    reward_paths = sorted(trials_dir.glob("*/reward.json"))
+    persisted_rewards = [json.loads(path.read_text(encoding="utf-8")) for path in reward_paths]
+    assert len(persisted_rewards) == 2
+    assert len({path.parent.name.rstrip(" .").casefold() for path in reward_paths}) == 2
+    assert {reward["entry_id"] for reward in persisted_rewards} == {"case-a", "case-b"}
+    assert {reward["trial_id"] for reward in persisted_rewards} == {"case-a", physical_trial_root}
+
+    loaded_agent = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    assert loaded_agent["rewards_complete"] is True
+    assert len(loaded_agent["rewards"]) == 2
+
+
+def test_persisted_trial_alias_keeps_exact_source_identity_with_trailing_space(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs"
+    rewards: list[dict[str, object]] = []
+    for index, trial_root_name in enumerate(("case", "case "), start=1):
+        agent_dir = job_dir / trial_root_name / "agent"
+        agent_dir.mkdir(parents=True)
+        trajectory = {
+            "schema_version": "ATIF-v1.2",
+            "agent": {"name": "opencode", "version": "test"},
+            "steps": [
+                {
+                    "step_id": 1,
+                    "source": "agent",
+                    "message": f"source-{index}",
+                    "tool_calls": [],
+                    "observation": {"results": []},
+                }
+            ],
+        }
+        (agent_dir / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+        rewards.append(
+            {
+                **_default_reward(f"case-{index}", 1.0),
+                "_trial_name": trial_root_name,
+                "_trial_root_name": trial_root_name,
+            }
+        )
+
+    trials_dir = tmp_path / "results" / "trials"
+    collector_module._save_trials(
+        rewards,
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    persisted = [
+        (
+            json.loads((path / "reward.json").read_text(encoding="utf-8")),
+            json.loads((path / "trajectory.json").read_text(encoding="utf-8")),
+        )
+        for path in sorted(trials_dir.iterdir())
+    ]
+    assert {reward["trial_id"] for reward, _trajectory in persisted} == {"case", "case "}
+    assert {trajectory["steps"][0]["message"] for _reward, trajectory in persisted} == {
+        "source-1",
+        "source-2",
+    }
+
+
+def test_scored_and_unscored_portable_name_collision_persists_distinct_trials(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs"
+    scored_source = job_dir / "foo "
+    scored_source.mkdir(parents=True)
+    unscored_source = job_dir / "foo"
+    unscored_source.mkdir(parents=True)
+    (unscored_source / "exception.txt").write_text("unscored-source", encoding="utf-8")
+    rewards = [
+        {
+            **_default_reward("case-scored", 1.0),
+            "_trial_name": "foo ",
+            "_trial_root_name": "foo ",
+        }
+    ]
+    trials_dir = tmp_path / "results" / "trials"
+
+    collector_module._save_trials(
+        rewards,
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    trial_dirs = sorted(path for path in trials_dir.iterdir() if path.is_dir())
+    assert len(trial_dirs) == 2
+    assert len({path.name.rstrip(" .").casefold() for path in trial_dirs}) == 2
+    [scored_out] = [path for path in trial_dirs if (path / "reward.json").exists()]
+    [unscored_out] = [path for path in trial_dirs if (path / "failure.json").exists()]
+    assert json.loads((scored_out / "reward.json").read_text(encoding="utf-8"))["entry_id"] == "case-scored"
+    assert json.loads((unscored_out / "failure.json").read_text(encoding="utf-8"))["trial"] == "foo"
+    assert (unscored_out / "exception.txt").read_text(encoding="utf-8") == "unscored-source"
+
+
+def test_unscored_failure_metadata_is_bounded_and_report_readable(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs"
+    trial_source = job_dir / "unscored-trial"
+    trial_source.mkdir(parents=True)
+    private_tail = "private-task-name-tail"
+    (trial_source / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": ("x" * (3 * 1024 * 1024)) + private_tail,
+                "exception_info": {
+                    "exception_type": "HarborTrialError",
+                    "exception_message": "the trial did not produce a reward",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    trials_dir = tmp_path / "results" / "trials"
+
+    collector_module._save_trials(
+        [],
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    failure_path = trials_dir / "unscored-trial" / "failure.json"
+    assert failure_path.stat().st_size <= 2 * 1024 * 1024
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert failure["status"] == "unscored"
+    assert len(failure["task_name"]) <= collector_module.REWARD_METADATA_TEXT_MAX_CHARS
+    assert failure["task_name"].endswith("...<truncated>")
+    assert private_tail not in failure_path.read_text(encoding="utf-8")
+    diagnostics: list[dict[str, object]] = []
+    assert report_data._load_bounded_json(failure_path, diagnostics, artifact="failure") == failure
+    assert diagnostics == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="colon and backslash are not literal Windows child names")
+@pytest.mark.parametrize("trial_root_name", [r"foo\bar", "foo:bar"])
+def test_persisted_trial_alias_keeps_exact_posix_source_name(
+    tmp_path: Path,
+    trial_root_name: str,
+) -> None:
+    job_dir = tmp_path / "jobs"
+    trial_source = job_dir / trial_root_name
+    trial_source.mkdir(parents=True)
+    (trial_source / "trial.log").write_text("actual-source", encoding="utf-8")
+    trials_dir = tmp_path / "results" / "trials"
+
+    collector_module._save_trials(
+        [
+            {
+                **_default_reward("case-scored", 1.0),
+                "_trial_name": trial_root_name,
+                "_trial_root_name": trial_root_name,
+            }
+        ],
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    [trial_out] = list(trials_dir.iterdir())
+    assert (trial_out / "trial.log").read_text(encoding="utf-8") == "actual-source"
+    assert json.loads((trial_out / "reward.json").read_text(encoding="utf-8"))["trial_id"] == trial_root_name
+
+
+def test_long_multistep_output_name_uses_portable_collision_alias(tmp_path: Path) -> None:
+    trial_root_name = "r" * 200
+    step_name = "s" * 100
+    job_dir = tmp_path / "jobs"
+    (job_dir / trial_root_name).mkdir(parents=True)
+    trials_dir = tmp_path / "results" / "trials"
+
+    collector_module._save_trials(
+        [
+            {
+                **_default_reward("case-scored", 1.0),
+                "_trial_name": trial_root_name,
+                "_trial_root_name": trial_root_name,
+                "_step_name": step_name,
+            }
+        ],
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    [trial_out] = list(trials_dir.iterdir())
+    assert trial_out.name.startswith("skillevaluator-trial-collision-")
+    assert len(trial_out.name.encode("utf-8")) <= 240
+    assert (trial_out / "reward.json").is_file()
+
+
+@pytest.mark.parametrize("reserved_name", ["CON", "nul.txt", "COM1"])
+def test_windows_reserved_trial_root_uses_portable_collision_alias(reserved_name: str) -> None:
+    [(output_name, source_name)] = collector_module._persisted_trial_names(
+        [{"_trial_root_name": reserved_name}],
+        None,
+    )
+
+    assert output_name.startswith("skillevaluator-trial-collision-")
+    assert source_name == reserved_name
+
+
+@pytest.mark.parametrize("trailing_dot_name", ["foo.", "foo.."])
+def test_windows_trailing_dot_trial_root_uses_portable_collision_alias(trailing_dot_name: str) -> None:
+    [(output_name, source_name)] = collector_module._persisted_trial_names(
+        [{"_trial_root_name": trailing_dot_name}],
+        None,
+    )
+
+    assert output_name.startswith("skillevaluator-trial-collision-")
+    assert source_name == trailing_dot_name
+
+
+def test_saved_reward_drops_credential_shaped_custom_metric_key(tmp_path: Path) -> None:
+    credential = "sk-abcdefghijk"
+    job_dir = tmp_path / "jobs"
+    (job_dir / "case-001").mkdir(parents=True)
+    trials_dir = tmp_path / "results" / "trials"
+    reward = {
+        **_default_reward("case-001", 1.0),
+        "custom_metrics": {credential: 0.5, "quality": 0.7},
+        "_trial_name": "case-001",
+        "_trial_root_name": "case-001",
+    }
+
+    collector_module._save_trials(
+        [reward],
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    persisted_text = (trials_dir / "case-001" / "reward.json").read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert credential not in persisted_text
+    assert persisted["custom_metrics"] == {"quality": 0.7}
+
+
+@pytest.mark.parametrize("surface", ["top_level", "custom_metrics", "metrics"])
+def test_saved_reward_preserves_allowlisted_sensitive_custom_metrics_and_safe_details(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    job_dir = tmp_path / "jobs"
+    (job_dir / "case-001").mkdir(parents=True)
+    trials_dir = tmp_path / "results" / "trials"
+    scores = {"secret_handling": 0.9, "auth_quality": 0.8, "token_efficiency": 0.7}
+    reward: dict[str, object] = {
+        "entry_id": "case-001",
+        "metric_set": CUSTOM_ONLY_METRIC_SET,
+        "overall": 0.8,
+        "custom_details": {
+            name: {
+                "reason": f"Evidence retained for {name}",
+                "api_key": "sk-abcdefghijk",
+            }
+            for name in scores
+        },
+        "_trial_name": "case-001",
+        "_trial_root_name": "case-001",
+    }
+    if surface == "top_level":
+        reward.update(scores)
+    elif surface == "custom_metrics":
+        reward["custom_metrics"] = scores
+    else:
+        reward["metrics"] = {name: {"score": score} for name, score in scores.items()}
+
+    collector_module._save_trials(
+        [reward],
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    persisted_text = (trials_dir / "case-001" / "reward.json").read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert "sk-abcdefghijk" not in persisted_text
+    assert extract_custom_metrics(persisted) == scores
+    for name in scores:
+        assert persisted["custom_details"][name] == {
+            "reason": f"Evidence retained for {name}",
+            "api_key": "<redacted>",
+        }
+
+
+@pytest.mark.parametrize("surface", ["top_level", "custom_metrics", "metrics"])
+def test_saved_reward_omits_rejected_metric_names_from_ordinary_details(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    job_dir = tmp_path / "jobs"
+    (job_dir / "case-001").mkdir(parents=True)
+    trials_dir = tmp_path / "results" / "trials"
+    rejected_name = "api_key_quality"
+    reward: dict[str, object] = {
+        "entry_id": "case-001",
+        "metric_set": CUSTOM_ONLY_METRIC_SET,
+        "overall": 0.8,
+        "details": {
+            rejected_name: {"reason": "must not become a redaction alias"},
+            "quality": {"reason": "bounded evidence"},
+        },
+        "_trial_name": "case-001",
+        "_trial_root_name": "case-001",
+    }
+    scores: dict[str, object] = {rejected_name: 0.9, "quality": 0.8}
+    if surface == "top_level":
+        reward.update(scores)
+    elif surface == "custom_metrics":
+        reward["custom_metrics"] = scores
+    else:
+        reward["metrics"] = {name: {"score": score} for name, score in scores.items()}
+
+    collector_module._save_trials(
+        [reward],
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    persisted_text = (trials_dir / "case-001" / "reward.json").read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert rejected_name not in persisted_text
+    assert persisted["details"] == {"quality": {"reason": "bounded evidence"}}
+
+
+@pytest.mark.parametrize(
+    "rejected_value",
+    [{"reason": "nonnumeric"}, "nonnumeric", None],
+    ids=("dict", "string", "null"),
+)
+def test_saved_reward_omits_nonnumeric_unpublishable_top_level_and_detail_keys(
+    tmp_path: Path,
+    rejected_value: object,
+) -> None:
+    job_dir = tmp_path / "jobs"
+    (job_dir / "case-001").mkdir(parents=True)
+    trials_dir = tmp_path / "results" / "trials"
+    rejected_names = [
+        "api_key_quality",
+        "tokens_quality",
+        "quality_sk-abcdefghijk",
+        "x" * (MAX_CUSTOM_METRIC_NAME_BYTES + 1),
+    ]
+    reward: dict[str, object] = {
+        "entry_id": "case-001",
+        "metric_set": CUSTOM_ONLY_METRIC_SET,
+        "overall": 0.8,
+        "quality": 0.8,
+        "details": {
+            **dict.fromkeys(rejected_names, rejected_value),
+            "quality": {"reason": "bounded evidence"},
+        },
+        **dict.fromkeys(rejected_names, rejected_value),
+        "_trial_name": "case-001",
+        "_trial_root_name": "case-001",
+    }
+
+    collector_module._save_trials(
+        [reward],
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    persisted_text = (trials_dir / "case-001" / "reward.json").read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert all(name not in persisted_text for name in rejected_names)
+    assert persisted["quality"] == 0.8
+    assert persisted["details"] == {"quality": {"reason": "bounded evidence"}}
+
+
+@pytest.mark.parametrize("surface", ["custom_metrics", "metrics", "top_level"])
+def test_credential_custom_metric_names_never_reach_aggregates_or_paired_artifacts(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    credentials = [
+        "sk-abcdefghijk",
+        "ghp_" + ("a" * 36),
+        "gho_" + ("a" * 36),
+        "ghu_" + ("a" * 36),
+        "ghs_" + ("a" * 36),
+        "ghr_" + ("a" * 36),
+        "ghs_123456789_" + ("a" * 32) + "." + ("b" * 32) + "." + ("c" * 32),
+        "github_pat_" + ("a" * 30),
+        "".join(("xoxb-", "1234567890-abcdefghijklmnopqrstuvwx")),  # noqa: FLY002
+        "AIza" + ("A" * 35),
+        "glpat-" + ("a" * 20),
+    ]
+    for variant, quality in (("with", 0.8), ("without", 0.3)):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        reward = _default_reward("case-001", quality)
+        custom = {**dict.fromkeys(credentials, 0.5), "quality": quality}
+        if surface == "top_level":
+            reward.update(custom)
+        else:
+            reward[surface] = custom
+        _write_reward(job_dir, "case-001__attempt", reward)
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["custom_with_skill"] == {"quality": 0.8}
+    assert agent["custom_without_skill"] == {"quality": 0.3}
+    assert set(agent["custom_lift"]) == {"quality"}
+    assert all(credential not in json.dumps(result) for credential in credentials)
+    assert "<redacted>" not in json.dumps(agent["custom_lift"])
+
+    for artifact in (tmp_path / "results").rglob("*.json"):
+        text = artifact.read_text(encoding="utf-8")
+        json.loads(text)
+        assert all(credential not in text for credential in credentials)
+    loaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    assert loaded["rewards_complete"] is True
+
+
+@pytest.mark.parametrize("surface", ["custom_metrics", "metrics"])
+def test_invalid_claimed_custom_metric_values_are_omitted_without_score_drift(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    invalid_entries: dict[str, object] = {
+        "negative_scalar": -0.1,
+        "above_one_scalar": 1.1,
+        "string_scalar": "not-a-score",
+        "null_scalar": None,
+        "boolean_scalar": True,
+        "negative_dict": {"score": -0.1},
+        "above_one_dict": {"score": 1.1},
+        "string_dict": {"score": "not-a-score"},
+        "null_dict": {"score": None},
+        "boolean_dict": {"score": False},
+    }
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    reward = _default_reward("case-001", 1.0)
+    reward[surface] = {**invalid_entries, "quality": 0.8}
+    _write_reward(job_dir, "case-001__attempt", reward)
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded"
+    assert result["agents"]["opencode"]["custom_with_skill"] == {"quality": 0.8}
+    reward_path = next((tmp_path / "results/opencode/with-skill/trials").glob("*/reward.json"))
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"))
+    assert persisted[surface] == {"quality": 0.8}
+    for artifact in (tmp_path / "results").rglob("*.json"):
+        text = artifact.read_text(encoding="utf-8")
+        json.loads(text)
+        assert all(name not in text for name in invalid_entries)
+
+
+@pytest.mark.parametrize("surface", ["custom_metrics", "metrics"])
+def test_invalid_custom_metric_cardinality_is_stripped_before_publication(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    invalid_entries = {f"invalid_{index:03d}": None for index in range(MAX_CUSTOM_METRICS + 1)}
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    reward = _default_reward("case-001", 1.0)
+    reward[surface] = {**invalid_entries, "quality": 0.8}
+    _write_reward(job_dir, "case-001__attempt", reward)
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded"
+    assert result["agents"]["opencode"]["custom_with_skill"] == {"quality": 0.8}
+    summary_path = tmp_path / "results/opencode/with-skill/summary.json"
+    assert summary_path.stat().st_size <= report_data._MAX_JSON_BYTES
+    reward_path = next((summary_path.parent / "trials").glob("*/reward.json"))
+    persisted_text = reward_path.read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert persisted[surface] == {"quality": 0.8}
+    assert all(name not in persisted_text for name in invalid_entries)
+
+
+def test_custom_metric_cardinality_fails_before_aggregation_and_stays_report_readable(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    reward = _default_reward("case-001", 1.0)
+    reward["custom_metrics"] = {f"metric_{index:03d}": 1.0 for index in range(MAX_CUSTOM_METRICS + 1)}
+    _write_reward(job_dir, "case-001__attempt", reward)
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert agent["custom_with_skill"] == {}
+    summary_path = tmp_path / "results" / "opencode" / "with-skill" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary_path.stat().st_size <= report_data._MAX_JSON_BYTES
+    assert summary["execution_status"] == "failed"
+    [reward_path] = (summary_path.parent / "trials").glob("*/reward.json")
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"))
+    assert persisted["evaluation_status"] == "failed"
+    assert "custom metric" in json.dumps(persisted["evaluation_errors"]).casefold()
+
+
+def test_condition_custom_metric_union_fails_before_summary_or_custom_lift(tmp_path: Path) -> None:
+    per_reward = MAX_CUSTOM_METRICS // 2 + 1
+    case_ids = ["case-a", "case-b"]
+    for variant in ("with", "without"):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        for case_index, case_id in enumerate(case_ids):
+            reward = _default_reward(case_id, 1.0)
+            reward["custom_metrics"] = {f"{variant}_{case_index}_{index:03d}": 1.0 for index in range(per_reward)}
+            _write_reward(job_dir, f"{case_id}__attempt", reward)
+        _write_complete_job_result(job_dir, [f"{case_id}__attempt" for case_id in case_ids])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=case_ids)
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert agent["conditions"]["without_skill"]["scored_attempts"] == 0
+    assert agent["custom_with_skill"] == {}
+    assert agent["custom_without_skill"] == {}
+    assert agent["custom_lift"] == {}
+    assert not (tmp_path / "results" / "opencode" / "custom_lift.json").exists()
+    for summary_path in (tmp_path / "results" / "opencode").glob("*/summary.json"):
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary_path.stat().st_size <= report_data._MAX_JSON_BYTES
+        assert summary["execution_status"] == "failed"
+
+
+def test_oversized_custom_metric_name_is_rejected_without_published_alias(tmp_path: Path) -> None:
+    oversized_name = "x" * (MAX_CUSTOM_METRIC_NAME_BYTES + 1)
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    reward = _default_reward("case-001", 1.0)
+    reward["custom_metrics"] = {oversized_name: 1.0, "quality": 0.8}
+    _write_reward(job_dir, "case-001__attempt", reward)
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "failed"
+    assert result["agents"]["opencode"]["custom_with_skill"] == {}
+    for artifact in (tmp_path / "results").rglob("*.json"):
+        text = artifact.read_text(encoding="utf-8")
+        json.loads(text)
+        assert oversized_name not in text
+
+
+def test_oversized_custom_metric_in_custom_sidecar_fails_standard_reward(tmp_path: Path) -> None:
+    oversized_name = "x" * (MAX_CUSTOM_METRIC_NAME_BYTES + 1)
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_reward(
+        job_dir,
+        "case-001__attempt",
+        _default_reward("case-001", 1.0),
+        custom={"custom_metrics": {oversized_name: 0.5}},
+    )
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "failed"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert agent["custom_with_skill"] == {}
+    [reward_path] = (tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json")
+    persisted_text = reward_path.read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert oversized_name not in persisted_text
+    assert persisted["evaluation_status"] == "failed"
+    assert "custom metric" in json.dumps(persisted["evaluation_errors"]).casefold()
+
+
+def test_custom_sidecar_details_are_limited_to_numeric_custom_metric_names(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    custom_details = {f"detail_only_{index:05d}": "unused" for index in range(10_000)}
+    custom_details.update(
+        {
+            "quality": {"reason": "bounded evidence"},
+            "api_key_quality": {"reason": "must not become a redaction alias"},
+        }
+    )
+    _write_reward(
+        job_dir,
+        "case-001__attempt",
+        _default_reward("case-001", 1.0),
+        custom={
+            "custom_metrics": {"quality": 0.8, "api_key_quality": 0.9},
+            "details": custom_details,
+        },
+    )
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded"
+    assert result["agents"]["opencode"]["custom_with_skill"] == {"quality": 0.8}
+    reward_path = next((tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json"))
+    persisted_text = reward_path.read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert persisted["custom_details"] == {"quality": {"reason": "bounded evidence"}}
+    assert "detail_only_" not in persisted_text
+    assert "api_key_quality" not in persisted_text
+
+    findings = report._extract_findings(
+        [persisted],
+        canonical_scores={"quality": 0.8},
+    )
+    finding_metrics = {finding["metric"] for finding in findings}
+    assert "quality" in finding_metrics
+    assert not any(metric.startswith("detail_only_") for metric in finding_metrics)
+    assert "api_key_quality" not in finding_metrics
+
+
+def test_safe_sensitive_custom_metric_details_survive_with_nested_secrets_redacted(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    credential = "sk-abcdefghijk"
+    _write_reward(
+        job_dir,
+        "case-001__attempt",
+        _default_reward("case-001", 1.0),
+        custom={
+            "custom_metrics": {"secret_handling": 0.9, "token_efficiency": 0.8},
+            "details": {
+                "secret_handling": {
+                    "reason": f"Handled {credential} without disclosure",
+                    "api_key": credential,
+                },
+                "token_efficiency": {
+                    "reason": "Used the token budget efficiently",
+                    "authorization": "Bearer abcdefghijklmnop",
+                },
+            },
+        },
+    )
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded"
+    reward_path = next((tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json"))
+    persisted_text = reward_path.read_text(encoding="utf-8")
+    persisted = json.loads(persisted_text)
+    assert credential not in persisted_text
+    assert persisted["custom_details"]["secret_handling"] == {
+        "reason": "Handled sk-<redacted> without disclosure",
+        "api_key": "<redacted>",
+    }
+    assert persisted["custom_details"]["token_efficiency"] == {
+        "reason": "Used the token budget efficiently",
+        "authorization": "<redacted>",
+    }
+
+    findings = report._extract_findings(
+        [persisted],
+        canonical_scores={"secret_handling": 0.9, "token_efficiency": 0.8},
+    )
+    findings_by_metric = {finding["metric"]: finding for finding in findings}
+    assert "Handled sk-<redacted> without disclosure" in findings_by_metric["secret_handling"]["reasons"], findings
+    assert "Used the token budget efficiently" in findings_by_metric["token_efficiency"]["reasons"], findings
+
+
+def test_unpublishable_detail_key_amplification_is_removed_before_scoring(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    reward = _default_reward("case-001", 1.0)
+    reward["details"] = {f"api_key_{index:020d}": "" for index in range(49_000)}
+    _write_reward(job_dir, "case-001__attempt", reward)
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
+    reward_path = next((tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json"))
+    assert reward_path.stat().st_size <= report_data._MAX_JSON_BYTES
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"))
+    assert persisted["details"] == {}
+    assert "api_key_" not in reward_path.read_text(encoding="utf-8")
+
+
+def test_security_attribution_cannot_make_persisted_reward_disagree_with_score(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    reward = _default_reward("case-001", 1.0)
+    reward["details"] = {
+        "security": {
+            "findings": [{"score_impact": True} for _ in range(10_000)],
+        }
+    }
+    _write_reward(job_dir, "case-001__attempt", reward)
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    agent = result["agents"]["opencode"]
+    assert result["execution_status"] == "succeeded"
+    assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
+    summary_path = tmp_path / "results" / "opencode" / "with-skill" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["execution_status"] == "succeeded"
+    assert summary["scored_attempts"] == 1
+    reward_path = next((summary_path.parent / "trials").glob("*/reward.json"))
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"))
+    assert reward_path.stat().st_size <= report_data._MAX_JSON_BYTES
+    assert persisted.get("evaluation_status") != "failed"
+    assert all(persisted[metric] == 1.0 for metric in DEFAULT_METRICS)
+
+
+def test_security_improvement_projection_keeps_paired_artifacts_scoreable_and_bounded(tmp_path: Path) -> None:
+    padding = "x" * 1_500_000
+    with_reward = _default_reward("case-001", 1.0)
+    with_reward["details"] = {
+        "padding": padding,
+        "security": {"score": 1.0, "findings": []},
+    }
+    baseline_reward = _default_reward("case-001", 1.0)
+    baseline_reward["details"] = {
+        "security": {
+            "score": 0.0,
+            "findings": [
+                {
+                    "type": "unsafe_action",
+                    "message": padding,
+                    "score_impact": True,
+                }
+            ],
+        }
+    }
+    for variant, reward in (("with", with_reward), ("without", baseline_reward)):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        _write_reward(job_dir, "case-001__attempt", reward)
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
+
+    assert result["execution_status"] == "succeeded"
+    with_summary = json.loads((tmp_path / "results/opencode/with-skill/summary.json").read_text(encoding="utf-8"))
+    assert with_summary["execution_status"] == "succeeded"
+    with_reward_path = next((tmp_path / "results/opencode/with-skill/trials").glob("*/reward.json"))
+    persisted = json.loads(with_reward_path.read_text(encoding="utf-8"))
+    derived = persisted["details"]["security"]["findings"][0]
+    assert persisted.get("evaluation_status") != "failed"
+    assert derived["type"] == "skill_reduced_unsafe_behavior"
+    assert derived["evidence"].startswith("Without-skill baseline contained 1")
+    assert len(derived["evidence"]) < 256
+    assert with_reward_path.stat().st_size <= report_data._MAX_JSON_BYTES
+
+
+def test_duplicate_physical_reward_rows_are_preserved_and_fail_closed() -> None:
+    reward = {
+        **_default_reward("case-a", 0.5),
+        "_trial_name": "case-a__attempt",
+        "_trial_root_name": "case-a__attempt",
+    }
+    rewards = [dict(reward), dict(reward)]
+
+    persisted_names = collector_module._persisted_trial_names(rewards, None)
+    assert len({name for name, _trial_root in persisted_names}) == 2
+    assert {trial_root for _name, trial_root in persisted_names} == {"case-a__attempt"}
+
+    execution = collector_module._condition_execution_summary(
+        rewards,
+        expected_case_ids=["case-a"],
+        expected_cases=1,
+        n_attempts=1,
+        job_failure="",
+    )
+    assert execution["execution_status"] == "failed"
+    assert "duplicate reward rows" in " ".join(execution["execution_errors"])
+
+
+def test_collision_names_do_not_encode_rejected_raw_identifiers() -> None:
+    first_marker = "synthetic-private-one"
+    second_marker = "synthetic-private-two"
+    rewards = [
+        {"_trial_root_name": f"token={first_marker}:invalid"},
+        {"_trial_root_name": f"token={second_marker}:invalid"},
+    ]
+
+    persisted_names = collector_module._persisted_trial_names(rewards, None)
+
+    assert persisted_names == [
+        ("skillevaluator-trial-collision-000001", f"token={first_marker}:invalid"),
+        ("skillevaluator-trial-collision-000002", f"token={second_marker}:invalid"),
+    ]
+    rendered_names = " ".join(name for name, _trial_root in persisted_names)
+    assert first_marker not in rendered_names
+    assert second_marker not in rendered_names
+    assert collector_module._persisted_trial_names(rewards, None) == persisted_names
+    assert collector_module._persisted_trial_names([{"_trial_root_name": "case-a", "_step_name": "x"}], None) == [
+        ("case-a__x", "case-a")
+    ]
 
 
 def test_reused_results_remove_stale_generated_quality_but_preserve_unrelated_files(

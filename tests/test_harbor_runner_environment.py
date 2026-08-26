@@ -20,6 +20,7 @@ from harbor.utils.env import resolve_env_vars
 from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.harbor import runner, runtime_preflight
 from skillevaluator.tier3.harbor.adapter import _verifier_env_vars
+from skillevaluator.tier3_environments import HARBOR_NATIVE_ENV_MODES
 
 
 def _provider(provider: str = "openai") -> ProviderConfig:
@@ -189,6 +190,30 @@ def test_skill_config_cannot_alias_operator_owned_credentials(
     assert source_name in errors[0]
 
 
+@pytest.mark.parametrize(
+    "runtime_env",
+    [
+        {"SAFE_ALIAS": "${PROJECT_DEPLOY_TOKEN}"},
+        {"PROJECT_DEPLOY_TOKEN": "${PROJECT_DEPLOY_TOKEN}"},
+        {"safe_alias": "${ProjectDeployToken}"},
+    ],
+)
+def test_skill_config_cannot_stage_conventional_unlisted_secret_names(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_env: dict[str, str],
+) -> None:
+    for value in runtime_env.values():
+        source_name = value.removeprefix("${").removesuffix("}")
+        monkeypatch.setenv(source_name, "synthetic-secret")
+
+    resolved, errors = runner._resolve_runtime_env(runtime_env)
+
+    assert resolved == {}
+    assert errors
+    assert "operator-owned" in errors[0] or "host process" in errors[0]
+    assert "synthetic-secret" not in " ".join(errors)
+
+
 @pytest.mark.parametrize("source_name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])
 def test_skill_config_cannot_alias_judge_model_with_default_expansion(
     monkeypatch: pytest.MonkeyPatch,
@@ -266,15 +291,15 @@ def test_runtime_env_preserves_platform_expansion_for_non_owned_percent_referenc
 
     def expandvars(value: str) -> str:
         expanded.append(value)
-        return value.replace("%HOST_AGENT_TOKEN%", "host-value")
+        return value.replace("%HOST_AGENT_LABEL%", "host-value")
 
     monkeypatch.setattr(runner.os.path, "expandvars", expandvars)
 
-    resolved, errors = runner._resolve_runtime_env({"SAFE_ALIAS": "%HOST_AGENT_TOKEN%"})
+    resolved, errors = runner._resolve_runtime_env({"SAFE_ALIAS": "%HOST_AGENT_LABEL%"})
 
     assert errors == []
     assert resolved == {"SAFE_ALIAS": "host-value"}
-    assert expanded == ["%HOST_AGENT_TOKEN%"]
+    assert expanded == ["%HOST_AGENT_LABEL%"]
 
 
 def test_custom_only_does_not_force_the_standard_judge_model_into_custom_verifiers() -> None:
@@ -996,6 +1021,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         return [task]
 
     def launch(**kwargs):
+        assert (kwargs["jobs_dir"].parent / "dataset_snapshot.json").is_file()
         launched[kwargs["agent"]] = (
             str(kwargs["with_skill"].relative_to(tmp_path / "results")),
             str(kwargs["baseline"].relative_to(tmp_path / "results")),
@@ -1343,6 +1369,7 @@ def test_harbor_subprocess_environment_excludes_arbitrary_host_secrets(
     host_environment = {
         "PATH": os.environ["PATH"],
         "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
         "TMPDIR": str(tmp_path / "tmp"),
         "LANG": "C.UTF-8",
         "DOCKER_HOST": "unix:///safe/docker.sock",
@@ -1368,7 +1395,9 @@ def test_harbor_subprocess_environment_excludes_arbitrary_host_secrets(
         "TMPDIR": str(tmp_path / "tmp"),
         "LANG": "C.UTF-8",
         "DOCKER_HOST": "unix:///safe/docker.sock",
+        "SSH_AUTH_SOCK": "/private/agent.sock",
         "SERVICE_TOKEN": "declared-runtime-secret",
+        "USERPROFILE": str(tmp_path),
         **provider_env,
     }
 
@@ -1399,6 +1428,384 @@ def test_harbor_subprocess_environment_includes_only_selected_backend_credential
     assert environment["E2B_API_KEY"] == "selected-key"
     assert "MODAL_TOKEN_ID" not in environment
     assert "MODAL_TOKEN_SECRET" not in environment
+
+
+def test_harbor_subprocess_environment_preserves_trusted_proxy_and_tls_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    network_environment = {
+        "HTTP_PROXY": "http://proxy.example:8080",
+        "HTTPS_PROXY": "https://proxy.example:8443",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "ALL_PROXY": "socks5://proxy.example:1080",
+        "http_proxy": "http://legacy-proxy.example:8080",
+        "https_proxy": "https://legacy-proxy.example:8443",
+        "no_proxy": "metadata.internal",
+        "all_proxy": "socks5://legacy-proxy.example:1080",
+        "SSL_CERT_FILE": "/etc/ssl/custom.pem",
+        "SSL_CERT_DIR": "/etc/ssl/custom",
+        "REQUESTS_CA_BUNDLE": "/etc/ssl/requests.pem",
+        "CURL_CA_BUNDLE": "/etc/ssl/curl.pem",
+    }
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {"PATH": "/usr/bin", "HOME": "/home/test", **network_environment, "UNRELATED_SECRET": "no"},
+    )
+    provider = _provider()
+
+    environment = runner._harbor_subprocess_environment(
+        env_mode="e2b",
+        provider=provider,
+        configured_runtime_env={},
+        provider_env=runner._provider_environment(provider),
+    )
+
+    assert {name: environment[name] for name in network_environment} == network_environment
+    assert "UNRELATED_SECRET" not in environment
+
+
+def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> None:
+    expected = {
+        "docker": {
+            "COMPOSE_ANSI",
+            "COMPOSE_HTTP_TIMEOUT",
+            "COMPOSE_IGNORE_ORPHANS",
+            "COMPOSE_PARALLEL_LIMIT",
+            "COMPOSE_PROGRESS",
+            "COMPOSE_STATUS_STDOUT",
+            "DOCKER_API_VERSION",
+            "DOCKER_AUTH_CONFIG",
+            "DOCKER_CERT_PATH",
+            "DOCKER_CONFIG",
+            "DOCKER_CONTEXT",
+            "DOCKER_CUSTOM_HEADERS",
+            "DOCKER_DEFAULT_PLATFORM",
+            "DOCKER_HOST",
+            "DOCKER_TLS",
+            "DOCKER_TLS_VERIFY",
+            "SSH_AUTH_SOCK",
+        },
+        "daytona": {
+            "DAYTONA_API_KEY",
+            "DAYTONA_API_URL",
+            "DAYTONA_HAPPY_EYEBALLS_DELAY",
+            "DAYTONA_JWT_TOKEN",
+            "DAYTONA_ORGANIZATION_ID",
+            "DAYTONA_SERVER_URL",
+            "DAYTONA_TARGET",
+        },
+        "e2b": {"E2B_API_KEY", "E2B_API_URL", "E2B_DOMAIN", "E2B_SANDBOX_URL"},
+        "modal": {
+            "MODAL_CONFIG_PATH",
+            "MODAL_ENVIRONMENT",
+            "MODAL_OVERRIDE_HEADERS",
+            "MODAL_PROFILE",
+            "MODAL_SERVER_URL",
+            "MODAL_TOKEN_ID",
+            "MODAL_TOKEN_SECRET",
+        },
+        "runloop": {"RUNLOOP_API_KEY", "RUNLOOP_BASE_URL", "RUNLOOP_CUSTOM_HEADERS"},
+        "langsmith": {
+            "LANGCHAIN_API_KEY",
+            "LANGCHAIN_ENDPOINT",
+            "LANGSMITH_API_KEY",
+            "LANGSMITH_CONFIG_FILE",
+            "LANGSMITH_ENDPOINT",
+            "LANGSMITH_PROFILE",
+            "LANGSMITH_SANDBOX_API_URL",
+            "LANGSMITH_WORKSPACE_ID",
+        },
+        "ec2": {
+            "AWS_ACCOUNT_ID",
+            "AWS_ACCOUNT_ID_ENDPOINT_MODE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_AUTH_SCHEME_PREFERENCE",
+            "AWS_CA_BUNDLE",
+            "AWS_CONFIG_FILE",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CREDENTIAL_EXPIRATION",
+            "AWS_CREDENTIAL_FILE",
+            "AWS_CSM_CLIENT_ID",
+            "AWS_CSM_ENABLED",
+            "AWS_CSM_HOST",
+            "AWS_CSM_PORT",
+            "AWS_DATA_PATH",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_DEFAULT_REGION",
+            "AWS_DEFAULTS_MODE",
+            "AWS_DISABLE_HOST_PREFIX_INJECTION",
+            "AWS_DISABLE_REQUEST_COMPRESSION",
+            "AWS_EC2_METADATA_DISABLED",
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+            "AWS_EC2_METADATA_V1_DISABLED",
+            "AWS_ENDPOINT_DISCOVERY_ENABLED",
+            "AWS_ENDPOINT_URL",
+            "AWS_ENDPOINT_URL_EC2",
+            "AWS_ENDPOINT_URL_SIGNIN",
+            "AWS_ENDPOINT_URL_SSO",
+            "AWS_ENDPOINT_URL_SSO_OIDC",
+            "AWS_ENDPOINT_URL_STS",
+            "AWS_EXECUTION_ENV",
+            "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+            "AWS_IMDS_USE_IPV6",
+            "AWS_LOGIN_CACHE_DIRECTORY",
+            "AWS_MAX_ATTEMPTS",
+            "AWS_METADATA_SERVICE_NUM_ATTEMPTS",
+            "AWS_METADATA_SERVICE_TIMEOUT",
+            "AWS_NEW_RETRIES_2026",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_RETRY_MODE",
+            "AWS_REQUEST_CHECKSUM_CALCULATION",
+            "AWS_REQUEST_MIN_COMPRESSION_SIZE_BYTES",
+            "AWS_RESPONSE_CHECKSUM_VALIDATION",
+            "AWS_ROLE_ARN",
+            "AWS_ROLE_SESSION_NAME",
+            "AWS_SDK_LOAD_CONFIG",
+            "AWS_SDK_UA_APP_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SECURITY_TOKEN",
+            "AWS_SESSION_TOKEN",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_SIGV4A_SIGNING_REGION_SET",
+            "AWS_STS_REGIONAL_ENDPOINTS",
+            "AWS_USE_DUALSTACK_ENDPOINT",
+            "AWS_USE_FIPS_ENDPOINT",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "BOTOCORE_TCP_KEEPALIVE",
+            "SSH_AUTH_SOCK",
+        },
+        "gke": {
+            "CLOUDSDK_ACTIVE_CONFIG_NAME",
+            "CLOUDSDK_AUTH_ACCESS_TOKEN",
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+            "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+            "CLOUDSDK_CONFIG",
+            "CLOUDSDK_CORE_ACCOUNT",
+            "CLOUDSDK_CORE_PROJECT",
+            "GCP_PROJECT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_QUOTA_PROJECT",
+            "KUBECONFIG",
+        },
+        "ack": {
+            "COMPOSE_ANSI",
+            "COMPOSE_HTTP_TIMEOUT",
+            "COMPOSE_IGNORE_ORPHANS",
+            "COMPOSE_PARALLEL_LIMIT",
+            "COMPOSE_PROGRESS",
+            "COMPOSE_STATUS_STDOUT",
+            "DOCKER_API_VERSION",
+            "DOCKER_AUTH_CONFIG",
+            "DOCKER_CERT_PATH",
+            "DOCKER_CONFIG",
+            "DOCKER_CONTEXT",
+            "DOCKER_CUSTOM_HEADERS",
+            "DOCKER_DEFAULT_PLATFORM",
+            "DOCKER_HOST",
+            "DOCKER_TLS",
+            "DOCKER_TLS_VERIFY",
+            "KUBECONFIG",
+            "KUBERNETES_SERVICE_HOST",
+            "KUBERNETES_SERVICE_PORT",
+            "SSH_AUTH_SOCK",
+        },
+        "openshift": {"KUBECONFIG"},
+        "novita": {
+            "NOVITA_ACCESS_TOKEN",
+            "NOVITA_API_KEY",
+            "NOVITA_API_URL",
+            "NOVITA_BASE_URL",
+            "NOVITA_DOMAIN",
+            "NOVITA_SANDBOX_URL",
+        },
+        "apple-container": set(),
+        "singularity": {
+            "APPTAINER_AUTHFILE",
+            "APPTAINER_CONFIGDIR",
+            "APPTAINER_DOCKER_PASSWORD",
+            "APPTAINER_DOCKER_USERNAME",
+            "SINGULARITY_AUTHFILE",
+            "SINGULARITY_CONFIGDIR",
+            "SINGULARITY_DOCKER_PASSWORD",
+            "SINGULARITY_DOCKER_USERNAME",
+        },
+        "islo": {"ISLO_API_KEY", "ISLO_API_URL", "ISLO_COMPUTE_URL"},
+        "tensorlake": {
+            "TENSORLAKE_API_KEY",
+            "TENSORLAKE_API_URL",
+            "TENSORLAKE_ORGANIZATION_ID",
+            "TENSORLAKE_PAT",
+            "TENSORLAKE_PROJECT_ID",
+            "TENSORLAKE_SANDBOX_PROXY_URL",
+        },
+        "cwsandbox": {"CWSANDBOX_API_KEY", "CWSANDBOX_BASE_URL"},
+        "wandb": {"NETRC", "WANDB_API_KEY", "WANDB_BASE_URL", "WANDB_ENTITY", "WANDB_PROJECT"},
+        "use-computer": {
+            "USE_COMPUTER_API_KEY",
+            "USE_COMPUTER_HOST",
+            "USE_COMPUTER_SNAPSHOT",
+            "USE_COMPUTER_VERSION",
+        },
+        "cua-cloud": {
+            "CUA_BASE_URL",
+            "CUA_CLIENT_ID",
+            "CUA_CLIENT_SECRET",
+            "CUA_CLOUD_NAMESPACE",
+            "CUA_CLOUD_STARTUP_COMMAND",
+            "CUA_TOKEN_URL",
+        },
+        "blaxel": {
+            "BL_API_KEY",
+            "BL_API_VERSION",
+            "BL_CLIENT_CREDENTIALS",
+            "BL_ENV",
+            "BL_REGION",
+            "BL_WORKSPACE",
+        },
+        "opensandbox": {"OPENSANDBOX_API_KEY", "OPENSANDBOX_DOMAIN"},
+        "beam": {
+            "API_HOST",
+            "API_PORT",
+            "BEAM_TOKEN",
+            "GATEWAY_HOST",
+            "GATEWAY_PORT",
+            "INTERNAL_API_HOST",
+            "INTERNAL_API_PORT",
+            "REALTIME_HOST",
+        },
+        "skypilot": {
+            "COMPOSE_ANSI",
+            "COMPOSE_HTTP_TIMEOUT",
+            "COMPOSE_IGNORE_ORPHANS",
+            "COMPOSE_PARALLEL_LIMIT",
+            "COMPOSE_PROGRESS",
+            "COMPOSE_STATUS_STDOUT",
+            "DOCKER_API_VERSION",
+            "DOCKER_AUTH_CONFIG",
+            "DOCKER_CERT_PATH",
+            "DOCKER_CONFIG",
+            "DOCKER_CONTEXT",
+            "DOCKER_CUSTOM_HEADERS",
+            "DOCKER_DEFAULT_PLATFORM",
+            "DOCKER_HOST",
+            "DOCKER_TLS",
+            "DOCKER_TLS_VERIFY",
+            "HARBOR_SKYPILOT_REGISTRY",
+            "SKYPILOT_API_SERVER_ENDPOINT",
+            "SKYPILOT_GLOBAL_CONFIG",
+            "SKYPILOT_PROJECT_CONFIG",
+            "SKYPILOT_SERVICE_ACCOUNT_TOKEN",
+            "SSH_AUTH_SOCK",
+        },
+        "hf-sandbox": {"HF_ENDPOINT", "HF_HOME", "HF_TOKEN", "HF_TOKEN_PATH", "HUGGING_FACE_HUB_TOKEN"},
+        "hyperbrowser": {
+            "COMPOSE_ANSI",
+            "COMPOSE_HTTP_TIMEOUT",
+            "COMPOSE_IGNORE_ORPHANS",
+            "COMPOSE_PARALLEL_LIMIT",
+            "COMPOSE_PROGRESS",
+            "COMPOSE_STATUS_STDOUT",
+            "DOCKER_API_VERSION",
+            "DOCKER_AUTH_CONFIG",
+            "DOCKER_CERT_PATH",
+            "DOCKER_CONFIG",
+            "DOCKER_CONTEXT",
+            "DOCKER_CUSTOM_HEADERS",
+            "DOCKER_DEFAULT_PLATFORM",
+            "DOCKER_HOST",
+            "DOCKER_TLS",
+            "DOCKER_TLS_VERIFY",
+            "HYPERBROWSER_API_KEY",
+            "HYPERBROWSER_BASE_URL",
+            "SSH_AUTH_SOCK",
+        },
+        "vercel": {"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"},
+    }
+
+    assert set(expected) == HARBOR_NATIVE_ENV_MODES
+    assert {mode: set(names) for mode, names in runner._HARBOR_ENV_MODE_VARS.items()} == expected
+
+
+def test_direct_run_returns_configuration_error_for_cyclic_environment_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cyclic: dict[str, object] = {}
+    cyclic["nested"] = cyclic
+    monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
+    monkeypatch.setattr(runner, "load_evals_config", lambda _path: ({}, None))
+
+    result = runner._run_harbor_eval_impl(
+        tmp_path,
+        ["opencode"],
+        environment_kwargs={"options": cyclic},
+        _evaluator_skill_path=tmp_path,
+    )
+
+    assert result == {"error": ["Invalid --environment-kwarg: must not contain cyclic values"]}
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "selected_name"),
+    [
+        ("ec2", "AWS_ACCESS_KEY_ID"),
+        ("ec2", "SSH_AUTH_SOCK"),
+        ("docker", "SSH_AUTH_SOCK"),
+        ("modal", "MODAL_SERVER_URL"),
+        ("gke", "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+        ("gke", "CLOUDSDK_CORE_PROJECT"),
+        ("ack", "KUBECONFIG"),
+        ("ack", "KUBERNETES_SERVICE_HOST"),
+        ("ack", "KUBERNETES_SERVICE_PORT"),
+        ("ack", "DOCKER_CONFIG"),
+        ("openshift", "KUBECONFIG"),
+        ("novita", "NOVITA_SANDBOX_URL"),
+        ("singularity", "APPTAINER_AUTHFILE"),
+        ("tensorlake", "TENSORLAKE_ORGANIZATION_ID"),
+        ("cua-cloud", "CUA_CLIENT_SECRET"),
+        ("blaxel", "BL_API_KEY"),
+        ("opensandbox", "OPENSANDBOX_DOMAIN"),
+        ("beam", "BEAM_TOKEN"),
+        ("beam", "API_HOST"),
+        ("skypilot", "SKYPILOT_API_SERVER_ENDPOINT"),
+        ("skypilot", "DOCKER_CONFIG"),
+        ("hf-sandbox", "HF_TOKEN_PATH"),
+        ("hyperbrowser", "HYPERBROWSER_API_KEY"),
+        ("hyperbrowser", "DOCKER_HOST"),
+        ("wandb", "NETRC"),
+        ("vercel", "VERCEL_OIDC_TOKEN"),
+    ],
+)
+def test_new_harbor_022_backend_environment_is_selected_without_cross_backend_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+    env_mode: str,
+    selected_name: str,
+) -> None:
+    host_environment = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/test",
+        selected_name: "selected-value",
+        "E2B_API_KEY": "unselected-value",
+    }
+    monkeypatch.setattr(runner.os, "environ", host_environment)
+    provider = _provider()
+
+    environment = runner._harbor_subprocess_environment(
+        env_mode=env_mode,
+        provider=provider,
+        configured_runtime_env={},
+        provider_env=runner._provider_environment(provider),
+    )
+
+    assert environment[selected_name] == "selected-value"
+    assert "E2B_API_KEY" not in environment
 
 
 def test_daytona_subprocess_environment_preserves_jwt_auth_pair(
@@ -1433,9 +1840,9 @@ def test_config_declared_substitution_is_resolved_without_leaking_source_variabl
     monkeypatch.setattr(
         runner.os,
         "environ",
-        {"PATH": "/usr/bin", "HOME": "/home/test", "HOST_AGENT_TOKEN": "runtime-key", "UNRELATED_SECRET": "no"},
+        {"PATH": "/usr/bin", "HOME": "/home/test", "HOST_AGENT_LABEL": "runtime-value", "UNRELATED_SECRET": "no"},
     )
-    configured_runtime_env, errors = runner._resolve_runtime_env({"AGENT_TOKEN": "${HOST_AGENT_TOKEN}"})
+    configured_runtime_env, errors = runner._resolve_runtime_env({"AGENT_LABEL": "${HOST_AGENT_LABEL}"})
     provider = _provider()
 
     environment = runner._harbor_subprocess_environment(
@@ -1446,8 +1853,8 @@ def test_config_declared_substitution_is_resolved_without_leaking_source_variabl
     )
 
     assert errors == []
-    assert environment["AGENT_TOKEN"] == "runtime-key"
-    assert "HOST_AGENT_TOKEN" not in environment
+    assert environment["AGENT_LABEL"] == "runtime-value"
+    assert "HOST_AGENT_LABEL" not in environment
     assert "UNRELATED_SECRET" not in environment
 
 
@@ -1475,6 +1882,7 @@ def test_runtime_env_rejects_host_process_control_names() -> None:
         "HTTPS_PROXY",
         "E2B_API_KEY",
         "AWS_CONFIG_FILE",
+        "AWS_ENDPOINT_URL",
         "AWS_PROFILE",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
     )
@@ -1532,6 +1940,12 @@ def test_bedrock_subprocess_environment_keeps_only_explicit_aws_provider_values(
     assert environment["AWS_ROLE_SESSION_NAME"] == "evaluation-session"
     assert environment["AWS_WEB_IDENTITY_TOKEN_FILE"] == "/var/run/secrets/token"
     assert "OTHER_CLOUD_SECRET" not in environment
+
+
+def test_bedrock_host_credential_allowlist_is_staged_for_the_verifier() -> None:
+    expected = set(runner._BEDROCK_HOST_ENV_VARS) | {"AWS_REGION"}
+
+    assert set(_verifier_env_vars(dict.fromkeys(expected, "configured"))) == expected
 
 
 def test_local_nvidia_provider_preserves_explicit_codex_credentials(

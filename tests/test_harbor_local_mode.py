@@ -36,10 +36,12 @@ from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.harbor import (
     ENV_MODE_LOCAL,
     HARBOR_ENV_MODES,
+    HARBOR_NATIVE_ENV_MODES,
     LOCAL_AGENT_IMPORT_PATHS,
     LOCAL_ENV_IMPORT_PATH,
     local_sandbox,
 )
+from skillevaluator.tier3.harbor import stream_redaction as stream_redaction_module
 from skillevaluator.tier3.harbor.local_agents import (
     NVIDIA_BUILD_AGENT_IMPORT_PATHS,
     SkillEvaluatorLocalOpenCode,
@@ -57,6 +59,7 @@ from skillevaluator.tier3.harbor.runner import (
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
 from skillevaluator.tier3.harbor.stream_redaction import (
+    CommandOutputLimitError,
     StreamingLogRedactor,
     StreamingSecretRedactor,
     _StreamingKnownPatternRedactor,
@@ -223,6 +226,65 @@ def test_local_stream_collector_rejects_missing_required_pipe(missing_stream: st
         )
 
 
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_local_output_limit_fails_closed_and_reaps_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_callback: bool,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    child_pid_path = environment._workspace / "output-limit-child-pid"
+    overflow_value = "synthetic-output-overflow-secret"
+    callback_chunks: list[str] = []
+    processes: list[asyncio.subprocess.Process] = []
+    create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def capture_process(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await create_subprocess_exec(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    command = (
+        "(sleep 30) & child=$!; "
+        "printf '%s' \"$child\" > output-limit-child-pid; "
+        "printf 12345; printf 67890 >&2; printf '%s' \"$OUTPUT_SECRET\"; wait"
+    )
+
+    async def exercise() -> None:
+        await environment.start()
+        callback_scope = environment.scoped_output_callback(on_output) if with_callback else contextlib.nullcontext()
+        with callback_scope:
+            await environment.exec(
+                command,
+                env={"OUTPUT_SECRET": overflow_value},
+                # This case exercises output containment, not timeout racing.
+                # Leave enough startup time for loaded CI hosts to emit the
+                # deliberately over-budget bytes before the sleep descendant.
+                timeout_sec=2.0,
+            )
+
+    monkeypatch.setattr(stream_redaction_module, "MAX_COMMAND_OUTPUT_BYTES", 8, raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_process)
+
+    with pytest.raises(CommandOutputLimitError, match=r"Command output exceeded the 8-byte safety limit") as caught:
+        asyncio.run(exercise())
+
+    assert len(processes) == 1
+    assert processes[0].returncode is not None
+    assert child_pid_path.is_file()
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    assert len("".join(callback_chunks).encode()) <= 8
+    assert overflow_value not in "".join(callback_chunks)
+    assert overflow_value not in str(caught.value)
+
+
 def test_streaming_log_redactor_preserves_nested_known_pattern_starts() -> None:
     jwt_secret = ".".join(("eyJ" + "A" * 20, "B" * 20, "C" * 20))
     raw = "ask-" + ("a" * 19 + "A1") + "--" + jwt_secret + "☃"
@@ -345,6 +407,12 @@ def test_known_replacement_cannot_create_a_visible_exact_secret() -> None:
 def test_local_is_a_registered_env_mode() -> None:
     assert ENV_MODE_LOCAL == "local"
     assert "local" in HARBOR_ENV_MODES
+
+
+def test_registered_native_env_modes_match_pinned_harbor_release() -> None:
+    from harbor.models.environment_type import EnvironmentType
+
+    assert frozenset(environment.value for environment in EnvironmentType) == HARBOR_NATIVE_ENV_MODES
 
 
 def test_build_command_uses_unified_flags_for_local_imports() -> None:
@@ -1852,6 +1920,38 @@ def test_local_stream_redaction_handles_short_sensitive_and_marker_collision_val
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_stream_redacts_short_compact_credential_names_without_substring_false_positives(
+    tmp_path: Path,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                'printf "%s|%s|%s|%s" "$MYSECRET" "$AUTHENTICATION" "$MONKEY" "$KEYBOARD"',
+                env={
+                    "MYSECRET": "pw",
+                    "AUTHENTICATION": "id",
+                    "MONKEY": "banana",
+                    "KEYBOARD": "clacky",
+                },
+            )
+
+    result = asyncio.run(exercise())
+    callback_output = "".join(callback_chunks)
+
+    assert callback_output == result.stdout
+    assert "pw" not in callback_output
+    assert "id" not in callback_output
+    assert callback_output.endswith("banana|clacky")
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_local_stream_redacts_known_secret_patterns_across_reader_chunks(tmp_path: Path) -> None:
     environment = _initialized_local_environment(tmp_path)
     callback_chunks: list[tuple[str, str]] = []
@@ -2044,20 +2144,32 @@ def test_local_streaming_preserves_exact_json_stdin_bootstrap(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
-def test_local_exec_without_callback_keeps_buffered_communicate_path(tmp_path: Path) -> None:
+def test_local_exec_without_callback_uses_bounded_stream_collector(tmp_path: Path) -> None:
     environment = _initialized_local_environment(tmp_path)
+    original_collect = environment._collect_streamed_output
+    callback_outputs: list[object] = []
 
-    async def unexpected_stream(*_args: object, **_kwargs: object) -> tuple[bytes, bytes]:
-        pytest.fail("no-callback exec unexpectedly selected the streaming collector")
+    async def capture_stream(
+        proc: asyncio.subprocess.Process,
+        stdin_data: bytes,
+        callback_output: object,
+    ) -> tuple[bytes, bytes]:
+        callback_outputs.append(callback_output)
+        return await original_collect(
+            proc,
+            stdin_data,
+            callback_output,  # type: ignore[arg-type]
+        )
 
     async def exercise() -> object:
         await environment.start()
-        environment._collect_streamed_output = unexpected_stream  # type: ignore[method-assign]
-        return await environment.exec("printf buffered-only")
+        environment._collect_streamed_output = capture_stream  # type: ignore[method-assign]
+        return await environment.exec("printf bounded-only")
 
     result = asyncio.run(exercise())
 
-    assert result.stdout == "buffered-only"
+    assert callback_outputs == [None]
+    assert result.stdout == "bounded-only"
     assert result.stderr == ""
     assert result.return_code == 0
 
@@ -3724,10 +3836,13 @@ def test_prelaunch_diagnostics_are_streamed_and_redacted_once(
     [
         ("MONKEY", "banana", False),
         ("KEYBOARD", "clacky", False),
+        ("MYSECRET", "legacy-secret-value", True),
+        # The long-value legacy fallback remains intentionally conservative.
+        ("MONKEY", "bananabanana", True),
         ("API_KEY", "x", True),
     ],
 )
-def test_output_redaction_uses_component_aware_sensitive_environment_names(
+def test_output_redaction_balances_component_names_and_legacy_fallback(
     tmp_path: Path,
     name: str,
     value: str,
@@ -5139,6 +5254,490 @@ def test_harbor_preflight_system_exit_becomes_a_diagnostic(monkeypatch: pytest.M
     assert _check_prerequisites(env_mode="docker", agents=[]) == [
         "Harbor environment 'docker' is not ready: daemon down"
     ]
+
+
+def test_singularity_prerequisite_requires_the_cli_harbor_invokes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(runner.shutil, "which", lambda executable: None if executable == "singularity" else "/bin/tool")
+
+    assert _check_prerequisites(env_mode="singularity", agents=[]) == [
+        "Harbor environment 'singularity' requires the singularity CLI on PATH."
+    ]
+
+
+def test_islo_prerequisite_requires_nonempty_host_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("ISLO_API_KEY", "   ")
+
+    assert _check_prerequisites(env_mode="islo", agents=[]) == [
+        "Harbor environment 'islo' requires a non-empty ISLO_API_KEY in the host environment."
+    ]
+
+
+def test_modal_custom_config_path_does_not_suppress_harbor_auth_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    config_path = tmp_path / "modal.toml"
+    config_path.write_text("[default]\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(runner.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(
+        EnvironmentFactory,
+        "run_preflight",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit(
+                "Modal requires authentication. Run 'modal token new' to set up credentials, "
+                "or set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET environment variables."
+            )
+        ),
+    )
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "Harbor environment 'modal' is not ready: Modal requires authentication. "
+        "Run 'modal token new' to set up credentials, or set MODAL_TOKEN_ID and "
+        "MODAL_TOKEN_SECRET environment variables."
+    ]
+
+
+def test_modal_custom_config_path_must_be_an_existing_regular_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(tmp_path / "missing.toml"))
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "MODAL_CONFIG_PATH must name an existing regular file."
+    ]
+
+
+def test_modal_custom_config_path_rejects_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(tmp_path))
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "MODAL_CONFIG_PATH must name an existing regular file."
+    ]
+
+
+def test_modal_custom_config_path_stat_error_is_a_bounded_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    class UnreadablePath:
+        def expanduser(self) -> UnreadablePath:
+            return self
+
+        def is_file(self) -> bool:
+            raise OSError("secret path detail")
+
+    monkeypatch.setenv("MODAL_CONFIG_PATH", "/private/config")
+    monkeypatch.setattr(runner, "Path", lambda _value: UnreadablePath())
+
+    assert runner._modal_custom_config_status() == (
+        False,
+        "MODAL_CONFIG_PATH must name an existing regular file.",
+    )
+
+
+def test_modal_custom_config_path_unknown_user_is_a_bounded_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setenv("MODAL_CONFIG_PATH", "~definitely-no-such-user-issue79/modal.toml")
+
+    assert runner._modal_custom_config_status() == (
+        False,
+        "MODAL_CONFIG_PATH must name an existing regular file.",
+    )
+
+
+@pytest.mark.parametrize("configured_path", ["", "   "])
+def test_modal_custom_config_path_must_not_be_blank(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_path: str,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("MODAL_CONFIG_PATH", configured_path)
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "MODAL_CONFIG_PATH must name an existing regular file."
+    ]
+
+
+def test_modal_custom_config_does_not_hide_unrelated_preflight_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    config_path = tmp_path / "modal.toml"
+    config_path.write_text("[default]\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(runner.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(
+        EnvironmentFactory,
+        "run_preflight",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("Modal daemon unavailable")),
+    )
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "Harbor environment 'modal' is not ready: Modal daemon unavailable"
+    ]
+
+
+def _install_fake_kubernetes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kube_config_error: bool = False,
+    pod_list_error: Exception | None = None,
+) -> dict[str, object]:
+    calls: dict[str, object] = {"kube": [], "incluster": 0, "pods": [], "closed": 0}
+
+    class ConfigException(Exception):
+        pass
+
+    def load_kube_config(**kwargs: str) -> None:
+        cast_calls = calls["kube"]
+        assert isinstance(cast_calls, list)
+        cast_calls.append(dict(kwargs))
+        if kube_config_error:
+            raise ConfigException("no kube config")
+
+    def load_incluster_config() -> None:
+        calls["incluster"] = int(calls["incluster"]) + 1
+
+    class ApiClient:
+        def close(self) -> None:
+            calls["closed"] = int(calls["closed"]) + 1
+
+    class CoreV1Api:
+        def __init__(self, api_client: ApiClient) -> None:
+            assert isinstance(api_client, ApiClient)
+
+        def list_namespaced_pod(self, **kwargs: object) -> None:
+            cast_calls = calls["pods"]
+            assert isinstance(cast_calls, list)
+            cast_calls.append(dict(kwargs))
+            if pod_list_error is not None:
+                raise pod_list_error
+
+    kubernetes = SimpleNamespace(
+        client=SimpleNamespace(ApiClient=ApiClient, CoreV1Api=CoreV1Api),
+        config=SimpleNamespace(
+            ConfigException=ConfigException,
+            load_kube_config=load_kube_config,
+            load_incluster_config=load_incluster_config,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "kubernetes", kubernetes)
+    return calls
+
+
+def test_ack_cluster_readiness_uses_explicit_config_context_and_bounded_namespaced_pod_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    calls = _install_fake_kubernetes(monkeypatch)
+
+    runner._check_ack_cluster_readiness(
+        {"namespace": "skill-evals", "context": "production", "kubeconfig": "/config/ack"}
+    )
+
+    assert calls == {
+        "kube": [{"context": "production", "config_file": "/config/ack"}],
+        "incluster": 0,
+        "pods": [{"namespace": "skill-evals", "limit": 1, "_request_timeout": (5, 10)}],
+        "closed": 1,
+    }
+
+
+def test_ack_cluster_readiness_falls_back_to_incluster_and_closes_on_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    calls = _install_fake_kubernetes(
+        monkeypatch,
+        kube_config_error=True,
+        pod_list_error=RuntimeError("namespaced pod list forbidden"),
+    )
+
+    with pytest.raises(RuntimeError, match="namespaced pod list forbidden"):
+        runner._check_ack_cluster_readiness({"namespace": "skill-evals"})
+
+    assert calls == {
+        "kube": [{}],
+        "incluster": 1,
+        "pods": [{"namespace": "skill-evals", "limit": 1, "_request_timeout": (5, 10)}],
+        "closed": 1,
+    }
+
+
+def test_ack_prerequisite_performs_namespaced_pod_list_access_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    captured: list[tuple[dict[str, object], dict[str, str]]] = []
+    subprocess_env = {"PATH": "/usr/bin", "KUBECONFIG": "/config/ack"}
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "_check_ack_cluster_readiness_subprocess",
+        lambda kwargs, *, subprocess_env: captured.append((dict(kwargs), dict(subprocess_env))),
+    )
+
+    assert (
+        _check_prerequisites(
+            env_mode="ack",
+            agents=[],
+            environment_kwargs={"namespace": "skill-evals", "context": "production"},
+            subprocess_env=subprocess_env,
+        )
+        == []
+    )
+    assert captured == [
+        (
+            {"namespace": "skill-evals", "context": "production"},
+            subprocess_env,
+        )
+    ]
+
+
+def test_ack_namespace_access_error_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:pw@proxy.invalid")
+    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "_check_ack_cluster_readiness_subprocess",
+        lambda _kwargs, **_options: (_ for _ in ()).throw(RuntimeError("API rejected user u password pw")),
+    )
+
+    rendered = " ".join(
+        _check_prerequisites(
+            env_mode="ack",
+            agents=[],
+            environment_kwargs={"namespace": "skill-evals"},
+        )
+    )
+
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "<redacted>" in rendered
+
+
+def test_ack_subprocess_probe_uses_exact_harbor_environment_and_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    captured: dict[str, object] = {}
+    child_env = {
+        "PATH": "/usr/bin",
+        "KUBECONFIG": "/config/ack",
+        "KUBERNETES_SERVICE_HOST": "kubernetes.default.svc",
+        "KUBERNETES_SERVICE_PORT": "443",
+    }
+    monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "parent-only-credential")
+
+    class FakeProcess:
+        pid = 1234
+        returncode = 0
+
+        def communicate(self, input_text: str, timeout: int) -> tuple[str, str]:
+            captured["input"] = input_text
+            captured["timeout"] = timeout
+            return "", ""
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        captured["command"] = list(command)
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
+
+    runner._check_ack_cluster_readiness_subprocess(
+        {
+            "namespace": "skill-evals",
+            "context": "production",
+            "kubeconfig": "/config/ack",
+            "node_selector": {"pool": "sandbox"},
+        },
+        subprocess_env=child_env,
+    )
+
+    assert captured["env"] == child_env
+    assert "ALIBABA_CLOUD_ACCESS_KEY_ID" not in captured["env"]
+    assert json.loads(str(captured["input"])) == {
+        "namespace": "skill-evals",
+        "context": "production",
+        "kubeconfig": "/config/ack",
+    }
+    assert captured["timeout"] == runner._ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS
+    assert captured["text"] is True
+    assert captured["stdin"] is subprocess.PIPE
+    assert captured["stdout"] is subprocess.PIPE
+    assert captured["stderr"] is subprocess.PIPE
+    assert captured["start_new_session"] is (os.name == "posix")
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:2] == [sys.executable, "-c"]
+    assert "production" not in " ".join(command)
+    assert "/config/ack" not in " ".join(command)
+
+
+def test_ack_subprocess_probe_redacts_config_values_and_child_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    context = "sensitive-context"
+    kubeconfig = "/private/ack-config"
+    child_env = {"PATH": "/usr/bin", "KUBECONFIG": kubeconfig, "HTTPS_PROXY": "http://u:pw@proxy.invalid"}
+
+    class FailedProcess:
+        pid = 1234
+        returncode = 1
+
+        def communicate(self, _input: str, timeout: int) -> tuple[str, str]:
+            assert timeout == runner._ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS
+            return (
+                "",
+                f"namespaced pod list forbidden for context {context} via {kubeconfig}; proxy user u password pw",
+            )
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: FailedProcess())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        runner._check_ack_cluster_readiness_subprocess(
+            {"namespace": "skill-evals", "context": context, "kubeconfig": kubeconfig},
+            subprocess_env=child_env,
+        )
+
+    rendered = str(exc_info.value)
+    assert context not in rendered
+    assert kubeconfig not in rendered
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "namespaced pod list forbidden" in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_ack_subprocess_probe_timeout_kills_the_exec_auth_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    signals: list[tuple[int, signal.Signals]] = []
+
+    class HungProcess:
+        pid = 4321
+        returncode: int | None = None
+
+        def communicate(self, _input: str, timeout: int) -> tuple[str, str]:
+            raise subprocess.TimeoutExpired([sys.executable, "-c", "probe"], timeout)
+
+        def wait(self, timeout: int) -> int:
+            assert timeout == runner._ACK_CLUSTER_READINESS_REAP_TIMEOUT_SECONDS
+            self.returncode = -int(signal.SIGKILL)
+            return self.returncode
+
+        def kill(self) -> None:
+            raise AssertionError("POSIX cleanup must kill the whole process group")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: HungProcess())
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, value: signals.append((pid, value)))
+
+    with pytest.raises(RuntimeError, match="timed out after 20 seconds"):
+        runner._check_ack_cluster_readiness_subprocess(
+            {"namespace": "skill-evals"},
+            subprocess_env={"PATH": "/usr/bin", "KUBECONFIG": "/config/ack"},
+        )
+
+    assert signals == [(4321, signal.SIGKILL)]
+
+
+def test_docker_prerequisite_redacts_proxy_uri_and_short_detached_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:pw@proxy.invalid")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            1,
+            stdout="",
+            stderr="proxy http://u:pw@proxy.invalid rejected user u password pw",
+        ),
+    )
+
+    rendered = " ".join(_check_prerequisites(env_mode="docker", agents=[]))
+
+    assert "http://u:pw@" not in rendered
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "<redacted>" in rendered
+
+
+def test_harbor_preflight_exception_redacts_detached_proxy_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:pw@proxy.invalid")
+    monkeypatch.setattr(
+        EnvironmentFactory,
+        "run_preflight",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("proxy rejected user u password pw")),
+    )
+
+    rendered = " ".join(_check_prerequisites(env_mode="e2b", agents=[]))
+
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "<redacted>" in rendered
 
 
 def test_harbor_preflight_does_not_swallow_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:

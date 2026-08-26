@@ -112,10 +112,26 @@ Inside the container, your grader reads two inputs and writes one result:
 
 <Note>
 In `default_plus_custom` mode, put your scores under `custom_metrics`. Your
-grader must not overwrite the reserved standard metric names — `security`,
-`skill_execution`, `skill_efficiency`, `accuracy`, `goal_accuracy`, and
-`behavior_check` — or grading fails with a collision error.
+grader must not overwrite reserved standard or reward-metadata names. These
+include `security`, `skill_execution`, `skill_efficiency`, `accuracy`,
+`goal_accuracy`, `behavior_check`, `overall`, `metrics`, `custom_metrics`,
+`custom_details`, `details`, `entry_id`, `metric_set`, `metric_set_version`,
+`evaluation_status`, `evaluation_errors`, `has_skill`, `error`,
+`trajectory_detail`, and `trajectory_source`. A collision fails grading.
 </Note>
+
+Keep each reward to at most 128 custom metrics, with no more than 256 UTF-8
+bytes in each printable, whitespace-trimmed metric name. The union across all
+rewards in one condition must also stay at or below 128 names. Exceeding these
+limits fails the affected reward or condition before aggregation so the
+machine-readable summary and HTML report cannot silently disagree. Names that
+look like credential values or credential fields are omitted without creating
+a colliding redaction alias; narrow metric-shaped names such as
+`secret_handling` and `token_efficiency` remain supported.
+Explicit custom-metric entries whose values are booleans, nonnumeric,
+non-finite, or outside 0.0–1.0 are omitted consistently from the persisted
+reward, aggregate, and report; they cannot contribute a score or consume the
+128-name publication budget.
 
 Rather than hard-coding the paths, read them from the `HARBOR_*` environment
 variables and fall back to the defaults below when a variable is unset — the
@@ -253,9 +269,9 @@ layout and the machine-readable contract.
     one the run fails rather than guessing.
   </Accordion>
   <Accordion title="Custom metric collides with a reserved name">
-    Your grader wrote a metric named after a standard one (`security`,
-    `accuracy`, and the rest). Rename it and keep custom scores under
-    `custom_metrics`.
+    Your grader wrote a metric named after a standard score or reward-metadata
+    field (`security`, `accuracy`, `overall`, `entry_id`, `details`, and the
+    rest). Rename it and keep custom scores under `custom_metrics`.
   </Accordion>
   <Accordion title="Custom scores don't appear in the report">
     Confirm the grading mode: `default` ignores custom graders entirely. Set

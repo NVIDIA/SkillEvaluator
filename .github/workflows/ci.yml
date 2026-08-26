@@ -183,23 +183,25 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json --archive dist/*.whl --archive dist/*.tar.gz
       - name: Validate distribution metadata
         run: uvx --from twine==6.2.0 twine check --strict dist/*
-      - name: Install and smoke-test the wheel
+      - name: Install and smoke-test the wheel on Python 3.12 and 3.13
         shell: bash
         run: |
           wheel="$(find "$PWD/dist" -maxdepth 1 -type f -name 'skillevaluator-*.whl' -print -quit)"
           test -n "$wheel"
-          venv="$RUNNER_TEMP/skillevaluator-wheel"
-          uv venv --python 3.13 "$venv"
-          uv pip install --python "$venv/bin/python" "${wheel}[tier3,llm]"
-          cd "$RUNNER_TEMP"
-          "$venv/bin/python" -c 'import anthropic, harbor, openai, skillevaluator, skillevaluator.model_catalog, skillevaluator.model_commands'
-          "$venv/bin/python" -c 'from importlib.resources import files; assert files("skillevaluator.tier3.harbor").joinpath("templates/eval.py").is_file()'
-          "$venv/bin/skillevaluator" --version
-          "$venv/bin/skillevaluator" --help >/dev/null
-          "$venv/bin/skillevaluator" models --help >/dev/null
-          SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
-            "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
-          "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'
+          for python_version in 3.12 3.13; do
+            venv="$RUNNER_TEMP/skillevaluator-wheel-${python_version}"
+            uv venv --python "$python_version" "$venv"
+            uv pip install --python "$venv/bin/python" "${wheel}[tier3]"
+            cd "$RUNNER_TEMP"
+            "$venv/bin/python" -c 'import anthropic, harbor, openai, skillevaluator, skillevaluator.model_catalog, skillevaluator.model_commands'
+            "$venv/bin/python" -c 'from importlib.resources import files; assert files("skillevaluator.tier3.harbor").joinpath("templates/eval.py").is_file()'
+            "$venv/bin/skillevaluator" --version
+            "$venv/bin/skillevaluator" --help >/dev/null
+            "$venv/bin/skillevaluator" models --help >/dev/null
+            SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
+              "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
+            "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'
+          done
 
   tier3-macos:
     name: Tier 3 macOS contract and progress
@@ -275,6 +277,7 @@ jobs:
           tests/reporting
           tests/test_cli.py
           tests/test_harbor_output_provenance.py
+          tests/test_harbor_runner_status.py
           tests/test_harbor_runtime_skill_isolation.py
           tests/test_harbor_secure_copy.py::test_checked_windows_fallback_accepts_crt_descriptor_identity
           tests/test_harbor_secure_copy.py::test_checked_windows_fallback_verifies_portable_chmod_semantics

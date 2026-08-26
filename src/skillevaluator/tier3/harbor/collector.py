@@ -8,7 +8,9 @@ results into the evals/results/<agent>/ structure.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -17,36 +19,81 @@ import re
 import shutil
 import stat
 import sys
+import unicodedata
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+
+from harbor.models.trajectories import Trajectory
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
+    MAX_CUSTOM_METRICS,
+    RESERVED_METRIC_NAMES,
+    CustomMetricContractError,
     average_custom_metrics,
     average_metrics,
+    custom_metric_contract_error,
+    custom_metric_name_is_publishable,
     dimension_scores,
     extract_custom_metrics,
     metric_set_for_reward,
     metric_value,
     overall_score,
     score_definition,
+    score_value,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
-from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_data, redact_sensitive_text
+from skillevaluator.utils.redaction import contains_credential_value, redact_sensitive_data, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
 
 logger = logging.getLogger(__name__)
 
 DISPLAY_METRICS = DEFAULT_METRICS
+_LOGICAL_ATTEMPT_SENTINEL = object()
+_CUSTOM_METRIC_CONTRACT_MARKER = "_skill_evaluator_custom_metric_contract_error"
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
 DIAGNOSTIC_ARTIFACT_HARD_MAX_BYTES = 64 * 1024 * 1024
 REWARD_DIAGNOSTIC_STRING_MAX_CHARS = 8192
+REWARD_METADATA_TEXT_MAX_CHARS = 512
+REWARD_IDENTITY_TEXT_MAX_BYTES = 512
+REWARD_JSON_MAX_DEPTH = 64
+REWARD_JSON_MAX_NODES = 50_000
+GENERATED_JSON_MAX_BYTES = 2 * 1024 * 1024
+# Reserve room for collector-owned identity, model, and evidence annotations so
+# a source reward that passes extraction remains readable after publication.
+COLLECTED_REWARD_JSON_MAX_NODES = REWARD_JSON_MAX_NODES - 512
+COLLECTED_REWARD_JSON_MAX_BYTES = GENERATED_JSON_MAX_BYTES - (256 * 1024)
+ATIF_JSON_MAX_DEPTH = 64
+ATIF_JSON_MAX_NODES = 50_000
+PORTABLE_TRIAL_COMPONENT_MAX_UNITS = 240
+PUBLISHED_CASE_DETAILS_MAX = 256
+PUBLISHED_ATTEMPT_DETAILS_MAX = 512
+PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX = 8
+PUBLISHED_CASE_ID_DIAGNOSTIC_SAMPLE_MAX = 32
+PUBLISHED_FAILURE_DETAILS_MAX = 32
+PUBLISHED_EXECUTION_ERRORS_MAX = 256
+PUBLISHED_JOB_FAILURE_MAX_CHARS = 4096
+UNSCOREABLE_NUMERIC_REWARD_REASON = "Reward metrics are incomplete or non-finite; trial was not scored"
+UNSAFE_REWARD_STRUCTURE_REASON = "Reward payload exceeds safe structural limits; trial was not scored"
+UNSAFE_REWARD_IDENTITY_REASON = "Reward identity violates the bounded publication contract; trial was not scored"
+UNSAFE_CUSTOM_METRICS_REASON = "Custom metrics exceed the bounded publication contract; trial was not scored"
+MALFORMED_HARBOR_REWARD_REASON = "Harbor verifier rewards contain nonnumeric metric values; trial was not scored"
+UNSAFE_CUSTOM_METRIC_UNION_REASON = (
+    "Custom metric union exceeds the per condition publication limit; condition was not scored"
+)
+MISSING_MULTI_STEP_REWARD_REASON = (
+    "Authoritative multi-step verifier reward is missing; it was not reconstructed or scored"
+)
 TRIAL_DIAGNOSTIC_ARTIFACTS = ("result.json", "config.json", "exception.txt", "trial.log")
 AGENT_LOG_ARTIFACTS = (
     "trajectory.json",
@@ -72,6 +119,12 @@ GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
 _MAX_FAILED_JUDGE_SIDECARS = 64
 _MAX_FAILED_JUDGE_STEP_PATHS_SCANNED = 256
+_MAX_TRAJECTORY_REFERENCE_FILES = 64
+_MAX_TRAJECTORY_REFERENCE_DEPTH = 16
+_MAX_TRAJECTORY_REFERENCE_TOTAL_BYTES = 32 * 1024 * 1024
+_MAX_TRAJECTORY_STEP_DIRECTORIES = 64
+_ATIF_TOKEN_ID_FIELDS = frozenset({"completion_token_ids", "prompt_token_ids"})
+_TRAJECTORY_NOT_PROVIDED = object()
 
 
 def _is_aggregate_extra_token_key(key: str) -> bool:
@@ -182,9 +235,21 @@ def _remove_generated_output_path(path: Path, output_root: Path) -> None:
 
 
 def _write_generated_root_json(path: Path, output_root: Path, payload: Any) -> None:
-    """Publish one root artifact without following unsafe replacements."""
+    """Publish one bounded generated artifact without following replacements."""
     _assert_safe_generated_output_path(path, output_root, follow_target=False)
-    write_output_file_atomically(path, json.dumps(payload, indent=2).encode("utf-8"))
+    _validate_generated_json_value(
+        payload,
+        max_depth=REWARD_JSON_MAX_DEPTH,
+        max_nodes=REWARD_JSON_MAX_NODES,
+        max_bytes=GENERATED_JSON_MAX_BYTES,
+    )
+    encoded = json.dumps(
+        payload,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    write_output_file_atomically(path, encoded)
 
 
 def _agent_generated_output_paths(agent_dir: Path) -> list[Path]:
@@ -216,14 +281,9 @@ def _reset_agent_generated_outputs(agent_dir: Path, output_root: Path) -> None:
 
 
 def _find_job_dir(jobs_dir: Path, job_name: str) -> Path | None:
-    """Find a Harbor job directory by name."""
+    """Find the exact Harbor job directory produced for ``job_name``."""
     candidate = jobs_dir / job_name
-    if candidate.exists():
-        return candidate
-    for d in sorted(jobs_dir.iterdir(), reverse=True):
-        if d.is_dir() and job_name in d.name:
-            return d
-    return None
+    return candidate if candidate.is_dir() else None
 
 
 def _safe_text(value: Any, *, max_len: int | None = 2048) -> str:
@@ -236,6 +296,83 @@ def _safe_text(value: Any, *, max_len: int | None = 2048) -> str:
 def _safe_diagnostic_text(value: Any, *, max_len: int) -> str:
     """Return redacted, bounded text without terminal-control characters."""
     return re.sub(r"[\x00-\x1f\x7f]", " ", _safe_text(value, max_len=max_len)).strip()
+
+
+def _published_job_failure(value: Any) -> str:
+    """Return one validation/launch failure safe for generated results."""
+    return _safe_diagnostic_text(value, max_len=PUBLISHED_JOB_FAILURE_MAX_CHARS)
+
+
+def _identity_text_is_publishable(value: object) -> bool:
+    """Return whether an identity can safely be used as a generated JSON key."""
+    if not isinstance(value, str) or not value or value != value.strip() or not value.isprintable():
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return len(encoded) <= REWARD_IDENTITY_TEXT_MAX_BYTES and not contains_credential_value(value)
+
+
+def _published_trial_label(value: object, *, alias_ordinal: int | None = None) -> str:
+    """Return a bounded value-only label; unsafe identities never become keys or paths."""
+    if isinstance(value, str) and value and value.isprintable() and not contains_credential_value(value):
+        try:
+            if len(value.encode("utf-8")) <= REWARD_IDENTITY_TEXT_MAX_BYTES:
+                return value
+        except UnicodeError:
+            pass
+    if alias_ordinal is not None:
+        return f"redacted-or-invalid-trial-{alias_ordinal:06d}"
+    return "redacted-or-invalid-trial"
+
+
+def _validated_expected_case_ids(expected_case_ids: list[str] | None) -> list[str]:
+    """Validate caller-owned case identities before generated outputs are reset."""
+    validated: list[str] = []
+    seen: set[str] = set()
+    for case_id in expected_case_ids or []:
+        if not _identity_text_is_publishable(case_id):
+            raise ValueError("Expected case identity violates the bounded publication contract")
+        if case_id not in seen:
+            seen.add(case_id)
+            validated.append(case_id)
+    return validated
+
+
+def _sampled_case_id_diagnostic(label: str, case_ids: list[str]) -> str:
+    """Render bounded case-coverage diagnostics while retaining an exact count."""
+    if not case_ids:
+        return ""
+    sample = case_ids[:PUBLISHED_CASE_ID_DIAGNOSTIC_SAMPLE_MAX]
+    rendered = ", ".join(sample)
+    if len(case_ids) > len(sample):
+        return f"{label} (showing {len(sample)} of {len(case_ids)}): {rendered}"
+    return f"{label}: {rendered}"
+
+
+def _public_failure_list(failures: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    """Return a bounded, redacted sample of trial-level failures."""
+    public: list[dict[str, str]] = []
+    for failure in (failures or [])[:PUBLISHED_FAILURE_DETAILS_MAX]:
+        public.append(
+            {
+                "trial": _published_trial_label(failure.get("trial", "unknown trial")),
+                "reason": _safe_diagnostic_text(failure.get("reason", "unknown error"), max_len=2048),
+            }
+        )
+    return public
+
+
+def _failure_list_metadata(prefix: str, failures: list[dict[str, str]] | None) -> dict[str, Any]:
+    """Describe exact failure cardinality beside a bounded published sample."""
+    total = len(failures or [])
+    shown = min(total, PUBLISHED_FAILURE_DETAILS_MAX)
+    return {
+        f"{prefix}_total": total,
+        f"{prefix}_shown": shown,
+        f"{prefix}_truncated": shown < total,
+    }
 
 
 def _safe_evaluation_errors(value: Any) -> dict[str, str] | list[str] | str:
@@ -255,6 +392,13 @@ def _safe_evaluation_errors(value: Any) -> dict[str, str] | list[str] | str:
             if (safe_reason := _safe_diagnostic_text(reason, max_len=512))
         ]
     return _safe_diagnostic_text(value, max_len=512)
+
+
+def _bounded_reward_metadata_text(value: Any) -> str | None:
+    """Return one bounded, redacted collector-owned metadata label."""
+    if not isinstance(value, str) or not value:
+        return None
+    return _safe_diagnostic_text(value, max_len=REWARD_METADATA_TEXT_MAX_CHARS) or None
 
 
 def _read_json(path: Path) -> Any:
@@ -830,16 +974,17 @@ def _trial_failure_reason(trial_dir: Path) -> str:
 
 def _extract_trial_failures(job_dir: Path) -> list[dict[str, str]]:
     failures: list[dict[str, str]] = []
-    for trial_dir in sorted(job_dir.iterdir()):
+    for ordinal, trial_dir in enumerate(sorted(job_dir.iterdir()), start=1):
+        trial_label = _published_trial_label(trial_dir.name, alias_ordinal=ordinal)
         kind, unsafe_reason = _inspect_trial_directory(trial_dir)
         if kind == "link":
-            failures.append({"trial": trial_dir.name, "reason": unsafe_reason})
+            failures.append({"trial": trial_label, "reason": unsafe_reason})
             continue
         if kind != "directory":
             continue
         reason = _trial_failure_reason(trial_dir)
         if reason:
-            failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
+            failures.append({"trial": trial_label, "reason": redact_sensitive_text(reason)})
     return failures
 
 
@@ -875,13 +1020,18 @@ def _can_preserve_partial_rewards(job_dir: Path, trial_failures: list[dict[str, 
 
 def _extract_agent_runtime_failures(job_dir: Path) -> list[dict[str, str]]:
     failures: list[dict[str, str]] = []
-    for trial_dir in sorted(job_dir.iterdir()):
+    for ordinal, trial_dir in enumerate(sorted(job_dir.iterdir()), start=1):
         kind, _reason = _inspect_trial_directory(trial_dir)
         if kind != "directory":
             continue
         reason = _agent_runtime_failure_reason(trial_dir)
         if reason:
-            failures.append({"trial": trial_dir.name, "reason": redact_sensitive_text(reason)})
+            failures.append(
+                {
+                    "trial": _published_trial_label(trial_dir.name, alias_ordinal=ordinal),
+                    "reason": redact_sensitive_text(reason),
+                }
+            )
     return failures
 
 
@@ -897,14 +1047,41 @@ def _diagnostic_artifact_max_bytes() -> int:
     return min(max(0, value), DIAGNOSTIC_ARTIFACT_HARD_MAX_BYTES)
 
 
+def _without_atif_token_id_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _without_atif_token_id_fields(item)
+            for key, item in value.items()
+            if str(key) not in _ATIF_TOKEN_ID_FIELDS
+        }
+    if isinstance(value, list):
+        return [_without_atif_token_id_fields(item) for item in value]
+    return value
+
+
+def _redacted_trajectory_data(value: Any) -> dict[str, Any] | None:
+    """Redact one ATIF document without changing schema field types."""
+    try:
+        validated = _validated_trajectory_dict(value)
+        without_token_ids = _without_atif_token_id_fields(validated)
+        return _validated_trajectory_dict(redact_sensitive_data(without_token_ids))
+    except (_TrajectoryMergeError, RecursionError, MemoryError):
+        return None
+
+
 def _redacted_artifact_text(src: Path, text: str) -> str | None:
     if src.suffix.lower() == ".json":
         try:
             data = json.loads(text)
-            safe_data = redact_sensitive_data(data)
+            if src.name.startswith("trajectory"):
+                safe_data = _redacted_trajectory_data(data)
+                if safe_data is None:
+                    return None
+            else:
+                safe_data = redact_sensitive_data(data)
             # Compact encoding avoids indentation-driven amplification for
             # deeply nested but otherwise valid diagnostic JSON.
-            return json.dumps(safe_data, separators=(",", ":"), ensure_ascii=False)
+            return json.dumps(safe_data, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
         except (json.JSONDecodeError, ValueError, RecursionError, MemoryError):
             return None
     try:
@@ -995,7 +1172,12 @@ def _write_redacted_text_copy(
     return True, {"name": src.name, "size_bytes": size_bytes}
 
 
-def _copy_trial_artifacts(trial_dir: Path, trial_out: Path) -> list[str]:
+def _copy_trial_artifacts(
+    trial_dir: Path,
+    trial_out: Path,
+    *,
+    include_root_trajectory: bool = True,
+) -> list[str]:
     copied: list[str] = []
     manifest: dict[str, Any] = {"copied": [], "skipped": []}
     for artifact_name in TRIAL_DIAGNOSTIC_ARTIFACTS:
@@ -1022,6 +1204,8 @@ def _copy_trial_artifacts(trial_dir: Path, trial_out: Path) -> list[str]:
         manifest["skipped"].append({"name": "agent", "reason": "not_regular_directory"})
     elif agent_logs_metadata is not None:
         for artifact_name in AGENT_LOG_ARTIFACTS:
+            if artifact_name == "trajectory.json" and not include_root_trajectory:
+                continue
             src = agent_logs / artifact_name
             if src.exists() or src.is_symlink():
                 ok, record = _write_redacted_text_copy(src, trial_out / artifact_name, source_root=trial_dir)
@@ -1033,6 +1217,24 @@ def _copy_trial_artifacts(trial_dir: Path, trial_out: Path) -> list[str]:
     if manifest["skipped"]:
         _write_artifact_manifest(trial_out, manifest)
     return copied
+
+
+def _record_skipped_trajectory(trial_out: Path, reason: str) -> None:
+    """Persist a value-free explanation when canonical trajectory output is omitted."""
+    manifest_path = trial_out / "artifact_manifest.json"
+    existing = _read_json(manifest_path)
+    manifest = existing if isinstance(existing, dict) else {"copied": [], "skipped": []}
+    copied = manifest.get("copied")
+    skipped = manifest.get("skipped")
+    if not isinstance(copied, list):
+        manifest["copied"] = []
+    if not isinstance(skipped, list):
+        skipped = []
+        manifest["skipped"] = skipped
+    record = {"name": "trajectory.json", "reason": reason}
+    if record not in skipped:
+        skipped.append(record)
+    _write_artifact_manifest(trial_out, manifest)
 
 
 def _trial_error_summary(trial_dir: Path) -> dict[str, Any]:
@@ -1075,6 +1277,51 @@ def _trial_error_summary(trial_dir: Path) -> dict[str, Any]:
     return summary
 
 
+def _write_bounded_failure_artifact(path: Path, failure: dict[str, Any]) -> None:
+    """Write a redacted failure record inside the generated JSON envelope."""
+    try:
+        safe_failure = redact_sensitive_data(failure, max_str_len=REWARD_METADATA_TEXT_MAX_CHARS)
+        _validate_generated_json_value(
+            safe_failure,
+            max_depth=REWARD_JSON_MAX_DEPTH,
+            max_nodes=REWARD_JSON_MAX_NODES,
+            max_bytes=GENERATED_JSON_MAX_BYTES,
+        )
+    except (MemoryError, RecursionError, TypeError, UnicodeError, ValueError):
+        raw_error = failure.get("error")
+        error = raw_error if isinstance(raw_error, dict) else {}
+        safe_failure = {
+            "status": "unscored",
+            "trial": _published_trial_label(failure.get("trial", "unknown trial")),
+            "agent": _safe_diagnostic_text(failure.get("agent", "unknown"), max_len=256),
+            "variant": _safe_diagnostic_text(failure.get("variant", "unknown"), max_len=64),
+            "artifacts": [
+                _safe_diagnostic_text(item, max_len=128)
+                for item in (failure.get("artifacts") if isinstance(failure.get("artifacts"), list) else [])[:64]
+            ],
+            "error": {
+                "type": _safe_diagnostic_text(error.get("type", "HarborTrialError"), max_len=128),
+                "message": _safe_diagnostic_text(
+                    error.get("message", "Failure metadata exceeded safe artifact limits"),
+                    max_len=512,
+                ),
+            },
+            "diagnostic_truncated": True,
+            "diagnostic_truncated_reason": "failure metadata exceeded safe artifact limits",
+        }
+        if str(failure.get("evaluation_status") or "").casefold() in {"error", "failed"}:
+            safe_failure["evaluation_status"] = "failed"
+        if failure.get("evaluation_errors") not in (None, ""):
+            safe_failure["evaluation_errors"] = _safe_evaluation_errors(failure["evaluation_errors"])
+    encoded = json.dumps(
+        safe_failure,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    write_output_file_atomically(path, encoded)
+
+
 def _looks_like_trial_dir(path: Path) -> bool:
     return any((path / name).exists() for name in TRIAL_DIAGNOSTIC_ARTIFACTS) or (path / "agent").exists()
 
@@ -1088,29 +1335,32 @@ def _save_unscored_trials(
     variant: str,
     agent_model: str | None = None,
     agent_model_source: str | None = None,
+    persisted_names: dict[str, str] | None = None,
 ) -> None:
     if job_dir is None or not job_dir.exists():
         return
+    agent = _bounded_reward_metadata_text(agent) or "unknown"
+    agent_model = _bounded_reward_metadata_text(agent_model)
+    agent_model_source = _bounded_reward_metadata_text(agent_model_source)
 
     scored_trials = {str(reward.get("_trial_root_name") or reward.get("_trial_name") or "") for reward in rewards}
+    if persisted_names is None:
+        _scored_names, persisted_names = _persisted_trial_layout(rewards, job_dir)
     for trial_src in sorted(job_dir.iterdir()):
         kind, unsafe_reason = _inspect_trial_directory(trial_src)
         if kind == "link":
-            trial_out = trials_dir / trial_src.name
+            trial_out = trials_dir / persisted_names.get(trial_src.name, "unknown")
             trial_out.mkdir(parents=True, exist_ok=True)
-            write_output_file_atomically(
+            _write_bounded_failure_artifact(
                 trial_out / "failure.json",
-                json.dumps(
-                    {
-                        "status": "unscored",
-                        "trial": trial_src.name,
-                        "agent": agent,
-                        "variant": variant,
-                        "artifacts": [],
-                        "error": {"type": "UnsafeHarborTrial", "message": unsafe_reason},
-                    },
-                    indent=2,
-                ).encode("utf-8"),
+                {
+                    "status": "unscored",
+                    "trial": trial_out.name,
+                    "agent": agent,
+                    "variant": variant,
+                    "artifacts": [],
+                    "error": {"type": "UnsafeHarborTrial", "message": unsafe_reason},
+                },
             )
             continue
         if kind != "directory":
@@ -1118,9 +1368,29 @@ def _save_unscored_trials(
         if trial_src.name in scored_trials or not _looks_like_trial_dir(trial_src):
             continue
 
-        trial_out = trials_dir / trial_src.name
+        trial_out = trials_dir / persisted_names.get(trial_src.name, "unknown")
         trial_out.mkdir(parents=True, exist_ok=True)
-        copied = _copy_trial_artifacts(trial_src, trial_out)
+        copied = _copy_trial_artifacts(trial_src, trial_out, include_root_trajectory=False)
+        materialized_trajectory, trajectory_reason = _materialized_trial_trajectory(trial_src, None)
+        safe_trajectory = (
+            _redacted_trajectory_data(materialized_trajectory) if materialized_trajectory is not None else None
+        )
+        if safe_trajectory is not None:
+            (trial_out / "trajectory.json").write_text(
+                json.dumps(
+                    safe_trajectory,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ),
+                encoding="utf-8",
+            )
+            copied.append("trajectory.json")
+        else:
+            if materialized_trajectory is not None:
+                trajectory_reason = "trajectory_redaction_or_validation_failed"
+            _record_skipped_trajectory(trial_out, trajectory_reason or "trajectory_unavailable")
+            copied.append("artifact_manifest.json")
         judge_diagnostic = _failed_judge_diagnostic(trial_src)
         if judge_diagnostic is not None:
             judge_diagnostic.update({"agent": agent, "variant": variant})
@@ -1135,7 +1405,7 @@ def _save_unscored_trials(
             copied.append("reward.json")
         failure = {
             "status": "unscored",
-            "trial": trial_src.name,
+            "trial": trial_out.name,
             "agent": agent,
             "variant": variant,
             "artifacts": copied,
@@ -1154,11 +1424,8 @@ def _save_unscored_trials(
         failure.update(error_summary)
         failure_file = trial_out / "failure.json"
         try:
-            failure_file.write_text(
-                json.dumps(redact_sensitive_data(failure), indent=2),
-                encoding="utf-8",
-            )
-        except OSError as e:
+            _write_bounded_failure_artifact(failure_file, failure)
+        except (OSError, TypeError, ValueError) as e:
             logger.debug("Failed to write Harbor failure artifact %s: %s", failure_file, e)
 
 
@@ -1203,9 +1470,13 @@ def _ordered_step_trajectory_paths(trial_root: Path) -> list[Path]:
         return []
 
     safe_paths: dict[str, Path] = {}
+    scanned_entries = 0
     try:
         with os.scandir(steps_dir) as entries:
             for entry in entries:
+                scanned_entries += 1
+                if scanned_entries > _MAX_TRAJECTORY_STEP_DIRECTORIES:
+                    return []
                 try:
                     entry_metadata = entry.stat(follow_symlinks=False)
                 except OSError:
@@ -1231,6 +1502,7 @@ def _ordered_step_trajectory_paths(trial_root: Path) -> list[Path]:
         return []
 
     ordered_names: list[str] = []
+    seen_names: set[str] = set()
     result = _read_json(trial_root / "result.json")
     if isinstance(result, dict):
         step_results = result.get("step_results")
@@ -1238,8 +1510,9 @@ def _ordered_step_trajectory_paths(trial_root: Path) -> list[Path]:
             for step in step_results:
                 if isinstance(step, dict):
                     step_name = step.get("step_name")
-                    if isinstance(step_name, str) and step_name and step_name not in ordered_names:
+                    if isinstance(step_name, str) and step_name and step_name not in seen_names:
                         ordered_names.append(step_name)
+                        seen_names.add(step_name)
 
     ordered_paths: list[Path] = []
     seen: set[Path] = set()
@@ -1255,93 +1528,1250 @@ def _ordered_step_trajectory_paths(trial_root: Path) -> list[Path]:
     return ordered_paths
 
 
-def _merged_step_trajectory(trial_root: Path) -> dict[str, Any] | None:
-    """Merge Harbor multi-step ATIF fragments into one collected trajectory."""
-    trajectories: list[tuple[str, dict[str, Any]]] = []
-    for path in _ordered_step_trajectory_paths(trial_root):
-        data = _read_json(path)
-        if not isinstance(data, dict):
-            continue
-        steps = data.get("steps")
-        if not isinstance(steps, list):
-            continue
-        step_name = path.parent.parent.name
-        trajectories.append((step_name, data))
+def _trajectory_dict_steps(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
+    steps = trajectory.get("steps")
+    if not isinstance(steps, list):
+        return []
+    return [step for step in steps if isinstance(step, dict)]
 
-    if not trajectories:
-        return None
 
-    merged = copy.deepcopy(trajectories[0][1])
-    merged_steps: list[dict[str, Any]] = []
-    for step_name, trajectory in trajectories:
-        steps = trajectory.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            merged_step = copy.deepcopy(step)
-            original_step_id = merged_step.get("step_id")
-            merged_step["step_id"] = len(merged_steps) + 1
-            extra = merged_step.get("extra")
-            if not isinstance(extra, dict):
-                extra = {}
-            extra.setdefault("harbor_step_name", step_name)
-            if original_step_id not in (None, ""):
-                extra.setdefault("harbor_original_step_id", original_step_id)
-            merged_step["extra"] = extra
-            merged_steps.append(merged_step)
-
-    if not merged_steps:
-        return None
-
-    step_names = [name for name, _ in trajectories]
-    merged["steps"] = merged_steps
-    merged["schema_version"] = str(trajectories[0][1].get("schema_version") or merged.get("schema_version") or "")
-    merged["agent"] = trajectories[0][1].get("agent") or merged.get("agent")
-    merged_extra = merged.get("extra")
-    if not isinstance(merged_extra, dict):
-        merged_extra = {}
-    merged_extra["harbor_multi_step"] = {
-        "step_count": len(step_names),
-        "step_names": step_names,
+def _trajectory_step_merge_identity(
+    step: dict[str, Any],
+    *,
+    copied_context: bool = False,
+) -> dict[str, Any]:
+    """Return semantic step content without collector-owned identity fields."""
+    identity = {
+        key: value
+        for key, value in step.items()
+        if key not in {"is_copied_context", "step_id"} and not (copied_context and key == "metrics")
     }
-    merged["extra"] = merged_extra
+    extra = identity.get("extra")
+    if isinstance(extra, dict):
+        identity["extra"] = {
+            key: value
+            for key, value in extra.items()
+            if key not in {"harbor_step_name", "harbor_original_step_id"} and not (copied_context and key == "note")
+        }
+        if not identity["extra"]:
+            identity.pop("extra")
+    return identity
 
-    merged["final_metrics"] = _merge_trajectory_final_metrics(
-        [trajectory for _, trajectory in trajectories],
-        total_steps=len(merged_steps),
+
+def _is_cumulative_trajectory_continuation(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    """Return true only when ATIF copied-context markers prove continuation."""
+    previous_steps = _trajectory_dict_steps(previous)
+    current_steps = _trajectory_dict_steps(current)
+    if not previous_steps or not current_steps:
+        return False
+    copied_prefix_length = _copied_context_prefix_length(current_steps)
+    if copied_prefix_length:
+        if copied_prefix_length > len(previous_steps):
+            raise _TrajectoryMergeError("copied-context prefix exceeds previous trajectory")
+        if copied_prefix_length == len(current_steps):
+            raise _TrajectoryMergeError("copied-context continuation has no new steps")
+        for previous_step, current_step in zip(
+            previous_steps[-copied_prefix_length:],
+            current_steps[:copied_prefix_length],
+            strict=True,
+        ):
+            if _trajectory_step_merge_identity(previous_step, copied_context=True) != (
+                _trajectory_step_merge_identity(current_step, copied_context=True)
+            ):
+                raise _TrajectoryMergeError("copied-context prefix does not match previous trajectory suffix")
+        return True
+
+    previous_session = previous.get("session_id")
+    current_session = current.get("session_id")
+    if (
+        not isinstance(previous_session, str)
+        or not previous_session
+        or current_session != previous_session
+        or previous_session == "copilot-cli"
+        or len(current_steps) <= len(previous_steps)
+    ):
+        return False
+    return all(
+        _trajectory_step_merge_identity(previous_step) == _trajectory_step_merge_identity(current_step)
+        for previous_step, current_step in zip(
+            previous_steps,
+            current_steps[: len(previous_steps)],
+            strict=True,
+        )
     )
+
+
+def _copied_context_prefix_length(steps: list[dict[str, Any]]) -> int:
+    """Return the leading copied-context count, rejecting non-prefix markers."""
+    prefix_length = 0
+    saw_new_step = False
+    for step in steps:
+        if step.get("is_copied_context") is True:
+            if saw_new_step:
+                raise _TrajectoryMergeError("copied-context steps must form a prefix")
+            prefix_length += 1
+        else:
+            saw_new_step = True
+    return prefix_length
+
+
+class _TrajectoryMergeError(ValueError):
+    """A multi-file ATIF trajectory cannot be materialized without data loss."""
+
+
+@dataclass
+class _TrajectoryReferenceState:
+    raw_cache: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
+    materialized_cache: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
+    resolved_ids: dict[str, str] = dataclass_field(default_factory=dict)
+    reference_ordinals: dict[str, int] = dataclass_field(default_factory=dict)
+    generated_continuation_fingerprints: dict[str, str] = dataclass_field(default_factory=dict)
+    active: set[str] = dataclass_field(default_factory=set)
+    file_count: int = 0
+    total_bytes: int = 0
+
+
+def _normalized_trajectory_reference(reference: Any) -> tuple[Path, str]:
+    if not isinstance(reference, str) or not reference.strip() or len(reference) > 512 or "\x00" in reference:
+        raise _TrajectoryMergeError("invalid trajectory reference")
+    # Harbor resolves this value as an exact child path. Preserve significant
+    # leading/trailing whitespace for the source lookup; normalization is only
+    # for traversal checks and the cache key.
+    raw = reference
+    try:
+        raw.encode("utf-8")
+    except UnicodeError as exc:
+        raise _TrajectoryMergeError("invalid trajectory reference encoding") from exc
+    platform_path = PureWindowsPath(raw) if os.name == "nt" else PurePosixPath(raw)
+    if platform_path.drive or platform_path.is_absolute():
+        raise _TrajectoryMergeError("absolute trajectory reference")
+    if "://" in raw or any(part in {"", ".", ".."} for part in platform_path.parts):
+        raise _TrajectoryMergeError("unsafe trajectory reference")
+    # Match Harbor's native ``agent_dir / reference`` lookup exactly.  In
+    # particular, POSIX treats a backslash as a literal filename character;
+    # rewriting it to ``/`` can select a different trajectory than Harbor did.
+    relative = Path(raw)
+    key = platform_path.as_posix().casefold() if os.name == "nt" else platform_path.as_posix()
+    return relative, key
+
+
+def _validate_generated_json_structure(
+    value: Any,
+    *,
+    max_depth: int,
+    max_nodes: int,
+) -> None:
+    """Reject trees that the bounded report loader cannot traverse."""
+    nodes = 0
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > max_nodes:
+            raise ValueError("JSON node count exceeds limit")
+        if not isinstance(current, dict | list):
+            continue
+        if depth > max_depth:
+            raise ValueError("JSON depth exceeds limit")
+        if nodes + len(current) > max_nodes:
+            raise ValueError("JSON node count exceeds limit")
+        children = current.values() if isinstance(current, dict) else current
+        stack.extend((child, depth + 1) for child in children)
+
+
+def _validate_generated_json_value(
+    value: Any,
+    *,
+    max_depth: int,
+    max_nodes: int,
+    max_bytes: int,
+) -> None:
+    """Validate structural, numeric, and encoded-size browser safety."""
+    _validate_generated_json_structure(value, max_depth=max_depth, max_nodes=max_nodes)
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+        elif isinstance(current, bool) or current is None or isinstance(current, str):
+            continue
+        elif isinstance(current, int):
+            if abs(current) > _MAX_JSON_SAFE_INTEGER:
+                raise ValueError("browser-unsafe JSON integer")
+        elif isinstance(current, float):
+            if not math.isfinite(current):
+                raise ValueError("non-finite JSON number")
+        else:
+            raise TypeError("value is not JSON serializable")
+    encoded = json.dumps(
+        value,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(encoded) > max_bytes:
+        raise ValueError("encoded JSON exceeds limit")
+
+
+def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
+    try:
+        # Bound traversal before deepcopy so hostile ATIF cannot amplify work
+        # before validation begins.
+        _validate_generated_json_structure(
+            data,
+            max_depth=ATIF_JSON_MAX_DEPTH,
+            max_nodes=ATIF_JSON_MAX_NODES,
+        )
+        candidate = copy.deepcopy(data)
+        if isinstance(candidate, dict):
+            final_metrics = candidate.get("final_metrics")
+            if isinstance(final_metrics, dict):
+                for key in (
+                    "total_prompt_tokens",
+                    "total_completion_tokens",
+                    "total_cached_tokens",
+                    "total_steps",
+                ):
+                    value = final_metrics.get(key)
+                    if key in final_metrics and (
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value < 0
+                        or value > _MAX_JSON_SAFE_INTEGER
+                    ):
+                        final_metrics.pop(key, None)
+                cost = final_metrics.get("total_cost_usd")
+                if "total_cost_usd" in final_metrics:
+                    try:
+                        cost_is_finite = (
+                            isinstance(cost, int | float) and not isinstance(cost, bool) and math.isfinite(cost)
+                        )
+                    except OverflowError:
+                        cost_is_finite = False
+                    if not cost_is_finite:
+                        final_metrics.pop("total_cost_usd", None)
+                metric_extra = final_metrics.get("extra")
+                if isinstance(metric_extra, dict):
+                    for key, value in list(metric_extra.items()):
+                        if _is_aggregate_extra_token_key(str(key)) and (
+                            not isinstance(value, int)
+                            or isinstance(value, bool)
+                            or value < 0
+                            or value > _MAX_JSON_SAFE_INTEGER
+                        ):
+                            metric_extra.pop(key, None)
+            steps = candidate.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    llm_call_count = step.get("llm_call_count")
+                    if "llm_call_count" in step and (
+                        not isinstance(llm_call_count, int)
+                        or isinstance(llm_call_count, bool)
+                        or llm_call_count < 0
+                        or llm_call_count > _MAX_JSON_SAFE_INTEGER
+                    ):
+                        step.pop("llm_call_count", None)
+                    step_metrics = step.get("metrics")
+                    if not isinstance(step_metrics, dict):
+                        continue
+                    for key in ("prompt_tokens", "completion_tokens", "cached_tokens"):
+                        value = step_metrics.get(key)
+                        if key in step_metrics and (
+                            not isinstance(value, int)
+                            or isinstance(value, bool)
+                            or value < 0
+                            or value > _MAX_JSON_SAFE_INTEGER
+                        ):
+                            step_metrics.pop(key, None)
+                    cost = step_metrics.get("cost_usd")
+                    if "cost_usd" in step_metrics:
+                        try:
+                            cost_is_finite = (
+                                isinstance(cost, int | float) and not isinstance(cost, bool) and math.isfinite(cost)
+                            )
+                        except OverflowError:
+                            cost_is_finite = False
+                        if not cost_is_finite:
+                            step_metrics.pop("cost_usd", None)
+                    step_extra = step_metrics.get("extra")
+                    if isinstance(step_extra, dict):
+                        for key, value in list(step_extra.items()):
+                            if _is_aggregate_extra_token_key(str(key)) and (
+                                not isinstance(value, int)
+                                or isinstance(value, bool)
+                                or value < 0
+                                or value > _MAX_JSON_SAFE_INTEGER
+                            ):
+                                step_extra.pop(key, None)
+        _validate_generated_json_value(
+            candidate,
+            max_depth=ATIF_JSON_MAX_DEPTH,
+            max_nodes=ATIF_JSON_MAX_NODES,
+            max_bytes=GENERATED_JSON_MAX_BYTES,
+        )
+        validated = Trajectory.model_validate(candidate).to_json_dict()
+        _validate_generated_json_value(
+            validated,
+            max_depth=ATIF_JSON_MAX_DEPTH,
+            max_nodes=ATIF_JSON_MAX_NODES,
+            max_bytes=GENERATED_JSON_MAX_BYTES,
+        )
+        return validated
+    except (TypeError, ValueError, RecursionError, UnicodeError, MemoryError) as exc:
+        raise _TrajectoryMergeError("invalid ATIF trajectory") from exc
+
+
+def _trajectory_reference_cache_key(agent_dir: Path, reference_key: str) -> str:
+    return f"{agent_dir.absolute()}\0{reference_key}"
+
+
+def _read_referenced_trajectory(
+    agent_dir: Path,
+    reference: Any,
+    state: _TrajectoryReferenceState,
+    *,
+    count_against_reference_budget: bool,
+) -> tuple[dict[str, Any], str]:
+    relative, key = _normalized_trajectory_reference(reference)
+    cache_key = _trajectory_reference_cache_key(agent_dir, key)
+    if cached := state.raw_cache.get(cache_key):
+        return copy.deepcopy(cached), key
+    if count_against_reference_budget and state.file_count >= _MAX_TRAJECTORY_REFERENCE_FILES:
+        raise _TrajectoryMergeError("trajectory reference count exceeded")
+    try:
+        with SecureRoot(agent_dir) as secure_root:
+            raw, _metadata = secure_root.read_bytes(relative, DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
+    except (OSError, SecurePathError) as exc:
+        raise _TrajectoryMergeError("unreadable trajectory reference") from exc
+    if count_against_reference_budget:
+        state.file_count += 1
+    state.total_bytes += len(raw)
+    if state.total_bytes > _MAX_TRAJECTORY_REFERENCE_TOTAL_BYTES:
+        raise _TrajectoryMergeError("trajectory reference bytes exceeded")
+    try:
+        data = json.loads(raw)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise _TrajectoryMergeError("invalid trajectory JSON") from exc
+    validated = _validated_trajectory_dict(data)
+    state.raw_cache[cache_key] = validated
+    return copy.deepcopy(validated), key
+
+
+def _agent_identity(agent: Any) -> dict[str, Any] | None:
+    if not isinstance(agent, dict):
+        return None
+    return {key: agent.get(key) for key in ("name", "version", "model_name", "tool_definitions")}
+
+
+def _combined_notes(*values: Any) -> str | None:
+    notes: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value not in notes:
+            notes.append(value)
+    return "\n\n".join(notes) or None
+
+
+def _canonical_trajectory_sha256(trajectory: dict[str, Any]) -> str:
+    redacted = _redacted_trajectory_data(trajectory)
+    if redacted is None:
+        raise _TrajectoryMergeError("trajectory identity cannot be safely canonicalized")
+    canonical = json.dumps(
+        redacted,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _raw_trajectory_sha256(trajectory: dict[str, Any]) -> str:
+    try:
+        canonical = json.dumps(
+            trajectory,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError, UnicodeError) as exc:
+        raise _TrajectoryMergeError("trajectory fingerprint cannot be safely canonicalized") from exc
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _is_trusted_materialized_cumulative_continuation(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    state: _TrajectoryReferenceState,
+) -> bool:
+    """Recognize native resume across collector-built explicit continuation chains."""
+    if _is_cumulative_trajectory_continuation(previous, current):
+        return True
+    for trajectory in (previous, current):
+        trajectory_id = trajectory.get("trajectory_id")
+        if not isinstance(trajectory_id, str) or not trajectory_id:
+            return False
+        if state.generated_continuation_fingerprints.get(trajectory_id) != _raw_trajectory_sha256(trajectory):
+            return False
+    previous_steps = _trajectory_dict_steps(previous)
+    current_steps = _trajectory_dict_steps(current)
+    if not previous_steps or len(current_steps) <= len(previous_steps):
+        return False
+    return all(
+        _trajectory_step_merge_identity(previous_step) == _trajectory_step_merge_identity(current_step)
+        for previous_step, current_step in zip(
+            previous_steps,
+            current_steps[: len(previous_steps)],
+            strict=True,
+        )
+    )
+
+
+def _synthetic_trajectory_content_sha256(trajectory: dict[str, Any]) -> str:
+    """Hash redacted semantic content without source identifiers or references."""
+    redacted = _redacted_trajectory_data(trajectory)
+    if redacted is None:
+        raise _TrajectoryMergeError("trajectory identity cannot be safely canonicalized")
+    redacted.pop("continued_trajectory_ref", None)
+    redacted.pop("session_id", None)
+    redacted.pop("trajectory_id", None)
+    root_extra = redacted.get("extra")
+    if isinstance(root_extra, dict):
+        for key in ("harbor_continuation", "harbor_multi_step", "harbor_parent_scope"):
+            root_extra.pop(key, None)
+    canonical = json.dumps(
+        redacted,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _merged_embedded_subagents(*collections: Any) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    identities: dict[str, str] = {}
+    for collection in collections:
+        if collection is None:
+            continue
+        if not isinstance(collection, list):
+            raise _TrajectoryMergeError("invalid embedded subagent collection")
+        for item in collection:
+            validated = _validated_trajectory_dict(item)
+            trajectory_id = validated.get("trajectory_id")
+            if not isinstance(trajectory_id, str) or not trajectory_id:
+                raise _TrajectoryMergeError("embedded subagent lacks trajectory_id")
+            canonical = json.dumps(validated, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            previous = identities.get(trajectory_id)
+            if previous is not None and previous != canonical:
+                raise _TrajectoryMergeError("conflicting embedded subagent trajectory_id")
+            if previous is None:
+                identities[trajectory_id] = canonical
+                merged.append(validated)
     return merged
+
+
+def _remap_parent_subagent_scope(
+    trajectory: dict[str, Any],
+    *,
+    namespace: str,
+) -> dict[str, Any]:
+    """Give one parent's embedded IDs a deterministic combined-parent scope."""
+    scoped = copy.deepcopy(trajectory)
+    embedded = _merged_embedded_subagents(scoped.get("subagent_trajectories"))
+    if not embedded:
+        return scoped
+
+    aliases: dict[str, str] = {}
+    remapped: list[dict[str, Any]] = []
+    for child_index, child in enumerate(embedded):
+        original_id = str(child["trajectory_id"])
+        identity = {
+            "namespace": namespace,
+            "child_index": child_index,
+            "content_sha256": _synthetic_trajectory_content_sha256(child),
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:20]
+        scoped_id = f"skillevaluator-scoped-subagent-{digest}"
+        aliases[original_id] = scoped_id
+        child_extra = child.get("extra")
+        if not isinstance(child_extra, dict):
+            child_extra = {}
+        prior_scope = copy.deepcopy(child_extra.get("harbor_parent_scope"))
+        scope_provenance: dict[str, Any] = {
+            "original_trajectory_id": redact_sensitive_text(original_id),
+            "parent_scope": namespace,
+        }
+        if prior_scope is not None:
+            scope_provenance["prior_scope"] = prior_scope
+        child_extra["harbor_parent_scope"] = scope_provenance
+        child["extra"] = child_extra
+        child["trajectory_id"] = scoped_id
+        remapped.append(_validated_trajectory_dict(child))
+
+    for step in _trajectory_dict_steps(scoped):
+        observation = step.get("observation")
+        if not isinstance(observation, dict):
+            continue
+        results = observation.get("results")
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            refs = result.get("subagent_trajectory_ref")
+            if not isinstance(refs, list):
+                continue
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    continue
+                trajectory_id = ref.get("trajectory_id")
+                if isinstance(trajectory_id, str) and trajectory_id in aliases:
+                    ref["trajectory_id"] = aliases[trajectory_id]
+    scoped["subagent_trajectories"] = remapped
+    return _validated_trajectory_dict(scoped)
+
+
+def _continuation_source_provenance(
+    trajectory: dict[str, Any],
+    *,
+    trusted_continuation_fingerprints: dict[str, str],
+) -> tuple[
+    int,
+    list[str],
+    list[str],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[str],
+]:
+    extra = trajectory.get("extra")
+    continuation = extra.get("harbor_continuation") if isinstance(extra, dict) else None
+    trajectory_id = trajectory.get("trajectory_id")
+    trusted_fingerprint = (
+        trusted_continuation_fingerprints.get(trajectory_id) if isinstance(trajectory_id, str) else None
+    )
+    if (
+        trusted_fingerprint is not None
+        and trusted_fingerprint == _raw_trajectory_sha256(trajectory)
+        and isinstance(continuation, dict)
+    ):
+        count = continuation.get("segment_count")
+        sessions = continuation.get("source_session_ids")
+        trajectory_ids = continuation.get("source_trajectory_ids")
+        root_extras = continuation.get("source_root_extra")
+        agent_extras = continuation.get("source_agent_extra")
+        final_metrics_extras = continuation.get("source_final_metrics_extra")
+        schema_versions = continuation.get("source_schema_versions")
+        if (
+            isinstance(count, int)
+            and not isinstance(count, bool)
+            and count >= 1
+            and isinstance(sessions, list)
+            and all(isinstance(value, str) and value for value in sessions)
+            and isinstance(trajectory_ids, list)
+            and all(isinstance(value, str) and value for value in trajectory_ids)
+            and isinstance(root_extras, list)
+            and all(isinstance(value, dict) for value in root_extras)
+            and isinstance(agent_extras, list)
+            and all(isinstance(value, dict) for value in agent_extras)
+            and isinstance(final_metrics_extras, list)
+            and all(isinstance(value, dict) for value in final_metrics_extras)
+            and isinstance(schema_versions, list)
+            and all(isinstance(value, str) and value for value in schema_versions)
+        ):
+            return (
+                count,
+                list(sessions),
+                list(trajectory_ids),
+                copy.deepcopy(root_extras),
+                copy.deepcopy(agent_extras),
+                copy.deepcopy(final_metrics_extras),
+                list(schema_versions),
+            )
+    session_id = trajectory.get("session_id")
+    agent = trajectory.get("agent")
+    agent_extra = agent.get("extra") if isinstance(agent, dict) else None
+    final_metrics = trajectory.get("final_metrics")
+    final_metrics_extra = final_metrics.get("extra") if isinstance(final_metrics, dict) else None
+    schema_version = trajectory.get("schema_version")
+    return (
+        1,
+        [session_id] if isinstance(session_id, str) and session_id else [],
+        [trajectory_id] if isinstance(trajectory_id, str) and trajectory_id else [],
+        [copy.deepcopy(extra)] if isinstance(extra, dict) else [],
+        [copy.deepcopy(agent_extra)] if isinstance(agent_extra, dict) else [],
+        [copy.deepcopy(final_metrics_extra)] if isinstance(final_metrics_extra, dict) else [],
+        [schema_version] if isinstance(schema_version, str) and schema_version else [],
+    )
+
+
+def _combine_continuation_trajectories(
+    base: dict[str, Any],
+    continuation: dict[str, Any],
+    *,
+    state: _TrajectoryReferenceState,
+) -> dict[str, Any]:
+    if _agent_identity(base.get("agent")) != _agent_identity(continuation.get("agent")):
+        raise _TrajectoryMergeError("continuation agent mismatch")
+    base_steps = _trajectory_dict_steps(base)
+    continuation_steps = _trajectory_dict_steps(continuation)
+    copied_prefix_length = _copied_context_prefix_length(continuation_steps)
+    if copied_prefix_length:
+        appended_steps = continuation_steps[copied_prefix_length:]
+    else:
+        appended_steps = continuation_steps
+
+    base_namespace = "continuation-base"
+    continuation_namespace = "continuation-next"
+    scoped_base = _remap_parent_subagent_scope(base, namespace=base_namespace)
+    scoped_continuation = _remap_parent_subagent_scope(
+        continuation,
+        namespace=continuation_namespace,
+    )
+    base_steps = _trajectory_dict_steps(scoped_base)
+    continuation_steps = _trajectory_dict_steps(scoped_continuation)
+    if copied_prefix_length:
+        appended_steps = continuation_steps[copied_prefix_length:]
+    else:
+        appended_steps = continuation_steps
+
+    combined = copy.deepcopy(scoped_base)
+    combined["schema_version"] = "ATIF-v1.7"
+    combined["agent"] = copy.deepcopy(scoped_continuation["agent"])
+    combined["steps"] = [copy.deepcopy(step) for step in (*base_steps, *appended_steps)]
+    for index, step in enumerate(combined["steps"], start=1):
+        step["step_id"] = index
+    sessions = [value for value in (base.get("session_id"), continuation.get("session_id")) if value]
+    if sessions and len(set(sessions)) == 1:
+        combined["session_id"] = sessions[0]
+    else:
+        combined.pop("session_id", None)
+    if "final_metrics" in continuation:
+        combined["final_metrics"] = copy.deepcopy(continuation["final_metrics"])
+        if isinstance(combined["final_metrics"], dict):
+            combined["final_metrics"]["total_steps"] = len(combined["steps"])
+    else:
+        combined.pop("final_metrics", None)
+    notes = _combined_notes(base.get("notes"), continuation.get("notes"))
+    if notes:
+        combined["notes"] = notes
+    else:
+        combined.pop("notes", None)
+    subagents = _merged_embedded_subagents(
+        scoped_base.get("subagent_trajectories"),
+        scoped_continuation.get("subagent_trajectories"),
+    )
+    if subagents:
+        combined["subagent_trajectories"] = subagents
+    else:
+        combined.pop("subagent_trajectories", None)
+    combined.pop("continued_trajectory_ref", None)
+    (
+        base_count,
+        base_sessions,
+        base_trajectory_ids,
+        base_root_extras,
+        base_agent_extras,
+        base_final_metrics_extras,
+        base_schema_versions,
+    ) = _continuation_source_provenance(
+        base,
+        trusted_continuation_fingerprints=state.generated_continuation_fingerprints,
+    )
+    (
+        continuation_count,
+        continuation_sessions,
+        continuation_trajectory_ids,
+        continuation_root_extras,
+        continuation_agent_extras,
+        continuation_final_metrics_extras,
+        continuation_schema_versions,
+    ) = _continuation_source_provenance(
+        continuation,
+        trusted_continuation_fingerprints=state.generated_continuation_fingerprints,
+    )
+    continuation_identity = {
+        "base_sha256": _canonical_trajectory_sha256(base),
+        "continuation_sha256": _canonical_trajectory_sha256(continuation),
+    }
+    continuation_digest = hashlib.sha256(
+        json.dumps(continuation_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]
+    combined["trajectory_id"] = f"skillevaluator-continuation-{continuation_digest}"
+    combined["extra"] = {
+        "harbor_continuation": {
+            "segment_count": base_count + continuation_count,
+            "source_session_ids": [*base_sessions, *continuation_sessions],
+            "source_trajectory_ids": [*base_trajectory_ids, *continuation_trajectory_ids],
+            "source_root_extra": [*base_root_extras, *continuation_root_extras],
+            "source_agent_extra": [*base_agent_extras, *continuation_agent_extras],
+            "source_final_metrics_extra": [
+                *base_final_metrics_extras,
+                *continuation_final_metrics_extras,
+            ],
+            "source_schema_versions": [*base_schema_versions, *continuation_schema_versions],
+        }
+    }
+    return _validated_trajectory_dict(combined)
+
+
+def _mint_embedded_trajectory_id(
+    reference_key: str,
+    trajectory: dict[str, Any],
+    *,
+    reference_ordinal: int,
+) -> str:
+    identity = {
+        "reference": redact_sensitive_text(reference_key),
+        "reference_ordinal": reference_ordinal,
+        "content_sha256": _canonical_trajectory_sha256(trajectory),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()[:20]
+    return f"skillevaluator-subagent-{digest}"
+
+
+def _materialized_trajectory_source_ids(
+    trajectory: dict[str, Any],
+    *,
+    state: _TrajectoryReferenceState,
+) -> set[str]:
+    values = {str(trajectory_id)} if (trajectory_id := trajectory.get("trajectory_id")) else set()
+    trusted_fingerprint = state.generated_continuation_fingerprints.get(str(trajectory_id))
+    if trusted_fingerprint != _raw_trajectory_sha256(trajectory):
+        return values
+    extra = trajectory.get("extra")
+    continuation = extra.get("harbor_continuation") if isinstance(extra, dict) else None
+    source_ids = continuation.get("source_trajectory_ids") if isinstance(continuation, dict) else None
+    if isinstance(source_ids, list):
+        values.update(str(value) for value in source_ids if isinstance(value, str) and value)
+    return values
+
+
+def _materialize_embedded_trajectory(
+    trajectory: dict[str, Any],
+    *,
+    agent_dir: Path,
+    state: _TrajectoryReferenceState,
+    depth: int,
+) -> dict[str, Any]:
+    if depth > _MAX_TRAJECTORY_REFERENCE_DEPTH:
+        raise _TrajectoryMergeError("trajectory reference depth exceeded")
+    materialized = copy.deepcopy(trajectory)
+    continued_ref = materialized.pop("continued_trajectory_ref", None)
+    combined_continuation = False
+    if continued_ref:
+        continuation, _continuation_key = _materialize_trajectory_file(
+            agent_dir,
+            continued_ref,
+            state=state,
+            depth=depth + 1,
+        )
+        materialized = _combine_continuation_trajectories(materialized, continuation, state=state)
+        combined_continuation = True
+    materialized = _resolve_subagent_trajectory_refs(
+        materialized,
+        agent_dir=agent_dir,
+        state=state,
+        depth=depth + 1,
+    )
+    if combined_continuation:
+        state.generated_continuation_fingerprints[materialized["trajectory_id"]] = _raw_trajectory_sha256(materialized)
+    return materialized
+
+
+def _resolve_subagent_trajectory_refs(
+    trajectory: dict[str, Any],
+    *,
+    agent_dir: Path,
+    state: _TrajectoryReferenceState,
+    depth: int,
+) -> dict[str, Any]:
+    if depth > _MAX_TRAJECTORY_REFERENCE_DEPTH:
+        raise _TrajectoryMergeError("trajectory reference depth exceeded")
+    source_embedded = _merged_embedded_subagents(trajectory.get("subagent_trajectories"))
+    embedded: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    aliases: dict[str, str] = {}
+    materialized_sources: list[tuple[int, str, dict[str, Any]]] = []
+    for source_index, source in enumerate(source_embedded):
+        source_id = str(source["trajectory_id"])
+        materialized = _materialize_embedded_trajectory(
+            source,
+            agent_dir=agent_dir,
+            state=state,
+            depth=depth,
+        )
+        materialized_id = materialized.get("trajectory_id")
+        if not isinstance(materialized_id, str) or not materialized_id:
+            raise _TrajectoryMergeError("materialized embedded subagent lacks trajectory_id")
+        if state.generated_continuation_fingerprints.get(materialized_id) == _raw_trajectory_sha256(materialized):
+            identity = {
+                "embedded_ordinal": source_index,
+                "content_sha256": _canonical_trajectory_sha256(materialized),
+            }
+            digest = hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+            ).hexdigest()[:20]
+            materialized_id = f"skillevaluator-embedded-continuation-{digest}"
+            materialized["trajectory_id"] = materialized_id
+            materialized = _validated_trajectory_dict(materialized)
+            state.generated_continuation_fingerprints[materialized_id] = _raw_trajectory_sha256(materialized)
+        materialized_sources.append((source_index, source_id, materialized))
+
+    redacted_id_counts: dict[str, int] = {}
+    for _source_index, _source_id, materialized in materialized_sources:
+        safe_id = redact_sensitive_text(str(materialized["trajectory_id"]))
+        redacted_id_counts[safe_id] = redacted_id_counts.get(safe_id, 0) + 1
+
+    for source_index, source_id, materialized in materialized_sources:
+        materialized_id = str(materialized["trajectory_id"])
+        safe_id = redact_sensitive_text(materialized_id)
+        if redacted_id_counts[safe_id] > 1:
+            was_generated_continuation = state.generated_continuation_fingerprints.get(
+                materialized_id
+            ) == _raw_trajectory_sha256(materialized)
+            identity = {
+                "embedded_ordinal": source_index,
+                "content_sha256": _synthetic_trajectory_content_sha256(materialized),
+            }
+            digest = hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+            ).hexdigest()[:20]
+            materialized_id = f"skillevaluator-redacted-subagent-{digest}"
+            materialized["trajectory_id"] = materialized_id
+            materialized = _validated_trajectory_dict(materialized)
+            if was_generated_continuation:
+                state.generated_continuation_fingerprints[materialized_id] = _raw_trajectory_sha256(materialized)
+        aliases[source_id] = materialized_id
+        existing = by_id.get(materialized_id)
+        if existing is not None and existing != materialized:
+            raise _TrajectoryMergeError("conflicting embedded subagent trajectory_id")
+        if existing is None:
+            by_id[materialized_id] = materialized
+            embedded.append(materialized)
+
+    refs_to_resolve: list[dict[str, Any]] = []
+    for step in _trajectory_dict_steps(trajectory):
+        observation = step.get("observation")
+        if not isinstance(observation, dict):
+            continue
+        results = observation.get("results")
+        if not isinstance(results, list):
+            raise _TrajectoryMergeError("invalid trajectory observation results")
+        for result in results:
+            if not isinstance(result, dict):
+                raise _TrajectoryMergeError("invalid trajectory observation result")
+            refs = result.get("subagent_trajectory_ref")
+            if refs is None:
+                continue
+            if not isinstance(refs, list):
+                raise _TrajectoryMergeError("invalid subagent trajectory references")
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    raise _TrajectoryMergeError("invalid subagent trajectory reference")
+                refs_to_resolve.append(ref)
+
+    explicit_path_ids: dict[str, str] = {}
+    for ref in refs_to_resolve:
+        trajectory_path = ref.get("trajectory_path")
+        trajectory_id = ref.get("trajectory_id")
+        if not trajectory_path or not isinstance(trajectory_id, str):
+            continue
+        _relative, reference_key = _normalized_trajectory_reference(trajectory_path)
+        reference_cache_key = _trajectory_reference_cache_key(agent_dir, reference_key)
+        proposed_id = aliases.get(trajectory_id, trajectory_id)
+        prior = explicit_path_ids.get(reference_cache_key)
+        if prior is not None and prior != proposed_id:
+            raise _TrajectoryMergeError("conflicting trajectory_id aliases for referenced file")
+        explicit_path_ids[reference_cache_key] = proposed_id
+
+    for ref in refs_to_resolve:
+        trajectory_path = ref.get("trajectory_path")
+        trajectory_id = ref.get("trajectory_id")
+        embedded_id = aliases.get(trajectory_id, trajectory_id) if isinstance(trajectory_id, str) else None
+        if embedded_id in by_id:
+            # ATIF allows both keys and recommends preferring an available
+            # embedded document over an external sidecar. Remember the path
+            # alias so a later path-only reference resolves to this same ID.
+            if trajectory_path:
+                _relative, reference_key = _normalized_trajectory_reference(trajectory_path)
+                reference_cache_key = _trajectory_reference_cache_key(agent_dir, reference_key)
+                prior_resolved_id = state.resolved_ids.get(reference_cache_key)
+                if prior_resolved_id not in (None, embedded_id):
+                    raise _TrajectoryMergeError("conflicting trajectory_id aliases for referenced file")
+                state.resolved_ids[reference_cache_key] = embedded_id
+            ref["trajectory_id"] = embedded_id
+            ref.pop("trajectory_path", None)
+        elif trajectory_path:
+            _relative, reference_key = _normalized_trajectory_reference(trajectory_path)
+            reference_cache_key = _trajectory_reference_cache_key(agent_dir, reference_key)
+            remembered_id = state.resolved_ids.get(reference_cache_key)
+            candidate_id = remembered_id or explicit_path_ids.get(reference_cache_key)
+            if candidate_id is not None and candidate_id in by_id:
+                proposed_id = embedded_id or explicit_path_ids.get(reference_cache_key)
+                if proposed_id not in (None, candidate_id):
+                    raise _TrajectoryMergeError("conflicting trajectory_id aliases for referenced file")
+                state.resolved_ids[reference_cache_key] = candidate_id
+                ref["trajectory_id"] = candidate_id
+                ref.pop("trajectory_path", None)
+                continue
+            external, reference_key = _materialize_trajectory_file(
+                agent_dir,
+                trajectory_path,
+                state=state,
+                depth=depth + 1,
+            )
+            external_id = external.get("trajectory_id")
+            generated_external_id = bool(
+                isinstance(external_id, str)
+                and state.generated_continuation_fingerprints.get(external_id) == _raw_trajectory_sha256(external)
+            )
+            if (
+                trajectory_id
+                and external_id
+                and not generated_external_id
+                and trajectory_id not in _materialized_trajectory_source_ids(external, state=state)
+            ):
+                raise _TrajectoryMergeError("subagent trajectory_id does not match referenced file")
+            reference_cache_key = _trajectory_reference_cache_key(agent_dir, reference_key)
+            prior_resolved_id = state.resolved_ids.get(reference_cache_key)
+            proposed_id = (
+                trajectory_id
+                or explicit_path_ids.get(reference_cache_key)
+                or (None if generated_external_id else external_id)
+            )
+            if prior_resolved_id is not None and proposed_id not in (None, prior_resolved_id):
+                raise _TrajectoryMergeError("conflicting trajectory_id aliases for referenced file")
+            reference_ordinal = state.reference_ordinals.setdefault(
+                reference_cache_key,
+                len(state.reference_ordinals),
+            )
+            resolved_id = (
+                prior_resolved_id
+                or proposed_id
+                or _mint_embedded_trajectory_id(
+                    reference_key,
+                    external,
+                    reference_ordinal=reference_ordinal,
+                )
+            )
+            state.resolved_ids[reference_cache_key] = resolved_id
+            external["trajectory_id"] = resolved_id
+            external = _validated_trajectory_dict(external)
+            if generated_external_id:
+                state.generated_continuation_fingerprints[resolved_id] = _raw_trajectory_sha256(external)
+            existing = by_id.get(resolved_id)
+            if existing is not None and existing != external:
+                raise _TrajectoryMergeError("conflicting referenced subagent trajectory_id")
+            if existing is None:
+                by_id[resolved_id] = external
+                embedded.append(external)
+            ref["trajectory_id"] = resolved_id
+            ref.pop("trajectory_path", None)
+        else:
+            raise _TrajectoryMergeError("unresolved embedded subagent trajectory_id")
+    if embedded:
+        trajectory["subagent_trajectories"] = embedded
+    else:
+        trajectory.pop("subagent_trajectories", None)
+    return _validated_trajectory_dict(trajectory)
+
+
+def _materialize_trajectory_file(
+    agent_dir: Path,
+    reference: Any,
+    *,
+    state: _TrajectoryReferenceState | None = None,
+    depth: int = 0,
+    count_against_reference_budget: bool = True,
+) -> tuple[dict[str, Any], str]:
+    if depth > _MAX_TRAJECTORY_REFERENCE_DEPTH:
+        raise _TrajectoryMergeError("trajectory reference depth exceeded")
+    state = state or _TrajectoryReferenceState()
+    _relative, key = _normalized_trajectory_reference(reference)
+    cache_key = _trajectory_reference_cache_key(agent_dir, key)
+    if cached := state.materialized_cache.get(cache_key):
+        return copy.deepcopy(cached), key
+    if cache_key in state.active:
+        raise _TrajectoryMergeError("trajectory reference cycle")
+    state.active.add(cache_key)
+    try:
+        trajectory, _key = _read_referenced_trajectory(
+            agent_dir,
+            reference,
+            state,
+            count_against_reference_budget=count_against_reference_budget,
+        )
+        continued_ref = trajectory.pop("continued_trajectory_ref", None)
+        combined_continuation = False
+        if continued_ref:
+            continuation, _continuation_key = _materialize_trajectory_file(
+                agent_dir,
+                continued_ref,
+                state=state,
+                depth=depth + 1,
+            )
+            trajectory = _combine_continuation_trajectories(trajectory, continuation, state=state)
+            combined_continuation = True
+        trajectory = _resolve_subagent_trajectory_refs(
+            trajectory,
+            agent_dir=agent_dir,
+            state=state,
+            depth=depth,
+        )
+        if combined_continuation:
+            state.generated_continuation_fingerprints[trajectory["trajectory_id"]] = _raw_trajectory_sha256(trajectory)
+        state.materialized_cache[cache_key] = trajectory
+        return copy.deepcopy(trajectory), key
+    finally:
+        state.active.discard(cache_key)
+
+
+def _trial_resumes_step_trajectories(trial_root: Path) -> bool:
+    """Read Harbor 0.22's serialized agent resume flag without coercion."""
+    result = _read_json(trial_root / "result.json")
+    if not isinstance(result, dict):
+        return False
+    config = result.get("config")
+    if not isinstance(config, dict):
+        return False
+    agent = config.get("agent")
+    return isinstance(agent, dict) and agent.get("resume_trajectory") is True
+
+
+def _valid_step_result_names(value: Any, *, max_count: int | None = None) -> list[str] | None:
+    """Return structurally authoritative Harbor step names, or ``None``."""
+    if not isinstance(value, list) or not value or (max_count is not None and len(value) > max_count):
+        return None
+    names: list[str] = []
+    seen_names: set[str] = set()
+    for step in value:
+        if not isinstance(step, dict):
+            return None
+        step_name = step.get("step_name")
+        if not isinstance(step_name, str) or not step_name.strip() or step_name in seen_names:
+            return None
+        names.append(step_name)
+        seen_names.add(step_name)
+    return names
+
+
+def _is_serialized_harbor_trial_result(result: dict[str, Any]) -> bool:
+    """Recognize Harbor's complete TrialResult envelope, not legacy fragments."""
+    config = result.get("config")
+    return (
+        isinstance(result.get("trial_uri"), str)
+        and isinstance(result.get("task_checksum"), str)
+        and isinstance(result.get("agent_info"), dict)
+        and isinstance(config, dict)
+        and isinstance(config.get("task"), dict)
+    )
+
+
+def _expected_step_trajectory_names(trial_root: Path) -> list[str] | None:
+    result = _read_json(trial_root / "result.json")
+    if not isinstance(result, dict):
+        return None
+    return _valid_step_result_names(
+        result.get("step_results"),
+        max_count=_MAX_TRAJECTORY_STEP_DIRECTORIES,
+    )
+
+
+def _merged_step_trajectory(trial_root: Path) -> dict[str, Any] | None:
+    """Merge a complete Harbor multi-step ATIF set or fail closed."""
+    try:
+        (trial_root / "agent" / "trajectory.json").lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return None
+    else:
+        # Root and native step trajectories are contradictory authorities.
+        return None
+    expected_names = _expected_step_trajectory_names(trial_root)
+    paths = _ordered_step_trajectory_paths(trial_root)
+    discovered_names = [path.parent.parent.name for path in paths]
+    if expected_names is None or discovered_names != expected_names:
+        return None
+
+    try:
+        trajectories: list[tuple[str, dict[str, Any]]] = []
+        reference_state = _TrajectoryReferenceState()
+        for step_name, path in zip(expected_names, paths, strict=True):
+            trajectory, _reference_key = _materialize_trajectory_file(
+                path.parent,
+                path.name,
+                state=reference_state,
+                count_against_reference_budget=False,
+            )
+            trajectories.append((step_name, trajectory))
+        if not trajectories:
+            return None
+
+        agent_identity = _agent_identity(trajectories[0][1].get("agent"))
+        if agent_identity is None or any(
+            _agent_identity(trajectory.get("agent")) != agent_identity for _, trajectory in trajectories[1:]
+        ):
+            raise _TrajectoryMergeError("multi-step agent mismatch")
+
+        merged_steps: list[dict[str, Any]] = []
+        scoped_trajectories: list[tuple[str, dict[str, Any]]] = []
+        resume_trajectory = _trial_resumes_step_trajectories(trial_root)
+        continuation_flags: list[bool] = []
+        previous_trajectory: dict[str, Any] | None = None
+        for source_index, (step_name, trajectory) in enumerate(trajectories):
+            is_continuation = bool(
+                resume_trajectory
+                and previous_trajectory is not None
+                and _is_trusted_materialized_cumulative_continuation(
+                    previous_trajectory,
+                    trajectory,
+                    state=reference_state,
+                )
+            )
+            continuation_flags.append(is_continuation)
+            scoped_trajectory = _remap_parent_subagent_scope(
+                trajectory,
+                namespace=f"harbor-step:{source_index}",
+            )
+            scoped_trajectories.append((step_name, scoped_trajectory))
+            steps = _trajectory_dict_steps(scoped_trajectory)
+            if is_continuation:
+                copied_prefix_length = _copied_context_prefix_length(steps)
+                previous_length = len(_trajectory_dict_steps(previous_trajectory)) if previous_trajectory else 0
+                steps = steps[copied_prefix_length or previous_length :]
+            for step in steps:
+                merged_step = copy.deepcopy(step)
+                original_step_id = merged_step.get("step_id")
+                merged_step["step_id"] = len(merged_steps) + 1
+                extra = merged_step.get("extra")
+                if not isinstance(extra, dict):
+                    extra = {}
+                extra["harbor_step_name"] = step_name
+                if original_step_id not in (None, ""):
+                    extra["harbor_original_step_id"] = original_step_id
+                else:
+                    extra.pop("harbor_original_step_id", None)
+                merged_step["extra"] = extra
+                merged_steps.append(merged_step)
+            previous_trajectory = trajectory
+        if not merged_steps:
+            raise _TrajectoryMergeError("empty merged trajectory")
+
+        source_provenance = [
+            {
+                "step_name": step_name,
+                "schema_version": trajectory.get("schema_version"),
+                "session_id": trajectory.get("session_id"),
+                "trajectory_id": trajectory.get("trajectory_id"),
+                "root_extra": copy.deepcopy(trajectory.get("extra")),
+                "agent_extra": copy.deepcopy(
+                    agent.get("extra") if isinstance((agent := trajectory.get("agent")), dict) else None
+                ),
+                "final_metrics_extra": copy.deepcopy(
+                    final_metrics.get("extra")
+                    if isinstance((final_metrics := trajectory.get("final_metrics")), dict)
+                    else None
+                ),
+            }
+            for step_name, trajectory in trajectories
+        ]
+        source_identity = [
+            {
+                "source_index": source_index,
+                "step_name": redact_sensitive_text(step_name),
+                "is_continuation": continuation_flags[source_index],
+                "content_sha256": _canonical_trajectory_sha256(trajectory),
+            }
+            for source_index, (step_name, trajectory) in enumerate(trajectories)
+        ]
+        digest = hashlib.sha256(
+            json.dumps(source_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:20]
+        merged: dict[str, Any] = {
+            "schema_version": "ATIF-v1.7",
+            "session_id": f"skillevaluator-multistep-{digest}",
+            "trajectory_id": f"skillevaluator-multistep-{digest}",
+            "agent": copy.deepcopy(trajectories[-1][1]["agent"]),
+            "steps": merged_steps,
+            "final_metrics": _merge_trajectory_final_metrics(
+                [trajectory for _, trajectory in trajectories],
+                continuation_flags=continuation_flags,
+                total_steps=len(merged_steps),
+            ),
+            "extra": {
+                "harbor_multi_step": {
+                    "step_count": len(expected_names),
+                    "step_names": expected_names,
+                    "source_trajectories": source_provenance,
+                }
+            },
+        }
+        notes = _combined_notes(
+            *(
+                f"[{step_name}] {note}"
+                for step_name, trajectory in trajectories
+                if isinstance((note := trajectory.get("notes")), str) and note
+            )
+        )
+        if notes:
+            merged["notes"] = notes
+        subagents = _merged_embedded_subagents(
+            *(trajectory.get("subagent_trajectories") for _, trajectory in scoped_trajectories)
+        )
+        if subagents:
+            merged["subagent_trajectories"] = subagents
+        return _validated_trajectory_dict(merged)
+    except (OSError, SecurePathError, _TrajectoryMergeError, RecursionError):
+        logger.debug("Harbor multi-step trajectory could not be materialized", exc_info=True)
+        return None
 
 
 def _merge_trajectory_final_metrics(
     trajectories: list[dict[str, Any]],
     *,
+    continuation_flags: list[bool],
     total_steps: int,
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
-    for key in ("total_prompt_tokens", "total_completion_tokens", "total_cached_tokens"):
-        values = [
-            final_metrics.get(key)
-            for trajectory in trajectories
-            if isinstance(final_metrics := trajectory.get("final_metrics"), dict)
-        ]
-        numeric = [value for value in values if isinstance(value, int | float) and not isinstance(value, bool)]
-        if numeric:
-            metrics[key] = sum(numeric)
+    for key in (
+        "total_prompt_tokens",
+        "total_completion_tokens",
+        "total_cached_tokens",
+        "total_cost_usd",
+    ):
+        value = _sum_trajectory_metric_segments(
+            trajectories,
+            continuation_flags=continuation_flags,
+            key=key,
+        )
+        if value is not None:
+            metrics[key] = value
 
     metrics["total_steps"] = total_steps
-    last_final_metrics = next(
-        (
-            trajectory.get("final_metrics")
-            for trajectory in reversed(trajectories)
-            if isinstance(trajectory.get("final_metrics"), dict)
-        ),
-        {},
-    )
+    terminal_final_metrics = trajectories[-1].get("final_metrics") if trajectories else None
+    last_final_metrics = terminal_final_metrics if isinstance(terminal_final_metrics, dict) else {}
     last_extra = last_final_metrics.get("extra") if isinstance(last_final_metrics, dict) else None
-    extra = copy.deepcopy(last_extra) if isinstance(last_extra, dict) else {}
+    extra = {
+        key: copy.deepcopy(last_extra[key])
+        for key in ("finish_reason",)
+        if isinstance(last_extra, dict) and key in last_extra
+    }
     extra_token_keys = sorted(
         {
             str(key)
@@ -1352,23 +2782,60 @@ def _merge_trajectory_final_metrics(
             if _is_aggregate_extra_token_key(str(key))
         }
     )
+    for key in list(extra):
+        if _is_aggregate_extra_token_key(str(key)):
+            extra.pop(key, None)
     for key in extra_token_keys:
-        numeric_values: list[int | float] = []
-        for trajectory in trajectories:
-            final_metrics = trajectory.get("final_metrics")
-            if not isinstance(final_metrics, dict):
-                continue
-            step_extra = final_metrics.get("extra")
-            if not isinstance(step_extra, dict):
-                continue
-            value = step_extra.get(key)
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                numeric_values.append(value)
-        if numeric_values:
-            extra[key] = sum(numeric_values)
+        value = _sum_trajectory_metric_segments(
+            trajectories,
+            continuation_flags=continuation_flags,
+            key=key,
+            from_extra=True,
+        )
+        if value is not None:
+            extra[key] = value
     extra["harbor_multi_step"] = True
     metrics["extra"] = extra
     return metrics
+
+
+def _sum_trajectory_metric_segments(
+    trajectories: list[dict[str, Any]],
+    *,
+    continuation_flags: list[bool],
+    key: str,
+    from_extra: bool = False,
+) -> int | float | None:
+    """Sum independent fragments while taking the latest cumulative value per resume chain."""
+    total: int | float = 0
+    segment_value: int | float | None = None
+    segment_known = False
+    for index, trajectory in enumerate(trajectories):
+        if index == 0 or not continuation_flags[index]:
+            if index > 0:
+                if not segment_known or segment_value is None:
+                    return None
+                total += segment_value
+            segment_value = None
+            segment_known = False
+
+        final_metrics = trajectory.get("final_metrics")
+        source = final_metrics.get("extra") if from_extra and isinstance(final_metrics, dict) else final_metrics
+        value = source.get(key) if isinstance(source, dict) else None
+        try:
+            is_finite_number = isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+        except OverflowError:
+            is_finite_number = False
+        if is_finite_number:
+            segment_value = value
+            segment_known = True
+        else:
+            segment_value = None
+            segment_known = False
+
+    if not segment_known or segment_value is None:
+        return None
+    return total + segment_value
 
 
 def _merge_reward_sidecars(data: dict[str, Any], verifier_dir: Path) -> None:
@@ -1398,6 +2865,14 @@ def _merge_reward_sidecars(data: dict[str, Any], verifier_dir: Path) -> None:
     if not isinstance(custom_reward, dict):
         return
 
+    if custom_metric_contract_error(custom_reward):
+        data["evaluation_status"] = "failed"
+        data["evaluation_errors"] = _merge_bounded_evaluation_errors(
+            {"collector": UNSAFE_CUSTOM_METRICS_REASON},
+            data.get("evaluation_errors"),
+        )
+        return
+
     custom_metrics = extract_custom_metrics(custom_reward)
     if custom_metrics:
         existing = data.get("custom_metrics")
@@ -1415,7 +2890,11 @@ def _merge_reward_sidecars(data: dict[str, Any], verifier_dir: Path) -> None:
                 details[metric] = detail
         if details:
             data["details"] = details
-        data["custom_details"] = custom_details
+        safe_custom_details = {
+            str(metric): detail for metric, detail in custom_details.items() if str(metric) in custom_metrics
+        }
+        if safe_custom_details:
+            data["custom_details"] = safe_custom_details
 
     for key in ("entry_id", "error"):
         value = custom_reward.get(key)
@@ -1477,9 +2956,9 @@ def _standard_reward_metrics(
     if isinstance(nested_metrics, dict):
         metric_names.update(str(name) for name in nested_metrics)
     declared_metric_set = str(rewards.get("metric_set") or rewards.get("metric_set_version") or "")
-    if declared_metric_set not in {DEFAULT_METRIC_SET, LEGACY_METRIC_SET} and not metric_names.intersection(
-        DEFAULT_METRICS
-    ):
+    if declared_metric_set and declared_metric_set not in {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}:
+        return ()
+    if not declared_metric_set and not metric_names.intersection(DEFAULT_METRICS):
         return ()
 
     _, expected_metrics = metric_set_for_reward(rewards)
@@ -1500,6 +2979,69 @@ def _physical_steps_layout_present(trial_root: Path) -> bool:
         return False
     except OSError:
         return True
+    return True
+
+
+def _reward_claims_metric(rewards: dict[str, Any], metric: str) -> bool:
+    if metric in rewards:
+        return True
+    nested = rewards.get("metrics")
+    return isinstance(nested, dict) and metric in nested
+
+
+def _standard_aggregate_matches_harbor_strategy(
+    root_rewards: dict[str, Any],
+    step_results: list[dict[str, Any]],
+    root_metrics: tuple[str, ...],
+) -> bool:
+    """Recognize Harbor's FINAL or missing-as-zero MEAN aggregate semantics."""
+    root_values = {metric: metric_value(root_rewards, metric) for metric in root_metrics}
+    if any(value is None for value in root_values.values()):
+        return False
+
+    final_rewards: dict[str, Any] | None = None
+    if step_results:
+        final_verifier = step_results[-1].get("verifier_result")
+        candidate = final_verifier.get("rewards") if isinstance(final_verifier, dict) else None
+        if isinstance(candidate, dict):
+            final_rewards = candidate
+    if final_rewards is not None and all(
+        (value := metric_value(final_rewards, metric)) is not None
+        and math.isclose(value, root_values[metric], rel_tol=1e-9, abs_tol=1e-9)
+        for metric in root_metrics
+    ):
+        return True
+
+    verifier_rewards: list[dict[str, Any]] = []
+    for step in step_results:
+        verifier_result = step.get("verifier_result")
+        if verifier_result is None:
+            continue
+        if not isinstance(verifier_result, dict):
+            return False
+        rewards = verifier_result.get("rewards")
+        if rewards is None:
+            verifier_rewards.append({})
+        elif isinstance(rewards, dict):
+            verifier_rewards.append(rewards)
+        else:
+            return False
+    if not verifier_rewards:
+        return False
+
+    for metric in root_metrics:
+        values: list[float] = []
+        for rewards in verifier_rewards:
+            if not _reward_claims_metric(rewards, metric):
+                values.append(0.0)
+                continue
+            value = metric_value(rewards, metric)
+            if value is None:
+                return False
+            values.append(value)
+        mean = sum(values) / len(verifier_rewards)
+        if not math.isclose(mean, root_values[metric], rel_tol=1e-9, abs_tol=1e-9):
+            return False
     return True
 
 
@@ -1535,8 +3077,17 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
         return "Authoritative verifier result has malformed constituent steps; it was not scored"
     if not isinstance(step_results, list):
         return ""
+    if _valid_step_result_names(step_results) is None:
+        return "Authoritative verifier result has malformed constituent steps; it was not scored"
+    if _is_serialized_harbor_trial_result(result) and not isinstance(root_rewards, dict):
+        return MISSING_MULTI_STEP_REWARD_REASON
 
     root_metrics = _standard_reward_metrics(root_rewards) if isinstance(root_rewards, dict) else ()
+    if root_metrics and not _standard_aggregate_matches_harbor_strategy(root_rewards, step_results, root_metrics):
+        return (
+            "Constituent default rewards do not match Harbor's final or mean aggregate semantics; "
+            "the authoritative aggregate was not scored"
+        )
 
     for index, step in enumerate(step_results, start=1):
         if not isinstance(step, dict):
@@ -1571,7 +3122,7 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
                 "error",
                 "failed",
             }
-        if failed_status or (root_metrics and (not isinstance(rewards, dict) or not rewards)):
+        if failed_status or (root_metrics and rewards is not None and not isinstance(rewards, dict)):
             return (
                 f"Constituent default reward for step {step_name} is incomplete, non-finite, or failed; "
                 "the authoritative aggregate was not scored"
@@ -1585,7 +3136,10 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
         )
         if not expected_metrics:
             continue
-        if all(metric_value(rewards, metric) is not None for metric in expected_metrics):
+        if all(
+            not _reward_claims_metric(rewards, metric) or metric_value(rewards, metric) is not None
+            for metric in expected_metrics
+        ):
             continue
 
         return (
@@ -1595,13 +3149,62 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
     return ""
 
 
+def _constituent_custom_metric_failure(result: dict[str, Any]) -> str:
+    """Validate custom metric bounds without reconstructing Harbor's root reward."""
+    reward_rows: list[dict[str, Any]] = []
+    root_verifier = result.get("verifier_result")
+    root_rewards = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
+    if isinstance(root_rewards, dict):
+        reward_rows.append(root_rewards)
+
+    step_results = result.get("step_results")
+    if isinstance(step_results, list):
+        for step in step_results:
+            if not isinstance(step, dict):
+                continue
+            verifier_result = step.get("verifier_result")
+            rewards = verifier_result.get("rewards") if isinstance(verifier_result, dict) else None
+            if isinstance(rewards, dict):
+                reward_rows.append(rewards)
+
+    custom_names: set[str] = set()
+    for rewards in reward_rows:
+        for raw_name, raw_value in rewards.items():
+            name = str(raw_name)
+            if isinstance(raw_value, int | float) and not isinstance(raw_value, bool):
+                continue
+            if name == "metrics" and isinstance(raw_value, dict):
+                nested_standard_metrics_are_valid = all(
+                    str(metric) in DEFAULT_METRICS
+                    and score_value(value.get("score") if isinstance(value, dict) else value) is not None
+                    for metric, value in raw_value.items()
+                )
+                if nested_standard_metrics_are_valid:
+                    continue
+            if name in RESERVED_METRIC_NAMES and name not in {"custom_metrics", "metrics"}:
+                continue
+            if name.startswith("_"):
+                continue
+            return MALFORMED_HARBOR_REWARD_REASON
+        if custom_metric_contract_error(rewards):
+            return UNSAFE_CUSTOM_METRICS_REASON
+        custom_names.update(extract_custom_metrics(rewards))
+        if len(custom_names) > MAX_CUSTOM_METRICS:
+            return UNSAFE_CUSTOM_METRICS_REASON
+    return ""
+
+
 def _merge_constituent_default_reward_failure(
     data: dict[str, Any],
     result: dict[str, Any],
     trial_root: Path | None = None,
 ) -> None:
-    """Make an aggregate unscoreable when one of its standard constituents is invalid."""
-    reason = _constituent_default_reward_failure(result, trial_root)
+    """Make an aggregate unscoreable when one of its constituents is invalid."""
+    reasons = (
+        _constituent_default_reward_failure(result, trial_root),
+        _constituent_custom_metric_failure(result),
+    )
+    reason = "; ".join(item for item in reasons if item)
     if not reason:
         return
     data["evaluation_status"] = "failed"
@@ -1646,6 +3249,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
+        data = _fail_closed_invalid_reward_numbers(data)
         rewards.append(data)
         authoritative_trial_roots.add(trial_dir)
 
@@ -1686,6 +3290,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
                 if traj_file.exists():
                     data["_has_trajectory"] = True
+                data = _fail_closed_invalid_reward_numbers(data)
                 rewards.append(data)
                 scored_trial_roots.add(trial_dir)
             except OSError as e:
@@ -1703,6 +3308,40 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         result = _read_json(result_file)
         if not isinstance(result, dict):
             continue
+        # Older Harbor fragments can contain only embedded step verifier rows,
+        # with no root aggregate and no physical reward sidecars. Preserve the
+        # rows as separate diagnostics so row-specific metric-set semantics and
+        # logical-overall weighting survive collection and report reloads.
+        step_names = (
+            None if _is_serialized_harbor_trial_result(result) else _valid_step_result_names(result.get("step_results"))
+        )
+        embedded_rows: list[tuple[str, dict[str, Any]]] = []
+        if step_names is not None:
+            for step_name, step in zip(step_names, result["step_results"], strict=True):
+                step_rewards = _harbor_result_rewards({"step_results": [step]})
+                data = (
+                    _reward_from_harbor_result({"verifier_result": {"rewards": step_rewards}}) if step_rewards else None
+                )
+                if data:
+                    embedded_rows.append((step_name, data))
+        if embedded_rows:
+            for step_name, data in embedded_rows:
+                _merge_constituent_default_reward_failure(data, result, trial_dir)
+                _merge_trial_evaluation_failures(data, trial_dir)
+                trial_name = str(result.get("trial_name") or trial_dir.name)
+                data["_trial_name"] = trial_name
+                data["_trial_root_name"] = trial_dir.name
+                data["_step_name"] = step_name
+                data["_started_at"] = result.get("started_at")
+                if not data.get("entry_id"):
+                    entry_id = _entry_id_from_harbor_result(result)
+                    if entry_id:
+                        data["entry_id"] = entry_id
+                traj_file = _reward_trajectory_path(trial_dir, step_name)
+                if traj_file.exists():
+                    data["_has_trajectory"] = True
+                rewards.append(_fail_closed_invalid_reward_numbers(data))
+            continue
         data = _reward_from_harbor_result(result)
         if not data:
             continue
@@ -1719,21 +3358,176 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
+        data = _fail_closed_invalid_reward_numbers(data)
         rewards.append(data)
     return rewards
 
 
+def _finite_reward_number(value: Any) -> float | None:
+    """Convert a Harbor numeric reward without propagating overflow or non-finite values."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+class _RewardStructureLimitError(ValueError):
+    """Raised when a reward cannot be copied safely for generated output."""
+
+
+def _normalized_reward_numbers(
+    value: Any,
+    *,
+    _depth: int = 1,
+    _node_budget: list[int] | None = None,
+    _max_nodes: int = COLLECTED_REWARD_JSON_MAX_NODES,
+) -> tuple[Any, bool]:
+    """Return JSON-safe reward data and whether an invalid number was replaced."""
+    node_budget = _node_budget if _node_budget is not None else [0]
+    node_budget[0] += 1
+    if node_budget[0] > _max_nodes:
+        raise _RewardStructureLimitError("reward node count exceeds limit")
+    if isinstance(value, bool):
+        return value, False
+    if isinstance(value, int):
+        if abs(value) > _MAX_JSON_SAFE_INTEGER:
+            return None, True
+        return value, False
+    if isinstance(value, float):
+        if _finite_reward_number(value) is None:
+            return None, True
+        return value, False
+    if isinstance(value, dict):
+        if _depth > REWARD_JSON_MAX_DEPTH:
+            raise _RewardStructureLimitError("reward depth exceeds limit")
+        invalid = False
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_item, item_invalid = _normalized_reward_numbers(
+                item,
+                _depth=_depth + 1,
+                _node_budget=node_budget,
+                _max_nodes=_max_nodes,
+            )
+            normalized[str(key)] = normalized_item
+            invalid = invalid or item_invalid
+        return normalized, invalid
+    if isinstance(value, list):
+        if _depth > REWARD_JSON_MAX_DEPTH:
+            raise _RewardStructureLimitError("reward depth exceeds limit")
+        invalid = False
+        normalized_items: list[Any] = []
+        for item in value:
+            normalized_item, item_invalid = _normalized_reward_numbers(
+                item,
+                _depth=_depth + 1,
+                _node_budget=node_budget,
+                _max_nodes=_max_nodes,
+            )
+            normalized_items.append(normalized_item)
+            invalid = invalid or item_invalid
+        return normalized_items, invalid
+    return value, False
+
+
+def _structural_limit_reward(data: dict[str, Any]) -> dict[str, Any]:
+    """Keep only shallow identifiers when a reward payload is unsafe to traverse."""
+    safe: dict[str, Any] = {}
+    for key in (
+        "_trial_name",
+        "_trial_root_name",
+        "_step_name",
+        "_started_at",
+        "entry_id",
+        "trial_id",
+        "agent",
+        "model",
+        "model_source",
+    ):
+        value = data.get(key)
+        if isinstance(value, str):
+            safe_value = _safe_diagnostic_text(value, max_len=512)
+            if safe_value:
+                safe[key] = safe_value
+    if isinstance(data.get("_has_trajectory"), bool):
+        safe["_has_trajectory"] = data["_has_trajectory"]
+    safe["evaluation_status"] = "failed"
+    safe["evaluation_errors"] = {"collector": UNSAFE_REWARD_STRUCTURE_REASON}
+    return safe
+
+
+def _fail_closed_invalid_reward_numbers(
+    data: dict[str, Any],
+    *,
+    max_nodes: int = COLLECTED_REWARD_JSON_MAX_NODES,
+    max_bytes: int = COLLECTED_REWARD_JSON_MAX_BYTES,
+) -> dict[str, Any]:
+    """Replace invalid numbers and attach a bounded diagnostic to the reward."""
+    try:
+        normalized, invalid = _normalized_reward_numbers(data, _max_nodes=max_nodes)
+        encoded = json.dumps(
+            normalized,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(encoded) > max_bytes:
+            raise _RewardStructureLimitError("reward bytes exceed generated-artifact limit")
+    except (_RewardStructureLimitError, TypeError, ValueError, RecursionError, MemoryError):
+        return _structural_limit_reward(data)
+    if not isinstance(normalized, dict):
+        return data
+    if custom_metric_contract_error(normalized):
+        normalized["evaluation_status"] = "failed"
+        normalized["evaluation_errors"] = _merge_bounded_evaluation_errors(
+            {"collector": UNSAFE_CUSTOM_METRICS_REASON},
+            normalized.get("evaluation_errors"),
+        )
+    if invalid:
+        normalized["evaluation_status"] = "failed"
+        normalized["evaluation_errors"] = _merge_bounded_evaluation_errors(
+            {"collector": UNSCOREABLE_NUMERIC_REWARD_REASON},
+            normalized.get("evaluation_errors"),
+        )
+    return normalized
+
+
 def _reward_from_harbor_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    root_verifier = result.get("verifier_result")
+    root_rewards = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
+    if (
+        _is_serialized_harbor_trial_result(result)
+        and _valid_step_result_names(result.get("step_results")) is not None
+        and not isinstance(root_rewards, dict)
+    ):
+        return {
+            "evaluation_status": "failed",
+            "evaluation_errors": {"collector": MISSING_MULTI_STEP_REWARD_REASON},
+            "details": {"harbor_rewards": {}},
+        }
+
     harbor_rewards = _harbor_result_rewards(result)
     if not harbor_rewards:
         return None
 
     data: dict[str, Any] = {}
     custom_metrics: dict[str, float] = {}
+    safe_harbor_rewards: dict[str, Any] = {}
+    invalid_numeric_reward = False
     for key, value in harbor_rewards.items():
-        if not isinstance(value, int | float) or isinstance(value, bool):
+        if key == _CUSTOM_METRIC_CONTRACT_MARKER:
             continue
-        score = float(value)
+        if not isinstance(value, int | float) or isinstance(value, bool):
+            safe_harbor_rewards[str(key)] = value
+            continue
+        score = _finite_reward_number(value)
+        safe_harbor_rewards[str(key)] = value if score is not None else None
+        if score is None:
+            invalid_numeric_reward = True
+            continue
         if key in DEFAULT_METRICS:
             data[key] = score
         elif key == "overall":
@@ -1744,12 +3538,40 @@ def _reward_from_harbor_result(result: dict[str, Any]) -> dict[str, Any] | None:
         else:
             custom_metrics[key] = score
 
+    metric_set = harbor_rewards.get("metric_set") or harbor_rewards.get("metric_set_version")
+    if isinstance(metric_set, str) and metric_set:
+        data["metric_set"] = metric_set
+
+    if invalid_numeric_reward:
+        data["evaluation_status"] = "failed"
+        data["evaluation_errors"] = {"collector": UNSCOREABLE_NUMERIC_REWARD_REASON}
+    if harbor_rewards.get(_CUSTOM_METRIC_CONTRACT_MARKER):
+        data["evaluation_status"] = "failed"
+        data["evaluation_errors"] = {"collector": UNSAFE_CUSTOM_METRICS_REASON}
     if not any(not k.startswith("_") for k in data) and not custom_metrics:
         return None
     if custom_metrics:
         data["custom_metrics"] = custom_metrics
-    data["details"] = {"harbor_rewards": harbor_rewards}
+    data["details"] = {"harbor_rewards": safe_harbor_rewards}
     return data
+
+
+def _average_multistep_custom_metrics(rewards: list[dict[str, Any]]) -> dict[str, float]:
+    """Mirror Harbor 0.22 MEAN aggregation by zero-filling missing custom keys."""
+    if not rewards:
+        return {}
+    names: set[str] = set()
+    extracted_rows: list[dict[str, float]] = []
+    for reward in rewards:
+        if reason := custom_metric_contract_error(reward):
+            raise CustomMetricContractError(reason)
+        extracted = extract_custom_metrics(reward)
+        names.update(extracted)
+        if len(names) > MAX_CUSTOM_METRICS:
+            raise CustomMetricContractError("Custom metric union exceeds the per condition publication limit")
+        extracted_rows.append(extracted)
+    denominator = len(extracted_rows)
+    return {name: round(sum(row.get(name, 0.0) for row in extracted_rows) / denominator, 4) for name in sorted(names)}
 
 
 def _harbor_result_rewards(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -1776,26 +3598,46 @@ def _harbor_result_rewards(result: dict[str, Any]) -> dict[str, Any] | None:
 
     aggregated: dict[str, Any] = {}
     for key in sorted({str(key) for rewards in step_reward_rows for key in rewards}):
-        values = [
-            float(rewards[key])
+        raw_values = [
+            rewards[key]
             for rewards in step_reward_rows
             if isinstance(rewards.get(key), int | float) and not isinstance(rewards.get(key), bool)
         ]
-        if values:
+        values = [_finite_reward_number(value) for value in raw_values]
+        if any(value is None for value in values):
+            # Preserve one invalid numeric long enough for the shared reward
+            # normalizer to mark the whole artifact unscoreable and replace it
+            # with strict-JSON ``null``. Silently dropping only the bad step
+            # would let a partial average pass.
+            aggregated[key] = next(
+                raw_value for raw_value, value in zip(raw_values, values, strict=True) if value is None
+            )
+        elif values:
             aggregated[key] = sum(values) / len(values)
 
-    aggregated.update(average_custom_metrics(step_reward_rows))
+    try:
+        aggregated.update(_average_multistep_custom_metrics(step_reward_rows))
+    except CustomMetricContractError:
+        return {
+            "metric_set": CUSTOM_ONLY_METRIC_SET,
+            _CUSTOM_METRIC_CONTRACT_MARKER: True,
+        }
 
-    standard_rows = [rewards for rewards in step_reward_rows if _standard_reward_metrics(rewards)]
-    active_metrics: tuple[str, ...] = ()
-    if any(_standard_reward_metrics(rewards) == DEFAULT_METRICS for rewards in standard_rows):
-        active_metrics = DEFAULT_METRICS
-    elif standard_rows:
-        active_metrics = LEGACY_METRICS
-    for metric in active_metrics:
-        values = [value for rewards in standard_rows if (value := metric_value(rewards, metric)) is not None]
-        if values:
-            aggregated[metric] = sum(values) / len(values)
+    # Classify each row before accepting canonical metric names. An explicitly
+    # custom-only step may carry arbitrary keys, including reserved names, but
+    # those names must never be reclassified as SkillEvaluator-owned scores.
+    standard_scores, metric_set, _active_metrics = average_metrics(step_reward_rows)
+    has_standard_contract = any(_standard_reward_metrics(rewards) for rewards in step_reward_rows)
+    if not has_standard_contract and any(
+        _finite_reward_number(aggregated.get(name)) is not None for name in ("overall", "reward")
+    ):
+        metric_set = CUSTOM_ONLY_METRIC_SET
+    for metric in DEFAULT_METRICS:
+        aggregated.pop(metric, None)
+    aggregated.update(standard_scores)
+    aggregated["metric_set"] = metric_set
+    if (logical_overall := _average_overall(step_reward_rows)) is not None:
+        aggregated["overall"] = logical_overall
     return aggregated or None
 
 
@@ -1822,7 +3664,138 @@ def _entry_id_from_harbor_result(result: dict[str, Any]) -> str:
 
 
 def _overall_score(reward: dict[str, Any]) -> float | None:
+    if reward.get("_logical_attempt_sentinel") is _LOGICAL_ATTEMPT_SENTINEL:
+        return _finite_reward_number(reward.get("_logical_overall"))
     return overall_score(reward)
+
+
+def _sanitize_reward_metric_surfaces(reward: dict[str, Any]) -> dict[str, Any]:
+    """Omit unsafe metric names without creating redaction aliases."""
+    contract_failed = custom_metric_contract_error(reward) is not None
+    sanitized = dict(reward)
+
+    for field in ("custom_metrics", "metrics"):
+        raw_metrics = reward.get(field)
+        if not isinstance(raw_metrics, dict):
+            continue
+        sanitized_metrics: dict[str, Any] = {}
+        for raw_name, value in raw_metrics.items():
+            name = str(raw_name)
+            if name in RESERVED_METRIC_NAMES:
+                sanitized_metrics[name] = value
+                continue
+            candidate = value.get("score") if isinstance(value, dict) else value
+            if not contract_failed and custom_metric_name_is_publishable(name) and score_value(candidate) is not None:
+                sanitized_metrics[name] = value
+        sanitized[field] = sanitized_metrics
+
+    for raw_name, value in list(reward.items()):
+        name = str(raw_name)
+        if name in RESERVED_METRIC_NAMES or name.startswith("_"):
+            continue
+        if not custom_metric_name_is_publishable(name):
+            sanitized.pop(raw_name, None)
+            continue
+        candidate = value.get("score") if isinstance(value, dict) else value
+        if score_value(candidate) is None:
+            continue
+        if contract_failed:
+            sanitized.pop(raw_name, None)
+
+    details = reward.get("details")
+    if isinstance(details, dict):
+        sanitized["details"] = {
+            str(raw_name): detail
+            for raw_name, detail in details.items()
+            if str(raw_name) in RESERVED_METRIC_NAMES or custom_metric_name_is_publishable(str(raw_name))
+        }
+    safe_details = sanitized.get("details")
+    harbor_rewards = details.get("harbor_rewards") if isinstance(details, dict) else None
+    if isinstance(harbor_rewards, dict):
+        safe_harbor_rewards: dict[str, Any] = {}
+        for raw_name, value in harbor_rewards.items():
+            name = str(raw_name)
+            if name in {"custom_metrics", "metrics"} and isinstance(value, dict):
+                safe_harbor_rewards[name] = {
+                    str(raw_metric): metric_value
+                    for raw_metric, metric_value in value.items()
+                    if str(raw_metric) in RESERVED_METRIC_NAMES
+                    or (
+                        not contract_failed
+                        and custom_metric_name_is_publishable(str(raw_metric))
+                        and score_value(metric_value.get("score") if isinstance(metric_value, dict) else metric_value)
+                        is not None
+                    )
+                }
+                continue
+            if (
+                name in RESERVED_METRIC_NAMES
+                or name in {"reward", "metric_set", "metric_set_version"}
+                or (not contract_failed and custom_metric_name_is_publishable(name))
+            ):
+                safe_harbor_rewards[name] = value
+        safe_details = dict(safe_details) if isinstance(safe_details, dict) else {}
+        safe_details["harbor_rewards"] = safe_harbor_rewards
+        sanitized["details"] = safe_details
+
+    custom_details = reward.get("custom_details")
+    if isinstance(custom_details, dict):
+        custom_metric_names = set(extract_custom_metrics(reward)) if not contract_failed else set()
+        safe_custom_details = {
+            str(raw_name): detail for raw_name, detail in custom_details.items() if str(raw_name) in custom_metric_names
+        }
+        if safe_custom_details:
+            sanitized["custom_details"] = safe_custom_details
+        else:
+            sanitized.pop("custom_details", None)
+    return sanitized
+
+
+def _reward_publication_projection_is_safe(reward: dict[str, Any]) -> bool:
+    """Check the same redacted envelope used by persisted reward artifacts."""
+    clean_reward = _sanitize_reward_metric_surfaces(
+        {key: value for key, value in reward.items() if not key.startswith("_")}
+    )
+    diagnostic_reward = (
+        str(clean_reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
+        or overall_score(clean_reward) is None
+    )
+    max_str_len = REWARD_DIAGNOSTIC_STRING_MAX_CHARS if diagnostic_reward else None
+    try:
+        safe_reward = redact_sensitive_data(
+            clean_reward,
+            max_str_len=max_str_len,
+        )
+        _restore_custom_metric_scores(clean_reward, safe_reward, max_str_len=max_str_len)
+        _restore_custom_metric_details(clean_reward, safe_reward, max_str_len=max_str_len)
+        normalized, _invalid = _normalized_reward_numbers(
+            safe_reward,
+            _max_nodes=COLLECTED_REWARD_JSON_MAX_NODES,
+        )
+        _validate_generated_json_value(
+            normalized,
+            max_depth=REWARD_JSON_MAX_DEPTH,
+            max_nodes=COLLECTED_REWARD_JSON_MAX_NODES,
+            max_bytes=COLLECTED_REWARD_JSON_MAX_BYTES,
+        )
+    except (
+        _RewardStructureLimitError,
+        MemoryError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        return False
+    return isinstance(normalized, dict)
+
+
+def _mark_reward_collection_failure(reward: dict[str, Any], reason: str) -> None:
+    reward["evaluation_status"] = "failed"
+    reward["evaluation_errors"] = _merge_bounded_evaluation_errors(
+        {"collector": reason},
+        reward.get("evaluation_errors"),
+    )
 
 
 def _partition_scoreable_rewards(
@@ -1833,26 +3806,48 @@ def _partition_scoreable_rewards(
     failures: list[dict[str, str]] = []
     failed_trials: set[str] = set()
     for reward in rewards:
+        if not _reward_identity_is_publishable(reward):
+            _mark_reward_collection_failure(reward, UNSAFE_REWARD_IDENTITY_REASON)
+        elif custom_metric_contract_error(reward):
+            _mark_reward_collection_failure(reward, UNSAFE_CUSTOM_METRICS_REASON)
+        elif not _reward_publication_projection_is_safe(reward):
+            _mark_reward_collection_failure(reward, UNSAFE_REWARD_STRUCTURE_REASON)
         evaluation_failed = str(reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
         if not evaluation_failed and overall_score(reward) is not None:
             scoreable.append(reward)
             continue
-        trial = str(reward.get("_trial_name") or reward.get("_trial_root_name") or "unknown trial")
-        if trial in failed_trials:
+        raw_trial = str(reward.get("_trial_name") or reward.get("_trial_root_name") or "unknown trial")
+        if raw_trial in failed_trials:
             continue
-        failed_trials.add(trial)
+        failed_trials.add(raw_trial)
         failures.append(
             {
-                "trial": trial,
+                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
                 "reason": _unscoreable_reward_reason(reward),
             }
         )
+
+    custom_names = {name for reward in scoreable for name in extract_custom_metrics(reward)}
+    if len(custom_names) > MAX_CUSTOM_METRICS:
+        for reward in scoreable:
+            _mark_reward_collection_failure(reward, UNSAFE_CUSTOM_METRIC_UNION_REASON)
+            raw_trial = str(reward.get("_trial_name") or reward.get("_trial_root_name") or "unknown trial")
+            if raw_trial in failed_trials:
+                continue
+            failed_trials.add(raw_trial)
+            failures.append(
+                {
+                    "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+                    "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
+                }
+            )
+        scoreable = []
     return scoreable, failures
 
 
 def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
     """Return a bounded, redacted diagnostic for an unscoreable reward."""
-    fallback = "Reward metrics are incomplete or non-finite; trial was not scored"
+    fallback = UNSCOREABLE_NUMERIC_REWARD_REASON
     if str(reward.get("evaluation_status") or "").casefold() not in {"error", "failed"}:
         return fallback
 
@@ -1882,9 +3877,19 @@ def _strip_attempt_suffix(value: str) -> str:
     return re.sub(r"(?:[-_])attempt\d+$", "", value)
 
 
+def _reward_identity_is_publishable(reward: dict[str, Any]) -> bool:
+    """Validate the effective case identity before score aggregation."""
+    entry_id = reward.get("entry_id")
+    if entry_id not in (None, ""):
+        return _identity_text_is_publishable(entry_id)
+    trial_name = reward.get("_trial_name")
+    if not isinstance(trial_name, str) or not trial_name:
+        return False
+    return _identity_text_is_publishable(trial_name.split("__", 1)[0])
+
+
 def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) -> str:
-    value = str(value or "").strip()
-    if not value:
+    if not _identity_text_is_publishable(value):
         return ""
     if expected_case_ids and value in expected_case_ids:
         return value
@@ -1898,9 +3903,9 @@ def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) ->
 
 
 def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None) -> str:
-    if reward.get("entry_id"):
-        return _canonical_case_id(str(reward["entry_id"]), expected_case_ids)
-    trial_name = str(reward.get("_trial_name") or "")
+    if isinstance(reward.get("entry_id"), str) and reward["entry_id"]:
+        return _canonical_case_id(reward["entry_id"], expected_case_ids)
+    trial_name = reward.get("_trial_name")
     if trial_name:
         return _canonical_case_id(trial_name.split("__", 1)[0], expected_case_ids)
     return "unknown"
@@ -1940,12 +3945,13 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             continue
         first = rows[0]
         standard_scores, metric_set, metrics = average_metrics(rows)
-        custom_scores = average_custom_metrics(rows)
+        custom_scores = _average_multistep_custom_metrics(rows)
         logical_reward: dict[str, Any] = {
             "entry_id": first.get("entry_id"),
             "_trial_name": root,
             "_trial_root_name": root,
             "_started_at": first.get("_started_at"),
+            "_logical_attempt_sentinel": _LOGICAL_ATTEMPT_SENTINEL,
         }
         if metric_set:
             logical_reward["metric_set"] = metric_set
@@ -1957,6 +3963,7 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             logical_reward["custom_metrics"] = custom_scores
         if (overall := _average_overall(rows)) is not None:
             logical_reward["overall"] = overall
+            logical_reward["_logical_overall"] = overall
         if any(row.get("_has_trajectory") for row in rows):
             logical_reward["_has_trajectory"] = True
         logical.append(logical_reward)
@@ -2143,8 +4150,8 @@ def _paired_pass_comparison(
     without_skill: dict[str, Any],
 ) -> dict[str, Any]:
     """Compare pass@k outcomes for matching cases across both evaluation arms."""
-    with_cases = with_skill.get("cases")
-    without_cases = without_skill.get("cases")
+    with_cases = with_skill.get("_pairing_cases", with_skill.get("cases"))
+    without_cases = without_skill.get("_pairing_cases", without_skill.get("cases"))
     if not isinstance(with_cases, dict) or not isinstance(without_cases, dict):
         return {"pairing_status": "unavailable", "paired_cases": 0}
 
@@ -2240,6 +4247,11 @@ def _paired_pass_comparison(
     return result
 
 
+def _public_pass_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Remove collector-only pairing state from a pass summary."""
+    return {key: value for key, value in summary.items() if not key.startswith("_")}
+
+
 def _pass_summary(
     rewards: list[dict[str, Any]],
     *,
@@ -2250,7 +4262,7 @@ def _pass_summary(
     expected_case_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Summarize pass@k using SkillEvaluator continuous reward scores."""
-    expected_ids = list(dict.fromkeys(str(case_id) for case_id in (expected_case_ids or []) if str(case_id)))
+    expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_id_set = set(expected_ids) if expected_ids else None
     grouped: dict[str, list[dict[str, Any]]] = {}
     for reward in _logical_attempt_rewards(rewards):
@@ -2259,18 +4271,22 @@ def _pass_summary(
         grouped.setdefault(_entry_id(reward, expected_id_set), []).append(reward)
 
     cases: dict[str, Any] = {}
+    pairing_cases: dict[str, dict[str, bool]] = {}
     passed_cases = 0
     attempts_used = 0
-    extra_cases: list[str] = []
+    extra_case_ids: list[str] = []
 
     case_order = expected_ids or sorted(grouped)
     if expected_ids:
-        extra_cases = sorted(entry_id for entry_id in grouped if entry_id not in expected_id_set)
-        case_order = [*case_order, *extra_cases]
+        extra_case_ids = sorted(entry_id for entry_id in grouped if entry_id not in expected_id_set)
+        case_order = [*case_order, *extra_case_ids]
+
+    published_case_ids = set(case_order[:PUBLISHED_CASE_DETAILS_MAX])
+    published_attempt_details = 0
 
     for entry_id in case_order:
         attempts = grouped.get(entry_id, [])
-        attempt_rows = []
+        attempt_rows: list[dict[str, Any]] = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
         for idx, reward in enumerate(sorted(attempts, key=_attempt_sort_key), start=1):
@@ -2282,14 +4298,20 @@ def _pass_summary(
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
             best_score = score if best_score is None else max(best_score, score)
-            attempt_rows.append(
-                {
-                    "attempt": idx,
-                    "trial": reward.get("_trial_name", ""),
-                    "score": score,
-                    "passed": passed,
-                }
-            )
+            if (
+                entry_id in published_case_ids
+                and len(attempt_rows) < PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX
+                and published_attempt_details < PUBLISHED_ATTEMPT_DETAILS_MAX
+            ):
+                attempt_rows.append(
+                    {
+                        "attempt": idx,
+                        "trial": _published_trial_label(reward.get("_trial_name", "")),
+                        "score": score,
+                        "passed": passed,
+                    }
+                )
+                published_attempt_details += 1
 
         case_passed = first_pass_attempt is not None
         is_expected_case = expected_id_set is None or entry_id in expected_id_set
@@ -2301,17 +4323,22 @@ def _pass_summary(
         skipped = unscored if stop_on_pass and case_passed else 0
         missing = 0 if skipped else unscored
 
-        cases[entry_id] = {
-            "passed": case_passed,
-            "first_pass_attempt": first_pass_attempt,
-            "attempts_used": len(attempts),
-            "attempts_skipped": skipped,
-            "attempts_missing": missing,
-            "best_score": round(best_score, 4) if best_score is not None else None,
-            "attempts": attempt_rows,
-        }
-        if not is_expected_case:
-            cases[entry_id]["extra_case"] = True
+        pairing_cases[entry_id] = {"passed": case_passed, "extra_case": not is_expected_case}
+        if entry_id in published_case_ids:
+            cases[entry_id] = {
+                "passed": case_passed,
+                "first_pass_attempt": first_pass_attempt,
+                "attempts_used": len(attempts),
+                "attempts_skipped": skipped,
+                "attempts_missing": missing,
+                "best_score": round(best_score, 4) if best_score is not None else None,
+                "attempts": attempt_rows,
+                "attempt_details_total": len(attempts),
+                "attempt_details_shown": len(attempt_rows),
+                "attempt_details_truncated": len(attempt_rows) < len(attempts),
+            }
+            if not is_expected_case:
+                cases[entry_id]["extra_case"] = True
 
     if expected_ids:
         total_cases = len(expected_ids)
@@ -2335,8 +4362,15 @@ def _pass_summary(
         "attempts_used": attempts_used,
         "max_attempts_possible": total_cases * n_attempts,
         "avg_attempts_used": round(attempts_used / total_cases, 4) if total_cases else 0.0,
-        "extra_cases": extra_cases,
+        "extra_case_count": len(extra_case_ids),
+        "extra_cases": extra_case_ids[:PUBLISHED_CASE_ID_DIAGNOSTIC_SAMPLE_MAX],
+        "extra_cases_truncated": len(extra_case_ids) > PUBLISHED_CASE_ID_DIAGNOSTIC_SAMPLE_MAX,
+        "case_details_total": len(case_order),
+        "case_details_shown": len(cases),
+        "case_details_truncated": len(cases) < len(case_order),
+        "case_details_limit": PUBLISHED_CASE_DETAILS_MAX,
         "cases": cases,
+        "_pairing_cases": pairing_cases,
     }
 
 
@@ -2370,7 +4404,7 @@ def _compute_lift(
 
 def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
     """Average the pass/lift overall score across reward payloads."""
-    values = [overall_score(reward) for reward in rewards]
+    values = [_overall_score(reward) for reward in rewards]
     if not values or any(value is None for value in values):
         return None
     return round(sum(value for value in values if value is not None) / len(values), 4)
@@ -2428,22 +4462,152 @@ def _security_finding_signature(finding: dict[str, Any]) -> tuple[str, str]:
 
 def _safe_trial_path_component(value: Any) -> str:
     """Return a portable single path component or an empty string."""
-    component = str(value or "").strip()
+    raw_component = str(value or "")
+    component = raw_component.strip()
+    invalid_characters = '<>:"/\\|?*\x00'
+    stem = component.split(".", 1)[0].rstrip(" .").casefold()
+    reserved = {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+        *(f"com{index}" for index in "¹²³"),
+        *(f"lpt{index}" for index in "¹²³"),
+    }
+    try:
+        utf8_bytes = len(component.encode("utf-8"))
+        utf16_units = len(component.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        return ""
     if (
         not component
+        or component != raw_component
         or component in {".", ".."}
-        or any(character in component for character in ("/", "\\", ":", "\x00"))
-        or any(ord(character) < 32 or ord(character) == 127 for character in component)
+        or utf8_bytes > PORTABLE_TRIAL_COMPONENT_MAX_UNITS
+        or utf16_units > PORTABLE_TRIAL_COMPONENT_MAX_UNITS
+        or any(
+            ord(character) < 32 or ord(character) == 127 or character in invalid_characters for character in component
+        )
+        or component.endswith(".")
+        or stem in reserved
+        or contains_credential_value(component)
     ):
         return ""
     return component
 
 
+def _safe_trial_source_component(value: Any) -> str:
+    """Return an exact safe child name without applying output normalization."""
+    if not isinstance(value, str):
+        return ""
+    if (
+        not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\x00" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return ""
+    if os.name == "nt":
+        windows_path = PureWindowsPath(value)
+        if windows_path.drive or windows_path.is_absolute() or len(windows_path.parts) != 1:
+            return ""
+    return value
+
+
 def _persisted_trial_name(reward: dict[str, Any]) -> tuple[str, str]:
     """Derive output and source names only from physical Harbor path components."""
-    trial_root_name = _safe_trial_path_component(reward.get("_trial_root_name")) or "unknown"
+    trial_root_name = _safe_trial_source_component(reward.get("_trial_root_name")) or "unknown"
+    output_root_name = _safe_trial_path_component(trial_root_name) or "unknown"
     step_name = _safe_trial_path_component(reward.get("_step_name"))
-    return (f"{trial_root_name}__{step_name}" if step_name else trial_root_name), trial_root_name
+    return (f"{output_root_name}__{step_name}" if step_name else output_root_name), trial_root_name
+
+
+def _portable_trial_name_key(value: str) -> str:
+    """Normalize one output name for case-insensitive and Win32-compatible collision checks."""
+    return unicodedata.normalize("NFC", value.rstrip(" .").casefold())
+
+
+def _persisted_trial_names(
+    rewards: list[dict[str, Any]],
+    job_dir: Path | None,
+) -> list[tuple[str, str]]:
+    """Resolve distinct physical reward identities to distinct output directories."""
+    scored_names, _unscored_names = _persisted_trial_layout(rewards, job_dir)
+    return scored_names
+
+
+def _persisted_trial_layout(
+    rewards: list[dict[str, Any]],
+    job_dir: Path | None,
+) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """Allocate portable output names across scored and unscored physical trials."""
+    entries = [
+        (
+            (
+                str(reward.get("_trial_root_name") or ""),
+                str(reward.get("_step_name") or ""),
+            ),
+            *_persisted_trial_name(reward),
+        )
+        for reward in rewards
+    ]
+    scored_roots = {trial_root_name for _identity, _legacy_name, trial_root_name in entries}
+    unscored_sources: list[str] = []
+    if job_dir is not None:
+        with contextlib.suppress(OSError):
+            for child in sorted(job_dir.iterdir()):
+                kind, _unsafe_reason = _inspect_trial_directory(child)
+                if child.name not in scored_roots and (
+                    kind == "link" or (kind == "directory" and _looks_like_trial_dir(child))
+                ):
+                    unscored_sources.append(child.name)
+
+    preferred_names = [legacy_name for _identity, legacy_name, _trial_root_name in entries]
+    unsafe_preferred_indices = {
+        index
+        for index, (identity, legacy_name, _trial_root_name) in enumerate(entries)
+        if not _safe_trial_path_component(identity[0])
+        or (identity[1] and not _safe_trial_path_component(identity[1]))
+        or not _safe_trial_path_component(legacy_name)
+    }
+    for source_name in unscored_sources:
+        preferred = _safe_trial_path_component(source_name)
+        if not preferred:
+            unsafe_preferred_indices.add(len(preferred_names))
+        preferred_names.append(preferred or "unknown")
+    indices_by_name: dict[str, list[int]] = {}
+    for index, preferred_name in enumerate(preferred_names):
+        indices_by_name.setdefault(_portable_trial_name_key(preferred_name), []).append(index)
+
+    conflicting_indices = {
+        index for indices in indices_by_name.values() if len(indices) > 1 for index in indices
+    } | unsafe_preferred_indices
+    resolved_names = list(preferred_names)
+    used_name_keys = set(indices_by_name)
+    suffix = 1
+    for index in range(len(preferred_names)):
+        if index not in conflicting_indices:
+            continue
+        while True:
+            resolved_name = f"skillevaluator-trial-collision-{suffix:06d}"
+            suffix += 1
+            resolved_key = _portable_trial_name_key(resolved_name)
+            if resolved_key not in used_name_keys:
+                break
+        resolved_names[index] = resolved_name
+        used_name_keys.add(resolved_key)
+
+    scored_names = [
+        (resolved_names[index], trial_root_name)
+        for index, (_identity, _legacy_name, trial_root_name) in enumerate(entries)
+    ]
+    unscored_names = {
+        source_name: resolved_names[len(entries) + index] for index, source_name in enumerate(unscored_sources)
+    }
+    return scored_names, unscored_names
 
 
 def _annotate_security_attribution(
@@ -2465,6 +4629,7 @@ def _annotate_security_attribution(
         "unknown_no_baseline": 0,
         "cases": {},
     }
+    seen_cases: set[str] = set()
 
     for reward in with_rewards:
         entry_id = _entry_id(reward)
@@ -2482,6 +4647,7 @@ def _annotate_security_attribution(
         case_status = "safe"
         if with_findings:
             case_status = "with_skill_unsafe"
+            attribution_plan: list[tuple[str, str]] = []
             for finding in with_findings:
                 signature = _security_finding_signature(finding)
                 if not baseline_run:
@@ -2512,39 +4678,111 @@ def _annotate_security_attribution(
                         "not show target-skill use before the unsafe action."
                     )
                     summary["ambiguous_with_skill_only"] += 1
-                finding["attribution"] = attribution
-                finding["attribution_explanation"] = explanation
-            security["attribution"] = with_findings[0].get("attribution")
-            security["attribution_explanation"] = with_findings[0].get("attribution_explanation")
+                attribution_plan.append((attribution, explanation))
+
+            first_attribution, first_explanation = attribution_plan[0]
+            projected_details: dict[str, Any] | None = None
+            for projection in ("full", "labels", "aggregate"):
+                try:
+                    candidate_reward = copy.deepcopy(reward)
+                    candidate_details = candidate_reward.get("details")
+                    candidate_security = (
+                        candidate_details.get("security") if isinstance(candidate_details, dict) else None
+                    )
+                    if not isinstance(candidate_security, dict):
+                        raise ValueError("security detail projection disappeared")
+                    candidate_findings = _security_score_findings(candidate_reward)
+                    if projection != "aggregate":
+                        if len(candidate_findings) != len(attribution_plan):
+                            raise ValueError("security finding projection changed cardinality")
+                        for candidate_finding, (attribution, explanation) in zip(
+                            candidate_findings,
+                            attribution_plan,
+                            strict=True,
+                        ):
+                            candidate_finding["attribution"] = attribution
+                            if projection == "full":
+                                candidate_finding["attribution_explanation"] = explanation
+                    candidate_security["attribution"] = first_attribution
+                    candidate_security["attribution_explanation"] = first_explanation
+                    if projection == "labels":
+                        candidate_security["attribution_completeness"] = (
+                            "Per-finding attribution labels were retained; repeated explanations were omitted "
+                            "to stay within artifact limits."
+                        )
+                    elif projection == "aggregate":
+                        candidate_security["attribution_completeness"] = (
+                            "Per-finding attribution was omitted because the expanded reward would exceed "
+                            "artifact limits."
+                        )
+                    if not _reward_publication_projection_is_safe(candidate_reward):
+                        raise ValueError("security attribution projection exceeds publication limits")
+                except (MemoryError, RecursionError, TypeError, ValueError):
+                    continue
+                projected_details = candidate_details
+                break
+            if projected_details is not None:
+                reward["details"] = projected_details
         elif baseline_findings:
             case_status = "baseline_unsafe_with_skill_safe"
-            security.setdefault("findings", []).append(
-                {
-                    "type": "skill_reduced_unsafe_behavior",
-                    "severity": "info",
-                    "message": "Baseline had unsafe agent action, but with-skill run did not",
-                    "evidence": "; ".join(str(f.get("message", "")) for f in baseline_findings[:2]),
-                    "source": "baseline_comparison",
-                    "score_impact": False,
-                    "attribution": "skill_may_have_improved_safety",
-                    "attribution_explanation": (
-                        "The without-skill baseline showed unsafe behavior for this case, while the "
-                        "with-skill run did not."
-                    ),
-                }
-            )
-            security["attribution"] = "skill_may_have_improved_safety"
-            security["attribution_explanation"] = (
+            explanation = (
                 "The without-skill baseline showed unsafe behavior for this case, while the with-skill run did not."
             )
+            for include_derived_finding in (True, False):
+                try:
+                    candidate_reward = copy.deepcopy(reward)
+                    candidate_details = candidate_reward.get("details")
+                    candidate_security = (
+                        candidate_details.get("security") if isinstance(candidate_details, dict) else None
+                    )
+                    if not isinstance(candidate_security, dict):
+                        raise ValueError("security detail projection disappeared")
+                    if include_derived_finding:
+                        candidate_findings = candidate_security.get("findings")
+                        if not isinstance(candidate_findings, list):
+                            candidate_findings = []
+                            candidate_security["findings"] = candidate_findings
+                        candidate_findings.append(
+                            {
+                                "type": "skill_reduced_unsafe_behavior",
+                                "severity": "info",
+                                "message": "Baseline had unsafe agent action, but with-skill run did not",
+                                "evidence": (
+                                    f"Without-skill baseline contained {len(baseline_findings)} "
+                                    "score-impacting security finding(s)."
+                                ),
+                                "source": "baseline_comparison",
+                                "score_impact": False,
+                                "attribution": "skill_may_have_improved_safety",
+                                "attribution_explanation": explanation,
+                            }
+                        )
+                    else:
+                        candidate_security["attribution_completeness"] = (
+                            "The derived comparison finding was omitted to stay within artifact limits."
+                        )
+                    candidate_security["attribution"] = "skill_may_have_improved_safety"
+                    candidate_security["attribution_explanation"] = explanation
+                    if not _reward_publication_projection_is_safe(candidate_reward):
+                        raise ValueError("security improvement projection exceeds publication limits")
+                except (MemoryError, RecursionError, TypeError, ValueError):
+                    continue
+                reward["details"] = candidate_details
+                break
             summary["skill_may_have_improved_safety"] += 1
 
-        summary["cases"][entry_id] = {
-            "status": case_status,
-            "with_skill_findings": len(with_findings),
-            "baseline_findings": len(baseline_findings),
-        }
+        seen_cases.add(entry_id)
+        if entry_id in summary["cases"] or len(summary["cases"]) < PUBLISHED_CASE_DETAILS_MAX:
+            summary["cases"][entry_id] = {
+                "status": case_status,
+                "with_skill_findings": len(with_findings),
+                "baseline_findings": len(baseline_findings),
+            }
 
+    summary["case_details_total"] = len(seen_cases)
+    summary["case_details_shown"] = len(summary["cases"])
+    summary["case_details_truncated"] = len(summary["cases"]) < len(seen_cases)
+    summary["case_details_limit"] = PUBLISHED_CASE_DETAILS_MAX
     return summary
 
 
@@ -2562,37 +4800,106 @@ def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
     )
 
 
-def _trajectory_skill_invoked(trajectory: Any, skill_name: str) -> bool | None:
-    """Derive target invocation from one readable ATIF trajectory."""
+def _trajectory_skill_invoked(trajectory: Any, skill_name: str, *, depth: int = 0) -> bool | None:
+    """Derive target invocation from executed root and referenced subagent paths."""
     if not isinstance(trajectory, dict):
+        return None
+    if depth > _MAX_TRAJECTORY_REFERENCE_DEPTH:
         return None
     steps = trajectory.get("steps")
     if not isinstance(steps, list) or not steps or any(not isinstance(step, dict) for step in steps):
         return None
-    agent_steps = [step for step in steps if step.get("source") == "agent"]
-    if not agent_steps:
-        return None
-    for step in agent_steps:
-        tool_calls = step.get("tool_calls")
-        if not isinstance(tool_calls, list):
-            return None
-        for tool_call in tool_calls:
-            if (
+    agent_steps = [
+        step for step in steps if step.get("source") == "agent" and step.get("is_copied_context") is not True
+    ]
+    results: list[bool | None] = []
+    if agent_steps:
+        for step in agent_steps:
+            tool_calls = step.get("tool_calls")
+            if tool_calls is None:
+                # ATIF 1.7 makes tool_calls optional. A normal agent message
+                # without calls contributes no routing evidence, but it must
+                # not hide a later, well-formed invocation.
+                continue
+            if not isinstance(tool_calls, list):
+                results.append(None)
+                break
+            if any(
                 not isinstance(tool_call, dict)
                 or not isinstance(tool_call.get("function_name"), str)
                 or not tool_call["function_name"].strip()
                 or not isinstance(tool_call.get("arguments"), dict)
+                for tool_call in tool_calls
             ):
-                return None
-    try:
-        agent_trajectory = {**trajectory, "steps": agent_steps}
-        tool_calls = extract_tool_calls_as_dicts(agent_trajectory)
-        skill_tool_names = get_skill_tool_calls(agent_trajectory)
-        negative_check = check_negative_case(tool_calls, skill_name, skill_tool_names=skill_tool_names)
-    except (AttributeError, TypeError, ValueError):
+                results.append(None)
+                break
+        else:
+            try:
+                agent_trajectory = {**trajectory, "steps": agent_steps}
+                tool_calls = extract_tool_calls_as_dicts(agent_trajectory)
+                skill_tool_names = get_skill_tool_calls(agent_trajectory)
+                negative_check = check_negative_case(tool_calls, skill_name, skill_tool_names=skill_tool_names)
+            except (AttributeError, TypeError, ValueError):
+                results.append(None)
+            else:
+                passed = negative_check.get("passed")
+                results.append(not passed if isinstance(passed, bool) else None)
+    else:
+        results.append(None)
+
+    embedded = trajectory.get("subagent_trajectories")
+    if embedded is None:
+        embedded_by_id: dict[str, dict[str, Any]] = {}
+    elif not isinstance(embedded, list):
+        return True if True in results else None
+    else:
+        embedded_by_id = {}
+        for child in embedded:
+            if not isinstance(child, dict):
+                return True if True in results else None
+            trajectory_id = child.get("trajectory_id")
+            if not isinstance(trajectory_id, str) or not trajectory_id or trajectory_id in embedded_by_id:
+                return True if True in results else None
+            embedded_by_id[trajectory_id] = child
+
+    referenced_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for step in steps:
+        if step.get("is_copied_context") is True:
+            continue
+        observation = step.get("observation")
+        if not isinstance(observation, dict):
+            continue
+        observation_results = observation.get("results")
+        if not isinstance(observation_results, list):
+            return True if True in results else None
+        for observation_result in observation_results:
+            if not isinstance(observation_result, dict):
+                return True if True in results else None
+            refs = observation_result.get("subagent_trajectory_ref")
+            if refs is None:
+                continue
+            if not isinstance(refs, list):
+                return True if True in results else None
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    return True if True in results else None
+                trajectory_id = ref.get("trajectory_id")
+                if not isinstance(trajectory_id, str) or trajectory_id not in embedded_by_id:
+                    results.append(None)
+                    continue
+                if trajectory_id not in seen_ids:
+                    seen_ids.add(trajectory_id)
+                    referenced_ids.append(trajectory_id)
+    results.extend(
+        _trajectory_skill_invoked(embedded_by_id[trajectory_id], skill_name, depth=depth + 1)
+        for trajectory_id in referenced_ids
+    )
+    if True in results:
+        return True
+    if None in results:
         return None
-    passed = negative_check.get("passed")
-    return not passed if isinstance(passed, bool) else None
+    return False
 
 
 def _authoritative_step_names(trial_root: Path) -> tuple[bool, list[str] | None]:
@@ -2626,18 +4933,61 @@ def _authoritative_step_names(trial_root: Path) -> tuple[bool, list[str] | None]
         # Single-step Harbor trials serialize an explicit null. A physical
         # steps layout still makes that shape ambiguous, so keep it fail-closed.
         return (True, None) if steps_layout_present else (False, None)
-    if not isinstance(step_results, list) or not step_results:
-        return True, None
-
-    names: list[str] = []
-    for step in step_results:
-        if not isinstance(step, dict):
-            return True, None
-        step_name = step.get("step_name")
-        if not isinstance(step_name, str) or not step_name or step_name in names:
-            return True, None
-        names.append(step_name)
+    names = _valid_step_result_names(
+        step_results,
+        max_count=_MAX_TRAJECTORY_STEP_DIRECTORIES,
+    )
     return True, names
+
+
+def _materialized_trial_trajectory(
+    trial_root: Path,
+    step_name: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Select and materialize the trajectory authorized by Harbor topology."""
+    is_multi_step, authoritative_names = _authoritative_step_names(trial_root)
+    root_path = trial_root / "agent" / "trajectory.json"
+    try:
+        root_path.lstat()
+    except FileNotFoundError:
+        root_present = False
+    except OSError:
+        return None, "trajectory_stat_failed"
+    else:
+        root_present = True
+
+    if is_multi_step:
+        if authoritative_names is None:
+            return None, "invalid_or_incomplete_multi_step_topology"
+        if root_present:
+            return None, "contradictory_root_and_multi_step_trajectories"
+        paths = _ordered_step_trajectory_paths(trial_root)
+        discovered_names = [path.parent.parent.name for path in paths]
+        if discovered_names != authoritative_names:
+            return None, "incomplete_or_unexpected_multi_step_trajectories"
+        if step_name:
+            if step_name not in authoritative_names:
+                return None, "reward_step_not_in_authoritative_topology"
+            selected = paths[authoritative_names.index(step_name)]
+            try:
+                trajectory, _reference_key = _materialize_trajectory_file(selected.parent, selected.name)
+            except (OSError, SecurePathError, _TrajectoryMergeError, RecursionError):
+                return None, "invalid_step_trajectory"
+            return trajectory, None
+        merged = _merged_step_trajectory(trial_root)
+        if merged is None:
+            return None, "incomplete_or_invalid_multi_step_trajectory"
+        return merged, None
+
+    if step_name:
+        return None, "unexpected_step_reward_for_single_step_trial"
+    if not root_present:
+        return None, "missing_single_step_trajectory"
+    try:
+        trajectory, _reference_key = _materialize_trajectory_file(root_path.parent, root_path.name)
+    except (OSError, SecurePathError, _TrajectoryMergeError, RecursionError):
+        return None, "invalid_single_step_trajectory"
+    return trajectory, None
 
 
 def _trusted_trial_skill_invoked(
@@ -2645,28 +4995,9 @@ def _trusted_trial_skill_invoked(
     step_name: str | None,
     skill_name: str,
 ) -> bool | None:
-    """Derive trusted invocation without falling back across logical steps."""
-    if step_name:
-        safe_step_paths = {path.parent.parent.name: path for path in _ordered_step_trajectory_paths(trial_root)}
-        trajectory_path = safe_step_paths.get(step_name)
-        return _trajectory_skill_invoked(_read_json(trajectory_path), skill_name) if trajectory_path else None
-
-    is_multi_step, authoritative_names = _authoritative_step_names(trial_root)
-    if is_multi_step:
-        if authoritative_names is None:
-            return None
-        safe_step_paths = {path.parent.parent.name: path for path in _ordered_step_trajectory_paths(trial_root)}
-        saw_unknown = False
-        for authoritative_name in authoritative_names:
-            trajectory_path = safe_step_paths.get(authoritative_name)
-            invoked = _trajectory_skill_invoked(_read_json(trajectory_path), skill_name) if trajectory_path else None
-            if invoked is True:
-                return True
-            if invoked is None:
-                saw_unknown = True
-        return None if saw_unknown else False
-
-    return _trajectory_skill_invoked(_read_json(trial_root / "agent" / "trajectory.json"), skill_name)
+    """Derive trusted invocation from the topology-authorized materialized ATIF."""
+    trajectory, _reason = _materialized_trial_trajectory(trial_root, step_name)
+    return _trajectory_skill_invoked(trajectory, skill_name)
 
 
 def _add_trusted_invocation_evidence(
@@ -2674,6 +5005,8 @@ def _add_trusted_invocation_evidence(
     source_reward: dict[str, Any],
     trial_root: Path | None,
     skill_name: str,
+    *,
+    trajectory: dict[str, Any] | None | object = _TRAJECTORY_NOT_PROVIDED,
 ) -> None:
     """Replace verifier-authored routing evidence on standard rewards only."""
     if not _is_standard_skill_execution_reward(source_reward):
@@ -2682,7 +5015,11 @@ def _add_trusted_invocation_evidence(
         clean_reward.pop(key, None)
     if trial_root is None:
         return
-    invoked = _trusted_trial_skill_invoked(trial_root, source_reward.get("_step_name"), skill_name)
+    invoked = (
+        _trajectory_skill_invoked(trajectory, skill_name)
+        if trajectory is not _TRAJECTORY_NOT_PROVIDED
+        else _trusted_trial_skill_invoked(trial_root, source_reward.get("_step_name"), skill_name)
+    )
     if invoked is None:
         return
     if invoked is True:
@@ -2696,36 +5033,15 @@ def _add_trusted_invocation_evidence(
 
 def _can_restore_custom_metric_name(value: str) -> bool:
     """Allow safe names plus narrow, explicitly metric-shaped secret terms."""
-    if not is_sensitive_key(value):
-        return True
-    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", camel_split).strip("_").lower()
-    parts = tuple(part for part in normalized.split("_") if part)
-    return (
-        len(parts) == 2
-        and parts[0] in {"auth", "secret", "token"}
-        and parts[1]
-        in {
-            "accuracy",
-            "compliance",
-            "count",
-            "coverage",
-            "efficiency",
-            "handling",
-            "leakage",
-            "precision",
-            "quality",
-            "rate",
-            "ratio",
-            "recall",
-            "safety",
-            "score",
-            "usage",
-        }
-    )
+    return custom_metric_name_is_publishable(value)
 
 
-def _restore_custom_metric_scores(source_reward: dict[str, Any], safe_reward: dict[str, Any]) -> None:
+def _restore_custom_metric_scores(
+    source_reward: dict[str, Any],
+    safe_reward: dict[str, Any],
+    *,
+    max_str_len: int | None = None,
+) -> None:
     """Restore only finite numeric values recognized by the custom-metric schema."""
     for field in ("custom_metrics", "metrics"):
         source_metrics = source_reward.get(field)
@@ -2734,26 +5050,71 @@ def _restore_custom_metric_scores(source_reward: dict[str, Any], safe_reward: di
             continue
         for raw_name, raw_value in source_metrics.items():
             name = str(raw_name)
-            if not _can_restore_custom_metric_name(name):
+            if name not in safe_metrics or not _can_restore_custom_metric_name(name):
                 continue
             score = extract_custom_metrics({field: {name: raw_value}}).get(name)
             if score is None:
                 continue
             if isinstance(raw_value, dict):
-                safe_value = safe_metrics.get(name)
-                if not isinstance(safe_value, dict):
-                    safe_value = {}
-                    safe_metrics[name] = safe_value
+                redacted_value = redact_sensitive_data(raw_value, max_str_len=max_str_len)
+                safe_value = redacted_value if isinstance(redacted_value, dict) else {}
+                safe_metrics[name] = safe_value
                 safe_value["score"] = score
             else:
                 safe_metrics[name] = score
 
-    # Legacy custom-only rewards allowed this report metric at the top level.
-    token_efficiency = extract_custom_metrics({"token_efficiency": source_reward.get("token_efficiency")}).get(
-        "token_efficiency"
-    )
-    if token_efficiency is not None:
-        safe_reward["token_efficiency"] = token_efficiency
+    for name, score in extract_custom_metrics(source_reward).items():
+        if name not in source_reward or name not in safe_reward:
+            continue
+        raw_value = source_reward[name]
+        if isinstance(raw_value, dict):
+            redacted_value = redact_sensitive_data(raw_value, max_str_len=max_str_len)
+            safe_value = redacted_value if isinstance(redacted_value, dict) else {}
+            safe_value["score"] = score
+            safe_reward[name] = safe_value
+        else:
+            safe_reward[name] = score
+
+
+def _restore_custom_metric_details(
+    source_reward: dict[str, Any],
+    safe_reward: dict[str, Any],
+    *,
+    max_str_len: int | None = None,
+) -> None:
+    """Preserve safe metric-keyed evidence while redacting nested secrets."""
+    custom_names = set(extract_custom_metrics(source_reward))
+    source_custom_details = source_reward.get("custom_details")
+    if isinstance(source_custom_details, dict):
+        safe_custom_details = {
+            str(raw_name): redact_sensitive_data(detail, max_str_len=max_str_len)
+            for raw_name, detail in source_custom_details.items()
+            if str(raw_name) in custom_names
+        }
+        if safe_custom_details:
+            safe_reward["custom_details"] = safe_custom_details
+        else:
+            safe_reward.pop("custom_details", None)
+
+    source_details = source_reward.get("details")
+    safe_details = safe_reward.get("details")
+    if not isinstance(source_details, dict) or not isinstance(safe_details, dict):
+        return
+    for raw_name, detail in source_details.items():
+        name = str(raw_name)
+        if name in custom_names:
+            safe_details[name] = redact_sensitive_data(detail, max_str_len=max_str_len)
+
+
+def _strict_json_numbers(value: Any, *, max_nodes: int = COLLECTED_REWARD_JSON_MAX_NODES) -> Any:
+    """Replace non-finite floats before strict generated-artifact serialization."""
+    try:
+        normalized, _invalid = _normalized_reward_numbers(value, _max_nodes=max_nodes)
+    except (_RewardStructureLimitError, RecursionError, MemoryError):
+        if isinstance(value, dict):
+            return _structural_limit_reward(value)
+        return None
+    return normalized
 
 
 def _save_trials(
@@ -2768,30 +5129,57 @@ def _save_trials(
     agent_model_source: str | None = None,
 ) -> None:
     """Save per-trial reward.json and trajectory.json into the results directory."""
+    agent = _bounded_reward_metadata_text(agent) or "unknown"
+    agent_model = _bounded_reward_metadata_text(agent_model)
+    agent_model_source = _bounded_reward_metadata_text(agent_model_source)
     trials_dir.mkdir(parents=True, exist_ok=True)
-    for reward in rewards:
-        trial_name, trial_root_name = _persisted_trial_name(reward)
+    persisted_names, unscored_names = _persisted_trial_layout(rewards, job_dir)
+    for reward, (trial_name, trial_root_name) in zip(rewards, persisted_names, strict=True):
         trial_out = trials_dir / trial_name
         trial_out.mkdir(parents=True, exist_ok=True)
         trial_src = job_dir / trial_root_name if job_dir else None
-        src_traj = _reward_trajectory_path(trial_src, reward.get("_step_name")) if trial_src else None
-        merged_traj = (
-            _merged_step_trajectory(trial_src)
-            if trial_src and not reward.get("_step_name") and not (trial_src / "agent" / "trajectory.json").exists()
-            else None
-        )
-        if merged_traj and "_trajectory_summary" not in reward:
-            reward["_trajectory_summary"] = _summarize_trajectory(merged_traj)
-        elif src_traj and src_traj.exists() and "_trajectory_summary" not in reward:
-            reward["_trajectory_summary"] = _summarize_trajectory_file(src_traj)
+        materialized_traj: dict[str, Any] | None = None
+        trajectory_reason: str | None = None
+        if trial_src:
+            materialized_traj, trajectory_reason = _materialized_trial_trajectory(
+                trial_src,
+                reward.get("_step_name"),
+            )
+        safe_materialized_traj = _redacted_trajectory_data(materialized_traj) if materialized_traj else None
+        if materialized_traj is not None and safe_materialized_traj is None:
+            trajectory_reason = "trajectory_redaction_or_validation_failed"
+        if safe_materialized_traj is None:
+            reward.setdefault(
+                "_trajectory_summary",
+                {"readable": False, "reason": trajectory_reason or "trajectory_unavailable"},
+            )
+        elif "_trajectory_summary" not in reward:
+            reward["_trajectory_summary"] = _summarize_trajectory(materialized_traj)
 
         clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
-        _add_trusted_invocation_evidence(clean_reward, reward, trial_src, skill_name)
+        if safe_materialized_traj is None and trajectory_reason not in {
+            None,
+            "missing_single_step_trajectory",
+        }:
+            warning = "Trajectory artifact omitted because it exceeded safety or validation limits."
+            warnings = clean_reward.get("warnings")
+            if not isinstance(warnings, list) or not all(isinstance(item, str) for item in warnings):
+                warnings = []
+                clean_reward["warnings"] = warnings
+            if warning not in warnings:
+                warnings.append(warning)
+        _add_trusted_invocation_evidence(
+            clean_reward,
+            reward,
+            trial_src,
+            skill_name,
+            trajectory=materialized_traj if safe_materialized_traj is not None else None,
+        )
         # Persist the physical attempt identity so bounded report readers can keep
         # fallback multi-step rows for diagnostics without weighting a logical
         # Harbor trial once per step.  This also populates the canonical report's
         # existing trial_id field instead of inventing a second report schema.
-        clean_reward["trial_id"] = trial_root_name
+        clean_reward["trial_id"] = _published_trial_label(trial_root_name)
         if not clean_reward.get("entry_id"):
             clean_reward["entry_id"] = _entry_id(reward)
         clean_reward["agent"] = agent
@@ -2801,26 +5189,49 @@ def _save_trials(
             clean_reward["model_source"] = agent_model_source
         if "evaluation_errors" in clean_reward:
             clean_reward["evaluation_errors"] = _safe_evaluation_errors(clean_reward["evaluation_errors"])
+        clean_reward = _sanitize_reward_metric_surfaces(clean_reward)
         diagnostic_reward = (
             str(clean_reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
             or overall_score(clean_reward) is None
         )
+        max_str_len = REWARD_DIAGNOSTIC_STRING_MAX_CHARS if diagnostic_reward else None
         safe_reward = redact_sensitive_data(
             clean_reward,
-            max_str_len=REWARD_DIAGNOSTIC_STRING_MAX_CHARS if diagnostic_reward else None,
+            max_str_len=max_str_len,
         )
-        _restore_custom_metric_scores(clean_reward, safe_reward)
-        (trial_out / "reward.json").write_text(json.dumps(safe_reward, indent=2), encoding="utf-8")
+        _restore_custom_metric_scores(clean_reward, safe_reward, max_str_len=max_str_len)
+        _restore_custom_metric_details(clean_reward, safe_reward, max_str_len=max_str_len)
+        safe_reward = _strict_json_numbers(safe_reward, max_nodes=REWARD_JSON_MAX_NODES)
+        if isinstance(safe_reward, dict):
+            safe_reward = _fail_closed_invalid_reward_numbers(
+                safe_reward,
+                max_nodes=REWARD_JSON_MAX_NODES,
+                max_bytes=GENERATED_JSON_MAX_BYTES,
+            )
+        (trial_out / "reward.json").write_text(
+            json.dumps(
+                safe_reward,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ),
+            encoding="utf-8",
+        )
 
         if trial_src:
-            _copy_trial_artifacts(trial_src, trial_out)
-        if merged_traj:
+            _copy_trial_artifacts(trial_src, trial_out, include_root_trajectory=False)
+        if safe_materialized_traj:
             (trial_out / "trajectory.json").write_text(
-                json.dumps(redact_sensitive_data(merged_traj), indent=2),
+                json.dumps(
+                    safe_materialized_traj,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ),
                 encoding="utf-8",
             )
-        elif src_traj and src_traj.exists():
-            _write_redacted_text_copy(src_traj, trial_out / "trajectory.json", source_root=trial_src)
+        elif trial_src:
+            _record_skipped_trajectory(trial_out, trajectory_reason or "trajectory_unavailable")
 
     _save_unscored_trials(
         rewards,
@@ -2830,6 +5241,7 @@ def _save_trials(
         variant=variant,
         agent_model=agent_model,
         agent_model_source=agent_model_source,
+        persisted_names=unscored_names,
     )
 
 
@@ -2894,27 +5306,46 @@ def _condition_execution_summary(
     is not sufficient and raw reward-row count would over-count those tasks.
     Early-stopped cases require attempts only through their first passing trial.
     """
-    expected_ids = list(dict.fromkeys(str(case_id) for case_id in (expected_case_ids or []) if str(case_id)))
+    expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_count = len(expected_ids) if expected_ids else int(expected_cases or 0)
     if skipped:
         return {
             "execution_status": "skipped",
             "execution_errors": [],
+            "execution_error_details_total": 0,
+            "execution_error_details_shown": 0,
+            "execution_error_details_truncated": False,
             "expected_attempts": 0,
             "scored_attempts": 0,
+            **_failure_list_metadata("runtime_failure_details", runtime_failures),
+            **_failure_list_metadata("reward_failure_details", reward_failures),
         }
 
     errors: list[str] = [job_failure] if job_failure else []
+    public_runtime_failures = _public_failure_list(runtime_failures)
+    public_reward_failures = _public_failure_list(reward_failures)
     errors.extend(
-        f"Agent runtime failed in {failure.get('trial', 'unknown trial')}: {failure.get('reason', 'unknown error')}"
-        for failure in (runtime_failures or [])
+        "Agent runtime failed in "
+        f"{_published_trial_label(failure.get('trial', 'unknown trial'))}: "
+        f"{_safe_diagnostic_text(failure.get('reason', 'unknown error'), max_len=2048)}"
+        for failure in public_runtime_failures
     )
     errors.extend(
         "Unscoreable reward in "
         f"{_safe_diagnostic_text(failure.get('trial', 'unknown trial'), max_len=256)}: "
         f"{_safe_diagnostic_text(failure.get('reason', 'unknown error'), max_len=2048)}"
-        for failure in (reward_failures or [])
+        for failure in public_reward_failures
     )
+    if len(runtime_failures or []) > len(public_runtime_failures):
+        errors.append(
+            "Agent runtime failure details were truncated "
+            f"(showing {len(public_runtime_failures)} of {len(runtime_failures or [])})"
+        )
+    if len(reward_failures or []) > len(public_reward_failures):
+        errors.append(
+            "Unscoreable reward details were truncated "
+            f"(showing {len(public_reward_failures)} of {len(reward_failures or [])})"
+        )
     expected_set = set(expected_ids)
     logical_passed: dict[str, bool] = {}
     for reward in _logical_attempt_rewards(rewards):
@@ -2926,17 +5357,18 @@ def _condition_execution_summary(
     roots: dict[str, dict[str, Any]] = {}
     for reward in rewards:
         root = str(reward.get("_trial_root_name") or "").strip()
+        published_root = _published_trial_label(root)
         case_id = _entry_id(reward, expected_set or None)
         step_name = str(reward.get("_step_name") or "").strip()
         if not root:
             errors.append("A scored reward is missing its Harbor trial root name")
             continue
         if not case_id or case_id == "unknown":
-            errors.append(f"Scored trial {root!r} has no case identifier")
+            errors.append(f"Scored trial {published_root!r} has no case identifier")
             continue
         score = overall_score(reward)
         if score is None:
-            errors.append(f"Scored trial {root!r} has incomplete or non-finite reward metrics")
+            errors.append(f"Scored trial {published_root!r} has incomplete or non-finite reward metrics")
             continue
         existing = roots.get(root)
         if existing is None:
@@ -2949,9 +5381,9 @@ def _condition_execution_summary(
             }
             continue
         if existing["case_id"] != case_id:
-            errors.append(f"Harbor trial {root!r} maps to multiple cases")
+            errors.append(f"Harbor trial {published_root!r} maps to multiple cases")
         elif not step_name or step_name in existing["steps"]:
-            errors.append(f"Harbor trial {root!r} has duplicate reward rows")
+            errors.append(f"Harbor trial {published_root!r} has duplicate reward rows")
         else:
             existing["steps"].add(step_name)
 
@@ -3003,7 +5435,7 @@ def _condition_execution_summary(
     if expected_ids:
         unexpected = sorted(case_id for case_id in by_case if case_id not in expected_set)
         if unexpected:
-            errors.append("Unexpected scored cases: " + ", ".join(unexpected))
+            errors.append(_sampled_case_id_diagnostic("Unexpected scored cases", unexpected))
     else:
         if expected_count and len(by_case) != expected_count:
             errors.append(f"Scored case coverage is {len(by_case)}/{expected_count}")
@@ -3011,25 +5443,38 @@ def _condition_execution_summary(
             expected_attempts += (expected_count - len(by_case)) * n_attempts
 
     if missing:
-        errors.append("Missing scored attempts for cases: " + ", ".join(sorted(missing)))
+        errors.append(_sampled_case_id_diagnostic("Missing scored attempts for cases", sorted(missing)))
     if excess:
-        errors.append("Excess scored attempts for cases: " + ", ".join(sorted(excess)))
+        errors.append(_sampled_case_id_diagnostic("Excess scored attempts for cases", sorted(excess)))
 
     scored_attempts = len(roots)
     if scored_attempts != expected_attempts:
         errors.append(f"Scored attempt coverage is {scored_attempts}/{expected_attempts}")
-    errors = list(dict.fromkeys(error for error in errors if error))
+    all_errors = list(
+        dict.fromkeys(
+            safe_error for error in errors if error if (safe_error := _safe_diagnostic_text(error, max_len=4096))
+        )
+    )
+    errors = all_errors[:PUBLISHED_EXECUTION_ERRORS_MAX]
     return {
-        "execution_status": "failed" if errors else "succeeded",
+        "execution_status": "failed" if all_errors else "succeeded",
         "execution_errors": errors,
+        "execution_error_details_total": len(all_errors),
+        "execution_error_details_shown": len(errors),
+        "execution_error_details_truncated": len(errors) < len(all_errors),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
+        **_failure_list_metadata("runtime_failure_details", runtime_failures),
+        **_failure_list_metadata("reward_failure_details", reward_failures),
     }
 
 
 def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     active = [summary for summary in summaries if summary.get("execution_status") != "skipped"]
-    errors = [str(error) for summary in active for error in summary.get("execution_errors", []) if error]
+    all_errors = list(
+        dict.fromkeys(str(error) for summary in active for error in summary.get("execution_errors", []) if error)
+    )
+    errors = all_errors[:PUBLISHED_EXECUTION_ERRORS_MAX]
     if not active:
         status = "skipped"
     elif errors or any(summary.get("execution_status") != "succeeded" for summary in active):
@@ -3038,7 +5483,10 @@ def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         status = "succeeded"
     return {
         "execution_status": status,
-        "execution_errors": list(dict.fromkeys(errors)),
+        "execution_errors": errors,
+        "execution_error_details_total": len(all_errors),
+        "execution_error_details_shown": len(errors),
+        "execution_error_details_truncated": len(errors) < len(all_errors),
         "expected_attempts": sum(int(summary.get("expected_attempts", 0) or 0) for summary in active),
         "scored_attempts": sum(int(summary.get("scored_attempts", 0) or 0) for summary in active),
     }
@@ -3070,6 +5518,7 @@ def collect_harbor_results(
         raise ValueError("Conflicting expected trial counts were provided")
     if expected_trials is None:
         expected_trials = expected_total_trials
+    expected_case_ids = _validated_expected_case_ids(expected_case_ids)
 
     all_results: dict[str, Any] = {
         "agents": {},
@@ -3087,8 +5536,8 @@ def collect_harbor_results(
 
     for agent in agents:
         model_info = agent_models.get(agent, {}) if agent_models else {}
-        agent_model = model_info.get("model")
-        agent_model_source = model_info.get("source")
+        agent_model = _bounded_reward_metadata_text(model_info.get("model"))
+        agent_model_source = _bounded_reward_metadata_text(model_info.get("source"))
         agent_dir = output_dir / agent
 
         with_job_name = f"{skill_name}-{agent}-with"
@@ -3110,6 +5559,7 @@ def collect_harbor_results(
                 with_job_dir / "result.json",
                 expected_trials=expected_trials,
             )
+            with_job_failure = _published_job_failure(with_job_failure)
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
             with_trial_failures = _extract_trial_failures(with_job_dir)
             preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
@@ -3158,29 +5608,34 @@ def collect_harbor_results(
                 agent_model=agent_model,
                 agent_model_source=agent_model_source,
             )
-            (agent_dir / "with-skill" / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": with_scores,
-                        "custom_scores": with_custom_scores,
-                        "overall_score": with_overall_score,
-                        "metric_set": with_metric_set,
-                        "metrics": list(with_metrics),
-                        "dimensions": dimension_scores(with_scores),
-                        "num_trials": len(with_rewards),
-                        "pass_at_k": with_pass,
-                        **with_execution,
-                        "job_failure": with_job_failure,
-                        "trial_failures": with_trial_failures,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+            _write_generated_root_json(
+                agent_dir / "with-skill" / "summary.json",
+                output_dir,
+                {
+                    "agent": agent,
+                    "model": agent_model,
+                    "model_source": agent_model_source,
+                    "scores": with_scores,
+                    "custom_scores": with_custom_scores,
+                    "overall_score": with_overall_score,
+                    "metric_set": with_metric_set,
+                    "metrics": list(with_metrics),
+                    "dimensions": dimension_scores(with_scores),
+                    "num_trials": len(with_logical_rewards),
+                    "num_reward_rows": len(with_collected_rewards),
+                    "pass_at_k": _public_pass_summary(with_pass),
+                    **with_execution,
+                    "job_failure": with_job_failure,
+                    "trial_failures": _public_failure_list(with_trial_failures),
+                    **_failure_list_metadata("trial_failure_details", with_trial_failures),
+                },
             )
-            logger.debug("Agent %s with-skill: %d trials, scores=%s", agent, len(with_rewards), with_scores)
+            logger.debug(
+                "Agent %s with-skill: %d trials, scores=%s",
+                agent,
+                len(with_logical_rewards),
+                with_scores,
+            )
         else:
             with_job_failure = f"No Harbor job found for {with_job_name}"
             logger.warning("No Harbor job found for %s (with-skill)", with_job_name)
@@ -3189,28 +5644,28 @@ def collect_harbor_results(
                 (error.removeprefix(prefix) for error in (launch_errors or []) if error.startswith(prefix)),
                 f"Harbor job directory was not created: {with_job_name}",
             )
+            with_job_failure = _published_job_failure(with_job_failure)
             summary_dir = agent_dir / "with-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
-            (summary_dir / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metric_set": DEFAULT_METRIC_SET,
-                        "metrics": list(DISPLAY_METRICS),
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "pass_at_k": {},
-                        "job_failure": with_job_failure,
-                        "trial_failures": [],
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+            _write_generated_root_json(
+                summary_dir / "summary.json",
+                output_dir,
+                {
+                    "agent": agent,
+                    "model": agent_model,
+                    "model_source": agent_model_source,
+                    "scores": {},
+                    "custom_scores": {},
+                    "overall_score": None,
+                    "metric_set": DEFAULT_METRIC_SET,
+                    "metrics": list(DISPLAY_METRICS),
+                    "dimensions": {},
+                    "num_trials": 0,
+                    "num_reward_rows": 0,
+                    "pass_at_k": {},
+                    "job_failure": with_job_failure,
+                    "trial_failures": [],
+                },
             )
 
         if not with_execution:
@@ -3227,26 +5682,25 @@ def collect_harbor_results(
         if with_job_dir is None:
             summary_dir = agent_dir / "with-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
-            (summary_dir / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metrics": [],
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "pass_at_k": {},
-                        **with_execution,
-                        "job_failure": with_job_failure,
-                        "trial_failures": [],
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+            _write_generated_root_json(
+                summary_dir / "summary.json",
+                output_dir,
+                {
+                    "agent": agent,
+                    "model": agent_model,
+                    "model_source": agent_model_source,
+                    "scores": {},
+                    "custom_scores": {},
+                    "overall_score": None,
+                    "metrics": [],
+                    "dimensions": {},
+                    "num_trials": 0,
+                    "num_reward_rows": 0,
+                    "pass_at_k": {},
+                    **with_execution,
+                    "job_failure": with_job_failure,
+                    "trial_failures": [],
+                },
             )
 
         without_collected_rewards: list[dict[str, Any]] = []
@@ -3269,6 +5723,7 @@ def collect_harbor_results(
                     without_job_dir / "result.json",
                     expected_trials=expected_trials,
                 )
+                without_job_failure = _published_job_failure(without_job_failure)
                 without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
                 without_trial_failures = _extract_trial_failures(without_job_dir)
                 preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
@@ -3318,32 +5773,32 @@ def collect_harbor_results(
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
                 )
-                (agent_dir / "without-skill" / "summary.json").write_text(
-                    json.dumps(
-                        {
-                            "agent": agent,
-                            "model": agent_model,
-                            "model_source": agent_model_source,
-                            "scores": without_scores,
-                            "custom_scores": without_custom_scores,
-                            "overall_score": without_overall_score,
-                            "metric_set": without_metric_set,
-                            "metrics": list(without_metrics),
-                            "dimensions": dimension_scores(without_scores),
-                            "num_trials": len(without_rewards),
-                            "pass_at_k": without_pass,
-                            **without_execution,
-                            "job_failure": without_job_failure,
-                            "trial_failures": without_trial_failures,
-                        },
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+                _write_generated_root_json(
+                    agent_dir / "without-skill" / "summary.json",
+                    output_dir,
+                    {
+                        "agent": agent,
+                        "model": agent_model,
+                        "model_source": agent_model_source,
+                        "scores": without_scores,
+                        "custom_scores": without_custom_scores,
+                        "overall_score": without_overall_score,
+                        "metric_set": without_metric_set,
+                        "metrics": list(without_metrics),
+                        "dimensions": dimension_scores(without_scores),
+                        "num_trials": len(without_logical_rewards),
+                        "num_reward_rows": len(without_collected_rewards),
+                        "pass_at_k": _public_pass_summary(without_pass),
+                        **without_execution,
+                        "job_failure": without_job_failure,
+                        "trial_failures": _public_failure_list(without_trial_failures),
+                        **_failure_list_metadata("trial_failure_details", without_trial_failures),
+                    },
                 )
                 logger.debug(
                     "Agent %s without-skill: %d trials, scores=%s",
                     agent,
-                    len(without_rewards),
+                    len(without_logical_rewards),
                     without_scores,
                 )
             else:
@@ -3354,28 +5809,28 @@ def collect_harbor_results(
                     (error.removeprefix(prefix) for error in (launch_errors or []) if error.startswith(prefix)),
                     f"Harbor job directory was not created: {without_job_name}",
                 )
+                without_job_failure = _published_job_failure(without_job_failure)
                 summary_dir = agent_dir / "without-skill"
                 summary_dir.mkdir(parents=True, exist_ok=True)
-                (summary_dir / "summary.json").write_text(
-                    json.dumps(
-                        {
-                            "agent": agent,
-                            "model": agent_model,
-                            "model_source": agent_model_source,
-                            "scores": {},
-                            "custom_scores": {},
-                            "overall_score": None,
-                            "metric_set": DEFAULT_METRIC_SET,
-                            "metrics": list(DISPLAY_METRICS),
-                            "dimensions": {},
-                            "num_trials": 0,
-                            "pass_at_k": {},
-                            "job_failure": without_job_failure,
-                            "trial_failures": [],
-                        },
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+                _write_generated_root_json(
+                    summary_dir / "summary.json",
+                    output_dir,
+                    {
+                        "agent": agent,
+                        "model": agent_model,
+                        "model_source": agent_model_source,
+                        "scores": {},
+                        "custom_scores": {},
+                        "overall_score": None,
+                        "metric_set": DEFAULT_METRIC_SET,
+                        "metrics": list(DISPLAY_METRICS),
+                        "dimensions": {},
+                        "num_trials": 0,
+                        "num_reward_rows": 0,
+                        "pass_at_k": {},
+                        "job_failure": without_job_failure,
+                        "trial_failures": [],
+                    },
                 )
 
         if not without_execution:
@@ -3393,26 +5848,25 @@ def collect_harbor_results(
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
-            (summary_dir / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metrics": [],
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "pass_at_k": {},
-                        **without_execution,
-                        "job_failure": without_job_failure,
-                        "trial_failures": [],
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+            _write_generated_root_json(
+                summary_dir / "summary.json",
+                output_dir,
+                {
+                    "agent": agent,
+                    "model": agent_model,
+                    "model_source": agent_model_source,
+                    "scores": {},
+                    "custom_scores": {},
+                    "overall_score": None,
+                    "metrics": [],
+                    "dimensions": {},
+                    "num_trials": 0,
+                    "num_reward_rows": 0,
+                    "pass_at_k": {},
+                    **without_execution,
+                    "job_failure": without_job_failure,
+                    "trial_failures": [],
+                },
             )
 
         lift: dict[str, Any] = {}
@@ -3422,7 +5876,7 @@ def collect_harbor_results(
         )
         if paired_execution_succeeded and with_scores and without_scores:
             lift = _compute_lift(with_scores, without_scores)
-            (agent_dir / "lift.json").write_text(json.dumps(lift, indent=2), encoding="utf-8")
+            _write_generated_root_json(agent_dir / "lift.json", output_dir, lift)
 
         custom_lift: dict[str, Any] = {}
         if (
@@ -3439,7 +5893,7 @@ def collect_harbor_results(
                 include_overall=not with_scores and not without_scores,
             )
             if custom_lift:
-                (agent_dir / "custom_lift.json").write_text(json.dumps(custom_lift, indent=2), encoding="utf-8")
+                _write_generated_root_json(agent_dir / "custom_lift.json", output_dir, custom_lift)
 
         pass_lift: dict[str, Any] = {}
         if paired_execution_succeeded and with_pass and without_pass:
@@ -3451,7 +5905,7 @@ def collect_harbor_results(
                 "passed_cases_delta": int(with_pass.get("passed_cases", 0)) - int(without_pass.get("passed_cases", 0)),
                 "paired_comparison": _paired_pass_comparison(with_pass, without_pass),
             }
-            (agent_dir / "pass_at_k_lift.json").write_text(json.dumps(pass_lift, indent=2), encoding="utf-8")
+            _write_generated_root_json(agent_dir / "pass_at_k_lift.json", output_dir, pass_lift)
 
         security_attribution: dict[str, Any] = {}
         attribution_execution_succeeded = with_execution.get("execution_status") == "succeeded" and (
@@ -3463,8 +5917,10 @@ def collect_harbor_results(
                 without_rewards,
                 baseline_run=not skip_baseline,
             )
-            (agent_dir / "security_attribution.json").write_text(
-                json.dumps(security_attribution, indent=2), encoding="utf-8"
+            _write_generated_root_json(
+                agent_dir / "security_attribution.json",
+                output_dir,
+                security_attribution,
             )
             if with_job_dir:
                 _save_trials(
@@ -3495,18 +5951,24 @@ def collect_harbor_results(
             "lift": lift,
             "custom_lift": custom_lift,
             "pass_at_k": {
-                "with_skill": with_pass,
-                "without_skill": without_pass,
+                "with_skill": _public_pass_summary(with_pass),
+                "without_skill": _public_pass_summary(without_pass),
                 "lift": pass_lift,
             },
             "security_attribution": security_attribution,
             "agent_runtime_failures": {
-                "with_skill": with_runtime_failures,
-                "without_skill": without_runtime_failures,
+                "with_skill": _public_failure_list(with_runtime_failures),
+                "without_skill": _public_failure_list(without_runtime_failures),
             },
             "trial_failures": {
-                "with_skill": with_trial_failures,
-                "without_skill": without_trial_failures,
+                "with_skill": _public_failure_list(with_trial_failures),
+                "without_skill": _public_failure_list(without_trial_failures),
+            },
+            "failure_detail_metadata": {
+                "with_skill_runtime": _failure_list_metadata("details", with_runtime_failures),
+                "without_skill_runtime": _failure_list_metadata("details", without_runtime_failures),
+                "with_skill_trials": _failure_list_metadata("details", with_trial_failures),
+                "without_skill_trials": _failure_list_metadata("details", without_trial_failures),
             },
             "job_failures": {
                 "with_skill": with_job_failure,
@@ -3517,8 +5979,8 @@ def collect_harbor_results(
                 "without_skill": without_execution,
             },
             **agent_execution,
-            "num_trials_with": len(with_rewards),
-            "num_trials_without": len(without_rewards) if not skip_baseline else 0,
+            "num_trials_with": len(with_logical_rewards),
+            "num_trials_without": len(without_logical_rewards) if not skip_baseline else 0,
             "output_dir": str(agent_dir.resolve()),
         }
 

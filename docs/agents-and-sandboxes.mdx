@@ -126,36 +126,151 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 ## Where trials run
 
-`--env-mode` accepts 16 values. Docker is the default; `local` is Skill
-Evaluator's own host-execution mode; everything else is a Harbor-native
-backend, enabled by installing the matching Harbor extra and supplying any
-credentials that backend requires.
+SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends,
+including Docker, plus SkillEvaluator's own `local` host-execution mode.
+Docker is the default. The `tier3` extra installs base `harbor==0.22.0`; install
+the environment extra shown below when a managed backend needs one.
 
-| Mode | Type | Notes |
+| Mode | Type | Harbor extra or system prerequisite |
 | --- | --- | --- |
-| `docker` | Container | Default. Runs on your local Docker daemon — see [Docker mode](#docker-mode). |
-| `daytona` | Harbor-native | Enabled by the matching Harbor extra. |
-| `e2b` | Harbor-native | Enabled by the matching Harbor extra. |
-| `modal` | Harbor-native | Enabled by the matching Harbor extra. |
-| `runloop` | Harbor-native | Enabled by the matching Harbor extra. |
-| `langsmith` | Harbor-native | Enabled by the matching Harbor extra. |
-| `gke` | Harbor-native | Enabled by the matching Harbor extra. |
-| `novita` | Harbor-native | Enabled by the matching Harbor extra. |
-| `apple-container` | Harbor-native | Enabled by the matching Harbor extra. |
-| `singularity` | Harbor-native | Enabled by the matching Harbor extra. |
-| `islo` | Harbor-native | Enabled by the matching Harbor extra. |
-| `tensorlake` | Harbor-native | Enabled by the matching Harbor extra. |
-| `cwsandbox` | Harbor-native | Enabled by the matching Harbor extra. |
-| `wandb` | Harbor-native | Enabled by the matching Harbor extra. |
-| `use-computer` | Harbor-native | Enabled by the matching Harbor extra. |
-| `local` | Host | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
+| `docker` | Harbor-native | No additional Python extra. Requires Docker Engine and Docker Compose v2 — see [Docker mode](#docker-mode). |
+| `daytona` | Harbor-native | `harbor[daytona]==0.22.0` |
+| `e2b` | Harbor-native | `harbor[e2b]==0.22.0` |
+| `modal` | Harbor-native | `harbor[modal]==0.22.0` |
+| `runloop` | Harbor-native | `harbor[runloop]==0.22.0` |
+| `langsmith` | Harbor-native | `harbor[langsmith]==0.22.0` |
+| `ec2` | Harbor-native | `harbor[ec2]==0.22.0` |
+| `gke` | Harbor-native | `harbor[gke]==0.22.0` |
+| `ack` | Harbor-native | `harbor[gke]==0.22.0` |
+| `openshift` | Harbor-native | No Harbor Python extra; install and authenticate the OpenShift `oc` CLI. |
+| `novita` | Harbor-native | `harbor[novita]==0.22.0` |
+| `apple-container` | Harbor-native | No Harbor Python extra; install the Apple `container` CLI. |
+| `singularity` | Harbor-native | No Harbor Python extra; install the `singularity` CLI Harbor invokes. |
+| `islo` | Harbor-native | `harbor[islo]==0.22.0` |
+| `tensorlake` | Harbor-native | `harbor[tensorlake]==0.22.0` |
+| `cwsandbox` | Harbor-native | `harbor[cwsandbox]==0.22.0` |
+| `wandb` | Harbor-native | `harbor[wandb]==0.22.0` |
+| `use-computer` | Harbor-native | `harbor[use-computer]==0.22.0` |
+| `cua-cloud` | Harbor-native | `harbor[cua]==0.22.0` |
+| `blaxel` | Harbor-native | `harbor[blaxel]==0.22.0` |
+| `opensandbox` | Harbor-native | `harbor[opensandbox]==0.22.0` |
+| `beam` | Harbor-native | `harbor[beam]==0.22.0` |
+| `skypilot` | Harbor-native | `harbor[skypilot]==0.22.0` |
+| `hf-sandbox` | Harbor-native | `harbor[hf-sandbox]==0.22.0` |
+| `hyperbrowser` | Harbor-native | `harbor[hyperbrowser]==0.22.0` |
+| `vercel` | Harbor-native | `harbor[vercel]==0.22.0` |
+| `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
 <Tip>
 SkillEvaluator documents setup for `docker` and `local`. For any other
-backend, install the matching Harbor environment extra, set the credentials
-that backend requires, and confirm readiness with
+backend, install the mapped Harbor extra or system CLI shown above, set the
+credentials that backend requires, and confirm readiness with
 `skillevaluator doctor --env-mode <mode>` before a full run.
 </Tip>
+
+### Native backend constructor options
+
+Environment kwargs are operator-only and apply only to Harbor-native
+non-Docker backends. `docker` and `local` reject any environment kwargs. For an
+eligible backend that needs non-secret constructor options in addition to host
+credentials, pass each option with the repeatable
+`--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` flag:
+
+```bash title="GKE constructor options"
+skillevaluator doctor --env-mode gke \
+  --ek cluster_name=my-cluster \
+  --ek region=us-central1 \
+  --ek namespace=skill-evals \
+  --ek registry_location=us-central1 \
+  --ek registry_name=skill-evals
+```
+
+Values accept Harbor's JSON-compatible types. Skill-owned `evals/config.yml`
+cannot set constructor kwargs because backend endpoints and sandbox controls
+belong to the operator trust boundary. Never pass secrets through the CLI;
+backend credentials belong in the operator's host environment and are kept
+out of Harbor argv and stored run configuration.
+
+SkillEvaluator also rejects fields reserved for Harbor runtime policy. Do not
+use environment kwargs for resource overrides (`override_cpus`,
+`override_gpus`, `override_memory_mb`, `override_storage_mb`, `override_tpu`),
+mount injection (`mounts`, `mounts_json`), network policy (`network_policy`,
+`phase_network_policies`, `extra_allowed_hosts`), extra Compose definitions
+(`extra_docker_compose`), lifecycle controls (`delete`, `force_build`,
+`keep_containers`), or Kubernetes pod/security overrides. Use SkillEvaluator's
+first-class flags and config where available; advanced pod/security overrides
+are intentionally not exposed through this CLI surface. Equivalent
+backend-specific aliases are also reserved when they directly bypass those
+guarantees, including provider volume/resource/network overrides, Kubernetes or
+cloud workload identities, disabled SSH host verification, and Singularity host
+mount policy.
+
+The backends with required constructor keys are:
+
+| Mode | Required keys |
+| --- | --- |
+| `gke` | `cluster_name`, `region`, `namespace`, `registry_location`, `registry_name` |
+| `ack` | `namespace` |
+| `ec2` | `region`, plus `ami_id` for the default `launch_mode=ephemeral`; use `launch_mode=attach` with `instance_id` to attach to an existing instance. |
+
+EC2 accepts either Harbor's explicit `ssh_key_path` option or the host's
+authenticated SSH agent. In the latter case, keep `SSH_AUTH_SOCK` set when
+running SkillEvaluator; it is forwarded only to the EC2 backend process. A
+provided `ssh_key_path` must resolve to an existing regular file. Ephemeral EC2
+with `use_public_ip=false` also requires a non-empty `subnet_id`.
+
+OpenSandbox requires either a non-empty `domain` constructor option or a
+child-visible `OPENSANDBOX_DOMAIN`. An explicitly empty `domain` is invalid and
+does not fall back to the host variable; `domain=null` uses the child-visible
+variable. An API key remains optional because OpenSandbox also supports local
+or otherwise unauthenticated deployments.
+
+Managed-backend readiness is not a connectivity test. EC2 preflight checks the
+Python extra, the local `ssh` executable, and the constructor invariants above;
+it does not contact AWS or prove credentials, AMI/instance access, networking,
+or quota. GKE preflight checks the required constructor options, local `gcloud`
+availability, and that a kubeconfig path exists; it does not contact the GKE
+cluster or prove authentication, permissions, registry access, or capacity.
+The first real trial remains the end-to-end infrastructure check.
+
+For ACK, optional `context` and `kubeconfig` kwargs select the Kubernetes
+configuration. Without an available kubeconfig, readiness falls back to the
+in-cluster service account and performs a bounded, namespaced pod-list probe
+before launching trials. `KUBERNETES_SERVICE_HOST` and
+`KUBERNETES_SERVICE_PORT` are forwarded only for this ACK client path.
+
+Harbor 0.22 Modal preflight requires `~/.modal.toml` or `MODAL_TOKEN_ID` plus
+`MODAL_TOKEN_SECRET`. SkillEvaluator validates and forwards an explicitly set
+`MODAL_CONFIG_PATH`, but Harbor's child-process preflight does not recognize a
+custom config path by itself; configure one of Harbor's supported credential
+forms before launching trials.
+
+Other eligible, backend-specific constructor options are forwarded after
+validation. Harbor acts only on options implemented by the selected backend;
+unknown kwargs are not a supported compatibility contract, so use the current
+Harbor constructor documentation for that environment. ACK scheduling options
+such as `node_selector` and
+`tolerations` are accepted, and `image_pull_secret` accepts only the name of an
+existing Kubernetes Secret object—not credential contents. Direct credential
+forwarding controls such as HF Sandbox's `forward_hf_token` are rejected. Use
+the same `--environment-kwarg` values and eligible non-Docker mode with
+`doctor` or `health-check` to preflight the configuration you intend to
+evaluate.
+
+A few Harbor options contain provider-managed secret **references**, not secret
+values. These narrow shapes are allowed; every other credential-shaped kwarg,
+embedded credential URI, or raw secret value is rejected:
+
+| Mode | Allowed reference shape |
+| --- | --- |
+| `ack` | `image_pull_secret="name"`, where `name` is a Kubernetes DNS-subdomain Secret name |
+| `modal` | `registry_secret="name"`; `secrets=["name", ...]` |
+| `skypilot` | `secrets=["name", ...]` |
+| `daytona` | `secrets={"TARGET_ENV": "organization-secret-name"}` |
+| `cwsandbox`, `wandb` | `secrets=[{...}]` provider reference mappings using only `env_var`, `field`, `name`, and `store` |
+
+Complex values use JSON syntax in the `KEY=VALUE` argument. Reference names
+must be trimmed and bounded; they cannot contain credential-bearing URIs.
 
 ## Docker mode
 

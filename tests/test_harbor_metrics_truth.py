@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
@@ -12,6 +13,7 @@ from fractions import Fraction
 
 import pytest
 
+from skillevaluator.tier3 import results_location
 from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor.collector import (
     _compute_lift,
@@ -24,24 +26,150 @@ from skillevaluator.tier3.harbor.collector import (
     _pass_rate_delta,
     _pass_summary,
     _probability_text,
+    _public_pass_summary,
     _wilson_score_interval,
 )
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    MAX_CUSTOM_METRIC_NAME_BYTES,
+    MAX_CUSTOM_METRICS,
+    CustomMetricContractError,
+    average_custom_metrics,
     average_metrics,
+    custom_metric_contract_error,
     extract_custom_metrics,
+    metric_set_for_reward,
     metric_value,
     overall_score,
 )
 
 
-@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
-def test_metric_inputs_reject_nonfinite_values(invalid: float) -> None:
+def test_custom_metric_names_filter_credentials_but_keep_explicit_metric_terms() -> None:
+    credentials = [
+        "sk-abcdefghijk",
+        "ghp_" + ("a" * 36),
+        "gho_" + ("a" * 36),
+        "ghu_" + ("a" * 36),
+        "ghs_" + ("a" * 36),
+        "ghr_" + ("a" * 36),
+        "qualityghp_" + ("a" * 36),
+        "qualitygho_" + ("a" * 36) + "suffix",
+        "ghs_123456789_" + ("a" * 32) + "." + ("b" * 32) + "." + ("c" * 32),
+        "github_pat_" + ("a" * 30),
+        "".join(("xoxb-", "1234567890-abcdefghijklmnopqrstuvwx")),  # noqa: FLY002
+        "AIza" + ("A" * 35),
+        "glpat-" + ("a" * 20),
+    ]
+    reward = {
+        "custom_metrics": {
+            **dict.fromkeys(credentials, 0.1),
+            **dict.fromkeys((f"quality_{credential}" for credential in credentials), 0.1),
+            "quality_nvapi-abcdefghijk": 0.1,
+            "quality_crsr_0123456789abcdef": 0.1,
+            "api_key_quality": 0.2,
+            "quality": 0.3,
+            "secret_handling": 0.4,
+            "token_efficiency": 0.5,
+        }
+    }
+
+    assert custom_metric_contract_error(reward) is None
+    assert extract_custom_metrics(reward) == {
+        "quality": 0.3,
+        "secret_handling": 0.4,
+        "token_efficiency": 0.5,
+    }
+
+
+@pytest.mark.parametrize(
+    "exact",
+    [
+        "x" * MAX_CUSTOM_METRIC_NAME_BYTES,
+        "é" * (MAX_CUSTOM_METRIC_NAME_BYTES // len("é".encode())),
+    ],
+    ids=("ascii", "multibyte"),
+)
+def test_custom_metric_contract_enforces_name_byte_boundary_without_aliasing(exact: str) -> None:
+    oversized = exact + "x"
+
+    assert custom_metric_contract_error({"custom_metrics": {exact: 1.0}}) is None
+    assert extract_custom_metrics({"custom_metrics": {exact: 1.0}}) == {exact: 1.0}
+    assert custom_metric_contract_error({"custom_metrics": {oversized: 1.0}}) is not None
+    assert extract_custom_metrics({"custom_metrics": {oversized: 1.0}}) == {}
+
+
+def test_custom_metric_contract_enforces_per_reward_and_union_cardinality() -> None:
+    exact = {f"metric_{index:03d}": 1.0 for index in range(MAX_CUSTOM_METRICS)}
+    oversized = {**exact, "one_too_many": 1.0}
+    exact_plus_unsafe = {**exact, "quality_sk-abcdefghijk": 1.0}
+
+    assert custom_metric_contract_error({"custom_metrics": exact}) is None
+    assert len(extract_custom_metrics({"custom_metrics": exact})) == MAX_CUSTOM_METRICS
+    assert custom_metric_contract_error({"custom_metrics": exact_plus_unsafe}) is None
+    assert len(extract_custom_metrics({"custom_metrics": exact_plus_unsafe})) == MAX_CUSTOM_METRICS
+    assert custom_metric_contract_error({"custom_metrics": oversized}) is not None
+    with pytest.raises(CustomMetricContractError, match="per reward"):
+        average_custom_metrics([{"custom_metrics": oversized}])
+
+    left = {f"left_{index:03d}": 1.0 for index in range(MAX_CUSTOM_METRICS // 2 + 1)}
+    right = {f"right_{index:03d}": 1.0 for index in range(MAX_CUSTOM_METRICS // 2 + 1)}
+    with pytest.raises(CustomMetricContractError, match="per condition"):
+        average_custom_metrics([{"custom_metrics": left}, {"custom_metrics": right}])
+
+
+def test_explicit_custom_metrics_reject_reserved_name_collisions() -> None:
+    reward = {"custom_metrics": {"security": 0.0, "quality": 1.0}, "overall": 1.0}
+
+    assert "collides" in (custom_metric_contract_error(reward) or "")
+    with pytest.raises(CustomMetricContractError, match="collides"):
+        average_custom_metrics([reward])
+
+
+@pytest.mark.parametrize("malformed", [None, 0.5, "quality", [0.5]])
+def test_custom_metrics_container_must_be_an_object(malformed: object) -> None:
+    reward = {"custom_metrics": malformed, "quality": 0.8, "overall": 0.8}
+
+    assert "container" in (custom_metric_contract_error(reward) or "")
+    assert extract_custom_metrics(reward) == {"quality": 0.8}
+    with pytest.raises(CustomMetricContractError, match="container"):
+        average_custom_metrics([reward])
+
+
+def test_custom_metric_extraction_unions_explicit_nested_and_top_level_dict_scores() -> None:
+    reward = {
+        "custom_metrics": {"quality": 0.8},
+        "metrics": {"coverage": {"score": 0.7}},
+        "domain_score": {"score": 0.6},
+        "api_key_quality": {"score": 0.9},
+    }
+
+    assert custom_metric_contract_error(reward) is None
+    assert extract_custom_metrics(reward) == {
+        "quality": 0.8,
+        "coverage": 0.7,
+        "domain_score": 0.6,
+    }
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_metric_inputs_reject_nonfinite_values(invalid: float | int) -> None:
     assert metric_value({"security": invalid}, "security") is None
     assert metric_value({"metrics": {"security": {"score": invalid}}}, "security") is None
     assert extract_custom_metrics({"custom_metrics": {"latency": invalid}}) == {}
+
+
+@pytest.mark.parametrize("invalid", [-0.01, 1.01, 1e308])
+def test_metric_inputs_reject_scores_outside_the_documented_unit_interval(invalid: float) -> None:
+    reward = {"metric_set": DEFAULT_METRIC_SET, **dict.fromkeys(DEFAULT_METRICS, invalid)}
+
+    assert metric_value({"security": invalid}, "security") is None
+    assert metric_value({"metrics": {"security": {"score": invalid}}}, "security") is None
+    assert extract_custom_metrics({"custom_metrics": {"latency": invalid}}) == {}
+    assert overall_score(reward) is None
+    assert overall_score({"metric_set": CUSTOM_ONLY_METRIC_SET, "overall": invalid}) is None
+    assert overall_score({**dict.fromkeys(DEFAULT_METRICS, invalid), "overall": 0.8}) is None
 
 
 def test_average_metrics_omits_unavailable_canonical_metrics() -> None:
@@ -58,6 +186,26 @@ def test_average_metrics_omits_unavailable_canonical_metrics() -> None:
     assert metric_set == DEFAULT_METRIC_SET
     assert metrics == DEFAULT_METRICS
     assert scores == {"security": 1.0}
+
+
+def test_explicit_custom_metric_set_cannot_spoof_canonical_metrics() -> None:
+    custom = {
+        "metric_set": CUSTOM_ONLY_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 0.0),
+        "overall": 0.25,
+    }
+    standard = {
+        "metric_set": DEFAULT_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        "overall": 1.0,
+    }
+
+    assert metric_set_for_reward(custom) == (CUSTOM_ONLY_METRIC_SET, ())
+    assert overall_score(custom) == pytest.approx(0.25)
+    scores, metric_set, metrics = average_metrics([custom, standard])
+    assert metric_set == DEFAULT_METRIC_SET
+    assert metrics == DEFAULT_METRICS
+    assert scores == dict.fromkeys(DEFAULT_METRICS, 1.0)
 
 
 def test_overall_score_requires_a_complete_finite_metric_set() -> None:
@@ -115,6 +263,100 @@ def test_pass_summary_marks_incomplete_reward_unscored() -> None:
     assert case["best_score"] is None
     assert summary["attempts_used"] == 0
     assert math.isfinite(summary["rate"])
+
+
+def test_large_case_sets_publish_bounded_samples_without_losing_exact_pairing() -> None:
+    case_ids = [f"case-{index:05d}-{'x' * 80}" for index in range(20_000)]
+    with_rewards = [
+        {
+            "entry_id": case_id,
+            "_trial_name": f"trial-{index:05d}",
+            "_trial_root_name": f"trial-{index:05d}",
+            "metric_set": CUSTOM_ONLY_METRIC_SET,
+            "overall": 1.0,
+        }
+        for index, case_id in enumerate(case_ids)
+    ]
+    without_rewards = [{**reward, "overall": 0.0} for reward in with_rewards]
+
+    with_summary = _pass_summary(
+        with_rewards,
+        n_attempts=1,
+        pass_threshold=0.5,
+        expected_cases=len(case_ids),
+        expected_case_ids=case_ids,
+    )
+    without_summary = _pass_summary(
+        without_rewards,
+        n_attempts=1,
+        pass_threshold=0.5,
+        expected_cases=len(case_ids),
+        expected_case_ids=case_ids,
+    )
+    paired = _paired_pass_comparison(with_summary, without_summary)
+    public = _public_pass_summary(with_summary)
+
+    assert with_summary["passed_cases"] == len(case_ids)
+    assert paired["pairing_status"] == "complete"
+    assert paired["paired_cases"] == len(case_ids)
+    assert paired["with_skill_only_pass"] == len(case_ids)
+    assert public["case_details_total"] == len(case_ids)
+    assert public["case_details_shown"] == collector_module.PUBLISHED_CASE_DETAILS_MAX
+    assert public["case_details_truncated"] is True
+    assert "_pairing_cases" not in public
+    assert len(json.dumps(public, separators=(",", ":")).encode()) < collector_module.GENERATED_JSON_MAX_BYTES
+    assert results_location._legacy_pass_at_k_is_complete(
+        public,
+        num_trials=len(case_ids),
+        require_scored_attempt=True,
+        expected_scored_attempts=len(case_ids),
+    )
+
+
+def test_large_missing_case_set_has_bounded_exact_execution_diagnostics() -> None:
+    case_ids = [f"case-{index:05d}-{'x' * 80}" for index in range(20_000)]
+
+    summary = _condition_execution_summary(
+        [],
+        expected_case_ids=case_ids,
+        expected_cases=len(case_ids),
+        n_attempts=1,
+        job_failure="job did not produce trials",
+    )
+    encoded = json.dumps(summary, separators=(",", ":")).encode()
+
+    assert summary["execution_status"] == "failed"
+    assert summary["expected_attempts"] == len(case_ids)
+    assert summary["scored_attempts"] == 0
+    assert any("showing 32 of 20000" in error for error in summary["execution_errors"])
+    assert len(encoded) < collector_module.GENERATED_JSON_MAX_BYTES
+
+
+@pytest.mark.parametrize("failure_kind", ["runtime_failures", "reward_failures"])
+def test_large_failure_sets_publish_bounded_samples_with_exact_counts(failure_kind: str) -> None:
+    failures = [{"trial": f"trial-{index:05d}", "reason": "upstream failure " + ("x" * 600)} for index in range(4_096)]
+
+    summary = _condition_execution_summary(
+        [],
+        expected_case_ids=[],
+        expected_cases=0,
+        n_attempts=1,
+        job_failure="",
+        **{failure_kind: failures},
+    )
+    encoded = json.dumps(summary, separators=(",", ":")).encode()
+    prefix = "runtime_failure_details" if failure_kind == "runtime_failures" else "reward_failure_details"
+
+    assert summary["execution_status"] == "failed"
+    assert summary[f"{prefix}_total"] == len(failures)
+    assert summary[f"{prefix}_shown"] == collector_module.PUBLISHED_FAILURE_DETAILS_MAX
+    assert summary[f"{prefix}_truncated"] is True
+    assert summary["execution_error_details_truncated"] is False
+    assert any(
+        f"showing {collector_module.PUBLISHED_FAILURE_DETAILS_MAX} of 4096" in error
+        for error in summary["execution_errors"]
+    )
+    assert len(encoded) < collector_module.GENERATED_JSON_MAX_BYTES
 
 
 @pytest.mark.parametrize(

@@ -29,6 +29,7 @@ from harbor.environments.docker.docker import DockerEnvironment
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
+from skillevaluator.tier3.harbor import stream_redaction as stream_redaction_module
 from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
 from skillevaluator.tier3.harbor.runner import build_harbor_run_command
 from skillevaluator.tier3.harbor.secure_docker_environment import (
@@ -38,6 +39,7 @@ from skillevaluator.tier3.harbor.secure_docker_environment import (
     SkillEvaluatorDockerEnvironment,
     SkillEvaluatorSecureDockerEnvironment,
     _collision_safe_redaction_marker,
+    _compose_client_credential_values,
     _compose_interpolation_names,
     _redact,
     _secure_exec_arguments,
@@ -46,6 +48,7 @@ from skillevaluator.tier3.harbor.secure_docker_environment import (
     _StreamingSecretRedactor,
 )
 from skillevaluator.tier3.harbor.sensitive_stdin import NVIDIA_BUILD_KEY_STDIN_ENV
+from skillevaluator.tier3.harbor.stream_redaction import CommandOutputLimitError
 
 _SENTINEL = "sentinel-never-visible-in-argv-or-files"
 
@@ -104,6 +107,8 @@ class _BufferedComposeProcess:
         self.returncode: int | None = return_code
         self._stdout = stdout
         self._stderr = stderr
+        self.stdout = _ChunkStream([stdout] if stdout else [])
+        self.stdin = _WritableStdin()
         self.communicate_inputs: list[bytes | None] = []
         self.wait_count = 0
 
@@ -174,6 +179,51 @@ class _FeedableStream:
     async def read(self, _limit: int) -> bytes:
         chunk = await self._chunks.get()
         return b"" if chunk is None else chunk
+
+
+class _ExitAwaitingStream:
+    def __init__(self, process: _HangingComposeProcess) -> None:
+        self._process = process
+
+    async def read(self, _limit: int) -> bytes:
+        self._process.started.set()
+        await asyncio.shield(self._process.completion())
+        return b""
+
+
+class _HangingComposeProcess:
+    def __init__(self, *, pid: int) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+        self.started = asyncio.Event()
+        self.stdin = _WritableStdin()
+        self.stdout = _ExitAwaitingStream(self)
+        self._completion: asyncio.Future[int] | None = None
+
+    def completion(self) -> asyncio.Future[int]:
+        if self._completion is None:
+            self._completion = asyncio.get_running_loop().create_future()
+        return self._completion
+
+    def finish(self, return_code: int) -> None:
+        self.returncode = return_code
+        completion = self.completion()
+        if not completion.done():
+            completion.set_result(return_code)
+
+    async def wait(self) -> int:
+        return await asyncio.shield(self.completion())
+
+    async def communicate(self, **_kwargs: bytes | None) -> tuple[bytes, None]:
+        self.started.set()
+        await asyncio.shield(self.completion())
+        return b"", None
+
+    def terminate(self) -> None:
+        self.finish(-signal.SIGTERM)
+
+    def kill(self) -> None:
+        self.finish(-signal.SIGKILL)
 
 
 class _StreamedComposeProcess:
@@ -259,7 +309,55 @@ def test_docker_streaming_accepts_newline_free_output_larger_than_reader_limit(
     assert all(len(chunk.encode()) <= 64 * 1024 for chunk in callbacks)
 
 
-def test_compose_buffered_path_uses_devnull_without_stdin_or_callback(
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_compose_output_limit_fails_closed_and_contains_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_callback: bool,
+) -> None:
+    environment = _initialized_docker_environment(tmp_path)
+    overflow_value = b"synthetic-overflow-value"
+    process = _BufferedAndStreamedComposeProcess([b"12345678", overflow_value])
+    callback_chunks: list[str] = []
+    containment_calls: list[asyncio.subprocess.Process] = []
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> _BufferedAndStreamedComposeProcess:
+        return process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def contain(
+        contained_process: asyncio.subprocess.Process,
+        communication: asyncio.Task[object],
+        **_kwargs: object,
+    ) -> None:
+        containment_calls.append(contained_process)
+        with contextlib.suppress(BaseException):
+            await communication
+
+    monkeypatch.setattr(stream_redaction_module, "MAX_COMMAND_OUTPUT_BYTES", 8, raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(environment, "_contain_main_and_reap_compose", contain)
+
+    callback = on_output if with_callback else None
+    with pytest.raises(CommandOutputLimitError, match=r"Command output exceeded the 8-byte safety limit") as caught:
+        asyncio.run(
+            environment._run_docker_compose_command(
+                ["version"],
+                check=False,
+                on_output=callback,
+            )
+        )
+
+    assert containment_calls == [process]
+    assert process.returncode is not None
+    assert len("".join(callback_chunks).encode()) <= 8
+    assert overflow_value.decode() not in "".join(callback_chunks)
+    assert overflow_value.decode() not in str(caught.value)
+
+
+def test_compose_bounded_path_uses_devnull_without_stdin_or_callback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -275,12 +373,12 @@ def test_compose_buffered_path_uses_devnull_without_stdin_or_callback(
     result = asyncio.run(environment._run_docker_compose_command(["version"], check=False))
 
     assert captured["stdin"] == asyncio.subprocess.DEVNULL
-    assert process.communicate_inputs == [None]
+    assert process.communicate_inputs == []
     assert result == ExecResult(stdout="buffered output", stderr=None, return_code=0)
 
 
 @pytest.mark.parametrize("stdin_data", [b"", b"\x00tar\xffpayload\nwith spaces\x00"])
-def test_compose_stdin_reaches_buffered_subprocess_byte_for_byte(
+def test_compose_stdin_reaches_bounded_subprocess_byte_for_byte(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stdin_data: bytes,
@@ -303,7 +401,8 @@ def test_compose_stdin_reaches_buffered_subprocess_byte_for_byte(
     )
 
     assert captured["stdin"] == asyncio.subprocess.PIPE
-    assert process.communicate_inputs == [stdin_data]
+    assert process.communicate_inputs == []
+    assert bytes(process.stdin.data) == stdin_data
     assert result.return_code == 0
 
 
@@ -406,6 +505,140 @@ def test_compose_stream_callback_receives_merged_complete_redacted_output(
     assert result.stdout == f"stdout {marker}\nstderr {marker}\ntail {marker}\n"
     assert result.stderr is None
     assert result.return_code == 0
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "credential_value"),
+    [
+        ("DOCKER_HOST", "tcp://compose-user:compose-password@docker.invalid:2376"),
+        ("HTTPS_PROXY", "https://proxy-user:proxy-password@proxy.invalid:8443"),
+        ("HTTPS_PROXY", "proxy-user:proxy-password@proxy.invalid:8443"),
+        (
+            "DOCKER_AUTH_CONFIG",
+            '{"auths":{"registry.invalid":{"auth":"compose-registry-credential"}}}',
+        ),
+    ],
+)
+def test_compose_redacts_host_client_credentials_from_callback_and_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+    credential_value: str,
+) -> None:
+    environment = _initialized_docker_environment(tmp_path)
+    process = _StreamedComposeProcess([f"client failure: {credential_value}\n".encode()])
+    callbacks: list[str] = []
+    captured_environment: dict[str, str] = {}
+
+    async def create_subprocess(*_args: object, **kwargs: object) -> _StreamedComposeProcess:
+        captured_environment.update(kwargs["env"])
+        return process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callbacks.append(text)
+
+    monkeypatch.setenv(environment_name, credential_value)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    result = asyncio.run(
+        environment._run_docker_compose_command(
+            ["version"],
+            check=False,
+            on_output=on_output,
+        )
+    )
+
+    callback_output = "".join(callbacks)
+    assert captured_environment[environment_name] == credential_value
+    assert callback_output == result.stdout
+    assert credential_value not in callback_output
+    assert credential_value not in (result.stdout or "")
+    compose_credential_values = _compose_client_credential_values({environment_name: credential_value})
+    assert _marker_for(*compose_credential_values) in callback_output
+
+
+@pytest.mark.parametrize(
+    ("proxy_uri", "diagnostic", "secrets"),
+    [
+        (
+            "https://proxy-user:proxy-password@proxy.invalid:8443",
+            "proxy auth failed for proxy-user with proxy-password\n",
+            ("proxy-user", "proxy-password"),
+        ),
+        (
+            "https://proxy%2Duser:proxy%2Dpassword@proxy.invalid:8443",
+            "proxy auth failed for proxy-user with proxy-password\n",
+            ("proxy-user", "proxy-password"),
+        ),
+        (
+            "proxy-user:proxy-password@proxy.invalid:8443",
+            "proxy auth failed for proxy-user with proxy-password\n",
+            ("proxy-user", "proxy-password"),
+        ),
+    ],
+)
+def test_compose_redacts_host_proxy_credential_fragments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_uri: str,
+    diagnostic: str,
+    secrets: tuple[str, ...],
+) -> None:
+    environment = _initialized_docker_environment(tmp_path)
+    split = max(1, len(diagnostic) // 2)
+    process = _StreamedComposeProcess([diagnostic[:split].encode(), diagnostic[split:].encode()])
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> _StreamedComposeProcess:
+        return process
+
+    monkeypatch.setenv("HTTPS_PROXY", proxy_uri)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    result = asyncio.run(environment._run_docker_compose_command(["version"], check=False, on_output=on_output))
+
+    assert all(secret not in (result.stdout or "") for secret in secrets)
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "credential_value"),
+    [
+        ("DOCKER_HOST", "tcp://compose-user:compose-password@docker.invalid:2376"),
+        ("HTTPS_PROXY", "https://proxy-user:proxy-password@proxy.invalid:8443"),
+        ("HTTPS_PROXY", "proxy-user:proxy-password@proxy.invalid:8443"),
+        (
+            "DOCKER_AUTH_CONFIG",
+            '{"auths":{"registry.invalid":{"auth":"compose-registry-credential"}}}',
+        ),
+    ],
+)
+def test_compose_redacts_host_client_credentials_from_checked_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+    credential_value: str,
+) -> None:
+    environment = _initialized_docker_environment(tmp_path)
+    process = _BufferedComposeProcess(
+        stdout=f"client failure: {credential_value}\n".encode(),
+        return_code=7,
+    )
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> _BufferedComposeProcess:
+        return process
+
+    monkeypatch.setenv(environment_name, credential_value)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(environment._run_docker_compose_command(["version"], check=True))
+
+    detail = str(caught.value)
+    assert credential_value not in detail
+    compose_credential_values = _compose_client_credential_values({environment_name: credential_value})
+    assert _marker_for(*compose_credential_values) in detail
 
 
 def test_compose_stream_callback_redacts_multiline_and_overlapping_secrets_across_reader_boundaries(
@@ -1124,6 +1357,7 @@ def test_compose_stream_callback_exception_is_propagated_after_process_reap(
     error_type: type[BaseException],
 ) -> None:
     secret = "callback-secret-value"
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/" + "noncredential-socket-path-" * 4)
     environment = _initialized_docker_environment(tmp_path)
     process = _StreamedComposeProcess([f"output {secret}\n".encode(), b"unread tail\n"])
     callback_chunks: list[str] = []
@@ -4483,6 +4717,52 @@ def test_windows_main_download_rejects_unsafe_container_archive_members(
     assert outside.read_text(encoding="utf-8") == "host-only-content"
 
 
+def test_windows_tar_member_rejects_many_leading_current_components_before_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    class NoFrontPopParts(list[str]):
+        def pop(self, index: int = -1) -> str:
+            if index == 0:
+                raise AssertionError("front-pop path normalization is quadratic")
+            return super().pop(index)
+
+    class ManyLeadingCurrentComponents(str):
+        __slots__ = ()
+
+        def split(self, *args: object, **kwargs: object) -> NoFrontPopParts:
+            return NoFrontPopParts(super().split(*args, **kwargs))
+
+    member = tarfile.TarInfo(ManyLeadingCurrentComponents("./" * 100_000 + "payload.bin"))
+    monkeypatch.setattr(
+        tarfile,
+        "data_filter",
+        lambda _candidate, _target: pytest.fail("unbounded path reached tarfile filter"),
+    )
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._validated_windows_tar_member(member, tmp_path)
+
+
+def test_windows_tar_member_accepts_bounded_leading_current_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    member = tarfile.TarInfo(
+        "./" * secure_docker_environment._WINDOWS_TAR_MAX_LEADING_CURRENT_COMPONENTS + "payload.bin"
+    )
+    monkeypatch.setattr(tarfile, "data_filter", lambda candidate, _target: candidate)
+
+    validated = secure_docker_environment._validated_windows_tar_member(member, tmp_path)
+
+    assert validated is not None
+    assert validated.canonical_parts == ("payload.bin",)
+
+
 @pytest.mark.parametrize(
     "member_names",
     (
@@ -4495,8 +4775,12 @@ def test_windows_main_download_rejects_unsafe_container_archive_members(
         ("./CON.txt",),
         ("./CONIN$",),
         ("./CONOUT$.log",),
-        ("./COM0",),
-        ("./LPT0.txt",),
+        ("./COM1",),
+        ("./COM9.log",),
+        ("./LPT1",),
+        ("./LPT9.txt",),
+        ("./COM¹",),
+        ("./LPT³.txt",),
         ("./trailing.",),
         ("./trailing-space ",),
     ),
@@ -4532,6 +4816,21 @@ def test_windows_main_download_rejects_aliases_reserved_names_and_file_prefixes(
 
     assert list(target.iterdir()) == [sentinel]
     assert sentinel.read_bytes() == b"unchanged"
+
+
+@pytest.mark.parametrize("member_name", ("./COM0", "./COM0.txt", "./LPT0", "./LPT0.log"))
+def test_windows_tar_member_accepts_nonreserved_zero_suffixed_device_names(
+    tmp_path: Path,
+    member_name: str,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    member = tarfile.TarInfo(member_name)
+
+    validated = secure_docker_environment._validated_windows_tar_member(member, tmp_path)
+
+    assert validated is not None
+    assert validated.kind == "file"
 
 
 @pytest.mark.parametrize("archive_kind", ["truncated", "compressed"])
@@ -4584,12 +4883,16 @@ def test_windows_main_download_enforces_archive_resource_bounds_before_target_mu
     archive_buffer = io.BytesIO()
     long_name = "./" + "long-name-" * 20 + "payload.bin"
     with tarfile.open(fileobj=archive_buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
-        names = ("./first.bin", "./second.bin") if bound == "members" else (
-            "./nested/payload.bin"
-            if bound == "components"
-            else long_name
-            if bound in {"paths", "metadata"}
-            else "./payload.bin",
+        names = (
+            ("./first.bin", "./second.bin")
+            if bound == "members"
+            else (
+                "./nested/payload.bin"
+                if bound == "components"
+                else long_name
+                if bound in {"paths", "metadata"}
+                else "./payload.bin",
+            )
         )
         for name in names:
             payload = b"four"
@@ -4685,6 +4988,255 @@ def test_windows_tar_prescan_rejects_global_pax_even_below_metadata_limit(
 
     with pytest.raises(ValueError):
         secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+@pytest.mark.parametrize(
+    "sparse_keyword",
+    (
+        "GNU.sparse.map",
+        "GNU.sparse.size",
+        "GNU.sparse.name",
+        "GNU.sparse.realsize",
+        "GNU.sparse.major",
+        "GNU.sparse.minor",
+    ),
+)
+def test_windows_tar_prescan_rejects_local_pax_gnu_sparse_metadata(
+    tmp_path: Path,
+    sparse_keyword: str,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "gnu-sparse-pax.tar"
+    with tarfile.open(archive_path, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        payload = b"1\n0\n0\n"
+        member = tarfile.TarInfo("payload.bin")
+        member.pax_headers = {sparse_keyword: "1"}
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_rejects_gnu_sparse_v1_before_payload_parsing(
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "gnu-sparse-v1.tar"
+    with tarfile.open(archive_path, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        payload = (b"0\n0\n" * 100_000) + b"0\n"
+        member = tarfile.TarInfo("payload.bin")
+        member.pax_headers = {
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+        }
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_rejects_pax_size_tunneling_hidden_sparse_metadata(
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    hidden_archive = io.BytesIO()
+    with tarfile.open(fileobj=hidden_archive, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        sparse_map = (b"0\n0\n" * 100_000) + b"0\n"
+        member = tarfile.TarInfo("hidden-sparse.bin")
+        member.pax_headers = {
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+        }
+        member.size = len(sparse_map)
+        archive.addfile(member, io.BytesIO(sparse_map))
+
+    archive_path = tmp_path / "pax-size-tunnel.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        size_override = b"10 size=0\n"
+        pax = tarfile.TarInfo("size-override")
+        pax.type = tarfile.XHDTYPE
+        pax.size = len(size_override)
+        archive.addfile(pax, io.BytesIO(size_override))
+
+        hidden_payload = hidden_archive.getvalue()
+        carrier = tarfile.TarInfo("carrier.bin")
+        carrier.size = len(hidden_payload)
+        archive.addfile(carrier, io.BytesIO(hidden_payload))
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_rejects_pax_size_tunneling_hidden_global_pax(
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    hidden_archive = io.BytesIO()
+    with tarfile.open(fileobj=hidden_archive, mode="w") as archive:
+        global_pax_payload = b"18 comment=hidden\n"
+        global_pax = tarfile.TarInfo("hidden-global-pax")
+        global_pax.type = tarfile.XGLTYPE
+        global_pax.size = len(global_pax_payload)
+        archive.addfile(global_pax, io.BytesIO(global_pax_payload))
+        regular = tarfile.TarInfo("payload.bin")
+        regular.size = 0
+        archive.addfile(regular, io.BytesIO())
+
+    archive_path = tmp_path / "pax-size-global-tunnel.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        size_override = b"10 size=0\n"
+        pax = tarfile.TarInfo("size-override")
+        pax.type = tarfile.XHDTYPE
+        pax.size = len(size_override)
+        archive.addfile(pax, io.BytesIO(size_override))
+
+        hidden_payload = hidden_archive.getvalue()
+        carrier = tarfile.TarInfo("carrier.bin")
+        carrier.size = len(hidden_payload)
+        archive.addfile(carrier, io.BytesIO(hidden_payload))
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_bounds_local_pax_record_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "many-pax-records.tar"
+    with tarfile.open(archive_path, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        member = tarfile.TarInfo("payload.bin")
+        member.pax_headers = {"comment": "one", "atime": "two"}
+        member.size = 0
+        archive.addfile(member, io.BytesIO())
+
+    monkeypatch.setattr(
+        secure_docker_environment,
+        "_WINDOWS_TAR_MAX_PAX_RECORDS_PER_HEADER",
+        1,
+    )
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_resets_pax_record_count_between_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "separate-pax-records.tar"
+    with tarfile.open(archive_path, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for index in range(2):
+            member = tarfile.TarInfo(f"payload-{index}.bin")
+            member.pax_headers = {"comment": str(index)}
+            member.size = 0
+            archive.addfile(member, io.BytesIO())
+
+    monkeypatch.setattr(
+        secure_docker_environment,
+        "_WINDOWS_TAR_MAX_PAX_RECORDS_PER_HEADER",
+        1,
+    )
+    secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_accepts_bounded_ordinary_local_pax_metadata(
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "ordinary-pax.tar"
+    with tarfile.open(archive_path, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        payload = b"content"
+        member = tarfile.TarInfo("payload.bin")
+        member.pax_headers = {"comment": "ordinary metadata"}
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_follows_bounded_local_pax_size_override(
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    payload = b"content"
+    size_override = b"9 size=7\n"
+    pax = tarfile.TarInfo("size-override")
+    pax.type = tarfile.XHDTYPE
+    pax.size = len(size_override)
+    carrier = tarfile.TarInfo("payload.bin")
+    carrier.size = 0
+    archive_bytes = (
+        pax.tobuf(format=tarfile.USTAR_FORMAT)
+        + size_override.ljust(512, b"\0")
+        + carrier.tobuf(format=tarfile.USTAR_FORMAT)
+        + payload.ljust(512, b"\0")
+        + b"\0" * 1024
+    )
+    archive_path = tmp_path / "pax-size-override.tar"
+    archive_path.write_bytes(archive_bytes)
+
+    secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+    with tarfile.open(archive_path, mode="r:") as archive:
+        member = archive.next()
+        assert member is not None
+        assert member.size == len(payload)
+        extracted = archive.extractfile(member)
+        assert extracted is not None
+        assert extracted.read() == payload
+
+
+def test_windows_tar_prescan_bounds_zero_byte_extension_chains(
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "extension-chain.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        for index in range(secure_docker_environment._WINDOWS_TAR_MAX_EXTENSION_CHAIN + 1):
+            extension = tarfile.TarInfo(f"pax-{index}")
+            extension.type = tarfile.XHDTYPE
+            extension.size = 0
+            archive.addfile(extension, io.BytesIO())
+        regular = tarfile.TarInfo("payload.bin")
+        regular.size = 0
+        archive.addfile(regular, io.BytesIO())
+
+    with pytest.raises(ValueError):
+        secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
+
+
+def test_windows_tar_prescan_resets_extension_chain_after_regular_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    archive_path = tmp_path / "separated-extensions.tar"
+    with tarfile.open(archive_path, mode="w") as archive:
+        for index in range(2):
+            extension = tarfile.TarInfo(f"pax-{index}")
+            extension.type = tarfile.XHDTYPE
+            extension.size = 0
+            archive.addfile(extension, io.BytesIO())
+            regular = tarfile.TarInfo(f"payload-{index}.bin")
+            regular.size = 0
+            archive.addfile(regular, io.BytesIO())
+
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TAR_MAX_EXTENSION_CHAIN", 1)
+    secure_docker_environment._prescan_uncompressed_tar_archive(archive_path)
 
 
 def test_windows_archive_budget_counts_zero_byte_entries_before_target_mutation(
@@ -4807,9 +5359,7 @@ def test_windows_transfer_error_redacts_exact_short_sensitive_value(
         def __init__(self) -> None:
             self.returncode: int | None = None
             self.stdout = _ChunkStream([])
-            self.stderr = _ChunkStream(
-                [("discarded-prefix-" * 20 + f"|{secret}|transfer failed").encode()]
-            )
+            self.stderr = _ChunkStream([("discarded-prefix-" * 20 + f"|{secret}|transfer failed").encode()])
 
         async def wait(self) -> int:
             self.returncode = 9
@@ -4837,12 +5387,8 @@ def test_windows_transfer_error_redacts_exact_short_sensitive_value(
         )
 
     assert secret not in str(caught.value)
-    assert "earlier transfer diagnostics truncated" in str(caught.value)
+    assert "diagnostics omitted" in str(caught.value)
     assert len(str(caught.value)) < 256
-    assert _collision_safe_redaction_marker(
-        {secret},
-        include_short=True,
-    ) in str(caught.value)
     assert not output_path.exists()
 
 
@@ -4893,12 +5439,68 @@ def test_windows_transfer_truncated_error_cannot_expose_secret_suffix(
     assert not output_path.exists()
 
 
-def test_windows_transfer_error_redacts_sensitive_docker_client_environment(
+def test_windows_transfer_truncated_error_with_repeated_secret_cannot_expose_earlier_suffix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
     environment = _initialized_secure_docker_environment(tmp_path)
-    secret = "SYNTHETIC_DOCKER_AUTH_SECRET"
+    secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567"
+    leaked_suffix = "RSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567"
+    output_path = tmp_path / "failed-transfer.tar"
+
+    class FailedTransferProcess:
+        pid = 7654
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _ChunkStream([])
+            self.stderr = _ChunkStream([("X" + secret + "|" + secret + "!" * 8).encode()])
+
+        async def wait(self) -> int:
+            self.returncode = 9
+            return self.returncode
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> FailedTransferProcess:
+        return FailedTransferProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(secure_docker_environment, "_WINDOWS_TRANSFER_STDERR_MAX_BYTES", 64)
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(
+            environment._run_trusted_transfer_command(
+                ["docker", "version"],
+                process_environment={"PATH": os.environ["PATH"]},
+                protected_values={secret},
+                output_path=output_path,
+            )
+        )
+
+    rendered = str(caught.value)
+    assert secret not in rendered
+    assert leaked_suffix not in rendered
+    assert "diagnostics omitted" in rendered
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "secret"),
+    (
+        ("DOCKER_AUTH_CONFIG", "SYNTHETIC_DOCKER_AUTH_SECRET"),
+        ("DOCKER_HOST", "tcp://synthetic-user:synthetic-pass@example.invalid:2376"),
+        ("DOCKER_HOST", "tcp://synthetic-user:synthetic-pass@[malformed"),
+        ("HTTPS_PROXY", "synthetic-user:synthetic-pass@example.invalid:8080"),
+    ),
+)
+def test_windows_transfer_error_redacts_sensitive_docker_client_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+    secret: str,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
     output_path = tmp_path / "failed-transfer.tar"
 
     class FailedTransferProcess:
@@ -4926,7 +5528,7 @@ def test_windows_transfer_error_redacts_sensitive_docker_client_environment(
                 ["docker", "version"],
                 process_environment={
                     "PATH": os.environ["PATH"],
-                    "DOCKER_AUTH_CONFIG": secret,
+                    environment_name: secret,
                 },
                 protected_values=set(),
                 output_path=output_path,
@@ -5319,8 +5921,8 @@ def test_secure_public_exec_streams_redacted_handoff_secrets(
     ]
     assert result.return_code == 7
     assert {stream for _text, stream in outer_chunks} == {"stdout"}
-    assert len(handoff_process.communicate_inputs) == 1
-    handoff_script = (handoff_process.communicate_inputs[0] or b"").decode("utf-8")
+    assert handoff_process.communicate_inputs == []
+    handoff_script = bytes(handoff_process.stdin.data).decode("utf-8")
     assert all(secret in handoff_script for secret in secrets)
     rendered_commands = "\n".join(" ".join(str(argument) for argument in command) for command in subprocess_commands)
     for secret in secrets:
@@ -5353,7 +5955,7 @@ def test_secure_handoff_scope_scrubs_compose_client_environment_and_resets(
 
     subprocess_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callback_chunks: list[str] = []
-    handoff_inputs: list[bytes] = []
+    handoff_processes: list[_BufferedComposeProcess] = []
 
     async def create_subprocess(*args: object, **kwargs: object):
         subprocess_calls.append((args, kwargs))
@@ -5363,15 +5965,7 @@ def test_secure_handoff_scope_scrubs_compose_client_environment_and_resets(
             return _BufferedAndStreamedComposeProcess([raw_output.encode()])
 
         process = _BufferedComposeProcess(stdout=b"")
-        original_communicate = process.communicate
-
-        async def capture_communicate(**communicate_kwargs: bytes | None):
-            stdin_value = communicate_kwargs.get("input")
-            if stdin_value is not None:
-                handoff_inputs.append(stdin_value)
-            return await original_communicate(**communicate_kwargs)
-
-        process.communicate = capture_communicate  # type: ignore[method-assign]
+        handoff_processes.append(process)
         return process
 
     async def exec_with_explicit_overrides(
@@ -5428,6 +6022,7 @@ def test_secure_handoff_scope_scrubs_compose_client_environment_and_resets(
 
     result, post_scope_environment = asyncio.run(exercise())
 
+    handoff_inputs = [bytes(process.stdin.data) for process in handoff_processes if process.stdin.data]
     assert handoff_inputs and all(secret.encode() in handoff_inputs[0] for secret in handoff_secrets)
     assert "".join(callback_chunks) == result.stdout
     for secret in all_secrets:
@@ -5518,17 +6113,16 @@ def test_concurrent_secure_handoff_scopes_are_isolated_and_reset(
     calls: list[dict[str, object]] = []
     remote_secrets: dict[str, str] = {}
 
-    class Process:
-        returncode = 0
-
+    class CapturingStdin(_WritableStdin):
         def __init__(self, record: dict[str, object]) -> None:
+            super().__init__()
             self._record = record
 
-        async def communicate(self, **kwargs: bytes | None) -> tuple[bytes, None]:
+        async def drain(self) -> None:
             nonlocal setup_count
-            stdin_data = kwargs.get("input")
+            stdin_data = bytes(self.data)
             self._record["stdin"] = stdin_data
-            if stdin_data is not None:
+            if stdin_data:
                 rendered = " ".join(str(argument) for argument in self._record["args"])
                 remote_path = next(
                     token for token in rendered.split() if token.startswith("/tmp/.skillevaluator-exec-env-")
@@ -5540,12 +6134,13 @@ def test_concurrent_secure_handoff_scopes_are_isolated_and_reset(
                 if setup_count == 2:
                     setup_barrier.set()
                 await setup_barrier.wait()
-            return b"", None
 
-    async def create_subprocess(*args: object, **kwargs: object) -> Process:
+    async def create_subprocess(*args: object, **kwargs: object) -> _BufferedComposeProcess:
         record = {"args": args, "env": dict(kwargs["env"])}
         calls.append(record)
-        return Process(record)
+        process = _BufferedComposeProcess(stdout=b"")
+        process.stdin = CapturingStdin(record)
+        return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
 
@@ -5634,20 +6229,12 @@ def test_secure_handoff_scope_scrubs_resolved_nvidia_key_from_compose_client(
 
     monkeypatch.setenv("RESOLVED_NVIDIA_WRAPPER", f"prefix:{resolved_secret}:suffix")
     environment = _initialized_secure_docker_environment(tmp_path)
-    calls: list[tuple[dict[str, str], bytes | None]] = []
+    calls: list[tuple[dict[str, str], _BufferedComposeProcess]] = []
 
-    class Process:
-        returncode = 0
-
-        def __init__(self, process_environment: dict[str, str]) -> None:
-            self._process_environment = process_environment
-
-        async def communicate(self, **kwargs: bytes | None) -> tuple[bytes, None]:
-            calls.append((self._process_environment, kwargs.get("input")))
-            return b"", None
-
-    async def create_subprocess(*_args: object, **kwargs: object) -> Process:
-        return Process(dict(kwargs["env"]))
+    async def create_subprocess(*_args: object, **kwargs: object) -> _BufferedComposeProcess:
+        process = _BufferedComposeProcess(stdout=b"")
+        calls.append((dict(kwargs["env"]), process))
+        return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
 
@@ -5655,8 +6242,8 @@ def test_secure_handoff_scope_scrubs_resolved_nvidia_key_from_compose_client(
 
     assert result.return_code == 0
     assert len(calls) == 4
-    assert any(stdin_data and resolved_secret.encode() in stdin_data for _env, stdin_data in calls)
-    for process_environment, _stdin_data in calls:
+    assert any(resolved_secret.encode() in bytes(process.stdin.data) for _env, process in calls)
+    for process_environment, _process in calls:
         assert "NVIDIA_API_KEY" not in process_environment
         assert all(resolved_secret not in value for value in process_environment.values())
 
@@ -5916,20 +6503,7 @@ def test_secure_handoff_scope_covers_containment_and_resets_after_interrupt(
     monkeypatch.setattr(secure_docker_environment, "_COMPOSE_TERMINATE_SECONDS", 0.01)
     monkeypatch.setattr(secure_docker_environment, "_COMPOSE_KILL_SECONDS", 0.01)
     subprocess_calls: list[tuple[tuple[object, ...], dict[str, str]]] = []
-    main_communicating = asyncio.Event()
-    main_completed: asyncio.Future[tuple[bytes, None]] | None = None
-
-    class HangingProcess:
-        pid = 7049
-        returncode: int | None = None
-
-        async def communicate(self, **_kwargs: bytes | None) -> tuple[bytes, None]:
-            nonlocal main_completed
-            main_communicating.set()
-            main_completed = asyncio.get_running_loop().create_future()
-            return await asyncio.shield(main_completed)
-
-    hanging_process = HangingProcess()
+    hanging_process = _HangingComposeProcess(pid=7049)
 
     async def create_subprocess(*args: object, **kwargs: object):
         subprocess_calls.append((args, dict(kwargs["env"])))
@@ -5939,9 +6513,7 @@ def test_secure_handoff_scope_covers_containment_and_resets_after_interrupt(
 
     def killpg(pid: int, value: signal.Signals) -> None:
         assert pid == hanging_process.pid
-        hanging_process.returncode = -value
-        if main_completed is not None and not main_completed.done():
-            main_completed.set_result((b"", None))
+        hanging_process.finish(-value)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
     monkeypatch.setattr(secure_docker_environment.os, "killpg", killpg)
@@ -5960,7 +6532,7 @@ def test_secure_handoff_scope_covers_containment_and_resets_after_interrupt(
 
     async def exercise() -> tuple[BaseException, dict[str, str]]:
         task = asyncio.create_task(worker())
-        await asyncio.wait_for(main_communicating.wait(), timeout=1)
+        await asyncio.wait_for(hanging_process.started.wait(), timeout=1)
         if interrupt_mode == "cancel":
             task.cancel()
             await asyncio.sleep(0)
@@ -6136,16 +6708,13 @@ def test_compose_process_receives_value_only_in_env_and_redacts_failure(
     )
     captured: dict[str, object] = {}
 
-    class _Process:
-        returncode = 7
-
-        async def communicate(self):
-            return f"failure included {_SENTINEL}".encode(), None
-
     async def _create_subprocess(*args, **kwargs):
         captured["args"] = args
         captured["env"] = kwargs["env"]
-        return _Process()
+        return _BufferedComposeProcess(
+            stdout=f"failure included {_SENTINEL}".encode(),
+            return_code=7,
+        )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _create_subprocess)
     with pytest.raises(RuntimeError) as caught:
@@ -6169,14 +6738,10 @@ def test_compose_check_false_redacts_success_output(
     environment = _initialized_docker_environment(tmp_path)
     environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
 
-    class Process:
-        returncode = 0
-
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return f"stdout {_SENTINEL}".encode(), f"stderr {_SENTINEL}".encode()
-
-    async def create_subprocess(*_args: object, **_kwargs: object) -> Process:
-        return Process()
+    async def create_subprocess(*_args: object, **_kwargs: object) -> _BufferedComposeProcess:
+        return _BufferedComposeProcess(
+            stdout=f"stdout {_SENTINEL}\nstderr {_SENTINEL}".encode(),
+        )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
     result = asyncio.run(
@@ -6188,8 +6753,8 @@ def test_compose_check_false_redacts_success_output(
     )
 
     marker = _marker_for(_SENTINEL)
-    assert result.stdout == f"stdout {marker}"
-    assert result.stderr == f"stderr {marker}"
+    assert result.stdout == f"stdout {marker}\nstderr {marker}"
+    assert result.stderr is None
 
 
 def test_compose_stdin_handoff_redacts_secret_without_argv_or_environment(
@@ -6212,19 +6777,16 @@ def test_compose_stdin_handoff_redacts_secret_without_argv_or_environment(
     environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
     captured: dict[str, object] = {}
 
-    class Process:
-        returncode = 9
+    process = _BufferedComposeProcess(
+        stdout=f"failure included {_SENTINEL}".encode(),
+        return_code=9,
+    )
 
-        async def communicate(self, **kwargs: bytes | None) -> tuple[bytes, None]:
-            assert set(kwargs) <= {"input"}
-            captured["input"] = kwargs.get("input")
-            return f"failure included {_SENTINEL}".encode(), None
-
-    async def create_subprocess(*args: object, **kwargs: object) -> Process:
+    async def create_subprocess(*args: object, **kwargs: object) -> _BufferedComposeProcess:
         captured["args"] = args
         captured["env"] = kwargs["env"]
         captured["stdin"] = kwargs["stdin"]
-        return Process()
+        return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
 
@@ -6237,7 +6799,7 @@ def test_compose_stdin_handoff_redacts_secret_without_argv_or_environment(
             )
         )
 
-    assert captured["input"] == b"private-stream-payload"
+    assert bytes(process.stdin.data) == b"private-stream-payload"
     assert captured["stdin"] is asyncio.subprocess.PIPE
     assert _SENTINEL not in " ".join(str(arg) for arg in captured["args"])
     assert _SENTINEL not in captured["env"].values()
@@ -6262,14 +6824,10 @@ def test_compose_redacts_long_secrets_without_rewriting_short_env_flags(
     environment._compose_env_vars = MethodType(lambda _self, **_kwargs: {"PATH": "/usr/bin"}, environment)
     long_secret = "abcdefgh"
 
-    class Process:
-        returncode = 0
-
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return b"http://127.0.0.1:41927\n", f"stderr {long_secret}".encode()
-
-    async def create_subprocess(*_args: object, **_kwargs: object) -> Process:
-        return Process()
+    async def create_subprocess(*_args: object, **_kwargs: object) -> _BufferedComposeProcess:
+        return _BufferedComposeProcess(
+            stdout=f"http://127.0.0.1:41927\nstderr {long_secret}".encode(),
+        )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
     result = asyncio.run(
@@ -6283,8 +6841,8 @@ def test_compose_redacts_long_secrets_without_rewriting_short_env_flags(
         )
     )
 
-    assert result.stdout == "http://127.0.0.1:41927\n"
-    assert result.stderr == f"stderr {_marker_for(long_secret)}"
+    assert result.stdout == f"http://127.0.0.1:41927\nstderr {_marker_for(long_secret)}"
+    assert result.stderr is None
 
 
 @pytest.mark.parametrize("secret", ["x", "hunter2", "abcdefgh"])
@@ -6333,41 +6891,22 @@ def test_compose_cancellation_reaps_process_tree_even_when_repeated(
 
     async def run_cancelled() -> list[str]:
         actions: list[str] = []
-        communicating = asyncio.Event()
-        completed: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+        process = _HangingComposeProcess(pid=4343)
 
-        class FakeProcess:
-            pid = 4343
-            returncode: int | None = None
-
-            async def communicate(self) -> tuple[bytes, bytes]:
-                communicating.set()
-                return await asyncio.shield(completed)
-
-            def terminate(self) -> None:
-                actions.append("terminate")
-
-            def kill(self) -> None:
-                actions.append("kill")
-                self.returncode = -9
-                if not completed.done():
-                    completed.set_result((b"", b""))
-
-        process = FakeProcess()
-
-        async def create_subprocess(*_args: object, **_kwargs: object) -> FakeProcess:
+        async def create_subprocess(*_args: object, **_kwargs: object) -> _HangingComposeProcess:
             return process
 
         def killpg(_pid: int, value: signal.Signals) -> None:
             if value == signal.SIGTERM:
-                process.terminate()
+                actions.append("terminate")
             else:
-                process.kill()
+                actions.append("kill")
+                process.finish(-signal.SIGKILL)
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
         monkeypatch.setattr(secure_docker_environment.os, "killpg", killpg, raising=False)
         task = asyncio.create_task(environment._run_docker_compose_command(["exec", "main", "sleep", "30"]))
-        await asyncio.wait_for(communicating.wait(), timeout=1)
+        await asyncio.wait_for(process.started.wait(), timeout=1)
         task.cancel()
         await asyncio.sleep(0)
         task.cancel()
@@ -6394,20 +6933,9 @@ def test_interrupted_exec_stops_main_container_before_reaping_host_client(
     async def run_cancelled() -> tuple[list[str], list[tuple[object, ...]]]:
         actions: list[str] = []
         commands: list[tuple[object, ...]] = []
-        communicating = asyncio.Event()
-        completed: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+        original = _HangingComposeProcess(pid=4545)
 
-        class OriginalProcess:
-            pid = 4545
-            returncode: int | None = None
-
-            async def communicate(self) -> tuple[bytes, bytes]:
-                communicating.set()
-                return await asyncio.shield(completed)
-
-        original = OriginalProcess()
-
-        async def create_subprocess(*args: object, **_kwargs: object) -> OriginalProcess:
+        async def create_subprocess(*args: object, **_kwargs: object) -> _HangingComposeProcess:
             commands.append(args)
             return original
 
@@ -6418,9 +6946,7 @@ def test_interrupted_exec_stops_main_container_before_reaping_host_client(
             assert pid == original.pid
             actions.append(f"host-{value.name.lower()}")
             if value == signal.SIGKILL:
-                original.returncode = -9
-                if not completed.done():
-                    completed.set_result((b"", b""))
+                original.finish(-signal.SIGKILL)
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
         monkeypatch.setattr(environment, "_contain_main_container", contain_main)
@@ -6432,7 +6958,7 @@ def test_interrupted_exec_stops_main_container_before_reaping_host_client(
                 timeout_sec=0.01 if interrupt_mode == "timeout" else None,
             )
         )
-        await asyncio.wait_for(communicating.wait(), timeout=1)
+        await asyncio.wait_for(original.started.wait(), timeout=1)
         if interrupt_mode == "cancel":
             task.cancel()
             await asyncio.sleep(0)
@@ -6472,18 +6998,9 @@ def test_exec_cancelled_during_process_creation_still_stops_main_container(
         release_creation = asyncio.Event()
         stop_started = asyncio.Event()
         release_stop = asyncio.Event()
-        completed: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+        original = _HangingComposeProcess(pid=4645)
 
-        class OriginalProcess:
-            pid = 4645
-            returncode: int | None = None
-
-            async def communicate(self) -> tuple[bytes, bytes]:
-                return await asyncio.shield(completed)
-
-        original = OriginalProcess()
-
-        async def create_subprocess(*args: object, **_kwargs: object) -> OriginalProcess:
+        async def create_subprocess(*args: object, **_kwargs: object) -> _HangingComposeProcess:
             commands.append(args)
             creation_started.set()
             await release_creation.wait()
@@ -6499,9 +7016,7 @@ def test_exec_cancelled_during_process_creation_still_stops_main_container(
             assert pid == original.pid
             actions.append(f"host-{value.name.lower()}")
             if value == signal.SIGKILL:
-                original.returncode = -9
-                if not completed.done():
-                    completed.set_result((b"", b""))
+                original.finish(-signal.SIGKILL)
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
         monkeypatch.setattr(environment, "_contain_main_container", contain_main)
@@ -6541,20 +7056,9 @@ def test_interrupted_exec_fails_closed_when_main_container_containment_fails(
     async def run_timeout() -> tuple[list[tuple[object, ...]], list[signal.Signals]]:
         commands: list[tuple[object, ...]] = []
         signals: list[signal.Signals] = []
-        communicating = asyncio.Event()
-        completed: asyncio.Future[tuple[bytes, bytes]] = asyncio.get_running_loop().create_future()
+        original = _HangingComposeProcess(pid=4745)
 
-        class OriginalProcess:
-            pid = 4745
-            returncode: int | None = None
-
-            async def communicate(self) -> tuple[bytes, bytes]:
-                communicating.set()
-                return await asyncio.shield(completed)
-
-        original = OriginalProcess()
-
-        async def create_subprocess(*args: object, **_kwargs: object) -> OriginalProcess:
+        async def create_subprocess(*args: object, **_kwargs: object) -> _HangingComposeProcess:
             commands.append(args)
             return original
 
@@ -6565,9 +7069,7 @@ def test_interrupted_exec_fails_closed_when_main_container_containment_fails(
             assert pid == original.pid
             signals.append(value)
             if value == signal.SIGKILL:
-                original.returncode = -9
-                if not completed.done():
-                    completed.set_result((b"", b""))
+                original.finish(-signal.SIGKILL)
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
         monkeypatch.setattr(environment, "_contain_main_container", contain_main)
@@ -6579,7 +7081,7 @@ def test_interrupted_exec_fails_closed_when_main_container_containment_fails(
                 stop_main_on_interrupt=True,
             )
         )
-        await asyncio.wait_for(communicating.wait(), timeout=1)
+        await asyncio.wait_for(original.started.wait(), timeout=1)
         if interrupt_mode == "cancel":
             task.cancel()
             await asyncio.sleep(0)

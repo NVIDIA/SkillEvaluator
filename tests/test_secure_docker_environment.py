@@ -123,19 +123,41 @@ def test_secure_docker_exec_redacts_persistent_and_per_call_credentials_from_all
     async def fake_upload_file(_source_path: Path | str, _target_path: str) -> None:
         return None
 
+    class FakeInput:
+        def write(self, _data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class FakeOutput:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        async def read(self, _size: int) -> bytes:
+            payload, self._payload = self._payload, b""
+            return payload
+
     class FakeProcess:
         returncode = 0
 
         def __init__(self, *, expose_secrets: bool) -> None:
-            self._expose_secrets = expose_secrets
+            payload = b""
+            if expose_secrets:
+                output = f"stdout {persistent_secret} {per_call_secret}".encode()
+                error = f"stderr {per_call_secret} {persistent_secret}".encode()
+                payload = output + error
+            self.stdin = FakeInput()
+            self.stdout = FakeOutput(payload)
 
-        async def communicate(self, **kwargs: bytes | None) -> tuple[bytes, bytes]:
-            assert set(kwargs) <= {"input"}
-            if not self._expose_secrets:
-                return b"", b""
-            output = f"stdout {persistent_secret} {per_call_secret}".encode()
-            error = f"stderr {per_call_secret} {persistent_secret}".encode()
-            return output, error
+        async def wait(self) -> int:
+            return self.returncode
 
     async def create_subprocess(*args: object, **_kwargs: object) -> FakeProcess:
         rendered = " ".join(str(arg) for arg in args)
@@ -338,10 +360,10 @@ def test_harbor_subprocess_receives_nvidia_key_only_over_stdin(monkeypatch, tmp_
         assert environment["NVIDIA_API_KEY"] == runner._NVIDIA_BUILD_STDIN_SENTINEL
         assert environment[runner._NVIDIA_BUILD_KEY_STDIN_ENV] == "1"
         assert runner._NVIDIA_BUILD_KEY_FILE_ENV not in environment
-        assert kwargs["input"] == secret
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert kwargs["stdin_text"] == secret
+        return runner._BoundedHarborProcessResult(returncode=0, output_tail="", output_exceeded=False)
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, ""))
 
     ok, detail = runner._run_harbor(
@@ -385,11 +407,15 @@ def test_harbor_subprocess_redacts_stdin_key_from_early_failure(monkeypatch, tmp
     secret = "nvidia-real-secret-value-for-test"
 
     def fake_run(command, **kwargs):
-        assert kwargs["input"] == secret
+        assert kwargs["stdin_text"] == secret
         assert secret not in kwargs["env"].values()
-        return SimpleNamespace(returncode=1, stdout="", stderr=f"provider rejected {secret}")
+        return runner._BoundedHarborProcessResult(
+            returncode=1,
+            output_tail=f"provider rejected {secret}",
+            output_exceeded=False,
+        )
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_run)
 
     ok, detail = runner._run_harbor(
         dataset=tmp_path / "dataset",

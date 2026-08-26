@@ -14,8 +14,10 @@ from uuid import UUID
 import pytest
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.tier3.harbor import collector as collector_module
+from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 _HARBOR_022_AGENT_RUNTIME_EXCEPTION_TYPES = (
     "AgentAuthenticationError",
@@ -353,6 +355,53 @@ def test_actual_harbor_022_error_or_cancelled_job_suppresses_reward(
     assert results["execution_status"] == "failed"
     assert results["agents"]["opencode"]["num_trials_with"] == 0
     assert results["agents"]["opencode"]["job_failures"]["with_skill"] == job_failure
+
+
+def test_malformed_job_diagnostic_is_redacted_and_bounded_before_publication(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    job_dir.mkdir(parents=True)
+    github_token = "ghp_" + ("A" * 36)
+    oversized_eval_name = github_token + "-" + ("x" * (3 * 1024 * 1024)) + "-private-tail"
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": 1,
+                "stats": {
+                    "n_completed_trials": 1,
+                    "n_errored_trials": 0,
+                    "n_running_trials": 0,
+                    "n_pending_trials": 0,
+                    "n_cancelled_trials": 0,
+                    "n_retries": 0,
+                    "evals": {oversized_eval_name: "invalid"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    job_failure = results["agents"]["opencode"]["job_failures"]["with_skill"]
+    assert results["execution_status"] == "failed"
+    assert len(job_failure) <= 4096
+    assert github_token not in job_failure
+    assert "private-tail" not in job_failure
+    summary_path = tmp_path / "results" / "opencode" / "with-skill" / "summary.json"
+    assert summary_path.stat().st_size <= 2 * 1024 * 1024
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["job_failure"] == job_failure
+    assert github_token not in summary_path.read_text(encoding="utf-8")
 
 
 def test_actual_harbor_022_multistep_root_reward_is_authoritative(tmp_path: Path) -> None:
@@ -775,8 +824,17 @@ def test_complete_low_score_is_execution_success(tmp_path: Path) -> None:
     assert condition == {
         "execution_status": "succeeded",
         "execution_errors": [],
+        "execution_error_details_total": 0,
+        "execution_error_details_shown": 0,
+        "execution_error_details_truncated": False,
         "expected_attempts": 1,
         "scored_attempts": 1,
+        "runtime_failure_details_total": 0,
+        "runtime_failure_details_shown": 0,
+        "runtime_failure_details_truncated": False,
+        "reward_failure_details_total": 0,
+        "reward_failure_details_shown": 0,
+        "reward_failure_details_truncated": False,
     }
     assert results["execution_status"] == "succeeded"
     assert "error" not in results
@@ -885,7 +943,491 @@ def test_native_multistep_rewards_count_as_one_logical_attempt(tmp_path: Path) -
 
     assert results["execution_status"] == "succeeded"
     assert results["scored_attempts"] == 1
-    assert results["agents"]["opencode"]["num_trials_with"] == 2
+    assert results["agents"]["opencode"]["num_trials_with"] == 1
+    persisted = json.loads((tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text())
+    assert persisted["num_trials"] == 1
+
+
+@pytest.mark.parametrize(
+    "step_results",
+    [
+        [],
+        [{"step_name": ""}],
+        [{"step_name": "duplicate"}, {"step_name": "duplicate"}],
+    ],
+)
+def test_malformed_authoritative_step_topology_invalidates_root_reward(
+    tmp_path: Path,
+    step_results: list[dict[str, object]],
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["step_results"] = step_results
+    trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    condition = results["agents"]["opencode"]["conditions"]["with_skill"]
+    assert results["execution_status"] == "failed"
+    assert condition["scored_attempts"] == 0
+    assert "malformed constituent steps" in " ".join(condition["execution_errors"])
+
+
+@pytest.mark.parametrize("verifier_mode", ["null", "missing"])
+def test_harbor_022_multistep_result_without_root_aggregate_is_not_reconstructed(
+    tmp_path: Path,
+    verifier_mode: Literal["null", "missing"],
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(
+        job_dir,
+        verifier_mode=verifier_mode,
+        step_rewards=(0.0, 1.0),
+    )
+    serialized_trial = json.loads((job_dir / trial_name / "result.json").read_text(encoding="utf-8"))
+    diagnostic = collector_module._reward_from_harbor_result(serialized_trial)
+    assert diagnostic is not None
+    assert diagnostic["evaluation_status"] == "failed"
+    assert "not reconstructed or scored" in diagnostic["evaluation_errors"]["collector"]
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    condition = results["agents"]["opencode"]["conditions"]["with_skill"]
+    assert results["execution_status"] == "failed"
+    assert condition["scored_attempts"] == 0
+    # Harbor 0.22 correctly excludes a trial with no root verifier reward from
+    # its eval statistics, so job validation fails before artifact extraction.
+    assert "statistics account for 0/1 completed trials" in " ".join(condition["execution_errors"])
+
+
+def test_harbor_022_complete_envelope_accepts_final_reward_strategy(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0, step_rewards=(0.2, 1.0))
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    final_reward = dict.fromkeys(DEFAULT_METRICS, 1.0)
+    trial_result["verifier_result"]["rewards"] = final_reward
+    trial_result["step_results"][0]["verifier_result"]["rewards"] = {"accuracy": 0.2}
+    trial_result["step_results"][1]["verifier_result"]["rewards"] = final_reward
+    trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+
+    diagnostic = collector_module._reward_from_harbor_result(trial_result)
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert diagnostic is not None
+    assert diagnostic.get("evaluation_status") != "failed"
+    assert results["execution_status"] == "succeeded"
+    assert results["scored_attempts"] == 1
+
+
+def test_legacy_step_reward_with_unrepresentable_integer_fails_closed() -> None:
+    reward = collector_module._reward_from_harbor_result(
+        {
+            "step_results": [
+                {
+                    "verifier_result": {
+                        "rewards": {"overall": 10**400},
+                    }
+                }
+            ]
+        }
+    )
+
+    assert reward is not None
+    assert reward["evaluation_status"] == "failed"
+    assert "non-finite" in reward["evaluation_errors"]["collector"]
+    assert reward["details"]["harbor_rewards"]["overall"] is None
+
+
+def test_large_valid_step_topology_does_not_invalidate_root_reward(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["step_results"] = [{"step_name": f"step-{index}"} for index in range(65)]
+    trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "succeeded"
+    assert results["scored_attempts"] == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_reward",
+    [float("nan"), float("inf"), float("-inf"), 10**400],
+    ids=["nan", "positive-infinity", "negative-infinity", "overflowing-integer"],
+)
+def test_invalid_root_reward_number_fails_closed_and_persists_strict_json(
+    tmp_path: Path,
+    invalid_reward: float | int,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["verifier_result"]["rewards"] = {"overall": invalid_reward}
+    trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    assert agent["num_trials_with"] == 0
+    [failure] = agent["trial_failures"]["with_skill"]
+    assert "non-finite" in failure["reason"]
+    assert len(failure["reason"]) <= 2048
+
+    reward_path = tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json"
+    raw_reward = reward_path.read_text(encoding="utf-8")
+
+    def reject_nonstandard_constant(value: str) -> None:
+        raise AssertionError(f"non-standard JSON number persisted: {value}")
+
+    persisted = json.loads(raw_reward, parse_constant=reject_nonstandard_constant)
+    json.dumps(persisted, allow_nan=False)
+    assert persisted["evaluation_status"] == "failed"
+    assert "non-finite" in persisted["evaluation_errors"]["collector"]
+    assert len(persisted["evaluation_errors"]["collector"]) <= 512
+    assert persisted["details"]["harbor_rewards"]["overall"] is None
+
+
+def test_out_of_range_canonical_scores_fail_closed_and_persist_strict_json(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["verifier_result"]["rewards"] = {
+        "metric_set": DEFAULT_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 1e308),
+    }
+    trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    summary_text = (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+
+    def reject_nonstandard_constant(value: str) -> None:
+        raise AssertionError(f"non-standard JSON number persisted: {value}")
+
+    summary = json.loads(summary_text, parse_constant=reject_nonstandard_constant)
+    json.dumps(summary, allow_nan=False)
+    assert summary["execution_status"] == "failed"
+    assert summary["scored_attempts"] == 0
+    assert summary["overall_score"] is None
+
+
+def test_deeply_nested_root_reward_fails_closed_without_recursion_crash(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["verifier_result"]["rewards"] = {
+        "overall": 1.0,
+        "nested_diagnostic": "__DEEPLY_NESTED_VALUE__",
+    }
+    nested_value = "[" * 1_000 + "0" + "]" * 1_000
+    serialized = json.dumps(trial_result).replace('"__DEEPLY_NESTED_VALUE__"', nested_value)
+    trial_result_path.write_text(serialized, encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    [failure] = results["agents"]["opencode"]["trial_failures"]["with_skill"]
+    assert "structural limits" in failure["reason"]
+    reward_path = tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json"
+
+    def reject_nonstandard_constant(value: str) -> None:
+        raise AssertionError(f"non-standard JSON number persisted: {value}")
+
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"), parse_constant=reject_nonstandard_constant)
+    json.dumps(persisted, allow_nan=False)
+    assert persisted["evaluation_status"] == "failed"
+    assert "structural limits" in persisted["evaluation_errors"]["collector"]
+    assert "details" not in persisted
+
+
+@pytest.mark.parametrize("wide_value", [[0] * 60_000, "x" * 2_000_000], ids=["nodes", "bytes"])
+def test_wide_root_reward_fails_closed_before_generating_an_unreadable_report_artifact(
+    tmp_path: Path,
+    wide_value: list[int] | str,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["verifier_result"]["rewards"] = {
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        "details": {"wide": wide_value},
+    }
+    trial_result_path.write_text(json.dumps(trial_result, separators=(",", ":")), encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    reward_path = tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json"
+    assert reward_path.stat().st_size <= report_data._MAX_JSON_BYTES
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"))
+    assert persisted["evaluation_status"] == "failed"
+    assert "structural limits" in persisted["evaluation_errors"]["collector"]
+    loaded = report_data.load_agent_data(tmp_path / "results")["opencode"]
+    diagnostics = loaded.get("_report_truncation", {}).get("reasons", [])
+    assert not any(diagnostic.get("code") in {"json_bytes", "json_nodes", "json_depth"} for diagnostic in diagnostics)
+
+
+def test_near_node_limit_reward_fails_before_aggregation_reserves_publication_headroom(
+    tmp_path: Path,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0)
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["verifier_result"]["rewards"] = {
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        "details": {"wide": [0] * 49_978},
+    }
+    trial_result_path.write_text(json.dumps(trial_result, separators=(",", ":")), encoding="utf-8")
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+        agent_models={"opencode": {"model": "m", "source": "cli"}},
+    )
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    [failure] = results["agents"]["opencode"]["trial_failures"]["with_skill"]
+    assert "structural limits" in failure["reason"]
+    reward_path = tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json"
+    persisted = json.loads(reward_path.read_text(encoding="utf-8"))
+    assert persisted["evaluation_status"] == "failed"
+    assert "structural limits" in persisted["evaluation_errors"]["collector"]
+
+
+@pytest.mark.parametrize(
+    "invalid_reward",
+    [float("nan"), 10**400],
+    ids=["nan", "overflowing-integer"],
+)
+def test_invalid_physical_reward_number_fails_closed_without_crashing(
+    tmp_path: Path,
+    invalid_reward: float | int,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    verifier_dir = job_dir / trial_name / "verifier"
+    verifier_dir.mkdir(parents=True)
+    (verifier_dir / "reward.json").write_text(
+        json.dumps({"overall": invalid_reward, "entry_id": "case-001"}),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    [failure] = agent["trial_failures"]["with_skill"]
+    assert "non-finite" in failure["reason"]
+    persisted = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json").read_text(
+            encoding="utf-8"
+        ),
+        parse_constant=lambda value: (_ for _ in ()).throw(AssertionError(value)),
+    )
+    assert persisted["overall"] is None
+    assert persisted["evaluation_status"] == "failed"
+    assert "non-finite" in persisted["evaluation_errors"]["collector"]
+
+
+def test_deeply_nested_physical_reward_fails_closed_without_recursion_crash(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    verifier_dir = job_dir / trial_name / "verifier"
+    verifier_dir.mkdir(parents=True)
+    nested_value = "[" * 1_000 + "0" + "]" * 1_000
+    (verifier_dir / "reward.json").write_text(
+        '{"overall":1.0,"entry_id":"case-001","details":' + nested_value + "}",
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    [failure] = agent["trial_failures"]["with_skill"]
+    assert "structural limits" in failure["reason"]
+    persisted = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert persisted["evaluation_status"] == "failed"
+    assert "structural limits" in persisted["evaluation_errors"]["collector"]
+    assert "details" not in persisted
+
+
+@pytest.mark.parametrize(
+    "invalid_reward",
+    [float("nan"), 10**400],
+    ids=["nan", "overflowing-integer"],
+)
+def test_invalid_step_reward_number_cannot_bypass_missing_root_fail_closed(
+    tmp_path: Path,
+    invalid_reward: float | int,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_name = _write_actual_harbor_022_result(job_dir, reward=1.0, step_rewards=(1.0,))
+    trial_result_path = job_dir / trial_name / "result.json"
+    trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    trial_result["verifier_result"] = None
+    trial_result["step_results"][0]["verifier_result"]["rewards"] = {"overall": invalid_reward}
+    trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+    step_reward_path = job_dir / trial_name / "steps" / "step-1" / "verifier" / "reward.json"
+    step_reward_path.unlink()
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    [failure] = agent["trial_failures"]["with_skill"]
+    assert "missing" in failure["reason"]
+    persisted = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "reward.json").read_text(
+            encoding="utf-8"
+        ),
+        parse_constant=lambda value: (_ for _ in ()).throw(AssertionError(value)),
+    )
+    assert persisted["evaluation_status"] == "failed"
+    assert "missing" in persisted["evaluation_errors"]["collector"]
 
 
 def test_unexpected_case_fails_execution_coverage(tmp_path: Path) -> None:
@@ -1304,3 +1846,114 @@ def test_expected_case_normalizes_generated_skillevaluator_task_prefix(tmp_path:
 
     assert results["execution_status"] == "succeeded"
     assert results["agents"]["opencode"]["pass_at_k"]["with_skill"]["extra_cases"] == []
+
+
+def test_oversized_reward_identities_fail_without_partial_or_oversized_outputs(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    huge_ids = ["a" * 1_100_000, "b" * 1_100_000]
+    trial_names: list[str] = []
+    for index, huge_id in enumerate(huge_ids, start=1):
+        trial_name = f"case-{index:03d}_attempt001"
+        _write_reward(
+            jobs_dir,
+            variant="with",
+            case_id=huge_id,
+            attempt=1,
+            score=1.0,
+            trial_name=trial_name,
+        )
+        trial_names.append(trial_name)
+    _write_complete_job_result(jobs_dir / "demo-opencode-with", trial_names)
+
+    results = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=1,
+        expected_cases=2,
+        expected_case_ids=["case-001", "case-002"],
+        expected_trials=2,
+    )
+    summary_path = tmp_path / "results/opencode/with-skill/summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    assert summary["execution_status"] == "failed"
+    assert summary["scored_attempts"] == 0
+    assert summary_path.stat().st_size < collector_module.GENERATED_JSON_MAX_BYTES
+    encoded_results = json.dumps(results, separators=(",", ":"))
+    encoded_summary = json.dumps(summary, separators=(",", ":"))
+    assert huge_ids[0][:1024] not in encoded_results + encoded_summary
+    assert huge_ids[1][:1024] not in encoded_results + encoded_summary
+
+
+@pytest.mark.parametrize(
+    "credential_id",
+    [
+        "sk-abcdefghijk",
+        "case-sk-abcdefghijk",
+        "case_nvapi-abcdefghijk",
+        "case-ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    ],
+)
+def test_credential_shaped_reward_identity_is_never_an_aggregate_key(
+    tmp_path: Path,
+    credential_id: str,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id=credential_id,
+        attempt=1,
+        score=1.0,
+        trial_name="case-001_attempt001",
+    )
+    _write_complete_job_result(jobs_dir / "demo-opencode-with", ["case-001_attempt001"])
+
+    results = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=1,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+    generated_json = "".join(path.read_text(encoding="utf-8") for path in (tmp_path / "results").rglob("*.json"))
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    assert credential_id not in json.dumps(results, separators=(",", ":"))
+    assert credential_id not in generated_json
+
+
+def test_credential_shaped_trial_name_uses_collision_safe_output_alias(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    credential_trial = "case-sk-abcdefghijk"
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="case-a",
+        attempt=1,
+        score=1.0,
+        trial_name=credential_trial,
+    )
+    _write_complete_job_result(jobs_dir / "demo-opencode-with", [credential_trial])
+
+    results = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=1,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+        expected_trials=1,
+    )
+    results_root = tmp_path / "results"
+    generated_json = "".join(path.read_text(encoding="utf-8") for path in results_root.rglob("*.json"))
+    trial_dirs = [path.name for path in (results_root / "opencode/with-skill/trials").iterdir()]
+
+    assert results["execution_status"] == "succeeded"
+    assert credential_trial not in json.dumps(results, separators=(",", ":"))
+    assert credential_trial not in generated_json
+    assert credential_trial not in trial_dirs
+    assert trial_dirs == ["skillevaluator-trial-collision-000001"]

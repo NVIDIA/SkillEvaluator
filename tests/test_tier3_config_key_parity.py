@@ -90,11 +90,12 @@ def _run_engine(
         ),
     )
     agents = engine_kwargs.pop("agents", ["opencode"])
+    env_mode = engine_kwargs.pop("env_mode", "docker")
     result = runner.run_harbor_eval(
         skill,
         agents,
         output_dir=tmp_path / "results",
-        env_mode="docker",
+        env_mode=env_mode,
         agent_runtime_preflight=engine_kwargs.pop("agent_runtime_preflight", False),
         **engine_kwargs,
     )
@@ -120,6 +121,41 @@ def test_user_config_parses_and_routes_end_to_end(monkeypatch: pytest.MonkeyPatc
     assert captured["collect"]["stop_on_pass"] is False
     assert captured["collect"]["pass_threshold"] == 0.6
     assert captured["collect"]["expected_trials"] == 1
+
+
+def test_environment_kwargs_cli_routes_to_every_harbor_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = """\
+schema_version: 1
+harbor:
+  task_source: evals_json
+"""
+
+    result, captured = _run_engine(
+        monkeypatch,
+        tmp_path,
+        config,
+        env_mode="ec2",
+        environment_kwargs={"region": "us-west-2", "launch_mode": "attach", "instance_id": "i-123"},
+    )
+
+    expected = {
+        "region": "us-west-2",
+        "launch_mode": "attach",
+        "instance_id": "i-123",
+    }
+    assert "error" not in result
+    assert captured["pair"]["environment_kwargs"] == expected
+    assert result["run_config"]["harbor"]["environment_kwargs"] == {
+        "keys": ["instance_id", "launch_mode", "region"],
+        "sources": {
+            "instance_id": "CLI",
+            "launch_mode": "CLI",
+            "region": "CLI",
+        },
+    }
 
 
 def test_stop_on_pass_config_key_routes_sequential_attempt_policy(
@@ -233,6 +269,33 @@ def test_agent_runtime_preflight_defaults_to_enabled(
 
     assert "error" not in result
     assert calls == ["opencode"]
+
+
+def test_environment_kwargs_route_to_runtime_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def observe(**kwargs: Any) -> SimpleNamespace:
+        observed.update(kwargs)
+        return SimpleNamespace(ok=True, detail="")
+
+    monkeypatch.setattr(runtime_preflight, "run_agent_runtime_preflight", observe)
+    result, _captured = _run_engine(
+        monkeypatch,
+        tmp_path,
+        USER_CONFIG,
+        env_mode="e2b",
+        agent_runtime_preflight=True,
+        environment_kwargs={"region": "us-west-2", "labels": {"owner": "eval"}},
+    )
+
+    assert "error" not in result
+    assert observed["environment_kwargs"] == {
+        "region": "us-west-2",
+        "labels": {"owner": "eval"},
+    }
 
 
 def test_agent_runtime_preflight_cli_value_overrides_config(

@@ -140,8 +140,14 @@ completed run directly:
           - trials/
 </FileTree>
 
-- **`result.json`** — the run summary: run ID, per-agent scores and lift,
-  pass@k, the resolved run configuration, and execution status.
+- **`result.json`** — the bounded run summary: run ID, per-agent scores and
+  lift, pass@k aggregates, the resolved run configuration, and execution
+  status. When repeated case, security, or failure details would make this
+  browser-facing file too large, `result_projection` records exactly which
+  fields were omitted and points to the canonical per-agent JSON artifacts by
+  relative path, byte size, and SHA-256 digest. The in-process return value
+  remains complete; readers rebuilding a report from disk follow those
+  artifact references.
 - **`run_config.json`** / **`attempt_policy.json`** — exactly how the run was
   configured: environment, attempts, concurrency, grading mode, pass threshold.
 - **`report.html`** — the human-readable report, generated automatically at
@@ -243,6 +249,14 @@ its pass rate. When both arms contain the same identified cases,
 baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
 McNemar diagnostic over the discordant pairs. Partial or unidentified pairing
 is labeled and does not receive that exact-test result.
+
+Case identifiers used as JSON keys must be printable, free of credential
+material, and no larger than 512 UTF-8 bytes. A reward with an unsafe identity
+is retained as a failed diagnostic but is not scored. For large evaluations,
+`summary.json` keeps exact pass, attempt, failure, and pairing totals while
+publishing bounded case, attempt, and failure-detail samples. The matching
+`*_total`, `*_shown`, and `*_truncated` fields make every omission explicit;
+sampling does not change the aggregate score or paired comparison.
 
 The paired record also reports its pass-rate delta and the minimum p-value the
 exact test could attain with the observed number of discordant pairs. When that

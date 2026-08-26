@@ -5,27 +5,33 @@
 
 from __future__ import annotations
 
+import codecs
+import hashlib
+import importlib.util
 import json
 import logging
 import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import tomllib
 from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from skillevaluator import __version__
@@ -36,7 +42,12 @@ from skillevaluator.provider_config import (
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
-from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+from skillevaluator.tier3.evals_config import (
+    EvalsConfigError,
+    encode_environment_kwarg,
+    load_evals_config,
+    validate_environment_kwargs,
+)
 from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
     _prevalidate_baseline_skill_candidates,
@@ -65,7 +76,10 @@ from skillevaluator.tier3.harbor.progress import (
     secret_values_from_environment,
 )
 from skillevaluator.tier3.harbor.report_data import (
+    DatasetSnapshotContractError,
     build_dataset_snapshot,
+    dataset_snapshot_manifest,
+    encode_dataset_snapshot,
     load_staged_harbor_dataset,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
@@ -76,6 +90,12 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL as _NVIDIA_BUILD_STDIN_SENTINEL,
 )
+from skillevaluator.tier3.harbor.stream_redaction import (
+    MAX_COMMAND_OUTPUT_BYTES,
+    CommandOutputByteBudget,
+    StreamingLogRedactor,
+    StreamingSecretRedactor,
+)
 from skillevaluator.tier3.output_provenance import (
     mark_generated_output_root,
     remove_generated_output_root_if_owned,
@@ -83,37 +103,459 @@ from skillevaluator.tier3.output_provenance import (
     write_output_file_atomically,
 )
 from skillevaluator.tier3.results_location import publish_latest_results
-from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
+from skillevaluator.tier3_environments import (
+    DEFAULT_ENV_MODE,
+    ENV_MODE_LOCAL,
+    HARBOR_ENV_MODES,
+    HARBOR_ENVIRONMENT_EXTRAS,
+    HARBOR_V022_ENVIRONMENT_KWARGS,
+)
+from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 logger = logging.getLogger(__name__)
+
+PUBLISHED_EXECUTION_ERRORS_MAX = 256
+PUBLISHED_EXECUTION_ERROR_MAX_CHARS = 4096
+PUBLISHED_EXECUTION_ERROR_MAX_SERIALIZED_BYTES = 4096
+PUBLISHED_EXECUTION_ERRORS_MAX_SERIALIZED_BYTES = 64 * 1024
+_EXECUTION_ERROR_TRUNCATION_MARKER = "...<truncated>"
+FINAL_RESULT_MAX_BYTES = 2 * 1024 * 1024
+FINAL_RESULT_MAX_DEPTH = 64
+FINAL_RESULT_MAX_NODES = 50_000
+_FINAL_RESULT_PROJECTION_SCHEMA_VERSION = "1.0"
+_FINAL_RESULT_CONTRACT_ERROR = (
+    "Final Tier 3 result exceeds the 2 MiB, depth-64, or 50,000-node publication limit after artifact projection"
+)
+
+
+class _FinalResultContractError(ValueError):
+    """Raised before publishing a result the report loader cannot read."""
+
+
+def _reject_nonfinite_json_constant(_constant: str) -> NoReturn:
+    """Reject JSON constants that are outside the interoperable JSON grammar."""
+    raise ValueError("non-finite JSON number")
+
+
+def _validate_final_result_tree(value: object) -> None:
+    """Match the structural envelope enforced by the report JSON loader."""
+    nodes = 0
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > FINAL_RESULT_MAX_NODES:
+            raise _FinalResultContractError(_FINAL_RESULT_CONTRACT_ERROR)
+        if not isinstance(current, dict | list):
+            continue
+        if depth > FINAL_RESULT_MAX_DEPTH or nodes + len(current) > FINAL_RESULT_MAX_NODES:
+            raise _FinalResultContractError(_FINAL_RESULT_CONTRACT_ERROR)
+        children = current.values() if isinstance(current, dict) else current
+        stack.extend((child, depth + 1) for child in children)
+
+
+def _encode_final_result(value: dict[str, Any]) -> bytes:
+    """Serialize one final result only when the browser/report loader can consume it."""
+    _validate_final_result_tree(value)
+    encoded = _serialize_final_result(value)
+    if len(encoded) > FINAL_RESULT_MAX_BYTES:
+        raise _FinalResultContractError(_FINAL_RESULT_CONTRACT_ERROR)
+    return encoded
+
+
+def _serialize_final_result(value: dict[str, Any]) -> bytes:
+    """Serialize valid JSON without applying the publication size envelope."""
+    try:
+        return json.dumps(value, indent=2, allow_nan=False).encode("utf-8")
+    except (MemoryError, RecursionError, TypeError, UnicodeError, ValueError):
+        raise _FinalResultContractError(_FINAL_RESULT_CONTRACT_ERROR) from None
+
+
+def _result_artifact_reference(run_dir: Path, relative: Path) -> dict[str, Any] | None:
+    """Describe one regular contained artifact by stable relative path and digest."""
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        return None
+    try:
+        with SecureRoot(run_dir) as secure_root:
+            raw, _metadata = secure_root.read_bytes(relative, FINAL_RESULT_MAX_BYTES)
+        decoded = json.loads(
+            raw,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+        if not isinstance(decoded, dict):
+            return None
+        _validate_final_result_tree(decoded)
+    except (OSError, RecursionError, RuntimeError, SecurePathError, UnicodeError, ValueError):
+        return None
+    return {
+        "path": relative.as_posix(),
+        "bytes": len(raw),
+        "sha256": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+    }
+
+
+def _compact_pass_detail(value: object, *, artifact_key: str) -> object:
+    """Retain exact pass aggregates while referencing persisted case details."""
+    if not isinstance(value, dict):
+        return value
+    compact = dict(value)
+    if isinstance(compact.get("cases"), dict):
+        compact["cases"] = {}
+    if isinstance(compact.get("extra_cases"), list):
+        compact["extra_cases"] = []
+    compact["detail_projection"] = {
+        "artifact": artifact_key,
+        "json_pointer": "/pass_at_k",
+    }
+    return compact
+
+
+def _compact_condition_detail(value: object, *, artifact_key: str) -> object:
+    """Retain condition truth while sampling diagnostics stored in its summary."""
+    if not isinstance(value, dict):
+        return value
+    compact = dict(value)
+    raw_errors = compact.get("execution_errors")
+    errors = [str(error) for error in raw_errors if str(error)] if isinstance(raw_errors, list) else []
+    total = compact.get("execution_error_details_total")
+    exact_total = (
+        total if isinstance(total, int) and not isinstance(total, bool) and total >= len(errors) else len(errors)
+    )
+    compact["execution_errors"] = errors[:1]
+    compact["execution_error_details_total"] = exact_total
+    compact["execution_error_details_shown"] = len(compact["execution_errors"])
+    compact["execution_error_details_truncated"] = len(compact["execution_errors"]) < exact_total
+    compact["detail_projection"] = {
+        "artifact": artifact_key,
+        "json_pointer": "",
+    }
+    return compact
+
+
+def _compact_agent_result(
+    agent: str,
+    value: object,
+    *,
+    run_dir: Path,
+) -> tuple[object, dict[str, Any], list[str]]:
+    """Project duplicated agent detail only when its canonical artifact exists."""
+    if not isinstance(value, dict) or Path(agent).name != agent or agent in {"", ".", ".."}:
+        return value, {}, []
+    compact = dict(value)
+    artifact_paths = {
+        "with_skill_summary": Path(agent) / "with-skill" / "summary.json",
+        "without_skill_summary": Path(agent) / "without-skill" / "summary.json",
+        "lift": Path(agent) / "lift.json",
+        "custom_lift": Path(agent) / "custom_lift.json",
+        "pass_at_k_lift": Path(agent) / "pass_at_k_lift.json",
+        "security_attribution": Path(agent) / "security_attribution.json",
+    }
+    references = {
+        key: reference
+        for key, relative in artifact_paths.items()
+        if (reference := _result_artifact_reference(run_dir, relative)) is not None
+    }
+    omitted: list[str] = []
+
+    raw_pass = compact.get("pass_at_k")
+    if isinstance(raw_pass, dict):
+        pass_at_k = dict(raw_pass)
+        for condition, artifact_key in (
+            ("with_skill", "with_skill_summary"),
+            ("without_skill", "without_skill_summary"),
+        ):
+            condition_pass = pass_at_k.get(condition)
+            if artifact_key not in references or not isinstance(condition_pass, dict):
+                continue
+            omitted_pass_fields: list[str] = []
+            if isinstance(condition_pass.get("cases"), dict) and condition_pass["cases"]:
+                omitted_pass_fields.append("cases")
+            if isinstance(condition_pass.get("extra_cases"), list) and condition_pass["extra_cases"]:
+                omitted_pass_fields.append("extra_cases")
+            if omitted_pass_fields:
+                pass_at_k[condition] = _compact_pass_detail(condition_pass, artifact_key=artifact_key)
+                omitted.extend(f"pass_at_k.{condition}.{field}" for field in omitted_pass_fields)
+        compact["pass_at_k"] = pass_at_k
+
+    if "security_attribution" in references and isinstance(compact.get("security_attribution"), dict):
+        security = dict(compact["security_attribution"])
+        if isinstance(security.get("cases"), dict) and security["cases"]:
+            security["cases"] = {}
+            omitted.append("security_attribution.cases")
+            security["detail_projection"] = {
+                "artifact": "security_attribution",
+                "json_pointer": "",
+            }
+            compact["security_attribution"] = security
+
+    conditions = compact.get("conditions")
+    if isinstance(conditions, dict):
+        compact_conditions = dict(conditions)
+        for condition, artifact_key in (
+            ("with_skill", "with_skill_summary"),
+            ("without_skill", "without_skill_summary"),
+        ):
+            condition_detail = compact_conditions.get(condition)
+            if (
+                artifact_key in references
+                and isinstance(condition_detail, dict)
+                and isinstance(condition_detail.get("execution_errors"), list)
+                and condition_detail["execution_errors"]
+            ):
+                compact_conditions[condition] = _compact_condition_detail(
+                    condition_detail,
+                    artifact_key=artifact_key,
+                )
+                omitted.append(f"conditions.{condition}.execution_errors")
+        compact["conditions"] = compact_conditions
+
+    for failure_field in ("agent_runtime_failures", "trial_failures"):
+        raw_failures = compact.get(failure_field)
+        if not isinstance(raw_failures, dict):
+            continue
+        projected_failures = dict(raw_failures)
+        for condition, artifact_key in (
+            ("with_skill", "with_skill_summary"),
+            ("without_skill", "without_skill_summary"),
+        ):
+            if (
+                artifact_key in references
+                and isinstance(projected_failures.get(condition), list)
+                and projected_failures[condition]
+            ):
+                projected_failures[condition] = []
+                omitted.append(f"{failure_field}.{condition}")
+        compact[failure_field] = projected_failures
+
+    job_failures = compact.get("job_failures")
+    if isinstance(job_failures, dict):
+        projected_job_failures = dict(job_failures)
+        for condition, artifact_key in (
+            ("with_skill", "with_skill_summary"),
+            ("without_skill", "without_skill_summary"),
+        ):
+            if (
+                artifact_key in references
+                and isinstance(projected_job_failures.get(condition), str)
+                and projected_job_failures[condition]
+            ):
+                projected_job_failures[condition] = ""
+                omitted.append(f"job_failures.{condition}")
+        compact["job_failures"] = projected_job_failures
+
+    raw_agent_errors = compact.get("execution_errors")
+    if isinstance(raw_agent_errors, list) and raw_agent_errors and references:
+        agent_errors = [str(error) for error in raw_agent_errors if str(error)]
+        total = compact.get("execution_error_details_total")
+        exact_total = (
+            total
+            if isinstance(total, int) and not isinstance(total, bool) and total >= len(agent_errors)
+            else len(agent_errors)
+        )
+        compact["execution_errors"] = agent_errors[:1]
+        compact["execution_error_details_total"] = exact_total
+        compact["execution_error_details_shown"] = len(compact["execution_errors"])
+        compact["execution_error_details_truncated"] = len(compact["execution_errors"]) < exact_total
+        omitted.append("execution_errors")
+
+    if omitted:
+        compact["detail_projection"] = {
+            "artifacts": sorted(references),
+            "omitted_fields": sorted(set(omitted)),
+        }
+    return compact, references, sorted(set(omitted))
+
+
+def _persisted_result_projection(result: dict[str, Any], *, run_dir: Path) -> dict[str, Any]:
+    """Build a compact on-disk result while leaving the returned result complete."""
+    projected = dict(result)
+    projected_agents: dict[str, Any] = {}
+    projection_agents: dict[str, Any] = {}
+    omitted_fields: dict[str, list[str]] = {}
+    raw_agents = result.get("agents")
+    if isinstance(raw_agents, dict):
+        for agent, value in raw_agents.items():
+            compact, references, omitted = _compact_agent_result(str(agent), value, run_dir=run_dir)
+            projected_agents[str(agent)] = compact
+            if references:
+                projection_agents[str(agent)] = references
+            if omitted:
+                omitted_fields[str(agent)] = omitted
+        projected["agents"] = projected_agents
+
+    root_omitted: list[str] = []
+    has_summary_references = any(
+        "with_skill_summary" in references or "without_skill_summary" in references
+        for references in projection_agents.values()
+    )
+    raw_root_errors = projected.get("execution_errors")
+    if has_summary_references and isinstance(raw_root_errors, list):
+        root_errors, observed_total = _published_execution_errors(raw_root_errors)
+        declared_total = projected.get("execution_error_details_total")
+        exact_total = (
+            declared_total
+            if isinstance(declared_total, int)
+            and not isinstance(declared_total, bool)
+            and declared_total >= observed_total
+            else observed_total
+        )
+        compact_root_errors = root_errors[:1]
+        if compact_root_errors != raw_root_errors:
+            projected["execution_errors"] = compact_root_errors
+            root_omitted.append("execution_errors")
+        projected["execution_error_details_total"] = exact_total
+        projected["execution_error_details_shown"] = len(compact_root_errors)
+        projected["execution_error_details_truncated"] = len(compact_root_errors) < exact_total
+        if projected.get("error") != compact_root_errors:
+            projected["error"] = compact_root_errors
+            root_omitted.append("error")
+
+    projection = {
+        "schema_version": _FINAL_RESULT_PROJECTION_SCHEMA_VERSION,
+        "mode": "artifact_referenced" if omitted_fields or root_omitted else "inline",
+        "returned_result": "full",
+        "persisted_result": "compact" if omitted_fields or root_omitted else "inline",
+        "agents": projection_agents,
+        "omitted_detail_fields": omitted_fields,
+        "omitted_root_detail_fields": sorted(set(root_omitted)),
+    }
+    result["result_projection"] = projection
+    projected["result_projection"] = projection
+    return projected
+
+
+def _write_final_result(result_path: Path, result: dict[str, Any]) -> dict[str, Any]:
+    """Project, validate, and atomically publish the final result contract."""
+    inline_projection = {
+        "schema_version": _FINAL_RESULT_PROJECTION_SCHEMA_VERSION,
+        "mode": "inline",
+        "returned_result": "full",
+        "persisted_result": "inline",
+        "agents": {},
+        "omitted_detail_fields": {},
+        "omitted_root_detail_fields": [],
+    }
+    result["result_projection"] = inline_projection
+    full_encoded = _serialize_final_result(result)
+    try:
+        _validate_final_result_tree(result)
+    except _FinalResultContractError:
+        pass
+    else:
+        if len(full_encoded) <= FINAL_RESULT_MAX_BYTES:
+            write_output_file_atomically(result_path, full_encoded)
+            return result
+
+    projected = _persisted_result_projection(result, run_dir=result_path.parent)
+    encoded = _encode_final_result(projected)
+    write_output_file_atomically(result_path, encoded)
+    return projected
+
+
+def _serialized_json_bytes(value: object) -> int:
+    """Return bytes produced by the same JSON settings used for result files."""
+    return len(json.dumps(value, indent=2).encode("utf-8"))
+
+
+def _bounded_execution_error(value: object) -> str:
+    """Redact and bound one diagnostic by characters and serialized bytes."""
+    redacted = redact_sensitive_text(str(value))
+    safe = "".join(character if character.isprintable() else " " for character in redacted).strip()
+    if not safe:
+        return ""
+    if (
+        len(safe) <= PUBLISHED_EXECUTION_ERROR_MAX_CHARS
+        and _serialized_json_bytes(safe) <= PUBLISHED_EXECUTION_ERROR_MAX_SERIALIZED_BYTES
+    ):
+        return safe
+
+    maximum_prefix_chars = min(
+        len(safe),
+        PUBLISHED_EXECUTION_ERROR_MAX_CHARS - len(_EXECUTION_ERROR_TRUNCATION_MARKER),
+    )
+    lower = 0
+    upper = maximum_prefix_chars
+    while lower < upper:
+        middle = (lower + upper + 1) // 2
+        candidate = safe[:middle] + _EXECUTION_ERROR_TRUNCATION_MARKER
+        if _serialized_json_bytes(candidate) <= PUBLISHED_EXECUTION_ERROR_MAX_SERIALIZED_BYTES:
+            lower = middle
+        else:
+            upper = middle - 1
+    return safe[:lower] + _EXECUTION_ERROR_TRUNCATION_MARKER
+
+
+def _published_execution_errors(errors: list[object]) -> tuple[list[str], int]:
+    """Return a redacted, byte-bounded, de-duplicated diagnostic sample."""
+    published: list[str] = []
+    seen_details: set[str] = set()
+    seen_publications: set[str] = set()
+    for error in errors:
+        redacted = redact_sensitive_text(str(error))
+        detail = "".join(character if character.isprintable() else " " for character in redacted).strip()
+        if not detail or detail in seen_details:
+            continue
+        seen_details.add(detail)
+        safe = _bounded_execution_error(detail)
+        if safe in seen_publications:
+            continue
+        seen_publications.add(safe)
+        if (
+            len(published) < PUBLISHED_EXECUTION_ERRORS_MAX
+            and _serialized_json_bytes([*published, safe]) <= PUBLISHED_EXECUTION_ERRORS_MAX_SERIALIZED_BYTES
+        ):
+            published.append(safe)
+    return published, len(seen_details)
 
 
 def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> dict[str, Any]:
     """Persist immutable dataset and evaluator identity before staging cleanup."""
     entries = load_staged_harbor_dataset(run_dir)
+    if getattr(entries, "_report_truncation", None):
+        raise DatasetSnapshotContractError
     if not entries:
         entries = [{"id": task_id} for task_id in fallback_task_ids]
-    snapshot = build_dataset_snapshot(entries, evaluator_version=__version__)
+    try:
+        snapshot = build_dataset_snapshot(entries, evaluator_version=__version__)
+        encoded = encode_dataset_snapshot(snapshot)
+    except DatasetSnapshotContractError:
+        raise
+    except (MemoryError, RecursionError, TypeError, UnicodeError, ValueError):
+        raise DatasetSnapshotContractError from None
     target = run_dir / "dataset_snapshot.json"
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=run_dir,
-        prefix=".dataset_snapshot.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        temporary = Path(handle.name)
-        json.dump(snapshot, handle, indent=2)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(target)
+    write_output_file_atomically(target, encoded)
     return snapshot
 
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _NVIDIA_BUILD_BRIDGED_AGENT_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+_HARBOR_RUN_TIMEOUT_SECONDS = 7200.0
+_HARBOR_RUN_OUTPUT_MAX_BYTES = MAX_COMMAND_OUTPUT_BYTES
+_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS = 16 * 1024
+_HARBOR_RUN_OUTPUT_READ_BYTES = 64 * 1024
+_HARBOR_RUN_POLL_SECONDS = 0.01
+_HARBOR_RUN_TERMINATE_SECONDS = 0.1
+_HARBOR_RUN_REAP_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class _BoundedHarborProcessResult:
+    returncode: int
+    output_tail: str
+    output_exceeded: bool
+
+
+class _HarborRunTimeoutError(RuntimeError):
+    """Raised after timed-out Harbor orchestration cleanup completes."""
+
+
+def _redact_harbor_diagnostic(detail: object, *, secret_values: set[str]) -> str:
+    """Normalize a complete diagnostic, then remove synthesized exact secrets."""
+    normalized = redact_progress_detail(detail, secret_values=secret_values)
+    exact_redactor = StreamingSecretRedactor(value for value in secret_values if len(value) >= 4)
+    return exact_redactor.feed(normalized) + exact_redactor.finish()
 
 
 def _reserve_run_dir(results_root: Path, timestamp: str) -> Path:
@@ -138,87 +580,279 @@ def _reserve_run_dir(results_root: Path, timestamp: str) -> Path:
     raise RuntimeError("Could not reserve a unique Tier 3 run directory")
 
 
-_HARBOR_BASE_ENV_VARS = frozenset(
+_TRUSTED_NETWORK_HOST_ENV_VARS = frozenset(
     {
-        "COMSPEC",
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "PATH",
-        "PATHEXT",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "WINDIR",
-        "XDG_RUNTIME_DIR",
+        "ALL_PROXY",
+        "CURL_CA_BUNDLE",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
     }
 )
-_HARBOR_ENV_MODE_VARS = {
-    "docker": frozenset(
-        {
-            "DOCKER_API_VERSION",
-            "DOCKER_CERT_PATH",
-            "DOCKER_CONFIG",
-            "DOCKER_CONTEXT",
-            "DOCKER_HOST",
-            "DOCKER_TLS_VERIFY",
-        }
-    ),
-    "daytona": frozenset(
-        {
-            "DAYTONA_API_KEY",
-            "DAYTONA_API_URL",
-            "DAYTONA_JWT_TOKEN",
-            "DAYTONA_ORGANIZATION_ID",
-            "DAYTONA_TARGET",
-        }
-    ),
-    "e2b": frozenset({"E2B_API_KEY"}),
-    "modal": frozenset({"MODAL_ENVIRONMENT", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"}),
-    "runloop": frozenset({"RUNLOOP_API_KEY"}),
-    "langsmith": frozenset(
-        {
-            "LANGCHAIN_API_KEY",
-            "LANGSMITH_API_KEY",
-            "LANGSMITH_ENDPOINT",
-            "LANGSMITH_PROFILE",
-            "LANGSMITH_SANDBOX_API_URL",
-        }
-    ),
-    "gke": frozenset(
-        {"CLOUDSDK_CONFIG", "GCP_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "KUBECONFIG"}
-    ),
-    "novita": frozenset({"NOVITA_API_KEY", "NOVITA_API_URL", "NOVITA_BASE_URL", "NOVITA_DOMAIN"}),
-    "islo": frozenset({"ISLO_API_KEY", "ISLO_API_URL", "ISLO_COMPUTE_URL"}),
-    "tensorlake": frozenset({"TENSORLAKE_API_KEY"}),
-    "cwsandbox": frozenset({"CWSANDBOX_API_KEY"}),
-    "wandb": frozenset({"WANDB_API_KEY", "WANDB_BASE_URL"}),
-    "use-computer": frozenset(
-        {"USE_COMPUTER_API_KEY", "USE_COMPUTER_HOST", "USE_COMPUTER_SNAPSHOT", "USE_COMPUTER_VERSION"}
-    ),
+_HARBOR_BASE_ENV_VARS = _TRUSTED_NETWORK_HOST_ENV_VARS | {
+    "COMSPEC",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "WINDIR",
+    "XDG_RUNTIME_DIR",
 }
-_BEDROCK_HOST_ENV_VARS = frozenset(
+_AWS_HOST_ENV_VARS = frozenset(
     {
+        "AWS_ACCOUNT_ID",
+        "AWS_ACCOUNT_ID_ENDPOINT_MODE",
         "AWS_ACCESS_KEY_ID",
-        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_AUTH_SCHEME_PREFERENCE",
+        "AWS_CA_BUNDLE",
         "AWS_CONFIG_FILE",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
         "AWS_CONTAINER_CREDENTIALS_FULL_URI",
         "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CREDENTIAL_EXPIRATION",
+        "AWS_CREDENTIAL_FILE",
+        "AWS_CSM_CLIENT_ID",
+        "AWS_CSM_ENABLED",
+        "AWS_CSM_HOST",
+        "AWS_CSM_PORT",
+        "AWS_DATA_PATH",
+        "AWS_DEFAULT_PROFILE",
         "AWS_DEFAULT_REGION",
+        "AWS_DEFAULTS_MODE",
+        "AWS_DISABLE_HOST_PREFIX_INJECTION",
+        "AWS_DISABLE_REQUEST_COMPRESSION",
+        "AWS_EC2_METADATA_DISABLED",
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+        "AWS_EC2_METADATA_V1_DISABLED",
+        "AWS_ENDPOINT_DISCOVERY_ENABLED",
+        "AWS_ENDPOINT_URL",
+        "AWS_ENDPOINT_URL_SIGNIN",
+        "AWS_ENDPOINT_URL_SSO",
+        "AWS_ENDPOINT_URL_SSO_OIDC",
+        "AWS_ENDPOINT_URL_STS",
+        "AWS_EXECUTION_ENV",
+        "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+        "AWS_IMDS_USE_IPV6",
+        "AWS_LOGIN_CACHE_DIRECTORY",
+        "AWS_MAX_ATTEMPTS",
+        "AWS_METADATA_SERVICE_NUM_ATTEMPTS",
+        "AWS_METADATA_SERVICE_TIMEOUT",
+        "AWS_NEW_RETRIES_2026",
         "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_REQUEST_CHECKSUM_CALCULATION",
+        "AWS_REQUEST_MIN_COMPRESSION_SIZE_BYTES",
+        "AWS_RESPONSE_CHECKSUM_VALIDATION",
+        "AWS_RETRY_MODE",
         "AWS_ROLE_ARN",
         "AWS_ROLE_SESSION_NAME",
         "AWS_SDK_LOAD_CONFIG",
+        "AWS_SDK_UA_APP_ID",
         "AWS_SECRET_ACCESS_KEY",
+        "AWS_SECURITY_TOKEN",
         "AWS_SESSION_TOKEN",
         "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_SIGV4A_SIGNING_REGION_SET",
+        "AWS_STS_REGIONAL_ENDPOINTS",
+        "AWS_USE_DUALSTACK_ENDPOINT",
+        "AWS_USE_FIPS_ENDPOINT",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "BOTOCORE_TCP_KEEPALIVE",
     }
 )
+_EC2_HOST_ENV_VARS = _AWS_HOST_ENV_VARS | {"AWS_ENDPOINT_URL_EC2", "SSH_AUTH_SOCK"}
+_DOCKER_HOST_ENV_VARS = frozenset(
+    {
+        "COMPOSE_ANSI",
+        "COMPOSE_HTTP_TIMEOUT",
+        "COMPOSE_IGNORE_ORPHANS",
+        "COMPOSE_PARALLEL_LIMIT",
+        "COMPOSE_PROGRESS",
+        "COMPOSE_STATUS_STDOUT",
+        "DOCKER_API_VERSION",
+        "DOCKER_AUTH_CONFIG",
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "DOCKER_CONTEXT",
+        "DOCKER_CUSTOM_HEADERS",
+        "DOCKER_DEFAULT_PLATFORM",
+        "DOCKER_HOST",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+        "SSH_AUTH_SOCK",
+    }
+)
+_HARBOR_ENV_MODE_VARS = {
+    "docker": _DOCKER_HOST_ENV_VARS,
+    "daytona": frozenset(
+        {
+            "DAYTONA_API_KEY",
+            "DAYTONA_API_URL",
+            "DAYTONA_HAPPY_EYEBALLS_DELAY",
+            "DAYTONA_JWT_TOKEN",
+            "DAYTONA_ORGANIZATION_ID",
+            "DAYTONA_SERVER_URL",
+            "DAYTONA_TARGET",
+        }
+    ),
+    "e2b": frozenset({"E2B_API_KEY", "E2B_API_URL", "E2B_DOMAIN", "E2B_SANDBOX_URL"}),
+    "modal": frozenset(
+        {
+            "MODAL_CONFIG_PATH",
+            "MODAL_ENVIRONMENT",
+            "MODAL_OVERRIDE_HEADERS",
+            "MODAL_PROFILE",
+            "MODAL_SERVER_URL",
+            "MODAL_TOKEN_ID",
+            "MODAL_TOKEN_SECRET",
+        }
+    ),
+    "runloop": frozenset({"RUNLOOP_API_KEY", "RUNLOOP_BASE_URL", "RUNLOOP_CUSTOM_HEADERS"}),
+    "langsmith": frozenset(
+        {
+            "LANGCHAIN_API_KEY",
+            "LANGCHAIN_ENDPOINT",
+            "LANGSMITH_API_KEY",
+            "LANGSMITH_CONFIG_FILE",
+            "LANGSMITH_ENDPOINT",
+            "LANGSMITH_PROFILE",
+            "LANGSMITH_SANDBOX_API_URL",
+            "LANGSMITH_WORKSPACE_ID",
+        }
+    ),
+    "ec2": _EC2_HOST_ENV_VARS,
+    "gke": frozenset(
+        {
+            "CLOUDSDK_ACTIVE_CONFIG_NAME",
+            "CLOUDSDK_AUTH_ACCESS_TOKEN",
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+            "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+            "CLOUDSDK_CONFIG",
+            "CLOUDSDK_CORE_ACCOUNT",
+            "CLOUDSDK_CORE_PROJECT",
+            "GCP_PROJECT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_QUOTA_PROJECT",
+            "KUBECONFIG",
+        }
+    ),
+    "ack": _DOCKER_HOST_ENV_VARS
+    | {
+        "KUBECONFIG",
+        "KUBERNETES_SERVICE_HOST",
+        "KUBERNETES_SERVICE_PORT",
+    },
+    "openshift": frozenset({"KUBECONFIG"}),
+    "novita": frozenset(
+        {
+            "NOVITA_ACCESS_TOKEN",
+            "NOVITA_API_KEY",
+            "NOVITA_API_URL",
+            "NOVITA_BASE_URL",
+            "NOVITA_DOMAIN",
+            "NOVITA_SANDBOX_URL",
+        }
+    ),
+    "apple-container": frozenset(),
+    "singularity": frozenset(
+        {
+            "APPTAINER_AUTHFILE",
+            "APPTAINER_CONFIGDIR",
+            "APPTAINER_DOCKER_PASSWORD",
+            "APPTAINER_DOCKER_USERNAME",
+            "SINGULARITY_AUTHFILE",
+            "SINGULARITY_CONFIGDIR",
+            "SINGULARITY_DOCKER_PASSWORD",
+            "SINGULARITY_DOCKER_USERNAME",
+        }
+    ),
+    "islo": frozenset({"ISLO_API_KEY", "ISLO_API_URL", "ISLO_COMPUTE_URL"}),
+    "tensorlake": frozenset(
+        {
+            "TENSORLAKE_API_KEY",
+            "TENSORLAKE_API_URL",
+            "TENSORLAKE_ORGANIZATION_ID",
+            "TENSORLAKE_PAT",
+            "TENSORLAKE_PROJECT_ID",
+            "TENSORLAKE_SANDBOX_PROXY_URL",
+        }
+    ),
+    "cwsandbox": frozenset({"CWSANDBOX_API_KEY", "CWSANDBOX_BASE_URL"}),
+    "wandb": frozenset({"NETRC", "WANDB_API_KEY", "WANDB_BASE_URL", "WANDB_ENTITY", "WANDB_PROJECT"}),
+    "use-computer": frozenset(
+        {"USE_COMPUTER_API_KEY", "USE_COMPUTER_HOST", "USE_COMPUTER_SNAPSHOT", "USE_COMPUTER_VERSION"}
+    ),
+    "cua-cloud": frozenset(
+        {
+            "CUA_BASE_URL",
+            "CUA_CLIENT_ID",
+            "CUA_CLIENT_SECRET",
+            "CUA_CLOUD_NAMESPACE",
+            "CUA_CLOUD_STARTUP_COMMAND",
+            "CUA_TOKEN_URL",
+        }
+    ),
+    "blaxel": frozenset(
+        {
+            "BL_API_KEY",
+            "BL_API_VERSION",
+            "BL_CLIENT_CREDENTIALS",
+            "BL_ENV",
+            "BL_REGION",
+            "BL_WORKSPACE",
+        }
+    ),
+    "opensandbox": frozenset({"OPENSANDBOX_API_KEY", "OPENSANDBOX_DOMAIN"}),
+    "beam": frozenset(
+        {
+            "API_HOST",
+            "API_PORT",
+            "BEAM_TOKEN",
+            "GATEWAY_HOST",
+            "GATEWAY_PORT",
+            "INTERNAL_API_HOST",
+            "INTERNAL_API_PORT",
+            "REALTIME_HOST",
+        }
+    ),
+    "skypilot": _DOCKER_HOST_ENV_VARS
+    | frozenset(
+        {
+            "HARBOR_SKYPILOT_REGISTRY",
+            "SKYPILOT_API_SERVER_ENDPOINT",
+            "SKYPILOT_GLOBAL_CONFIG",
+            "SKYPILOT_PROJECT_CONFIG",
+            "SKYPILOT_SERVICE_ACCOUNT_TOKEN",
+        }
+    ),
+    "hf-sandbox": frozenset({"HF_ENDPOINT", "HF_HOME", "HF_TOKEN", "HF_TOKEN_PATH", "HUGGING_FACE_HUB_TOKEN"}),
+    "hyperbrowser": _DOCKER_HOST_ENV_VARS | frozenset({"HYPERBROWSER_API_KEY", "HYPERBROWSER_BASE_URL"}),
+    "vercel": frozenset({"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"}),
+}
+_BEDROCK_HOST_ENV_VARS = _AWS_HOST_ENV_VARS | {
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_CSM_ENABLED",
+    "AWS_CSM_PORT",
+    "AWS_ENDPOINT_URL_BEDROCK",
+    "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+}
 _RUNTIME_ENV_HOST_CONTROL_NAMES = (
     frozenset(
         {
@@ -231,6 +865,7 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
             "CLASSPATH",
             "COMSPEC",
             "CODEX_HOME",
+            "CURL_CA_BUNDLE",
             "ENV",
             "GCONV_PATH",
             "GEMINI_CLI_HOME",
@@ -270,6 +905,10 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
             "XDG_RUNTIME_DIR",
             "ZDOTDIR",
             "_JAVA_OPTIONS",
+            "all_proxy",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
         }
     )
     | _BEDROCK_HOST_ENV_VARS
@@ -277,6 +916,7 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
     | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
 )
 _RUNTIME_ENV_HOST_CONTROL_PREFIXES = (
+    "AWS_",
     "BASH_FUNC_",
     "COMPOSE_",
     "DOCKER_",
@@ -363,6 +1003,89 @@ def _nvidia_build_key_handoff(
     return _NvidiaBuildKeyHandoff(subprocess_env)
 
 
+_HARBOR_RUNTIME_POLICY_KWARGS = frozenset(
+    {
+        "context_id",
+        "cpu_enforcement_policy",
+        "delete",
+        "environment_dir",
+        "environment_name",
+        "extra_allowed_hosts",
+        "extra_docker_compose",
+        "force_build",
+        "keep_containers",
+        "logger",
+        "memory_enforcement_policy",
+        "mounts",
+        "mounts_json",
+        "network_policy",
+        "override_cpus",
+        "override_gpus",
+        "override_memory_mb",
+        "override_storage_mb",
+        "override_tpu",
+        "persistent_env",
+        "pod_capabilities_add",
+        "pod_capabilities_drop",
+        "pod_overrides",
+        "pod_privileged",
+        "pod_run_as_group",
+        "pod_run_as_user",
+        "phase_network_policies",
+        "session_id",
+        "suppress_override_warnings",
+        "extra_env",
+        "extra_volume_mounts",
+        "extra_volumes",
+        "init_containers",
+        "task_env_config",
+        "trial_paths",
+    }
+)
+
+_HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
+    "ack": frozenset(
+        {
+            "build_job_namespace",
+            "buildkit_address",
+            "dind_image",
+            "memory_limit_multiplier",
+            "pod_annotations",
+            "pod_labels",
+            "sandbox_env_vars",
+            "service_account",
+            "use_buildkit",
+        }
+    ),
+    "blaxel": frozenset({"dind_extra_args"}),
+    "cua-cloud": frozenset({"claim_spec"}),
+    "daytona": frozenset({"network_block_all"}),
+    "ec2": frozenset({"iam_instance_profile", "strict_host_key_checking"}),
+    "gke": frozenset({"memory_limit_multiplier"}),
+    "modal": frozenset({"volumes"}),
+    "opensandbox": frozenset({"volumes"}),
+    "openshift": frozenset({"service_account_name"}),
+    "singularity": frozenset({"singularity_no_mount"}),
+    "use-computer": frozenset({"resources"}),
+    "vercel": frozenset({"ports"}),
+}
+
+
+def _environment_kwarg_policy_error(env_mode: str, environment_kwargs: Mapping[str, Any]) -> str | None:
+    if not environment_kwargs:
+        return None
+    if env_mode == "docker":
+        return "Environment kwargs are not supported for SkillEvaluator Docker mode"
+    if env_mode == ENV_MODE_LOCAL:
+        return "Environment kwargs are not supported for SkillEvaluator local mode"
+    reserved = _HARBOR_RUNTIME_POLICY_KWARGS | _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS.get(env_mode, frozenset())
+    if collisions := sorted(reserved & environment_kwargs.keys()):
+        return "Environment kwarg(s) reserved for Harbor runtime policy: " + ", ".join(collisions)
+    if unknown := sorted(environment_kwargs.keys() - HARBOR_V022_ENVIRONMENT_KWARGS[env_mode]):
+        return f"Harbor 0.22.0 environment '{env_mode}' does not accept environment kwarg(s): " + ", ".join(unknown)
+    return None
+
+
 def build_harbor_run_command(
     *,
     dataset_path: str | Path,
@@ -381,12 +1104,19 @@ def build_harbor_run_command(
     override_storage_mb: int | None = None,
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Build a Harbor invocation for a built-in environment type or local mode."""
     if env_mode not in HARBOR_ENV_MODES:
         raise ValueError(f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}")
     if agent_import_path and env_mode not in {"docker", ENV_MODE_LOCAL}:
         raise ValueError("agent_import_path is supported only with --env docker or local")
+    validated_environment_kwargs = validate_environment_kwargs(
+        dict(environment_kwargs or {}),
+        env_mode=env_mode,
+    )
+    if policy_error := _environment_kwarg_policy_error(env_mode, validated_environment_kwargs):
+        raise ValueError(policy_error)
 
     command = [
         _harbor_bin(),
@@ -443,6 +1173,8 @@ def build_harbor_run_command(
         command.extend(["--env", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
         command.extend(["--agent", agent, "--env", env_mode])
+    for name, value in sorted(validated_environment_kwargs.items()):
+        command.extend(["--ek", encode_environment_kwarg(name, value)])
     if jobs_dir is not None:
         command.extend(["--jobs-dir", str(jobs_dir)])
     if disable_verification:
@@ -671,13 +1403,208 @@ def _validate_agent_provider_credentials(
     return []
 
 
+def _environment_kwarg_prerequisite_errors(
+    env_mode: str,
+    environment_kwargs: Mapping[str, Any] | None,
+) -> list[str]:
+    """Validate constructor requirements Harbor cannot check in ``preflight``."""
+    try:
+        kwargs = validate_environment_kwargs(
+            dict(environment_kwargs or {}),
+            env_mode=env_mode,
+        )
+    except (RecursionError, TypeError, ValueError) as exc:
+        return [f"Invalid --environment-kwarg: {exc}"]
+    if policy_error := _environment_kwarg_policy_error(env_mode, kwargs):
+        return [policy_error]
+
+    def invalid_strings(*names: str) -> list[str]:
+        return [name for name in names if not isinstance(kwargs.get(name), str) or not kwargs[name].strip()]
+
+    required: tuple[str, ...] = ()
+    if env_mode == "gke":
+        required = ("cluster_name", "region", "namespace", "registry_location", "registry_name")
+    elif env_mode == "ack":
+        required = ("namespace",)
+    elif env_mode == "ec2":
+        required = ("region",)
+    if invalid := invalid_strings(*required):
+        return [
+            f"Harbor environment '{env_mode}' requires non-empty string --environment-kwarg for: " + ", ".join(invalid)
+        ]
+    if env_mode == "ack" and (
+        invalid := invalid_strings(*(name for name in ("context", "kubeconfig") if name in kwargs))
+    ):
+        return ["Harbor environment 'ack' requires non-empty string --environment-kwarg for: " + ", ".join(invalid)]
+    if env_mode == "opensandbox" and kwargs.get("domain") is not None and invalid_strings("domain"):
+        return ["Harbor environment 'opensandbox' requires domain to be a non-empty string when provided"]
+    if env_mode == "ec2":
+        launch_mode_value = kwargs.get("launch_mode", "ephemeral")
+        if not isinstance(launch_mode_value, str):
+            return ["Harbor environment 'ec2' requires launch_mode to be 'ephemeral' or 'attach'"]
+        launch_mode = launch_mode_value
+        if launch_mode not in {"ephemeral", "attach"}:
+            return ["Harbor environment 'ec2' requires launch_mode to be 'ephemeral' or 'attach'"]
+        conditional = "ami_id" if launch_mode == "ephemeral" else "instance_id"
+        if invalid_strings(conditional):
+            return [
+                f"Harbor environment 'ec2' launch_mode={launch_mode!r} requires --environment-kwarg {conditional}=VALUE"
+            ]
+        if (ssh_key_path := kwargs.get("ssh_key_path")) is not None:
+            try:
+                ssh_key_exists = isinstance(ssh_key_path, str) and Path(ssh_key_path).expanduser().is_file()
+            except (OSError, RuntimeError):
+                ssh_key_exists = False
+            if not ssh_key_exists:
+                return ["Harbor environment 'ec2' requires ssh_key_path to name an existing regular file"]
+        if launch_mode == "ephemeral" and kwargs.get("use_public_ip") is False and invalid_strings("subnet_id"):
+            return ["Harbor environment 'ec2' use_public_ip=False requires a non-empty subnet_id"]
+    return []
+
+
+def _environment_extra_install_hint(env_mode: str) -> str:
+    extra = HARBOR_ENVIRONMENT_EXTRAS.get(env_mode)
+    if extra is not None:
+        return f"Install 'harbor[{extra}]==0.22.0'."
+    system_hints = {
+        "apple-container": "Install the Apple container CLI; Harbor has no Python extra for this backend.",
+        "openshift": "Install the OpenShift oc CLI; Harbor has no Python extra for this backend.",
+        "singularity": "Install the singularity CLI; Harbor has no Python extra for this backend.",
+    }
+    return system_hints.get(env_mode, "Reinstall SkillEvaluator with its Tier 3 extra.")
+
+
+def _check_ack_cluster_readiness(environment_kwargs: Mapping[str, Any]) -> None:
+    """Load ACK credentials and run a bounded namespaced pod-list probe."""
+    from kubernetes import client as k8s_client
+    from kubernetes import config as k8s_config
+
+    load_kwargs: dict[str, str] = {}
+    if context := environment_kwargs.get("context"):
+        load_kwargs["context"] = str(context)
+    if kubeconfig := environment_kwargs.get("kubeconfig"):
+        load_kwargs["config_file"] = str(kubeconfig)
+    try:
+        k8s_config.load_kube_config(**load_kwargs)
+    except k8s_config.ConfigException:
+        k8s_config.load_incluster_config()
+
+    api_client = k8s_client.ApiClient()
+    try:
+        core_api = k8s_client.CoreV1Api(api_client)
+        core_api.list_namespaced_pod(
+            namespace=str(environment_kwargs["namespace"]),
+            limit=1,
+            _request_timeout=(5, 10),
+        )
+    finally:
+        api_client.close()
+
+
+_ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS = 20
+_ACK_CLUSTER_READINESS_REAP_TIMEOUT_SECONDS = 5
+_ACK_CLUSTER_READINESS_PROBE_CODE = """\
+import json
+import sys
+
+from skillevaluator.tier3.harbor.runner import _check_ack_cluster_readiness
+
+try:
+    _check_ack_cluster_readiness(json.loads(sys.stdin.read()))
+except Exception as exc:
+    sys.stderr.write((str(exc) or type(exc).__name__)[:4096])
+    raise SystemExit(1) from None
+"""
+
+
+def _terminate_ack_readiness_process(process: subprocess.Popen[str]) -> None:
+    """Kill the ACK probe and its exec-auth descendants, then reap it."""
+    if os.name == "posix":
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=_ACK_CLUSTER_READINESS_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=_ACK_CLUSTER_READINESS_REAP_TIMEOUT_SECONDS)
+
+
+def _check_ack_cluster_readiness_subprocess(
+    environment_kwargs: Mapping[str, Any],
+    *,
+    subprocess_env: Mapping[str, str],
+) -> None:
+    """Run ACK's bounded pod-list probe under Harbor's exact child environment."""
+    validated = validate_environment_kwargs(dict(environment_kwargs), env_mode="ack")
+    if policy_error := _environment_kwarg_policy_error("ack", validated):
+        raise ValueError(policy_error)
+    payload = {name: validated[name] for name in ("namespace", "context", "kubeconfig") if name in validated}
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    child_env = dict(subprocess_env)
+    redacted_values = secret_values_from_environment(child_env)
+    redacted_values.update(str(value) for value in payload.values() if isinstance(value, str) and value)
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", _ACK_CLUSTER_READINESS_PROBE_CODE],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=child_env,
+            start_new_session=os.name == "posix",
+        )
+        stdout, stderr = process.communicate(
+            encoded,
+            timeout=_ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        assert process is not None
+        _terminate_ack_readiness_process(process)
+        raise RuntimeError(
+            "ACK namespaced pod-list readiness probe timed out after "
+            f"{_ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS} seconds"
+        ) from None
+    except OSError as exc:
+        if process is not None and process.returncode is None:
+            _terminate_ack_readiness_process(process)
+        detail = redact_progress_detail(exc, secret_values=redacted_values) or type(exc).__name__
+        raise RuntimeError(f"ACK namespaced pod-list readiness probe could not start: {detail}") from None
+    if process.returncode == 0:
+        return
+    output = "\n".join(part for part in (stderr, stdout) if part).strip()
+    detail = redact_progress_detail(output, secret_values=redacted_values) or f"probe exited {process.returncode}"
+    raise RuntimeError(f"ACK namespaced pod-list readiness probe failed: {detail[-2000:]}")
+
+
+def _modal_custom_config_status() -> tuple[bool, str | None]:
+    raw = os.environ.get("MODAL_CONFIG_PATH")
+    if raw is None:
+        return False, None
+    if not raw.strip():
+        return False, "MODAL_CONFIG_PATH must name an existing regular file."
+    try:
+        is_file = Path(raw).expanduser().is_file()
+    except (OSError, RuntimeError):
+        is_file = False
+    if not is_file:
+        return False, "MODAL_CONFIG_PATH must name an existing regular file."
+    return True, None
+
+
 def _check_prerequisites(
     env_mode: str = DEFAULT_ENV_MODE,
     agents: list[str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
+    subprocess_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Check Harbor and the selected environment (built-in or local mode)."""
     if env_mode not in HARBOR_ENV_MODES:
         return [f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(HARBOR_ENV_MODES))}"]
+    if kwarg_errors := _environment_kwarg_prerequisite_errors(env_mode, environment_kwargs):
+        return kwarg_errors
     if env_mode == ENV_MODE_LOCAL:
         from skillevaluator.tier3.harbor import local_sandbox
 
@@ -691,6 +1618,38 @@ def _check_prerequisites(
             "harbor CLI not found. Reinstall with the Tier 3 extra: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         ]
+
+    if env_mode == "singularity" and shutil.which("singularity") is None:
+        return ["Harbor environment 'singularity' requires the singularity CLI on PATH."]
+    if env_mode == "islo" and not os.environ.get("ISLO_API_KEY", "").strip():
+        return ["Harbor environment 'islo' requires a non-empty ISLO_API_KEY in the host environment."]
+    if env_mode == "opensandbox" and (environment_kwargs or {}).get("domain") is None:
+        opensandbox_env = (
+            subprocess_env
+            if subprocess_env is not None
+            else _selected_host_environment(
+                _HARBOR_BASE_ENV_VARS | _HARBOR_ENV_MODE_VARS["opensandbox"],
+                os.environ,
+            )
+        )
+        if not opensandbox_env.get("OPENSANDBOX_DOMAIN", "").strip():
+            return [
+                "Harbor environment 'opensandbox' requires a non-empty domain --environment-kwarg "
+                "or child-visible OPENSANDBOX_DOMAIN."
+            ]
+
+    if env_mode == "modal":
+        _, modal_config_error = _modal_custom_config_status()
+        if modal_config_error:
+            return [modal_config_error]
+        try:
+            modal_spec = importlib.util.find_spec("modal")
+        except (ImportError, ValueError):
+            modal_spec = None
+        if modal_spec is None:
+            return [
+                f"Harbor environment 'modal' needs optional dependencies. {_environment_extra_install_hint(env_mode)}"
+            ]
 
     if env_mode == ENV_MODE_LOCAL:
         # Local mode is a host sandbox, not a Harbor-native backend: verify the
@@ -726,10 +1685,18 @@ def _check_prerequisites(
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            return [f"Docker Compose v2 is required for Tier 3 Docker mode: {exc}"]
+            detail = redact_progress_detail(
+                exc,
+                secret_values=secret_values_from_environment(os.environ),
+            )
+            return [f"Docker Compose v2 is required for Tier 3 Docker mode: {detail}"]
         if compose.returncode != 0:
             detail = (compose.stderr or compose.stdout).strip()
-            suffix = f": {detail}" if detail else ""
+            safe_detail = redact_progress_detail(
+                detail,
+                secret_values=secret_values_from_environment(os.environ),
+            )
+            suffix = f": {safe_detail}" if safe_detail else ""
             return [f"Docker Compose v2 is required for Tier 3 Docker mode{suffix}"]
 
     try:
@@ -737,23 +1704,51 @@ def _check_prerequisites(
         from harbor.models.environment_type import EnvironmentType
 
         EnvironmentFactory.run_preflight(EnvironmentType(env_mode))
+        if env_mode == "ack":
+            ack_subprocess_env = (
+                dict(subprocess_env)
+                if subprocess_env is not None
+                else _selected_host_environment(
+                    _HARBOR_BASE_ENV_VARS | _HARBOR_ENV_MODE_VARS["ack"],
+                    os.environ,
+                )
+            )
+            _check_ack_cluster_readiness_subprocess(
+                dict(environment_kwargs or {}),
+                subprocess_env=ack_subprocess_env,
+            )
     except ImportError as exc:
+        detail = redact_progress_detail(
+            exc,
+            secret_values=secret_values_from_environment(os.environ),
+        )
         return [
-            f"Harbor environment '{env_mode}' needs optional dependencies: {exc}. "
-            "Install the matching Harbor environment extra."
+            f"Harbor environment '{env_mode}' needs optional dependencies: {detail}. "
+            f"{_environment_extra_install_hint(env_mode)}"
         ]
     except SystemExit as exc:
-        detail = " ".join(str(exc).split()) or "preflight exited without a diagnostic"
+        detail = (
+            redact_progress_detail(
+                exc,
+                secret_values=secret_values_from_environment(os.environ),
+            )
+            or "preflight exited without a diagnostic"
+        )
         return [f"Harbor environment '{env_mode}' is not ready: {detail}"]
     except Exception as exc:
-        return [f"Harbor environment '{env_mode}' is not ready: {exc}"]
+        detail = redact_progress_detail(
+            exc,
+            secret_values=secret_values_from_environment(os.environ),
+        )
+        return [f"Harbor environment '{env_mode}' is not ready: {detail}"]
     return []
 
 
 def _is_operator_owned_runtime_name(name: str) -> bool:
     normalized = name.upper()
     return (
-        normalized in _RUNTIME_ENV_HOST_CONTROL_NAMES
+        is_sensitive_key(name)
+        or normalized in _RUNTIME_ENV_HOST_CONTROL_NAMES
         or normalized in _OPERATOR_OWNED_AGENT_ENV
         or normalized.startswith(_RUNTIME_ENV_HOST_CONTROL_PREFIXES)
     )
@@ -1226,6 +2221,300 @@ def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mo
     return None
 
 
+def _signal_harbor_process_group(process: subprocess.Popen[bytes], value: signal.Signals) -> None:
+    try:
+        os.killpg(process.pid, value)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        # macOS can report EPERM instead of ESRCH after the group leader exits.
+        # Suppress only when the original PID is independently gone.
+        if process.poll() is not None:
+            try:
+                os.getpgid(process.pid)
+            except ProcessLookupError:
+                return
+        raise
+
+
+def _windows_system_directory() -> Path:
+    """Return the Windows system directory without consulting ambient environment."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    get_system_directory.restype = wintypes.UINT
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_system_directory(buffer, len(buffer))
+    if length == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if length >= len(buffer):
+        raise OSError("Windows system directory path exceeded the supported length")
+    system_directory = Path(buffer.value)
+    if not system_directory.is_absolute():
+        raise OSError("Windows system directory was not absolute")
+    return system_directory
+
+
+def _verified_windows_taskkill_path() -> Path:
+    """Resolve a regular, non-reparse taskkill executable inside System32."""
+    system_directory = _windows_system_directory()
+    if not system_directory.is_absolute():
+        raise OSError("Windows system directory was not absolute")
+    candidate = system_directory / "taskkill.exe"
+    try:
+        system_metadata = system_directory.lstat()
+        candidate_metadata = candidate.lstat()
+        resolved_system_directory = system_directory.resolve(strict=True)
+        resolved_candidate = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise OSError("Windows taskkill executable could not be verified") from exc
+
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    def is_reparse_point(metadata: os.stat_result) -> bool:
+        return bool(getattr(metadata, "st_file_attributes", 0) & reparse_attribute)
+
+    if (
+        not stat.S_ISDIR(system_metadata.st_mode)
+        or stat.S_ISLNK(system_metadata.st_mode)
+        or is_reparse_point(system_metadata)
+    ):
+        raise OSError("Windows system directory could not be verified")
+    if (
+        not stat.S_ISREG(candidate_metadata.st_mode)
+        or stat.S_ISLNK(candidate_metadata.st_mode)
+        or is_reparse_point(candidate_metadata)
+    ):
+        raise OSError("Windows taskkill executable could not be verified")
+    if resolved_candidate.parent != resolved_system_directory:
+        raise OSError("Windows taskkill executable escaped the system directory")
+    return resolved_candidate
+
+
+def _terminate_harbor_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Terminate the POSIX process group or Windows task tree and reap Harbor."""
+    if os.name == "posix":
+        # POSIX process groups do not own a descendant that deliberately calls
+        # setsid(2). The host-side Harbor CLI/configuration is therefore a
+        # trusted boundary; untrusted task execution belongs in an isolated
+        # backend rather than SkillEvaluator's experimental local mode.
+        _signal_harbor_process_group(process, signal.SIGTERM)
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_HARBOR_RUN_TERMINATE_SECONDS)
+        # Always signal the original group after the grace period. The leader
+        # may already have exited while a descendant retained the output pipe.
+        _signal_harbor_process_group(process, signal.SIGKILL)
+        try:
+            process.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Harbor parent process could not be reaped") from exc
+        return
+
+    taskkill_error: BaseException | None = None
+    taskkill: subprocess.Popen[bytes] | None = None
+    try:
+        taskkill = subprocess.Popen(
+            [str(_verified_windows_taskkill_path()), "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+        if taskkill.returncode != 0:
+            taskkill_error = RuntimeError("Windows Harbor process-tree cleanup failed")
+    except subprocess.TimeoutExpired as exc:
+        taskkill_error = exc
+        if taskkill is not None and taskkill.poll() is None:
+            taskkill.kill()
+            try:
+                taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+            except subprocess.TimeoutExpired as reap_error:
+                taskkill_error = reap_error
+    except OSError as exc:
+        taskkill_error = exc
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Harbor parent process could not be reaped") from exc
+    if taskkill_error is not None:
+        raise RuntimeError("Harbor process-tree cleanup could not be confirmed") from taskkill_error
+
+
+def _run_bounded_harbor_process(
+    command: list[str],
+    *,
+    env: Mapping[str, str],
+    stdin_text: str | None,
+    timeout_seconds: float,
+    max_output_bytes: int,
+    diagnostic_tail_chars: int,
+    secret_values: set[str],
+) -> _BoundedHarborProcessResult:
+    """Run Harbor with bounded merged output and platform cleanup ownership."""
+    if timeout_seconds <= 0:
+        raise ValueError("Harbor run timeout must be positive")
+    if max_output_bytes <= 0:
+        raise ValueError("Harbor output byte limit must be positive")
+    if diagnostic_tail_chars <= 0:
+        raise ValueError("Harbor diagnostic tail limit must be positive")
+
+    creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=dict(env),
+        start_new_session=os.name == "posix",
+        creationflags=creation_flags,
+    )
+    if process.stdout is None:
+        _terminate_harbor_process_tree(process)
+        raise RuntimeError("Harbor output pipe invariant violated")
+
+    reader_done = threading.Event()
+    output_exceeded = threading.Event()
+    reader_error: list[BaseException] = []
+    stdin_error: list[BaseException] = []
+    output_tail = ""
+    deadline = time.monotonic() + timeout_seconds
+
+    def append_tail(text: str) -> None:
+        nonlocal output_tail
+        if text:
+            output_tail = (output_tail + text)[-diagnostic_tail_chars:]
+
+    def collect_output() -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        redactor = StreamingLogRedactor(value for value in secret_values if len(value) >= 4)
+        output_budget = CommandOutputByteBudget(max_output_bytes)
+        reached_eof = False
+        try:
+            output_descriptor = process.stdout.fileno()
+            while True:
+                chunk = os.read(output_descriptor, _HARBOR_RUN_OUTPUT_READ_BYTES)
+                if not chunk:
+                    reached_eof = True
+                    break
+                remaining = output_budget.limit_bytes - output_budget.consumed_bytes
+                accepted = chunk[: max(remaining, 0)]
+                if accepted:
+                    output_budget.consume(accepted)
+                    append_tail(redactor.feed(decoder.decode(accepted)))
+                if len(chunk) > remaining:
+                    output_exceeded.set()
+                    break
+        except BaseException as exc:
+            reader_error.append(exc)
+        finally:
+            if reached_eof:
+                try:
+                    append_tail(redactor.feed(decoder.decode(b"", final=True)))
+                    append_tail(redactor.finish())
+                except BaseException as exc:
+                    reader_error.append(exc)
+            with suppress(OSError):
+                process.stdout.close()
+            reader_done.set()
+
+    def deliver_stdin() -> None:
+        try:
+            if stdin_text is None:
+                return
+            if process.stdin is None:
+                raise RuntimeError("Harbor stdin pipe invariant violated")
+            try:
+                process.stdin.write(stdin_text.encode("utf-8"))
+                process.stdin.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                process.stdin.close()
+        except BaseException as exc:
+            stdin_error.append(exc)
+
+    reader = threading.Thread(
+        target=collect_output,
+        name="skillevaluator-harbor-output",
+        daemon=True,
+    )
+    stdin_writer = threading.Thread(
+        target=deliver_stdin,
+        name="skillevaluator-harbor-stdin",
+        daemon=True,
+    )
+    reader_started = False
+    stdin_writer_started = False
+    try:
+        reader.start()
+        reader_started = True
+        stdin_writer.start()
+        stdin_writer_started = True
+        timed_out = False
+        while True:
+            if output_exceeded.is_set() or reader_error or stdin_error:
+                break
+            if reader_done.is_set() and process.poll() is not None:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            reader_done.wait(min(_HARBOR_RUN_POLL_SECONDS, remaining))
+
+        if timed_out or output_exceeded.is_set() or reader_error or stdin_error:
+            _terminate_harbor_process_tree(process)
+        else:
+            process.wait()
+        reader.join(timeout=_HARBOR_RUN_REAP_SECONDS)
+        stdin_writer.join(timeout=_HARBOR_RUN_REAP_SECONDS)
+        if reader.is_alive():
+            raise RuntimeError("Harbor output reader could not be reaped")
+        if stdin_writer.is_alive():
+            raise RuntimeError("Harbor stdin writer could not be reaped")
+        if reader_error:
+            raise RuntimeError("Harbor output collection failed") from reader_error[0]
+        if stdin_error:
+            raise RuntimeError("Harbor stdin delivery failed") from stdin_error[0]
+        if timed_out:
+            detail = f"Harbor run timed out after {timeout_seconds:g} seconds"
+            safe_tail = redact_progress_detail(output_tail, secret_values=secret_values)
+            if safe_tail:
+                detail += f". Last output: {safe_tail[-2000:]}"
+            raise _HarborRunTimeoutError(_redact_harbor_diagnostic(detail, secret_values=secret_values))
+        return _BoundedHarborProcessResult(
+            returncode=int(process.returncode or 0),
+            output_tail=output_tail,
+            output_exceeded=output_exceeded.is_set(),
+        )
+    except BaseException as primary_error:
+        cleanup_error: BaseException | None = None
+        if process.poll() is None or not reader_done.is_set():
+            try:
+                _terminate_harbor_process_tree(process)
+            except BaseException as exc:
+                cleanup_error = exc
+        if not reader_started:
+            with suppress(OSError):
+                process.stdout.close()
+        if not stdin_writer_started and process.stdin is not None:
+            with suppress(OSError):
+                process.stdin.close()
+        if reader_started:
+            reader.join(timeout=_HARBOR_RUN_REAP_SECONDS)
+        if stdin_writer_started:
+            stdin_writer.join(timeout=_HARBOR_RUN_REAP_SECONDS)
+        if cleanup_error is not None:
+            primary_error.add_note(f"Harbor process-tree cleanup also failed: {type(cleanup_error).__name__}")
+            raise primary_error from cleanup_error
+        raise
+
+
 def _run_harbor(
     *,
     dataset: Path,
@@ -1243,6 +2532,7 @@ def _run_harbor(
     override_storage_mb: int | None,
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
@@ -1263,31 +2553,49 @@ def _run_harbor(
         override_storage_mb=override_storage_mb,
         agent_import_path=agent_import_path,
         verifier_env=verifier_env,
+        environment_kwargs=environment_kwargs,
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
-        result = subprocess.run(
+        result = _run_bounded_harbor_process(
             command,
-            capture_output=True,
-            text=True,
-            input=handoff.stdin_text,
             env=handoff.subprocess_env,
-            timeout=7200,
-            check=False,
+            stdin_text=handoff.stdin_text,
+            timeout_seconds=_HARBOR_RUN_TIMEOUT_SECONDS,
+            max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
+            diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
+            secret_values=set(run_env.values()),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, str(exc)
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        secret_values = set(run_env.values())
+        detail = _redact_harbor_diagnostic(exc, secret_values=secret_values)
+        if not detail:
+            detail = _redact_harbor_diagnostic(type(exc).__name__, secret_values=secret_values)
+        return False, detail
+    if result.output_exceeded:
+        secret_values = set(run_env.values())
+        safe_tail = redact_progress_detail(result.output_tail, secret_values=secret_values)
+        detail = f"harbor run output exceeded the {_HARBOR_RUN_OUTPUT_MAX_BYTES}-byte safety limit"
+        if safe_tail:
+            detail += f". Last output: {safe_tail[-2000:]}"
+        return False, _redact_harbor_diagnostic(detail, secret_values=secret_values)
     if result.returncode == 0:
-        return _validate_harbor_job_result(
+        validation_ok, validation_detail = _validate_harbor_job_result(
             jobs_dir,
             job_name,
             expected_trials=expected_trials,
             expected_total_trials=expected_total_trials,
         )
-    output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
-    safe_output = redact_progress_detail(output, secret_values=set(run_env.values()))
+        if validation_ok:
+            return True, validation_detail
+        return False, _redact_harbor_diagnostic(
+            validation_detail,
+            secret_values=set(run_env.values()),
+        )
+    secret_values = set(run_env.values())
+    safe_output = redact_progress_detail(result.output_tail, secret_values=secret_values)
     detail = safe_output[-2000:] or f"harbor run exited {result.returncode}"
-    return False, detail
+    return False, _redact_harbor_diagnostic(detail, secret_values=secret_values)
 
 
 def _validate_harbor_job_result(
@@ -1385,6 +2693,47 @@ def _job_root_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int,
     )
 
 
+# ``copytree_secure`` stages as ``.{name}.staging-{16 hex}`` in the same
+# directory. Keep the published name below NAME_MAX with room for that suffix.
+_AGGREGATE_TRIAL_NAME_MAX_BYTES = 224
+
+
+def _utf8_prefix(value: str, max_bytes: int) -> str:
+    """Return a UTF-8-safe prefix bounded by encoded byte length."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _aggregate_trial_name(
+    job_name: str,
+    child_name: str,
+    *,
+    source_index: int,
+    used_names: set[str],
+) -> str:
+    """Build a deterministic, attempt-readable, filesystem-safe trial name."""
+    raw_name = f"{job_name}__{child_name}"
+    if len(raw_name.encode("utf-8")) > _AGGREGATE_TRIAL_NAME_MAX_BYTES:
+        digest = hashlib.sha256(f"{source_index}\0{raw_name}".encode()).hexdigest()[:16]
+        attempt_match = re.search(r"attempt0*\d+", raw_name, flags=re.IGNORECASE)
+        attempt = attempt_match.group(0) if attempt_match else "attempt"
+        suffix = f"__{attempt}__{digest}"
+        name = _utf8_prefix(raw_name, _AGGREGATE_TRIAL_NAME_MAX_BYTES - len(suffix.encode())) + suffix
+    else:
+        name = raw_name
+
+    candidate = name
+    collision_index = 2
+    while candidate in used_names:
+        suffix = f"-{collision_index}"
+        candidate = _utf8_prefix(name, _AGGREGATE_TRIAL_NAME_MAX_BYTES - len(suffix.encode())) + suffix
+        collision_index += 1
+    used_names.add(candidate)
+    return candidate
+
+
 def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
     """Merge per-attempt Harbor jobs into the job directory shape collection expects.
 
@@ -1392,6 +2741,10 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
     per-attempt Harbor ``result.json`` statistics are combined so the merged
     job still satisfies :func:`validate_harbor_job_result`.
     """
+    from harbor.models.job.result import JobResult, JobStats
+    from harbor.models.trial.config import TrialConfig
+    from harbor.models.trial.result import TrialResult
+
     aggregate_path = Path(os.path.abspath(aggregate_dir))  # noqa: PTH100 -- compare lexical publication roots
     source_paths: list[tuple[str, Path, Path, tuple[int, int, int, int, int, int]]] = []
     for job_dir in job_dirs:
@@ -1419,7 +2772,7 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
 
     aggregate_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix=f".{aggregate_path.name}-merge-",
+        prefix=".harbor-merge-",
         dir=aggregate_path.parent,
     ) as private_root_raw:
         private_root = Path(private_root_raw)
@@ -1430,7 +2783,7 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
 
         snapshots: list[tuple[str, Path]] = []
         for index, (job_name, job_path, job_resolved, expected_fingerprint) in enumerate(source_paths):
-            snapshot = snapshot_root / f"{index:04d}-{job_name}"
+            snapshot = snapshot_root / f"{index:04d}"
             try:
                 before = job_path.lstat()
             except OSError as exc:
@@ -1446,53 +2799,189 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 raise ValueError(f"attempt Harbor job root changed during snapshot: {job_path}")
             snapshots.append((job_name, snapshot))
 
+        aggregate_job_id = uuid4()
         total_trials = 0
-        completed_trials = 0
-        errored_trials = 0
-        merged_evals: dict[str, dict[str, Any]] = {}
-        for job_name, job_dir in snapshots:
-            renamed: dict[str, str] = {}
+        aggregate_retries = 0
+        merged_trial_results: list[TrialResult] = []
+        source_started_at: list[datetime] = []
+        source_updated_at: list[datetime] = []
+        used_trial_names: set[str] = set()
+        for source_index, (job_name, job_dir) in enumerate(snapshots):
+            try:
+                source_job_result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                source_job_result = None
+            if isinstance(source_job_result, dict):
+                try:
+                    source_job_model = JobResult.model_validate(source_job_result)
+                except Exception:
+                    source_job_model = None
+                if source_job_model is not None:
+                    source_started_at.append(source_job_model.started_at)
+                    source_updated_at.append(
+                        source_job_model.updated_at or source_job_model.finished_at or source_job_model.started_at
+                    )
+            root_trial_results: dict[str, dict[str, Any]] = {}
+            if isinstance(source_job_result, dict) and isinstance(source_job_result.get("trial_results"), list):
+                for candidate in source_job_result["trial_results"]:
+                    if isinstance(candidate, dict) and isinstance(candidate.get("trial_name"), str):
+                        root_trial_results[candidate["trial_name"]] = candidate
+            if isinstance(source_job_result, dict) and isinstance(source_job_result.get("stats"), dict):
+                source_retries = source_job_result["stats"].get("n_retries")
+                if isinstance(source_retries, int) and not isinstance(source_retries, bool) and source_retries >= 0:
+                    aggregate_retries += source_retries
+
+            job_trial_results: list[TrialResult] = []
+            job_trial_slots = 0
             for child in sorted(job_dir.iterdir()):
                 if not child.is_dir():
                     continue
-                dest = staged_aggregate / f"{job_name}__{child.name}"
-                suffix = 2
-                while dest.exists():
-                    dest = staged_aggregate / f"{job_name}__{child.name}-{suffix}"
-                    suffix += 1
+                dest = staged_aggregate / _aggregate_trial_name(
+                    job_name,
+                    child.name,
+                    source_index=source_index,
+                    used_names=used_trial_names,
+                )
                 copytree_secure(child, dest, allowed_root=job_dir)
-                renamed[child.name] = dest.name
+
+                result_path = child / "result.json"
+                config_path = child / "config.json"
+                if not result_path.exists() and not config_path.exists():
+                    continue
+                job_trial_slots += 1
+                root_trial_payload = root_trial_results.get(child.name)
+                if not result_path.exists() and root_trial_payload is None:
+                    try:
+                        source_trial_config = TrialConfig.model_validate_json(config_path.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        raise ValueError(f"attempt Harbor trial config is invalid: {child}") from exc
+                    rewritten_config = source_trial_config.model_dump(mode="json")
+                    rewritten_config.update(
+                        {
+                            "trial_name": dest.name,
+                            "trials_dir": str(aggregate_path),
+                            "job_id": str(aggregate_job_id),
+                        }
+                    )
+                    try:
+                        merged_trial_config = TrialConfig.model_validate(rewritten_config)
+                    except Exception as exc:
+                        raise ValueError(f"aggregate Harbor trial config is invalid: {dest}") from exc
+                    (dest / "config.json").write_text(
+                        merged_trial_config.model_dump_json(indent=2),
+                        encoding="utf-8",
+                    )
+                    continue
+                try:
+                    trial_payload = json.loads(result_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    trial_payload = root_trial_payload
+                if not isinstance(trial_payload, dict):
+                    raise ValueError(f"attempt Harbor trial result is unreadable: {child}")
+                if trial_payload.get("trial_name") != child.name:
+                    raise ValueError(f"attempt Harbor trial result name does not match its directory: {child}")
+                try:
+                    source_trial_result = TrialResult.model_validate(trial_payload)
+                except Exception as exc:
+                    raise ValueError(f"attempt Harbor trial result is invalid: {child}") from exc
+
+                rewritten = source_trial_result.model_dump(mode="json")
+                rewritten["trial_name"] = dest.name
+                rewritten["trial_uri"] = (aggregate_path / dest.name).as_uri()
+                rewritten_config = rewritten.get("config")
+                if not isinstance(rewritten_config, dict):
+                    raise ValueError(f"attempt Harbor trial config is invalid: {child}")
+                rewritten_config.update(
+                    {
+                        "trial_name": dest.name,
+                        "trials_dir": str(aggregate_path),
+                        "job_id": str(aggregate_job_id),
+                    }
+                )
+                try:
+                    merged_trial_result = TrialResult.model_validate(rewritten)
+                except Exception as exc:
+                    raise ValueError(f"aggregate Harbor trial result is invalid: {dest}") from exc
+                (dest / "result.json").write_text(
+                    merged_trial_result.model_dump_json(indent=2),
+                    encoding="utf-8",
+                )
+                (dest / "config.json").write_text(
+                    merged_trial_result.config.model_dump_json(indent=2),
+                    encoding="utf-8",
+                )
+                job_trial_results.append(merged_trial_result)
+                merged_trial_results.append(merged_trial_result)
 
             stats = _attempt_job_stats(job_dir)
             if stats is None:
+                total_trials += job_trial_slots
                 continue
-            job_total, job_completed, job_errored, job_evals = stats
-            total_trials += job_total
-            completed_trials += job_completed
-            errored_trials += job_errored
-            for eval_name, (eval_trials, eval_errors, reward_stats) in job_evals.items():
-                merged = merged_evals.setdefault(eval_name, {"n_trials": 0, "n_errors": 0, "reward_stats": {}})
-                merged["n_trials"] += eval_trials
-                merged["n_errors"] += eval_errors
-                for metric, buckets in reward_stats.items():
-                    merged_buckets = merged["reward_stats"].setdefault(metric, {})
-                    for bucket, trial_names in buckets.items():
-                        merged_buckets.setdefault(bucket, []).extend(
-                            renamed.get(name, f"{job_name}__{name}") for name in trial_names
-                        )
+            job_total, job_completed, _job_errored, _job_evals = stats
+            total_trials += max(job_total, job_trial_slots)
+            if job_completed > len(job_trial_results):
+                raise ValueError(
+                    f"attempt Harbor job completed {job_completed} trials but retained "
+                    f"{len(job_trial_results)} valid trial results: {job_dir}"
+                )
 
+        aggregate_config: dict[str, Any] | None = None
+        for _job_name, job_dir in snapshots:
+            try:
+                candidate_config = json.loads((job_dir / "config.json").read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(candidate_config, dict):
+                aggregate_config = candidate_config
+                break
+        if aggregate_config is None:
+            # The aggregate is a retained viewer surface, not a replayable
+            # Harbor invocation. Keep its fallback config valid and explicit
+            # rather than inventing an oracle agent or dataset.
+            aggregate_config = {"agents": [], "datasets": [], "tasks": []}
+        aggregate_config.update(
+            {
+                "job_name": aggregate_path.name,
+                "jobs_dir": str(aggregate_path.parent),
+                "n_attempts": 1,
+            }
+        )
+        (staged_aggregate / "config.json").write_text(
+            json.dumps(aggregate_config, indent=2),
+            encoding="utf-8",
+        )
+
+        trial_finished_at = [result.finished_at for result in merged_trial_results if result.finished_at is not None]
+        aggregate_updated_at = max([*trial_finished_at, *source_updated_at], default=datetime.now(UTC))
+        aggregate_started_at = min(
+            [
+                *(result.started_at for result in merged_trial_results if result.started_at is not None),
+                *source_started_at,
+            ],
+            default=aggregate_updated_at,
+        )
+        aggregate_total_trials = max(total_trials, len(merged_trial_results))
+        aggregate_stats = JobStats.from_trial_results(
+            merged_trial_results,
+            n_total_trials=aggregate_total_trials,
+            n_retries=aggregate_retries,
+        )
+        aggregate_finished_at = (
+            max(trial_finished_at, default=aggregate_updated_at)
+            if aggregate_stats.n_completed_trials >= aggregate_total_trials
+            else None
+        )
+        aggregate_result = JobResult(
+            id=aggregate_job_id,
+            started_at=aggregate_started_at,
+            updated_at=aggregate_updated_at,
+            finished_at=aggregate_finished_at,
+            n_total_trials=aggregate_total_trials,
+            stats=aggregate_stats,
+            trial_results=merged_trial_results,
+        )
         (staged_aggregate / "result.json").write_text(
-            json.dumps(
-                {
-                    "n_total_trials": total_trials,
-                    "stats": {
-                        "n_trials": completed_trials,
-                        "n_errors": errored_trials,
-                        "evals": merged_evals,
-                    },
-                },
-                indent=2,
-            ),
+            aggregate_result.model_dump_json(indent=2),
             encoding="utf-8",
         )
         copytree_secure(
@@ -1522,6 +3011,7 @@ def _run_stop_on_pass_variant(
     override_storage_mb: int | None,
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
     errors: list[str] = []
@@ -1545,6 +3035,7 @@ def _run_stop_on_pass_variant(
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_path,
                 verifier_env=verifier_env,
+                environment_kwargs=environment_kwargs,
                 expected_trials=1,
                 include_task_names=[task_name],
             )
@@ -1581,6 +3072,7 @@ def _run_agent_pair(
     pass_threshold: float = 0.50,
     task_names: list[str] | None = None,
     verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
 ) -> list[str]:
     jobs = [("with", with_skill)]
     if baseline is not None:
@@ -1609,6 +3101,7 @@ def _run_agent_pair(
                     override_storage_mb=override_storage_mb,
                     agent_import_path=agent_import_path,
                     verifier_env=verifier_env,
+                    environment_kwargs=environment_kwargs,
                 )
             )
         return sequential_errors
@@ -1640,6 +3133,7 @@ def _run_agent_pair(
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_path,
                 verifier_env=verifier_env,
+                environment_kwargs=environment_kwargs,
                 expected_trials=expected_trials,
             ): variant
             for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
@@ -1796,6 +3290,7 @@ def _run_harbor_eval_impl(
     agent_runtime_preflight: bool | None = None,
     env_mode: str = DEFAULT_ENV_MODE,
     env_mode_source: str = "CLI",
+    environment_kwargs: Mapping[str, Any] | None = None,
     timeout_multiplier: float | None = None,
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
@@ -1869,6 +3364,16 @@ def _run_harbor_eval_impl(
     # ``reuse``/``rebuild`` opt into the shared pre-built eval base image.
     base_image_mode = harbor_config.get("base_image_mode", "disabled")
     task_source = harbor_config.get("task_source", "auto")
+    try:
+        effective_environment_kwargs = validate_environment_kwargs(
+            dict(environment_kwargs or {}),
+            env_mode=env_mode,
+        )
+    except (RecursionError, TypeError, ValueError) as exc:
+        detail = f"Invalid --environment-kwarg: {exc}"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
+    environment_kwarg_sources = dict.fromkeys(effective_environment_kwargs, "CLI")
 
     if not isinstance(n_attempts, int) or n_attempts < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid attempt count"))
@@ -1929,8 +3434,36 @@ def _run_harbor_eval_impl(
         )
     )
 
+    prerequisite_subprocess_env: dict[str, str] | None = None
+    if env_mode in {"ack", "opensandbox"} and agents:
+        preflight_agent = agents[0]
+        runtime_provider_env = {
+            name: value for name, value in provider_env.items() if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
+        }
+        prerequisite_subprocess_env = _harbor_subprocess_environment(
+            env_mode=env_mode,
+            provider=provider,
+            configured_runtime_env=configured_runtime_env,
+            provider_env=runtime_provider_env,
+            agent=preflight_agent,
+            agent_model=model_resolution[preflight_agent]["model"],
+        )
+        prerequisite_subprocess_env.update(
+            _agent_credentials(
+                provider=provider,
+                agent=preflight_agent,
+                env_mode=env_mode,
+            )
+        )
+        prerequisite_subprocess_env.update(_job_judge_subprocess_env(provider_env, grading_mode))
+
     reporter.emit(ProgressEvent(stage="environment-preflight", state="running", detail=env_mode))
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agents)
+    prereq_errors = _check_prerequisites(
+        env_mode=env_mode,
+        agents=agents,
+        environment_kwargs=effective_environment_kwargs,
+        subprocess_env=prerequisite_subprocess_env,
+    )
     if prereq_errors:
         reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
         return {"error": prereq_errors}
@@ -2133,6 +3666,10 @@ def _run_harbor_eval_impl(
         "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
         "harbor": {
             "environment": {"value": env_mode, "source": env_mode_source},
+            "environment_kwargs": {
+                "keys": sorted(effective_environment_kwargs),
+                "sources": environment_kwarg_sources,
+            },
             "n_attempts": n_attempts,
             "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
@@ -2212,11 +3749,17 @@ def _run_harbor_eval_impl(
 
     def _persist_pre_execution_failure(errors: list[str]) -> dict[str, Any]:
         """Retain redacted probe provenance for failures after run reservation."""
+        published_errors, error_total = _published_execution_errors(errors)
         failed_result: dict[str, Any] = {
             "skill_name": skill_path.name,
             "execution_status": "failed",
-            "execution_errors": errors,
-            "error": errors,
+            "execution_errors": published_errors,
+            "execution_error_details_total": error_total,
+            "execution_error_details_shown": len(published_errors),
+            "execution_error_details_truncated": len(published_errors) < error_total,
+            # Keep the legacy list-shaped failure alias without serializing the
+            # complete diagnostic sample a second time.
+            "error": published_errors[:1],
             "run_id": run_id,
             "run_dir": str(run_dir),
             "harbor_jobs_dir": str(jobs_dir),
@@ -2230,7 +3773,7 @@ def _run_harbor_eval_impl(
             run_dir / "run_config.json",
             json.dumps(run_config, indent=2).encode("utf-8"),
         )
-        write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
+        _write_final_result(result_path, failed_result)
         return failed_result
 
     reservation_identity: tuple[int, int] | None = None
@@ -2361,6 +3904,10 @@ def _run_harbor_eval_impl(
         return _persist_pre_execution_failure([str(exc)])
 
     task_names = expected_task_names or []
+    try:
+        dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
+    except DatasetSnapshotContractError as exc:
+        return _persist_pre_execution_failure([str(exc)])
     expected_trials = len(task_names) * n_attempts
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
@@ -2420,6 +3967,7 @@ def _run_harbor_eval_impl(
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 agent_import_path=nvidia_build_agent_import_paths.get(agent),
+                environment_kwargs=effective_environment_kwargs,
             )
             if not preflight.ok:
                 preflight_errors.append(f"{agent} runtime preflight failed: {preflight.detail}")
@@ -2464,6 +4012,7 @@ def _run_harbor_eval_impl(
             pass_threshold=float(pass_threshold),
             task_names=task_names,
             verifier_env=job_judge_verifier_env,
+            environment_kwargs=effective_environment_kwargs,
         )
 
     active_agents: set[str] = set()
@@ -2544,7 +4093,6 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
-    dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
     results.update(
         {
             "skill_name": skill_path.name,
@@ -2555,7 +4103,7 @@ def _run_harbor_eval_impl(
             "harbor_jobs_retained": keep_harbor_jobs,
             "evaluated_at": datetime.now(UTC).isoformat(),
             "evaluator_version": dataset_truth["evaluator_version"],
-            "dataset_snapshot": dataset_truth,
+            "dataset_snapshot": dataset_snapshot_manifest(dataset_truth),
             "dataset_snapshot_path": str(run_dir / "dataset_snapshot.json"),
             "dataset_summary": dataset_truth["dataset_summary"],
             "dataset_digest": dataset_truth["dataset_digest"],
@@ -2575,12 +4123,22 @@ def _run_harbor_eval_impl(
         result=results,
     )
     if errors:
-        execution_errors = list(
-            dict.fromkeys([*(str(error) for error in results.get("execution_errors", [])), *errors])
-        )
+        raw_execution_errors = results.get("execution_errors", [])
+        if isinstance(raw_execution_errors, list):
+            existing_execution_errors: list[object] = raw_execution_errors
+        elif raw_execution_errors:
+            existing_execution_errors = [raw_execution_errors]
+        else:
+            existing_execution_errors = []
+        execution_errors, error_total = _published_execution_errors([*existing_execution_errors, *errors])
         results["execution_status"] = "failed"
         results["execution_errors"] = execution_errors
-        results["error"] = execution_errors
+        results["execution_error_details_total"] = error_total
+        results["execution_error_details_shown"] = len(execution_errors)
+        results["execution_error_details_truncated"] = len(execution_errors) < error_total
+        # ``execution_errors`` is authoritative; ``error`` remains a compact
+        # list-shaped compatibility alias for older callers.
+        results["error"] = execution_errors[:1]
     reporter.emit(ProgressEvent(stage="report", state="running"))
     try:
         (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
@@ -2612,7 +4170,7 @@ def _run_harbor_eval_impl(
     results["duration_seconds"] = round(time.monotonic() - started_at, 3)
 
     try:
-        write_output_file_atomically(result_path, json.dumps(results, indent=2).encode("utf-8"))
+        _write_final_result(result_path, results)
     except Exception:
         reporter.emit(ProgressEvent(stage="report", state="failed", detail="result write failed"))
         _emit_run_finished("failed", "report artifacts could not be written")
@@ -2672,7 +4230,7 @@ def _finalize_harbor_artifacts(
     result_path_value = result.get("result_path")
     result_path = Path(str(result_path_value)) if result_path_value else run_dir / "result.json"
     if result_path.is_file():
-        write_output_file_atomically(result_path, json.dumps(result, indent=2).encode("utf-8"))
+        _write_final_result(result_path, result)
     run_config = result.get("run_config")
     run_config_path = run_dir / "run_config.json"
     if isinstance(run_config, dict) and run_config_path.is_file():

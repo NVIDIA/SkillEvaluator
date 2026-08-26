@@ -13,6 +13,27 @@ from collections.abc import Iterable
 _REDACTION_LABEL = "<redacted>"
 _REDACTION_SENTINEL_CANDIDATES = ("␟", "␞", "␝", "␜", "")
 _MAX_REDACTION_SCAN_CHUNK = 64 * 1024
+MAX_COMMAND_OUTPUT_BYTES = 16 * 1024 * 1024
+
+
+class CommandOutputLimitError(RuntimeError):
+    """Signal that an untrusted command exceeded its raw output budget."""
+
+
+class CommandOutputByteBudget:
+    """Enforce one combined raw stdout/stderr budget for a command."""
+
+    def __init__(self, limit_bytes: int | None = None) -> None:
+        self.limit_bytes = MAX_COMMAND_OUTPUT_BYTES if limit_bytes is None else limit_bytes
+        if self.limit_bytes <= 0:
+            raise ValueError("command output byte limit must be positive")
+        self.consumed_bytes = 0
+
+    def consume(self, chunk: bytes) -> None:
+        next_total = self.consumed_bytes + len(chunk)
+        if next_total > self.limit_bytes:
+            raise CommandOutputLimitError(f"Command output exceeded the {self.limit_bytes}-byte safety limit")
+        self.consumed_bytes = next_total
 
 
 def collision_safe_redaction_marker(secret_values: Iterable[str]) -> str:

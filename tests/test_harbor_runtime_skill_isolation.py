@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from harbor.models.task.config import TaskConfig
 
 import skillevaluator.tier3.harbor.adapter as adapter_module
 from skillevaluator.tier3.harbor.adapter import (
@@ -32,6 +33,8 @@ from skillevaluator.tier3.harbor.adapter import (
 )
 from skillevaluator.tier3.output_provenance import mark_generated_output_root
 from skillevaluator.tier3.results_location import publish_latest_results
+
+_SYNTHETIC_CREDENTIAL_DEFAULT = "".join(("sk-", "synthetic-default-12345678"))  # noqa: FLY002
 
 
 def _write_runtime_skill(path: Path, package: str) -> Path:
@@ -282,6 +285,263 @@ def test_native_tasks_reject_judge_model_controls_in_agent_environment(tmp_path:
 
     with pytest.raises(ValueError, match=r"environment.env.*judge|judge.*environment.env"):
         stage_native_harbor_tasks(target, tmp_path / "native-agent-judge-control")
+
+
+@pytest.mark.parametrize("source_name", ["DOCKER_AUTH_CONFIG", "DAYTONA_API_KEY"])
+@pytest.mark.parametrize(
+    "authored_config",
+    [
+        '[environment.env]\nTASK_ALIAS = "${SOURCE_NAME}"\n',
+        '[solution.env]\nTASK_ALIAS = "${SOURCE_NAME}"\n',
+        '[verifier.env]\nTASK_ALIAS = "${SOURCE_NAME}"\n',
+        '[verifier.environment]\nworkdir = "/workspace"\n\n[verifier.environment.env]\nTASK_ALIAS = "${SOURCE_NAME}"\n',
+        '[[steps]]\nname = "step-one"\n\n[steps.verifier.env]\nTASK_ALIAS = "${SOURCE_NAME}"\n',
+        '[[steps]]\nname = "step-one"\n\n[steps.verifier.environment]\nworkdir = "/workspace"\n\n'
+        '[steps.verifier.environment.env]\nTASK_ALIAS = "${SOURCE_NAME}"\n',
+    ],
+)
+def test_native_tasks_reject_unstaged_parent_env_templates_in_every_harbor_scope(
+    tmp_path: Path,
+    source_name: str,
+    authored_config: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8") + "\n" + authored_config.replace("SOURCE_NAME", source_name),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="outside the evaluator-staged role boundary"):
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / f"native-host-env-{source_name.lower()}",
+            grading_mode="custom_only",
+        )
+
+
+def test_native_tasks_allow_only_role_staged_host_env_templates(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8")
+        + "\n"
+        + '[environment.env]\nAGENT_ALIAS = "${AGENT_VALUE}"\n\n'
+        + '[solution.env]\nSOLUTION_ALIAS = "${AGENT_VALUE}"\n\n'
+        + '[verifier]\nenvironment_mode = "separate"\n\n'
+        + '[verifier.env]\nVERIFY_ALIAS = "${VERIFY_VALUE}"\n\n'
+        + '[verifier.environment]\nworkdir = "/workspace"\n\n'
+        + '[verifier.environment.env]\nVERIFY_ENV_ALIAS = "${VERIFY_VALUE}"\n\n'
+        + '[[steps]]\nname = "step-one"\n\n'
+        + '[steps.verifier.env]\nSTEP_VERIFY_ALIAS = "${VERIFY_VALUE}"\n\n'
+        + '[steps.verifier.environment]\nworkdir = "/workspace"\n\n'
+        + '[steps.verifier.environment.env]\nSTEP_ENV_ALIAS = "${VERIFY_VALUE}"\n',
+        encoding="utf-8",
+    )
+
+    task = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-role-env",
+        grading_mode="custom_only",
+        runtime_env={"AGENT_VALUE": "${AGENT_VALUE}"},
+        verifier_env={"VERIFY_VALUE": "${VERIFY_VALUE}"},
+    )[0]
+
+    config = TaskConfig.model_validate_toml((task / "task.toml").read_text(encoding="utf-8"))
+    assert config.environment.env["AGENT_ALIAS"] == "${AGENT_VALUE}"
+    assert config.environment.env["AGENT_VALUE"] == "${AGENT_VALUE}"
+    assert config.solution.env == {"SOLUTION_ALIAS": "${AGENT_VALUE}"}
+    assert config.verifier.env == {"VERIFY_ALIAS": "${VERIFY_VALUE}"}
+    assert config.verifier.environment is not None
+    assert config.verifier.environment.env == {"VERIFY_ENV_ALIAS": "${VERIFY_VALUE}"}
+    assert config.steps is not None
+    assert config.steps[0].verifier.env == {"STEP_VERIFY_ALIAS": "${VERIFY_VALUE}"}
+    assert config.steps[0].verifier.environment is not None
+    assert config.steps[0].verifier.environment.env == {"STEP_ENV_ALIAS": "${VERIFY_VALUE}"}
+
+
+def test_native_tasks_allow_safe_literal_default_for_role_staged_host_env_template(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8") + '\n[environment.env]\nAGENT_MODE = "${AGENT_VALUE:-offline}"\n',
+        encoding="utf-8",
+    )
+
+    task = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-safe-env-default",
+        grading_mode="custom_only",
+        runtime_env={"AGENT_VALUE": "${AGENT_VALUE}"},
+    )[0]
+
+    config = TaskConfig.model_validate_toml((task / "task.toml").read_text(encoding="utf-8"))
+    assert config.environment.env["AGENT_MODE"] == "${AGENT_VALUE:-offline}"
+
+
+@pytest.mark.parametrize(
+    ("key", "template", "protected_fragment"),
+    [
+        (
+            "AGENT_ALIAS",
+            f"${{AGENT_VALUE:-{_SYNTHETIC_CREDENTIAL_DEFAULT}}}",
+            _SYNTHETIC_CREDENTIAL_DEFAULT,
+        ),
+        ("AGENT_ALIAS", "${AGENT_VALUE:-${OTHER_SECRET}}", "OTHER_SECRET"),
+        ("API_TOKEN", "${AGENT_VALUE:-offline}", "offline"),
+    ],
+)
+def test_native_tasks_reject_credential_bearing_or_nested_role_staged_template_defaults_without_echo(
+    tmp_path: Path,
+    key: str,
+    template: str,
+    protected_fragment: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8") + f'\n[environment.env]\n{key} = "{template}"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="literal credential-bearing assignment") as error:
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / "native-unsafe-env-default",
+            grading_mode="custom_only",
+            runtime_env={"AGENT_VALUE": "${AGENT_VALUE}"},
+        )
+    assert protected_fragment not in str(error.value)
+
+
+def test_native_tasks_reject_unstaged_template_defaults_and_literal_credentials_without_echo(
+    tmp_path: Path,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8")
+        + '\n[environment.env]\nAGENT_ALIAS = "${DOCKER_AUTH_CONFIG:-fallback-secret}"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as default_error:
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / "native-env-default",
+            grading_mode="custom_only",
+        )
+    assert "fallback-secret" not in str(default_error.value)
+
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8").replace(
+            'AGENT_ALIAS = "${DOCKER_AUTH_CONFIG:-fallback-secret}"',
+            'PASSWORD = "literal-credential-value"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as literal_error:
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / "native-env-literal",
+            grading_mode="custom_only",
+        )
+    assert "literal-credential-value" not in str(literal_error.value)
+
+
+@pytest.mark.parametrize("verifier_scope", ["task", "step"])
+@pytest.mark.parametrize("source_name", ["DOCKER_AUTH_CONFIG", "DAYTONA_API_KEY"])
+def test_native_tasks_reject_parent_env_interpolation_in_separate_verifier_compose(
+    tmp_path: Path,
+    verifier_scope: str,
+    source_name: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    if verifier_scope == "task":
+        authored_config = '[verifier]\nenvironment_mode = "separate"\n\n[verifier.environment]\n'
+        verifier_context = native_task / "tests"
+    else:
+        authored_config = (
+            '[[steps]]\nname = "step-one"\n\n'
+            '[steps.verifier]\nenvironment_mode = "separate"\n\n'
+            "[steps.verifier.environment]\n"
+        )
+        verifier_context = native_task / "steps" / "step-one" / "tests"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8") + "\n" + authored_config,
+        encoding="utf-8",
+    )
+    verifier_context.mkdir(parents=True, exist_ok=True)
+    (verifier_context / "docker-compose.yaml").write_text(
+        f"services:\n  main:\n    depends_on: [helper]\n  helper:\n    image: busybox:${{{source_name}}}\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / f"native-{verifier_scope}-verifier-compose-{source_name.lower()}"
+    with pytest.raises(ValueError, match="undeclared interpolation variables"):
+        stage_native_harbor_tasks(
+            target,
+            output_dir,
+            grading_mode="custom_only",
+        )
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("verifier_scope", ["task", "step"])
+def test_native_tasks_allow_staged_verifier_env_interpolation_in_separate_verifier_compose(
+    tmp_path: Path,
+    verifier_scope: str,
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    native_task = target / "evals" / "harbor" / "case-001"
+    task_toml = native_task / "task.toml"
+    if verifier_scope == "task":
+        authored_config = '[verifier]\nenvironment_mode = "separate"\n\n[verifier.environment]\n'
+        verifier_context = native_task / "tests"
+        staged_relative_context = Path("tests")
+    else:
+        authored_config = (
+            '[[steps]]\nname = "step-one"\n\n'
+            '[steps.verifier]\nenvironment_mode = "separate"\n\n'
+            "[steps.verifier.environment]\n"
+        )
+        verifier_context = native_task / "steps" / "step-one" / "tests"
+        staged_relative_context = Path("steps") / "step-one" / "tests"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8") + "\n" + authored_config,
+        encoding="utf-8",
+    )
+    verifier_context.mkdir(parents=True, exist_ok=True)
+    compose_text = (
+        "services:\n"
+        "  main:\n"
+        "    depends_on: [helper]\n"
+        "  helper:\n"
+        '    image: "busybox:${VERIFY_IMAGE}"\n'
+        '    ports: ["18080:80"]\n'
+    )
+    (verifier_context / "docker-compose.yaml").write_text(compose_text, encoding="utf-8")
+
+    staged_task = stage_native_harbor_tasks(
+        target,
+        tmp_path / f"native-{verifier_scope}-verifier-compose-allowed",
+        grading_mode="custom_only",
+        verifier_env={"VERIFY_IMAGE": "${VERIFY_IMAGE}"},
+    )[0]
+
+    assert (verifier_context / "docker-compose.yaml").read_text(encoding="utf-8") == compose_text
+    staged_compose = (staged_task / staged_relative_context / "docker-compose.yaml").read_text(encoding="utf-8")
+    assert "${VERIFY_IMAGE}" in staged_compose
+    assert "ports:" not in staged_compose
 
 
 def test_native_task_reuses_existing_exact_provider_placeholder_when_injecting(tmp_path: Path) -> None:
@@ -2024,8 +2284,63 @@ def test_native_tasks_pin_skills_dir_to_controlled_projection(tmp_path: Path) ->
 
     staged_toml = (staged / "task.toml").read_text(encoding="utf-8")
     assert 'skills_dir = "/workspace/skills"' in staged_toml
-    assert '"BASH_ENV" = ""' in staged_toml
-    assert '"CLAUDE_CODE_DISABLE_POLICY_SKILLS" = "1"' in staged_toml
+    staged_config = tomllib.loads(staged_toml)
+    assert staged_config["environment"]["env"]["BASH_ENV"] == ""
+    assert staged_config["environment"]["env"]["CLAUDE_CODE_DISABLE_POLICY_SKILLS"] == "1"
+
+
+def test_native_task_structural_mutation_supports_inline_tables_and_quoted_keys(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    source = (
+        'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n'
+        '[metadata]\nentry_id = "case-001"\n\n'
+        '[verifier]\nenv = { AUTHORED = "kept" }\n\n'
+        '[environment]\nenv = { AUTHORED = "kept" }\n"skills_dir" = "/workspace/skills"\n'
+    )
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+
+    staged = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-inline-toml",
+        runtime_env={"RUNTIME_VALUE": "${RUNTIME_VALUE}"},
+        verifier_env={"SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}"},
+        pre_agent_setup=["echo ready"],
+    )[0]
+
+    rendered = (staged / "task.toml").read_text(encoding="utf-8")
+    TaskConfig.model_validate_toml(rendered)
+    config = tomllib.loads(rendered)
+    assert config["environment"]["skills_dir"] == "/workspace/skills"
+    assert config["environment"]["env"]["AUTHORED"] == "kept"
+    assert config["environment"]["env"]["RUNTIME_VALUE"] == "${RUNTIME_VALUE}"
+    assert config["verifier"]["env"] == {
+        "AUTHORED": "kept",
+        "SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}",
+    }
+    assert "echo ready" in config["environment"]["healthcheck"]["command"]
+
+
+def test_native_task_inline_healthcheck_conflicts_with_pre_agent_setup(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    source = task_toml.read_text(encoding="utf-8").replace(
+        "[environment]\n",
+        '[environment]\nhealthcheck = { command = "true" }\n',
+    )
+    TaskConfig.model_validate_toml(source)
+    task_toml.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="healthcheck"):
+        stage_native_harbor_tasks(
+            target,
+            tmp_path / "native-inline-healthcheck",
+            grading_mode="custom_only",
+            pre_agent_setup=["echo ready"],
+        )
 
 
 @pytest.mark.parametrize("name", ["BASH_ENV", "BASH_FUNC_hidden%%"])

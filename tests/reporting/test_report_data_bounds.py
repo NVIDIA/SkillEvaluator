@@ -76,6 +76,33 @@ def test_normal_agent_artifacts_are_loaded_without_truncation_marker(tmp_path: P
     assert "_report_truncation" not in agents["codex"]
 
 
+def test_report_loader_omits_unrepresentable_trajectory_token_counters(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "codex"
+    _write_summary(agent_dir)
+    _write_trial(
+        agent_dir,
+        "case-001__1",
+        {"entry_id": "case-001", "accuracy": 1.0},
+        {
+            "steps": [{"action": "answer"}],
+            "final_metrics": {
+                "total_prompt_tokens": 10**400,
+                "total_completion_tokens": 4,
+                "total_cached_tokens": 1 << 53,
+            },
+        },
+    )
+
+    agents = report_data.load_agent_data(tmp_path)
+
+    assert agents["codex"]["rewards"][0]["_traj"] == {
+        "steps": 1,
+        "prompt_tokens": 0,
+        "completion_tokens": 4,
+        "cached_tokens": 0,
+    }
+
+
 def test_actual_atif_v17_preserves_string_messages_token_metrics_and_provenance(tmp_path: Path) -> None:
     from harbor.models.job.result import JobResult, JobStats
     from harbor.models.trajectories import Trajectory

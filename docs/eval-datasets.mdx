@@ -249,9 +249,17 @@ grading:
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
 | `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. Alias: `setup_commands`. |
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
+
 | `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
 | `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
+
+Environment constructor kwargs are deliberately not accepted in this
+skill-owned file. Operators can pass non-secret kwargs for Harbor-native
+non-Docker backends with repeatable `--environment-kwarg KEY=VALUE` / `--ek
+KEY=VALUE` CLI flags. Backend credentials stay in the host environment;
+runtime-policy, mount, network, lifecycle, and pod-security fields are
+reserved.
 
 <Note>
   Unknown keys are rejected, not ignored — a typo like `n_attemps` fails the

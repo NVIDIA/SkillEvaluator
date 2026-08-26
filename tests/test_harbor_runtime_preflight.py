@@ -3653,6 +3653,10 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
 
     assert result["execution_status"] == "failed"
     assert result["execution_errors"] == ["opencode runtime preflight failed: 401 Unauthorized"]
+    assert result["error"] == result["execution_errors"][:1]
+    assert result["execution_error_details_total"] == 1
+    assert result["execution_error_details_shown"] == 1
+    assert result["execution_error_details_truncated"] is False
     assert preflight_run_env["LLM_JUDGE_MODEL"] == "host-legacy"
     assert preflight_run_env["SKILL_EVAL_JUDGE_MODEL"] == "host-legacy"
     full_matrix.assert_not_called()
@@ -3670,6 +3674,8 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
         "model catalog access does not verify runtime credentials for this endpoint"
     }
     persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result_path.stat().st_size <= 2 * 1024 * 1024
+    assert persisted["error"] == persisted["execution_errors"][:1]
     assert persisted["run_config"] == result["run_config"]
     run_config_path = Path(result["run_dir"]) / "run_config.json"
     assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]

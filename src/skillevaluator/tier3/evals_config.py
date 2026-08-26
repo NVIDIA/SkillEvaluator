@@ -9,7 +9,10 @@ dataset says what to evaluate; this config says how SkillEvaluator should run Ha
 
 from __future__ import annotations
 
+import json
+import math
 import re
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +58,22 @@ _RESOURCE_KEYS = {"cpus", "memory_mb", "storage_mb"}
 _SKILL_WORKSPACE_KEYS = {"mode", "include"}
 _GRADING_KEYS = {"mode"}
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_URI_AUTHORITY_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,31}://(?P<authority>[^\s/?#]*)")
+_SCHEMELESS_CREDENTIAL_AUTHORITY_RE = re.compile(r"[^\s/:@]+:[^\s/@]+@[^\s/?#]+")
+_REFERENCE_KWARG_NAMES_BY_ENV_MODE = {
+    "ack": frozenset({"image_pull_secret"}),
+    "cwsandbox": frozenset({"secrets"}),
+    "daytona": frozenset({"secrets"}),
+    "modal": frozenset({"registry_secret", "secrets"}),
+    "skypilot": frozenset({"secrets"}),
+    "wandb": frozenset({"secrets"}),
+}
+_CWSANDBOX_SECRET_REFERENCE_KEYS = frozenset({"env_var", "field", "name", "store"})
+_KUBERNETES_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+_MAX_ENVIRONMENT_KWARGS_JSON_BYTES = 64 * 1024
+_MAX_ENVIRONMENT_KWARGS_DEPTH = 32
+_MAX_ENVIRONMENT_KWARGS_NODES = 4096
+_MAX_ENVIRONMENT_REFERENCE_BYTES = 512
 
 
 class EvalsConfigError(ValueError):
@@ -298,6 +317,255 @@ def _non_empty_string(value: Any, config_path: Path, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EvalsConfigError(f"{config_path}: {field} must be a non-empty string")
     return value.strip()
+
+
+def _is_sensitive_environment_kwarg_name(name: str) -> bool:
+    """Recognize secret-bearing names across snake, kebab, and camel case."""
+    normalized = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
+    tokens = tuple(part for part in re.sub(r"[^A-Za-z0-9]+", "_", normalized).lower().split("_") if part)
+    if any(
+        token
+        in {
+            "auth",
+            "authorization",
+            "authentication",
+            "credential",
+            "credentials",
+            "passwd",
+            "password",
+            "secret",
+            "secrets",
+            "token",
+        }
+        for token in tokens
+    ):
+        return True
+    if any(
+        pair in {("api", "key"), ("access", "key"), ("private", "key"), ("secret", "key")} for pair in pairwise(tokens)
+    ):
+        return True
+    compact = "".join(tokens)
+    return compact.endswith(
+        (
+            "apikey",
+            "accesskey",
+            "privatekey",
+            "secretkey",
+            "auth",
+            "authorization",
+            "authentication",
+            "credential",
+            "credentials",
+            "passwd",
+            "password",
+            "secret",
+            "secrets",
+            "token",
+        )
+    )
+
+
+def _contains_credential_bearing_uri(value: str) -> bool:
+    """Reject URI userinfo without parsing or rendering the supplied value."""
+    if any("@" in match.group("authority") for match in _URI_AUTHORITY_RE.finditer(value)):
+        return True
+    return _SCHEMELESS_CREDENTIAL_AUTHORITY_RE.search(value) is not None
+
+
+def _safe_environment_kwarg_path(path: tuple[str | int, ...]) -> str:
+    """Describe a value location without echoing attacker-controlled nested keys."""
+    if not path:
+        return "mapping"
+    root = path[0]
+    if not isinstance(root, str) or not _ENV_NAME_RE.fullmatch(root):
+        return "mapping value"
+    return root if len(path) == 1 else f"{root} nested value"
+
+
+def _environment_kwarg_shape_error(value: Any) -> str | None:
+    """Validate bounded JSON shape iteratively so cycles/deep values fail closed."""
+    stack: list[tuple[bool, Any, tuple[str | int, ...], int]] = [(True, value, (), 0)]
+    active_containers: set[int] = set()
+    node_count = 0
+    while stack:
+        entering, current, path, depth = stack.pop()
+        if not entering:
+            active_containers.remove(id(current))
+            continue
+        node_count += 1
+        if node_count > _MAX_ENVIRONMENT_KWARGS_NODES:
+            return f"must contain at most {_MAX_ENVIRONMENT_KWARGS_NODES} JSON values"
+        if depth > _MAX_ENVIRONMENT_KWARGS_DEPTH:
+            return f"must nest at most {_MAX_ENVIRONMENT_KWARGS_DEPTH} levels"
+        if isinstance(current, dict | list):
+            identity = id(current)
+            if identity in active_containers:
+                return "must not contain cyclic values"
+            active_containers.add(identity)
+            stack.append((False, current, path, depth))
+            if isinstance(current, dict):
+                items = list(current.items())
+                for raw_key, item in reversed(items):
+                    if not isinstance(raw_key, str):
+                        return f"{_safe_environment_kwarg_path(path)} keys must be strings"
+                    stack.append((True, item, (*path, raw_key), depth + 1))
+            else:
+                for index in range(len(current) - 1, -1, -1):
+                    stack.append((True, current[index], (*path, index), depth + 1))
+            continue
+        if isinstance(current, str):
+            if _contains_credential_bearing_uri(current):
+                return (
+                    f"{_safe_environment_kwarg_path(path)} contains a credential-bearing URI; "
+                    "pass credentials through the host environment instead"
+                )
+            continue
+        if current is None or isinstance(current, bool | int):
+            continue
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                return f"{_safe_environment_kwarg_path(path)} must be a finite JSON number"
+            continue
+        return f"{_safe_environment_kwarg_path(path)} must contain only JSON-compatible values"
+    return None
+
+
+def _secret_reference_name_error(value: Any, *, label: str) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return f"{label} must be a non-empty secret reference name"
+    if value != value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return f"{label} must be a trimmed secret reference name without control characters"
+    if len(value.encode("utf-8")) > _MAX_ENVIRONMENT_REFERENCE_BYTES:
+        return f"{label} must encode to at most {_MAX_ENVIRONMENT_REFERENCE_BYTES} bytes"
+    if _contains_credential_bearing_uri(value):
+        return f"{label} must be a secret reference name, not a credential-bearing URI"
+    return None
+
+
+def _reference_kwarg_error(env_mode: str | None, name: str, value: Any) -> str | None:
+    """Validate Harbor fields whose values name provider-managed secrets."""
+    if name == "image_pull_secret":
+        if env_mode != "ack":
+            return "image_pull_secret is supported only for Harbor environment 'ack'"
+        if not isinstance(value, str) or len(value.encode("utf-8")) > 253:
+            return "image_pull_secret must be a Kubernetes DNS-subdomain Secret name"
+        labels = value.split(".")
+        if not labels or any(len(label) > 63 or not _KUBERNETES_DNS_LABEL_RE.fullmatch(label) for label in labels):
+            return "image_pull_secret must be a Kubernetes DNS-subdomain Secret name"
+        return None
+    if env_mode in {"modal", "skypilot"} and name == "secrets":
+        if not isinstance(value, list):
+            return f"{name} must be a list of provider secret reference names for Harbor environment '{env_mode}'"
+        for item in value:
+            if error := _secret_reference_name_error(item, label=name):
+                return error
+        return None
+    if env_mode == "modal" and name == "registry_secret":
+        return _secret_reference_name_error(value, label=name)
+    if env_mode == "daytona" and name == "secrets":
+        if not isinstance(value, dict):
+            return "secrets must map sandbox environment variable names to Daytona organization secret names"
+        for target_name, secret_name in value.items():
+            if not isinstance(target_name, str) or not _ENV_NAME_RE.fullmatch(target_name):
+                return "secrets keys must be valid sandbox environment variable names"
+            if error := _secret_reference_name_error(secret_name, label="secrets value"):
+                return error
+        return None
+    if env_mode in {"cwsandbox", "wandb"} and name == "secrets":
+        if not isinstance(value, list):
+            return f"secrets must be a list of provider secret reference mappings for Harbor environment '{env_mode}'"
+        for item in value:
+            if not isinstance(item, dict) or not item:
+                return "secrets entries must be non-empty provider secret reference mappings"
+            if set(item) - _CWSANDBOX_SECRET_REFERENCE_KEYS:
+                return "secrets entries contain unsupported provider secret reference fields"
+            for field_name, field_value in item.items():
+                if field_name == "env_var":
+                    if not isinstance(field_value, str) or not _ENV_NAME_RE.fullmatch(field_value):
+                        return "secrets env_var fields must be valid environment variable names"
+                elif error := _secret_reference_name_error(field_value, label=f"secrets {field_name} field"):
+                    return error
+        return None
+    return f"{name} is secret-bearing; pass credentials through the host environment instead"
+
+
+def _environment_kwarg_secret_policy_error(value: dict[str, Any], *, env_mode: str | None) -> str | None:
+    stack: list[tuple[dict[str, Any] | list[Any], tuple[str | int, ...]]] = [(value, ())]
+    allowed_mode_references = _REFERENCE_KWARG_NAMES_BY_ENV_MODE.get(env_mode or "", frozenset())
+    while stack:
+        current, path = stack.pop()
+        if isinstance(current, dict):
+            for raw_key, item in current.items():
+                item_path = (*path, raw_key)
+                is_top_level_reference = not path and (raw_key in allowed_mode_references)
+                if is_top_level_reference:
+                    if error := _reference_kwarg_error(env_mode, raw_key, item):
+                        return error
+                    continue
+                if _is_sensitive_environment_kwarg_name(raw_key):
+                    return (
+                        f"{_safe_environment_kwarg_path(item_path)} is secret-bearing; "
+                        "pass credentials through the host environment instead"
+                    )
+                if isinstance(item, dict | list):
+                    stack.append((item, item_path))
+        else:
+            for index, item in enumerate(current):
+                if isinstance(item, dict | list):
+                    stack.append((item, (*path, index)))
+    return None
+
+
+def validate_environment_kwargs(value: Any, *, env_mode: str | None = None) -> dict[str, Any]:
+    """Validate non-secret Harbor constructor kwargs for safe argv forwarding."""
+    if not isinstance(value, dict):
+        raise ValueError("must be a mapping")
+    for raw_name in value:
+        if not isinstance(raw_name, str) or not _ENV_NAME_RE.fullmatch(raw_name):
+            raise ValueError("keys must be valid Python keyword names")
+    if error := _environment_kwarg_shape_error(value):
+        raise ValueError(error)
+    if error := _environment_kwarg_secret_policy_error(value, env_mode=env_mode):
+        raise ValueError(error)
+    try:
+        encoded = json.dumps(value, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+    except (RecursionError, TypeError, ValueError):
+        raise ValueError("must contain only JSON-compatible values") from None
+    if len(encoded.encode("utf-8")) > _MAX_ENVIRONMENT_KWARGS_JSON_BYTES:
+        raise ValueError(f"must encode to at most {_MAX_ENVIRONMENT_KWARGS_JSON_BYTES} bytes")
+    return dict(value)
+
+
+def parse_environment_kwarg_overrides(
+    values: tuple[str, ...] | list[str],
+    *,
+    env_mode: str | None = None,
+) -> dict[str, Any]:
+    """Parse repeatable CLI ``KEY=VALUE`` arguments using Harbor's value rules."""
+    parsed: dict[str, Any] = {}
+    for index, raw in enumerate(values, start=1):
+        if "=" not in raw:
+            raise ValueError(f"Invalid --environment-kwarg entry {index}: expected KEY=VALUE")
+        name, raw_value = raw.split("=", 1)
+        name = name.strip()
+        raw_value = raw_value.strip()
+        try:
+            value: Any = json.loads(raw_value)
+        except json.JSONDecodeError:
+            value = {"True": True, "False": False, "None": None}.get(raw_value, raw_value)
+        except RecursionError:
+            raise ValueError(f"Invalid --environment-kwarg entry {index}: JSON value nests too deeply") from None
+        parsed[name] = value
+    try:
+        return validate_environment_kwargs(parsed, env_mode=env_mode)
+    except ValueError as exc:
+        raise ValueError(f"Invalid --environment-kwarg: {exc}") from None
+
+
+def encode_environment_kwarg(name: str, value: Any) -> str:
+    """Encode one validated kwarg so Harbor's parser preserves its JSON type."""
+    return f"{name}={json.dumps(value, allow_nan=False, ensure_ascii=False, separators=(',', ':'))}"
 
 
 def _resources(value: Any, config_path: Path) -> dict[str, int]:

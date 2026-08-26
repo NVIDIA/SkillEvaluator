@@ -13,6 +13,7 @@ import hashlib
 import heapq
 import json
 import logging
+import math
 import os
 import stat
 from collections.abc import Callable, Iterable
@@ -20,7 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, metric_set_for_reward
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ _MAX_JSON_BYTES = 2 * 1024 * 1024
 _MAX_JSON_DEPTH = 64
 _MAX_JSON_NODES = 50_000
 _MAX_JSON_NUMBER_CHARS = 4_300
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 _MAX_AGENTS = 64
 _MAX_AGENT_PATHS_SCANNED = 512
 _MAX_TRIALS_PER_CONDITION = 512
@@ -38,10 +40,25 @@ _MAX_DATASET_RECORDS = 4096
 _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
 
+DATASET_SNAPSHOT_MAX_BYTES = _MAX_JSON_BYTES
+DATASET_SNAPSHOT_MAX_DEPTH = _MAX_JSON_DEPTH
+DATASET_SNAPSHOT_MAX_NODES = _MAX_JSON_NODES
+DATASET_SNAPSHOT_LIMIT_ERROR = (
+    "Dataset snapshot exceeds the 2 MiB, depth-64, or 50,000-node publication limit; "
+    "reduce dataset size or structural complexity."
+)
+
 __all__ = (
     "DATASET_SNAPSHOT_DIGEST_ALGORITHM",
+    "DATASET_SNAPSHOT_LIMIT_ERROR",
+    "DATASET_SNAPSHOT_MAX_BYTES",
+    "DATASET_SNAPSHOT_MAX_DEPTH",
+    "DATASET_SNAPSHOT_MAX_NODES",
+    "DatasetSnapshotContractError",
     "build_dataset_snapshot",
+    "dataset_snapshot_manifest",
     "deduplicate_dataset_entries",
+    "encode_dataset_snapshot",
     "load_agent_data",
     "load_dataset",
     "load_dataset_snapshot",
@@ -53,6 +70,13 @@ __all__ = (
 
 DATASET_SNAPSHOT_DIGEST_ALGORITHM = "skill-evaluator-dataset-snapshot/1"
 DATASET_SNAPSHOT_SCHEMA_VERSION = "1.0"
+
+
+class DatasetSnapshotContractError(ValueError):
+    """Raised when exact dataset truth cannot fit the public artifact contract."""
+
+    def __init__(self) -> None:
+        super().__init__(DATASET_SNAPSHOT_LIMIT_ERROR)
 
 
 def _canonical_dataset_json(value: Any) -> str:
@@ -110,12 +134,63 @@ def build_dataset_snapshot(entries: list[dict[str, Any]], *, evaluator_version: 
     }
 
 
+def encode_dataset_snapshot(snapshot: object) -> bytes:
+    """Encode one snapshot within the same bounds enforced by the report loader."""
+    try:
+        _validate_json_tree(snapshot)
+        stack = [snapshot]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+            elif isinstance(current, bool) or current is None or isinstance(current, str):
+                continue
+            elif isinstance(current, int):
+                if abs(current) > _MAX_JSON_SAFE_INTEGER:
+                    raise ValueError("browser-unsafe JSON integer")
+            elif isinstance(current, float):
+                if not math.isfinite(current):
+                    raise ValueError("non-finite JSON number")
+            else:
+                raise TypeError("value is not JSON serializable")
+        encoded = json.dumps(
+            snapshot,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    except (MemoryError, RecursionError, TypeError, UnicodeError, ValueError):
+        raise DatasetSnapshotContractError from None
+    if len(encoded) > DATASET_SNAPSHOT_MAX_BYTES:
+        raise DatasetSnapshotContractError
+    return encoded
+
+
+def dataset_snapshot_manifest(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return validated dataset metadata suitable for embedding in ``result.json``."""
+    encode_dataset_snapshot(snapshot)
+    return {
+        "schema_version": snapshot.get("schema_version"),
+        "evaluator_version": snapshot.get("evaluator_version"),
+        "dataset_summary": dict(snapshot.get("dataset_summary", {})),
+        "dataset_digest": snapshot.get("dataset_digest"),
+        "dataset_digest_algorithm": snapshot.get("dataset_digest_algorithm"),
+    }
+
+
 def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
     """Load a validated run-owned dataset snapshot, if one was persisted."""
     path = run_dir / "dataset_snapshot.json"
     diagnostics: list[dict[str, Any]] = []
     snapshot = _load_bounded_json(path, diagnostics, artifact="dataset_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != DATASET_SNAPSHOT_SCHEMA_VERSION:
+        return None
+    try:
+        encode_dataset_snapshot(snapshot)
+    except DatasetSnapshotContractError:
         return None
     dataset = snapshot.get("dataset")
     summary = snapshot.get("dataset_summary")
@@ -414,9 +489,10 @@ def _load_bounded_jsonl(raw: bytes, diagnostics: list[dict[str, Any]]) -> list[A
 
 
 def _metrics_for_rewards(rewards: list[dict[str, Any]]) -> list[str]:
-    if any(isinstance(reward.get("security"), int | float) for reward in rewards):
+    inferred = [metric_set_for_reward(reward)[1] for reward in rewards]
+    if any(metrics == DEFAULT_METRICS for metrics in inferred):
         return list(DEFAULT_METRICS)
-    if any(any(isinstance(reward.get(metric), int | float) for metric in LEGACY_METRICS) for reward in rewards):
+    if any(metrics == LEGACY_METRICS for metrics in inferred):
         return list(LEGACY_METRICS)
     return []
 
@@ -462,6 +538,13 @@ def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict
 
 def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _trajectory_token_counter(value: Any) -> int:
+    """Return a browser-safe nonnegative token counter."""
+    return (
+        value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER else 0
+    )
 
 
 def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
@@ -525,7 +608,8 @@ def load_agent_data(
                     agent_info[metric_key] = data.get("metrics", [])
                     custom_key = "custom_with_skill" if variant == "with-skill" else "custom_without_skill"
                     if "custom_scores" in data:
-                        agent_info[custom_key] = data.get("custom_scores", {})
+                        custom_scores = data.get("custom_scores")
+                        agent_info[custom_key] = custom_scores if isinstance(custom_scores, dict) else {}
                     overall_key = "overall_with_skill" if variant == "with-skill" else "overall_without_skill"
                     if "overall_score" in data:
                         agent_info[overall_key] = data.get("overall_score")
@@ -564,6 +648,14 @@ def load_agent_data(
                     num_trials = data.get("num_trials")
                     if isinstance(num_trials, int) and not isinstance(num_trials, bool) and num_trials >= 0:
                         agent_info[count_key] = num_trials
+                    reward_row_count_key = "num_reward_rows" if variant == "with-skill" else "num_reward_rows_baseline"
+                    num_reward_rows = data.get("num_reward_rows")
+                    if (
+                        isinstance(num_reward_rows, int)
+                        and not isinstance(num_reward_rows, bool)
+                        and num_reward_rows >= 0
+                    ):
+                        agent_info[reward_row_count_key] = num_reward_rows
 
         lift_file = agent_dir / "lift.json"
         if lift_file.exists():
@@ -581,13 +673,15 @@ def load_agent_data(
         if custom_lift_file.exists():
             custom_lift = _load_bounded_json(custom_lift_file, agent_diagnostics, artifact="custom_lift")
             if custom_lift is not _INVALID_JSON:
-                agent_info["custom_lift"] = custom_lift
+                agent_info["custom_lift"] = custom_lift if isinstance(custom_lift, dict) else {}
 
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
             trial_list: list[dict[str, Any]] = []
             count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
-            expected_reward_rows = agent_info.get(count_key)
-            rewards_complete = isinstance(expected_reward_rows, int)
+            reward_row_count_key = "num_reward_rows" if variant_key == "rewards" else "num_reward_rows_baseline"
+            expected_logical_trials = agent_info.get(count_key)
+            expected_reward_rows = agent_info.get(reward_row_count_key)
+            rewards_complete = isinstance(expected_logical_trials, int)
             trials_dir = agent_dir / variant_dir_name / "trials"
             if _is_safe_directory(trials_dir, results_dir):
                 try:
@@ -641,14 +735,19 @@ def load_agent_data(
                             steps = trajectory.get("steps", [])
                             reward["_traj"] = {
                                 "steps": len(steps) if isinstance(steps, list) else 0,
-                                "prompt_tokens": final_metrics.get("total_prompt_tokens", 0),
-                                "completion_tokens": final_metrics.get("total_completion_tokens", 0),
-                                "cached_tokens": final_metrics.get("total_cached_tokens", 0),
+                                "prompt_tokens": _trajectory_token_counter(final_metrics.get("total_prompt_tokens")),
+                                "completion_tokens": _trajectory_token_counter(
+                                    final_metrics.get("total_completion_tokens")
+                                ),
+                                "cached_tokens": _trajectory_token_counter(final_metrics.get("total_cached_tokens")),
                             }
                     trial_list.append(reward)
             else:
-                rewards_complete = expected_reward_rows == 0
-            if expected_reward_rows != len(trial_list):
+                rewards_complete = expected_logical_trials == 0
+            logical_trial_count = len(logical_trial_reward_groups(trial_list))
+            if expected_logical_trials != logical_trial_count:
+                rewards_complete = False
+            if isinstance(expected_reward_rows, int) and expected_reward_rows != len(trial_list):
                 rewards_complete = False
             agent_info[variant_key] = trial_list
             agent_info[f"{variant_key}_complete"] = rewards_complete

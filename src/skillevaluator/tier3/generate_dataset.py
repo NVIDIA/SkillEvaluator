@@ -496,6 +496,11 @@ def _ensure_project_imports():
         sys.path.insert(0, src_dir)
 
 
+def _case_id_from_trial_dir(trial_dir_name: str) -> str:
+    """Map Harbor trial folders like ``case-001__Lmi47iy`` back to the eval case id."""
+    return trial_dir_name.split("__", 1)[0]
+
+
 def _discover_trajectories(
     skill_path: Path,
     from_results: str | None = None,
@@ -534,7 +539,9 @@ def _discover_trajectories(
         for trial_dir in sorted(trials_dir.iterdir()):
             if not trial_dir.is_dir():
                 continue
-            case_id = trial_dir.name
+            case_id = _case_id_from_trial_dir(trial_dir.name)
+            if not case_id:
+                continue
             traj_path = trial_dir / "trajectory.json"
             traj, meta = load_trajectory_with_fallback(traj_path, logs_dir=trial_dir)
             if traj and traj.get("steps"):

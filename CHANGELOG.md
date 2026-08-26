@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `create-eval-dataset --refine` now maps Harbor trial folders
+  (`case-id__suffix`) back to eval case ids so trajectories attach.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

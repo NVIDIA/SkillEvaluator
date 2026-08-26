@@ -37,6 +37,29 @@ def test_discover_trajectories_uses_env_results_root(tmp_path, monkeypatch):
     assert _discover_trajectories(skill) == {"case-001": trajectory}
 
 
+def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, monkeypatch):
+    """Harbor persists trials as ``{case_id}__{suffix}``; refine looks up by case id."""
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / "demo-001__Lmi47iy"
+    trial.mkdir(parents=True)
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
+
+    found = _discover_trajectories(skill)
+    assert "demo-001" in found
+    assert "demo-001__Lmi47iy" not in found
+    assert found["demo-001"] == trajectory
+
+
 def test_discover_trajectories_results_dir_overrides_env(tmp_path, monkeypatch):
     skill = tmp_path / "my-skill"
     skill.mkdir()

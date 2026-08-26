@@ -413,6 +413,65 @@ license: MIT
         error_text = " ".join(result.errors).lower()
         assert any(token in error_text for token in ("conflict", "mismatch", "differ"))
         assert any(f.check_name == "frontmatter_license_mismatch" for f in result.findings)
+        assert result.metadata.get("license_status") == "conflict"
+        assert not any("ALLOWED - permissive" in message for message in result.messages)
+
+    def test_copying_gpl_is_not_hidden_by_mit_license_file(self, tmp_path: Path):
+        """MIT LICENSE plus GPL COPYING must fail closed even with MIT frontmatter."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-license-gpl-copying",
+            "MIT",
+            MIT_LICENSE_TEXT,
+        )
+        (skill_dir / "COPYING").write_text(GPL_V3_LICENSE_TEXT)
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert result.metadata.get("license_status") == "blocked"
+        assert not any("License: MIT (ALLOWED" in message for message in result.messages)
+
+    def test_single_file_mit_and_gpl_signatures_fail_closed(self, tmp_path: Path):
+        """One LICENSE file matching both MIT and GPL patterns must not report MIT allowed."""
+        skill_dir = tmp_path / "dual-signature-license"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: dual-signature-license
+description: LICENSE file contains both MIT and GPL signatures
+license: MIT
+---
+
+# Dual signature
+""")
+        (skill_dir / "LICENSE").write_text(MIT_LICENSE_TEXT + "\n" + GPL_V3_LICENSE_TEXT)
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert result.metadata.get("license_status") == "blocked"
+
+    def test_unrecognized_lgpl21_license_file_fails_closed(self, tmp_path: Path):
+        """A present LICENSE file without a configured signature cannot be treated as absent."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-frontmatter-lgpl21-file",
+            "MIT",
+            """GNU LESSER GENERAL PUBLIC LICENSE
+Version 2.1, February 1999
+
+Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+""",
+        )
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "unrecognized_license_file" for f in result.findings)
+        assert result.metadata.get("license_status") == "unrecognized"
+        assert result.metadata.get("license_status") != "allowed"
 
     def test_strict_dual_license_expression_with_unknown_component_fails(self, tmp_path: Path):
         """Strict mode should fail when any expression component is unknown."""

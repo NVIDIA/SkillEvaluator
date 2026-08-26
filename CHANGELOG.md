@@ -8,7 +8,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - License detection no longer treats a frontmatter `license` identifier as
   authoritative when a LICENSE file declares a different license. Claiming
-  MIT while shipping GPL-3.0 now fails closed
+  MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is
+  reconciled, an unidentified license file is not treated as absent, and a
+  blocking conflict no longer publishes `license_status=allowed`
   ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect

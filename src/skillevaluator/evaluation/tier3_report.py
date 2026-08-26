@@ -81,6 +81,15 @@ def _finite_float(value: object) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _token_counter(value: object) -> int | None:
+    """Return one browser-safe token count, preserving unavailable as null."""
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER
+        else None
+    )
+
+
 def _sanitize_json_numbers(value: Any) -> Any:
     """Copy a payload while replacing numbers browsers cannot represent safely."""
     if isinstance(value, bool):
@@ -1861,12 +1870,19 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         }
         traj = reward.get("_traj")
         if not is_multi_row and isinstance(traj, dict):
-            trial["steps"] = traj.get("steps")
-            trial["tokens"] = {
-                "prompt": traj.get("prompt_tokens", 0),
-                "completion": traj.get("completion_tokens", 0),
-                "cached": traj.get("cached_tokens", 0),
-            }
+            steps = _token_counter(traj.get("steps"))
+            if steps is not None:
+                trial["steps"] = steps
+            prompt_tokens = _token_counter(traj.get("prompt_tokens"))
+            completion_tokens = _token_counter(traj.get("completion_tokens"))
+            cached_tokens = _token_counter(traj.get("cached_tokens"))
+            if prompt_tokens is not None and completion_tokens is not None:
+                trial["tokens"] = {
+                    "prompt": prompt_tokens,
+                    "completion": completion_tokens,
+                }
+                if cached_tokens is not None:
+                    trial["tokens"]["cached"] = cached_tokens
         warnings = list(
             dict.fromkeys(
                 str(warning) for item in group if isinstance(item.get("warnings"), list) for warning in item["warnings"]

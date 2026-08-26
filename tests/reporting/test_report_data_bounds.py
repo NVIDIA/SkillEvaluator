@@ -97,9 +97,54 @@ def test_report_loader_omits_unrepresentable_trajectory_token_counters(tmp_path:
 
     assert agents["codex"]["rewards"][0]["_traj"] == {
         "steps": 1,
-        "prompt_tokens": 0,
+        "prompt_tokens": None,
         "completion_tokens": 4,
-        "cached_tokens": 0,
+        "cached_tokens": None,
+    }
+
+
+def test_report_loader_marks_missing_trajectory_token_counters_unavailable(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "codex"
+    _write_summary(agent_dir)
+    _write_trial(
+        agent_dir,
+        "case-001__1",
+        {"entry_id": "case-001", "accuracy": 1.0},
+        {"steps": [{"action": "answer"}]},
+    )
+
+    agents = report_data.load_agent_data(tmp_path)
+
+    assert agents["codex"]["rewards"][0]["_traj"] == {
+        "steps": 1,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "cached_tokens": None,
+    }
+
+
+def test_report_loader_marks_missing_trajectory_steps_unavailable(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "codex"
+    _write_summary(agent_dir)
+    _write_trial(
+        agent_dir,
+        "case-001__1",
+        {"entry_id": "case-001", "accuracy": 1.0},
+        {
+            "final_metrics": {
+                "total_prompt_tokens": 10,
+                "total_completion_tokens": 4,
+            }
+        },
+    )
+
+    agents = report_data.load_agent_data(tmp_path)
+
+    assert agents["codex"]["rewards"][0]["_traj"] == {
+        "steps": None,
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "cached_tokens": None,
     }
 
 

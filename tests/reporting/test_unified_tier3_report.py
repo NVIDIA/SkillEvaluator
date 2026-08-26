@@ -237,6 +237,63 @@ def test_normalize_trials_collapses_multi_step_rows_to_one_logical_attempt() -> 
     assert "invocation_evidence_source" not in trial
 
 
+def test_normalize_trials_omits_unavailable_tokens_but_preserves_steps() -> None:
+    missing, available = _normalize_trials(
+        [
+            {
+                "trial_id": "missing",
+                "entry_id": "missing",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": 4,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "cached_tokens": None,
+                },
+            },
+            {
+                "trial_id": "available",
+                "entry_id": "available",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": 3,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "cached_tokens": None,
+                },
+            },
+        ],
+        [],
+    )
+
+    assert missing["steps"] == 4
+    assert "tokens" not in missing
+    assert available["steps"] == 3
+    assert available["tokens"] == {"prompt": 10, "completion": 4}
+
+
+def test_normalize_trials_omits_unavailable_steps_but_preserves_tokens() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "trial_id": "missing-steps",
+                "entry_id": "missing-steps",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": None,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "cached_tokens": 2,
+                },
+            }
+        ],
+        [],
+    )
+
+    assert "steps" not in trial
+    assert trial["tokens"] == {"prompt": 10, "completion": 4, "cached": 2}
+
+
 def test_normalize_trials_fails_closed_when_a_grouped_standard_row_is_incomplete() -> None:
     complete = {
         "trial_id": "case-1__attempt1",
@@ -418,6 +475,222 @@ def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None
     assert 'data-tier3-tab="trials"' in html
     assert "Diagnostics" in html
     assert "SkillEvaluator" in html
+
+
+def test_trial_report_renders_unavailable_tokens_as_unavailable() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Steps per Eval Case" in trials_html
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert "With-Skill Per-Evaluator Drill-Down" in trials_html
+    assert re.search(r"<td>4</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": None,
+                        },
+                    },
+                    {
+                        "trial_id": "case-2__attempt1",
+                        "entry_id": "case-2",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    },
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+    assert re.search(r"<td>4</td>\s*<td>14</td>", trials_html)
+    assert re.search(r"<td>3</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_when_any_agent_telemetry_is_incomplete() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_report_omits_token_chart_when_reported_agent_has_no_trials() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "failed",
+                "execution_errors": ["malformed judge response"],
+                "expected_attempts": 1,
+                "scored_attempts": 0,
+                "with_skill": {},
+                "rewards": [],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    assert set(payload["agents"]) == {"codex", "opencode"}
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+    trials_html = _tier3_page(html, "trials", "agents")
+
+    assert 'id="tier3-token-chart"' in trials_html
+    assert '{ label: "Prompt (total)"' in html
+    assert '{ label: "Cached (included in prompt)"' in html
+    assert "if (observed.length !== matching.length) return null;" in html
 
 
 def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path: Path) -> None:

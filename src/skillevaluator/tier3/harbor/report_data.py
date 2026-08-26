@@ -540,10 +540,12 @@ def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _trajectory_token_counter(value: Any) -> int:
-    """Return a browser-safe nonnegative token counter."""
+def _trajectory_token_counter(value: Any) -> int | None:
+    """Return a browser-safe token counter without inventing zero usage."""
     return (
-        value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER else 0
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER
+        else None
     )
 
 
@@ -732,9 +734,9 @@ def load_agent_data(
                             final_metrics = trajectory.get("final_metrics", {})
                             if not isinstance(final_metrics, dict):
                                 final_metrics = {}
-                            steps = trajectory.get("steps", [])
+                            steps = trajectory.get("steps")
                             reward["_traj"] = {
-                                "steps": len(steps) if isinstance(steps, list) else 0,
+                                "steps": len(steps) if isinstance(steps, list) else None,
                                 "prompt_tokens": _trajectory_token_counter(final_metrics.get("total_prompt_tokens")),
                                 "completion_tokens": _trajectory_token_counter(
                                     final_metrics.get("total_completion_tokens")

@@ -2818,7 +2818,7 @@ def test_native_standard_grader_runs_from_replaced_isolated_payload_directory(
         encoding="utf-8",
     )
     completed = subprocess.run(
-        ["bash", str(staged / "tests" / "test.sh")],
+        [sys.executable, "-I", str(evaluator_dir / "eval.py")],
         capture_output=True,
         text=True,
         env={

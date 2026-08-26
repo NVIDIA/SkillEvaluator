@@ -50,6 +50,52 @@ depth.
 | The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 | Docker running (the default environment) | `docker info` | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 
+## Harbor 0.22 compatibility
+
+The `tier3` extra installs Harbor 0.22.0, the supported Tier 3 backend for this
+release. The `[all]` extra includes `tier3`. Existing SkillEvaluator commands do
+not change: the public `--agents` and `--env-mode` options map built-in names and
+installed adapters to Harbor's unified `--agent` and `--env` selectors.
+
+The exact Harbor pin is deliberate: its CLI, Python models, result artifacts,
+and environment/agent subclass interfaces form one compatibility surface. This
+release targets stable Harbor 0.22.0 rather than unreleased `main`. Harbor stays
+behind the operator-selected `tier3` extra, so static Tier 1 installs do not pull
+it in. The shared LLM client window (`litellm>=1.92.0,<1.94.0.dev0`) admits
+patched 1.92 and 1.93 releases validated with this integration while excluding
+prerelease and as-yet unvalidated 1.94 behavior.
+
+The integration preserves SkillEvaluator's runtime and artifact contracts while
+using Harbor 0.22:
+
+- Installed Codex adapters merge existing user and MCP configuration before the
+  selected runtime provider and endpoint take precedence over conflicting route
+  keys.
+- Docker and local execution stream stdout and stderr through secret redaction
+  before Harbor callbacks receive them. Each command has a 16 MiB combined raw
+  stdout/stderr limit; exceeding it terminates the command process tree and
+  fails the trial instead of returning partial output.
+- The parent Harbor orchestration process has its own 16 MiB combined
+  stdout/stderr limit for the full job. Overflow or timeout terminates and reaps
+  the Harbor POSIX process group or Windows task tree while retaining only a
+  bounded, redacted diagnostic tail. A POSIX process that deliberately creates
+  a new session can escape process-group cleanup, so the host-side Harbor CLI,
+  configuration, and local-mode skills must be trusted. Run untrusted evaluated
+  workloads in Docker or another isolated Harbor backend instead of local mode.
+- Docker accepts Harbor stdin payloads and isolates main-container execution
+  from sidecar operations without placing environment values on Compose argv.
+  For NVIDIA Build, the credential reaches the trusted parent over stdin; each
+  main-container exec then uses a short-lived, container-only stdin handoff that
+  is removed before the requested command runs.
+- Native Windows main-container artifact transfer requires `tar` in the image
+  and accepts regular files and directories only. Links, junctions, hardlinks,
+  sparse files, special files, compressed streams, and unsafe or colliding
+  Windows path spellings fail closed before publication.
+- Generated tasks retain schema 1.3, which Harbor 0.22 accepts. User-owned native
+  tasks, including schema 1.4, are staged without a schema rewrite. Collection
+  accepts Harbor 0.22 job, trial, reward, and ATIF v1.7 artifacts, including
+  single-step `step_results: null` and authoritative multi-step results.
+
 ## Run your first evaluation
 
 <Steps toc={true}>
@@ -286,12 +332,34 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-Docker is the default and needs only a running daemon. The same `--env-mode`
-flag also selects **local mode**, which runs the agent CLI directly on the
-host under an OS-sandbox policy, and 14 additional Harbor-native backends
-(such as `daytona`, `e2b`, and `modal`), each requiring the matching Harbor
-environment extra. The complete environment matrix, Docker resource tuning, local-mode
-safety controls, and workspace modes live in
+`--env-mode` selects one of 27 environment modes: 26 Harbor-native backends,
+including the default Docker backend, plus SkillEvaluator's **local mode**,
+which runs the agent CLI directly on the host under an OS-sandbox policy.
+Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
+Harbor 0.22 extra; OpenShift, Apple Container, and Singularity instead use
+system CLIs and have no Harbor Python extra. These are selectable integration
+modes, not evidence that every managed backend was exercised end to end for
+this release. Harbor 0.22 transport verification covers Docker and local;
+validate any managed backend's extra, credentials, infrastructure, and
+constructor settings with `doctor` and its Harbor preflight before relying on
+it.
+
+Environment kwargs are only for Harbor-native non-Docker backends. Pass
+non-secret constructor settings with the repeatable, operator-only
+`--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` option. Skill-owned
+`evals/config.yml` cannot set them. `docker` and `local` reject any environment
+kwargs. Fields owned by Harbor runtime policy are also reserved: resource
+overrides, mounts, network policy, extra Compose definitions, SkillEvaluator's
+own lifecycle fields (`delete`, `force_build`, `keep_containers`), and
+Kubernetes pod security are not exposed through this surface. Other
+backend-specific timeout and retention knobs remain operator-owned. Use the same
+eligible-backend flags with `doctor` and `health-check`; never pass secrets
+through constructor kwargs. GKE requires
+`cluster_name`, `region`, `namespace`, `registry_location`, and
+`registry_name`; ACK requires `namespace`; EC2 requires `region` plus `ami_id`
+for its default ephemeral launch mode or `instance_id` with
+`launch_mode=attach`. The complete environment/extra matrix, examples, Docker
+resource tuning, local-mode safety controls, and workspace modes live in
 [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 <Warning>

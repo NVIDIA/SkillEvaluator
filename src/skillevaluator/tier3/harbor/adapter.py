@@ -10,7 +10,7 @@ Generates two Harbor datasets from a single evals.json:
 
 Each dataset entry becomes one Harbor task directory with:
   instruction.md, task.toml, environment/Dockerfile or environment/skills,
-  tests/eval.py, tests/entry.json
+  tests/skill_evaluator/eval.py, tests/entry.json
 """
 
 from __future__ import annotations
@@ -34,7 +34,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from skillevaluator.tier3.case_ids import safe_child, validate_case_ids, validate_output_directory_path
+from skillevaluator.tier3.case_ids import (
+    safe_child,
+    validate_case_id,
+    validate_case_ids,
+    validate_output_directory_path,
+)
 from skillevaluator.tier3.harbor.secure_copy import (
     copy_file_secure,
     copytree_secure,
@@ -50,12 +55,14 @@ from skillevaluator.tier3.output_provenance import (
 )
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.utils.process_environment import child_process_env
+from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _EVAL_CORE_DIR = Path(__file__).resolve().parent.parent / "eval_core"
+_EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
@@ -202,6 +209,8 @@ _COMPOSE_ALLOWED_BUILD_KEYS = frozenset(
 _COMPOSE_ALLOWED_NETWORK_KEYS = frozenset({"attachable", "enable_ipv4", "enable_ipv6", "internal", "labels"})
 _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
 _VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
+_VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset({"LLM_JUDGE_FALLBACK_MODELS"})
+_VERIFIER_JUDGE_CONTROL_ENV_VARS = _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS
 _VERIFIER_PROVIDER_ENV_VARS = frozenset(
     {
         "SKILL_EVAL_LLM_PROVIDER",
@@ -213,30 +222,151 @@ _VERIFIER_PROVIDER_ENV_VARS = frozenset(
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
         "NVIDIA_API_KEY",
+        "AWS_ACCOUNT_ID",
+        "AWS_ACCOUNT_ID_ENDPOINT_MODE",
         "AWS_REGION",
         "AWS_ACCESS_KEY_ID",
+        "AWS_AUTH_SCHEME_PREFERENCE",
         "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_CA_BUNDLE",
         "AWS_CONFIG_FILE",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
         "AWS_CONTAINER_CREDENTIALS_FULL_URI",
         "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CREDENTIAL_EXPIRATION",
+        "AWS_CREDENTIAL_FILE",
+        "AWS_CSM_CLIENT_ID",
+        "AWS_CSM_ENABLED",
+        "AWS_CSM_HOST",
+        "AWS_CSM_PORT",
+        "AWS_DATA_PATH",
+        "AWS_DEFAULT_PROFILE",
         "AWS_DEFAULT_REGION",
+        "AWS_DEFAULTS_MODE",
+        "AWS_DISABLE_HOST_PREFIX_INJECTION",
+        "AWS_DISABLE_REQUEST_COMPRESSION",
+        "AWS_EC2_METADATA_DISABLED",
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+        "AWS_EC2_METADATA_V1_DISABLED",
+        "AWS_ENDPOINT_DISCOVERY_ENABLED",
+        "AWS_ENDPOINT_URL",
+        "AWS_ENDPOINT_URL_BEDROCK",
+        "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+        "AWS_ENDPOINT_URL_SIGNIN",
+        "AWS_ENDPOINT_URL_SSO",
+        "AWS_ENDPOINT_URL_SSO_OIDC",
+        "AWS_ENDPOINT_URL_STS",
+        "AWS_EXECUTION_ENV",
+        "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+        "AWS_IMDS_USE_IPV6",
+        "AWS_LOGIN_CACHE_DIRECTORY",
+        "AWS_MAX_ATTEMPTS",
+        "AWS_METADATA_SERVICE_NUM_ATTEMPTS",
+        "AWS_METADATA_SERVICE_TIMEOUT",
+        "AWS_NEW_RETRIES_2026",
         "AWS_PROFILE",
+        "AWS_REQUEST_CHECKSUM_CALCULATION",
+        "AWS_REQUEST_MIN_COMPRESSION_SIZE_BYTES",
+        "AWS_RESPONSE_CHECKSUM_VALIDATION",
+        "AWS_RETRY_MODE",
         "AWS_ROLE_ARN",
         "AWS_ROLE_SESSION_NAME",
         "AWS_SDK_LOAD_CONFIG",
+        "AWS_SDK_UA_APP_ID",
         "AWS_SECRET_ACCESS_KEY",
+        "AWS_SECURITY_TOKEN",
         "AWS_SESSION_TOKEN",
         "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_SIGV4A_SIGNING_REGION_SET",
+        "AWS_STS_REGIONAL_ENDPOINTS",
+        "AWS_USE_DUALSTACK_ENDPOINT",
+        "AWS_USE_FIPS_ENDPOINT",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "BOTOCORE_TCP_KEEPALIVE",
     }
+)
+_RUNTIME_PROCESS_CONTROL_ENV_NAMES = frozenset(
+    {
+        "ALL_PROXY",
+        "BASHOPTS",
+        "BASH_ENV",
+        "CDPATH",
+        "CLAUDE_CODE_DISABLE_POLICY_SKILLS",
+        "CLAUDE_CONFIG_DIR",
+        "CLASSPATH",
+        "COMSPEC",
+        "CODEX_HOME",
+        "CURL_CA_BUNDLE",
+        "ENV",
+        "GCONV_PATH",
+        "GEMINI_CLI_HOME",
+        "HOME",
+        "HOSTALIASES",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "IFS",
+        "JAVA_TOOL_OPTIONS",
+        "LOCPATH",
+        "LUA_CPATH",
+        "LUA_INIT",
+        "LUA_PATH",
+        "NLSPATH",
+        "NO_PROXY",
+        "OPENCODE_CONFIG_DIR",
+        "PATHEXT",
+        "PATH",
+        "PERL5LIB",
+        "PERL5OPT",
+        "REQUESTS_CA_BUNDLE",
+        "RES_OPTIONS",
+        "RUBYOPT",
+        "RUBYLIB",
+        "SHELLOPTS",
+        "SSLKEYLOGFILE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SSH_AUTH_SOCK",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_RUNTIME_DIR",
+        "ZDOTDIR",
+        "_JAVA_OPTIONS",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
+_RUNTIME_PROCESS_CONTROL_ENV_PREFIXES = (
+    "AWS_",
+    "BASH_FUNC_",
+    "COMPOSE_",
+    "DOCKER_",
+    "DYLD_",
+    "GIT_",
+    "HARBOR_",
+    "LD_",
+    "NODE_",
+    "OTEL_",
+    "PIP_",
+    "PYTHON",
+    "SKILL_EVAL_",
+    "SKILLEVALUATOR_",
+    "UV_",
 )
 
 
 def _verifier_env_vars(runtime_env: dict[str, str] | None = None) -> tuple[str, ...]:
-    """Return public provider variables explicitly staged for the verifier."""
-    return tuple(sorted(set(runtime_env or {}).intersection(_VERIFIER_PROVIDER_ENV_VARS)))
+    """Return evaluator-owned variables explicitly staged for the verifier."""
+    staged_controls = _VERIFIER_PROVIDER_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS
+    return tuple(sorted(set(runtime_env or {}).intersection(staged_controls)))
 
 
 def _verifier_env_block(runtime_env: dict[str, str] | None = None, indent: str = "") -> str:
@@ -1883,6 +2013,16 @@ def _pre_agent_setup_command(pre_agent_setup: list[str] | None) -> str:
     return "bash -lc " + shlex.quote(script)
 
 
+def _reject_baseline_pre_agent_setup(*, with_skill: bool, pre_agent_setup: list[str] | None) -> None:
+    """Keep skill-owned setup code out of the observational baseline arm."""
+    if with_skill or not _pre_agent_setup_command(pre_agent_setup):
+        return
+    raise ValueError(
+        "harbor.pre_agent_setup/setup_commands cannot be used while staging a baseline; "
+        "use with_skill=True (the --skip-baseline path)"
+    )
+
+
 def _pre_agent_setup_healthcheck_toml_block(pre_agent_setup: list[str] | None) -> str:
     command = _pre_agent_setup_command(pre_agent_setup)
     if not command:
@@ -1929,34 +2069,63 @@ def _write_entry_json(
 def _write_test_sh(task_dir: Path, *, grading_mode: str, custom_grader: bool) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
-    prefix = '#!/bin/bash\nset -euo pipefail\ntests_dir="${HARBOR_TESTS_DIR:-/tests}"\n'
+    prefix = (
+        '#!/bin/bash\nset -euo pipefail\ntests_dir="${HARBOR_TESTS_DIR:-/tests}"\n'
+        f'evaluator_dir="${{tests_dir}}/{_EVALUATOR_TESTS_SUBDIR}"\n'
+    )
     if grading_mode == "custom_only":
-        script = prefix + 'python3 "${tests_dir}/custom_grader_runner.py" --mode custom_only\n'
+        script = prefix + 'python3 -I "${evaluator_dir}/custom_grader_runner.py" --mode custom_only\n'
     elif grading_mode == "default_plus_custom" and custom_grader:
         script = (
             prefix
-            + 'python3 "${tests_dir}/eval.py"\n'
-            + 'python3 "${tests_dir}/custom_grader_runner.py" --mode default_plus_custom\n'
+            + 'python3 -I "${evaluator_dir}/eval.py"\n'
+            + 'python3 -I "${evaluator_dir}/custom_grader_runner.py" --mode default_plus_custom\n'
         )
     else:
-        script = prefix + 'python3 "${tests_dir}/eval.py"\n'
+        script = prefix + 'python3 -I "${evaluator_dir}/eval.py"\n'
     test_sh = tests_dir / "test.sh"
     test_sh.write_text(script, encoding="utf-8")
     test_sh.chmod(0o755)
 
 
+def _evaluator_tests_dir(task_dir: Path) -> Path:
+    return task_dir / "tests" / _EVALUATOR_TESTS_SUBDIR
+
+
+def _replace_evaluator_tests_dir(task_dir: Path) -> Path:
+    """Replace the evaluator-owned verifier payload inside a staged task."""
+    evaluator_dir = _evaluator_tests_dir(task_dir)
+    if os.path.lexists(evaluator_dir):
+        try:
+            metadata = evaluator_dir.lstat()
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect evaluator verifier payload path: {evaluator_dir}") from exc
+        if _path_is_link_or_reparse(evaluator_dir, metadata) or not stat.S_ISDIR(metadata.st_mode):
+            evaluator_dir.unlink()
+        else:
+            if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+                raise ValueError(
+                    "cannot safely replace the evaluator verifier payload: this platform does not provide "
+                    "symlink-attack-resistant recursive deletion"
+                )
+            shutil.rmtree(evaluator_dir)
+    evaluator_dir.mkdir(parents=True)
+    return evaluator_dir
+
+
 def _copy_verifier(task_dir: Path) -> None:
-    """Copy the standalone eval.py verifier into the task's tests/ directory."""
+    """Copy verifier code into a clean evaluator-owned tests subdirectory."""
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
+    evaluator_dir = _replace_evaluator_tests_dir(task_dir)
     src = TEMPLATES_DIR / "eval.py"
     if src.exists():
-        shutil.copy2(src, tests_dir / "eval.py")
+        shutil.copy2(src, evaluator_dir / "eval.py")
     else:
         logger.warning("Verifier template not found at %s", src)
     lc = _EVAL_CORE_DIR / "log_converters.py"
     if lc.exists():
-        shutil.copy2(lc, tests_dir / "log_converters.py")
+        shutil.copy2(lc, evaluator_dir / "log_converters.py")
     else:
         logger.warning("log_converters helper not found at %s", lc)
 
@@ -1983,7 +2152,9 @@ def _copy_custom_grader(
 
     runner_src = TEMPLATES_DIR / "custom_grader_runner.py"
     if runner_src.exists():
-        shutil.copy2(runner_src, tests_dir / "custom_grader_runner.py")
+        evaluator_dir = _evaluator_tests_dir(task_dir)
+        evaluator_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(runner_src, evaluator_dir / "custom_grader_runner.py")
 
     evals_dir = evals_dir or skill_path / "evals"
     grader_candidates = [
@@ -2959,6 +3130,7 @@ def _validate_and_sanitize_custom_compose(
     compose_path: Path,
     *,
     allowed_env: set[str],
+    sanitize: bool = True,
 ) -> None:
     """Reject Docker-host escape features and remove sidecar host ports.
 
@@ -3022,7 +3194,7 @@ def _validate_and_sanitize_custom_compose(
             field=f"service '{svc_name}' environment",
         )
 
-        if svc_name != "main" and "ports" in service:
+        if sanitize and svc_name != "main" and "ports" in service:
             del service["ports"]
             changed = True
             logger.debug("Stripped host port mapping from sidecar service '%s'", svc_name)
@@ -3061,7 +3233,7 @@ def _validate_and_sanitize_custom_compose(
 
     _validate_compose_interpolation(content, allowed_env)
 
-    if changed:
+    if changed and sanitize:
         compose_path.write_text(yaml.dump(content, default_flow_style=False), encoding="utf-8")
 
 
@@ -4218,9 +4390,8 @@ def _native_entry_id(task_dir: Path) -> str:
     except Exception:
         return task_dir.name
     metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
-    if isinstance(metadata, dict) and metadata.get("entry_id"):
-        return str(metadata["entry_id"])
-    return task_dir.name
+    raw_entry_id = metadata.get("entry_id", task_dir.name) if isinstance(metadata, dict) else task_dir.name
+    return validate_case_id(raw_entry_id)
 
 
 def _environment_reference_names(value: object) -> set[str]:
@@ -4260,7 +4431,383 @@ def _validate_native_agent_judge_model_controls(task_toml: Path, environment_env
         )
 
 
-def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) -> str | None:
+_HARBOR_HOST_ENV_TEMPLATE_RE = re.compile(r"\$\{(?P<name>[^}:]+)(?::-(?P<default>.*))?\}", re.DOTALL)
+
+
+def _validate_native_host_env_mapping(
+    task_toml: Path,
+    field: str,
+    environment: object,
+    *,
+    allowed_references: set[str],
+) -> None:
+    """Reject task-authored parent-env reads outside one staged role."""
+    if environment is None:
+        return
+    if not isinstance(environment, dict):
+        raise ValueError(f"Native Harbor task [{field}] must be a table: {task_toml}")
+    for key, value in environment.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError(f"Native Harbor task [{field}] must contain string assignments: {task_toml}")
+        template = _HARBOR_HOST_ENV_TEMPLATE_RE.fullmatch(value)
+        if template is not None:
+            source_name = template.group("name")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", source_name) is None or source_name not in allowed_references:
+                raise ValueError(
+                    f"Native Harbor task [{field}] contains a host environment template "
+                    f"outside the evaluator-staged role boundary: {task_toml}"
+                )
+            # Harbor substitutes a missing-source default verbatim; it does not
+            # recursively expand or otherwise validate that authored fallback.
+            default = template.group("default")
+            if default is not None and (
+                is_sensitive_key(key)
+                or redact_sensitive_text(default) != default
+                or _environment_reference_names(default)
+            ):
+                raise ValueError(
+                    f"Native Harbor task [{field}] contains a literal credential-bearing assignment: {task_toml}"
+                )
+            continue
+        if is_sensitive_key(key) or redact_sensitive_text(value) != value:
+            raise ValueError(
+                f"Native Harbor task [{field}] contains a literal credential-bearing assignment: {task_toml}"
+            )
+
+
+def _validate_native_task_host_env_boundaries(
+    task_toml: Path,
+    data: dict[str, Any],
+    *,
+    runtime_env: dict[str, str] | None,
+    verifier_env: dict[str, str] | None,
+) -> None:
+    """Validate every Harbor 0.22 task field that resolves from parent env."""
+    runtime_names = set(runtime_env or {})
+    verifier_names = set(verifier_env if verifier_env is not None else runtime_env or {})
+    verifier_names.update(_VERIFIER_JUDGE_CONTROL_ENV_VARS)
+
+    environment = data.get("environment", {})
+    if not isinstance(environment, dict):
+        raise ValueError(f"Native Harbor task [environment] must be a table: {task_toml}")
+    _validate_native_host_env_mapping(
+        task_toml,
+        "environment.env",
+        environment.get("env", {}),
+        allowed_references=runtime_names,
+    )
+    solution = data.get("solution", {})
+    if not isinstance(solution, dict):
+        raise ValueError(f"Native Harbor task [solution] must be a table: {task_toml}")
+    _validate_native_host_env_mapping(
+        task_toml,
+        "solution.env",
+        solution.get("env", {}),
+        allowed_references=runtime_names,
+    )
+
+    def validate_verifier(verifier: object, field: str) -> None:
+        if not isinstance(verifier, dict):
+            raise ValueError(f"Native Harbor task [{field}] must be a table: {task_toml}")
+        _validate_native_host_env_mapping(
+            task_toml,
+            f"{field}.env",
+            verifier.get("env", {}),
+            allowed_references=verifier_names,
+        )
+        verifier_environment = verifier.get("environment")
+        if verifier_environment is None:
+            return
+        if not isinstance(verifier_environment, dict):
+            raise ValueError(f"Native Harbor task [{field}.environment] must be a table: {task_toml}")
+        _validate_native_host_env_mapping(
+            task_toml,
+            f"{field}.environment.env",
+            verifier_environment.get("env", {}),
+            allowed_references=verifier_names,
+        )
+
+    validate_verifier(data.get("verifier", {}), "verifier")
+    steps = data.get("steps")
+    if steps is None:
+        return
+    if not isinstance(steps, list):
+        raise ValueError(f"Native Harbor task [[steps]] must be an array of tables: {task_toml}")
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"Native Harbor task [[steps]] must contain tables: {task_toml}")
+        validate_verifier(step.get("verifier", {}), f"steps[{index}].verifier")
+
+
+def _validate_native_verifier_compose_boundaries(
+    task_dir: Path,
+    data: dict[str, Any],
+    *,
+    runtime_env: dict[str, str] | None,
+    verifier_env: dict[str, str] | None,
+    sanitize: bool,
+) -> None:
+    """Keep separate-verifier Compose models inside the verifier env boundary."""
+    from harbor.models.task.config import TaskConfig
+    from harbor.models.task.paths import TaskPaths
+    from harbor.models.task.verifier_mode import resolve_effective_verifier_env_config
+
+    allowed_env = set(verifier_env if verifier_env is not None else runtime_env or {})
+    allowed_env.update(_VERIFIER_JUDGE_CONTROL_ENV_VARS)
+    config = TaskConfig.model_validate(data)
+    paths = TaskPaths(task_dir)
+    contexts: list[Path] = []
+    if config.steps:
+        for step in config.steps:
+            if resolve_effective_verifier_env_config(config, step) is None:
+                continue
+            step_context = paths.step_tests_dir(step.name)
+            if not _path_is_canonically_contained(step_context, paths.steps_dir):
+                raise ValueError(f"Native Harbor task step verifier path escapes the task: {task_dir / 'task.toml'}")
+            contexts.append(step_context if step_context.exists() else paths.tests_dir)
+    elif resolve_effective_verifier_env_config(config, step_cfg=None) is not None:
+        contexts.append(paths.tests_dir)
+
+    for context in dict.fromkeys(contexts):
+        if _has_symlink_component(context, paths.task_dir):
+            raise ValueError(f"Native Harbor verifier environment cannot use linked paths: {context}")
+        compose_path = _custom_compose_path(context)
+        if compose_path is not None:
+            if _path_is_link_or_reparse(compose_path) or not _path_is_canonically_contained(compose_path, context):
+                raise ValueError(f"Native Harbor verifier Compose file must be contained and regular: {compose_path}")
+            _validate_and_sanitize_custom_compose(
+                compose_path,
+                allowed_env=allowed_env,
+                sanitize=sanitize,
+            )
+
+
+def _native_path_has_content(path: Path) -> bool:
+    """Return whether an authored native-task path can project any payload."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ValueError(f"Cannot inspect native Harbor task path: {path}") from exc
+    if _path_is_link_or_reparse(path, metadata) or not stat.S_ISDIR(metadata.st_mode):
+        return True
+    try:
+        return next(path.iterdir(), None) is not None
+    except OSError as exc:
+        raise ValueError(f"Cannot inspect native Harbor task directory: {path}") from exc
+
+
+def _validated_native_task_model(task_dir: Path, data: dict[str, Any]) -> Any:
+    from harbor.models.task.config import TaskConfig
+
+    task_toml = task_dir / "task.toml"
+    try:
+        return TaskConfig.model_validate(data)
+    except Exception as exc:
+        raise ValueError(f"Cannot validate native Harbor task config: {task_toml}") from exc
+
+
+def _validated_native_task_steps(task_dir: Path, config: Any) -> tuple[Any, list[Any]]:
+    from harbor.models.task.paths import TaskPaths
+
+    paths = TaskPaths(task_dir)
+    steps = list(config.steps or [])
+    for step in steps:
+        if not _path_is_canonically_contained(paths.step_dir(step.name), paths.steps_dir):
+            raise ValueError(f"Native Harbor task step path escapes the task: {task_dir / 'task.toml'}")
+    return paths, steps
+
+
+def _effective_native_verifiers(config: Any, steps: list[Any]) -> list[tuple[str, Any | None]]:
+    from harbor.models.task.verifier_mode import resolve_effective_verifier_env_config
+
+    scopes = [("task", None)] if not steps else [(f"step {step.name!r}", step) for step in steps]
+    return [(scope, resolve_effective_verifier_env_config(config, step)) for scope, step in scopes]
+
+
+def _native_custom_only_tests_are_complete(task_dir: Path) -> bool:
+    """Return whether Harbor can resolve an authored test script for every pass."""
+    config = _validated_native_task_model(
+        task_dir,
+        tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8")),
+    )
+    paths, steps = _validated_native_task_steps(task_dir, config)
+    if not steps:
+        return paths.discovered_test_path_for(config.environment.os) is not None
+
+    from harbor.models.task.verifier_mode import resolve_effective_verifier_env_config
+
+    for step in steps:
+        verifier_environment = resolve_effective_verifier_env_config(config, step)
+        task_os = verifier_environment.os if verifier_environment is not None else config.environment.os
+        step_test = paths.discovered_step_test_path_for(step.name, task_os)
+        if verifier_environment is not None and paths.step_tests_dir(step.name).exists():
+            if step_test is None:
+                return False
+            continue
+        if step_test is None and paths.discovered_test_path_for(task_os) is None:
+            return False
+    return True
+
+
+def _reject_native_windows_execution(
+    task_toml: Path,
+    config: Any,
+    effective_verifiers: list[tuple[str, Any | None]],
+) -> None:
+    from harbor.models.task.config import TaskOS
+
+    if config.environment.os == TaskOS.WINDOWS:
+        raise ValueError(
+            "Native Harbor agent environments using Windows are unsupported until "
+            f"SkillEvaluator's task projection and verifier scripts are OS-aware: {task_toml}"
+        )
+    for scope, verifier_environment in effective_verifiers:
+        if verifier_environment is not None and verifier_environment.os == TaskOS.WINDOWS:
+            raise ValueError(
+                f"Native Harbor effective verifier for {scope} uses Windows, which is unsupported until "
+                f"SkillEvaluator's verifier projection is OS-aware: {task_toml}"
+            )
+
+
+def _reject_native_baseline_setup(task_toml: Path, config: Any, paths: Any, steps: list[Any]) -> None:
+    prior_trajectory = paths.step_trajectory_path(steps[0].name) if steps else paths.trajectory_path
+    if os.path.lexists(prior_trajectory):
+        raise ValueError(
+            f"Native Harbor task-shipped prior trajectory is not allowed in a paired baseline: {prior_trajectory}"
+        )
+    if config.environment.healthcheck is not None:
+        raise ValueError(f"Native Harbor environment healthcheck is not allowed in a paired baseline: {task_toml}")
+    for step in steps:
+        if step.healthcheck is not None:
+            raise ValueError(f"Native Harbor step healthcheck is not allowed in a paired baseline: {task_toml}")
+        step_workdir = paths.step_dir(step.name) / "workdir"
+        if os.path.lexists(step_workdir):
+            raise ValueError(
+                f"Native Harbor step workdir projection is not allowed in a paired baseline: {step_workdir}"
+            )
+
+
+def _native_standard_grader_environment_controls(
+    environment: dict[str, str],
+    *,
+    allowed_operator_references: set[str] | None = None,
+) -> set[str]:
+    """Return task-owned names that can redirect or poison the standard verifier."""
+    operator_controls = _VERIFIER_PROVIDER_ENV_VARS | _VERIFIER_JUDGE_CONTROL_ENV_VARS
+    reserved = (
+        operator_controls
+        | _RUNTIME_PROCESS_CONTROL_ENV_NAMES
+        | _RUNTIME_DISCOVERY_ENV_NAMES
+        | _RUNTIME_LOADER_ENV_NAMES
+    )
+    controls: set[str] = set()
+    for name, value in environment.items():
+        upper_name = name.upper()
+        if (
+            upper_name in operator_controls
+            and name in (allowed_operator_references or set())
+            and value == f"${{{name}}}"
+        ):
+            continue
+        if (
+            upper_name in reserved
+            or upper_name.startswith("HARBOR_")
+            or upper_name.startswith(_RUNTIME_LOADER_ENV_PREFIXES)
+            or upper_name.startswith(_RUNTIME_PROCESS_CONTROL_ENV_PREFIXES)
+        ):
+            controls.add(name)
+    return controls
+
+
+def _reject_native_standard_grading_overrides(
+    task_toml: Path,
+    grading_mode: str,
+    config: Any,
+    paths: Any,
+    steps: list[Any],
+    effective_verifiers: list[tuple[str, Any | None]],
+    allowed_verifier_env: set[str],
+) -> None:
+    if grading_mode not in {"default", "default_plus_custom"}:
+        return
+    verifier_environments = [
+        ("environment.env", config.environment.env, set()),
+        ("verifier.env", config.verifier.env, allowed_verifier_env),
+        *((f"step {step.name!r} verifier.env", step.verifier.env, allowed_verifier_env) for step in steps),
+    ]
+    for scope, environment, allowed_operator_references in verifier_environments:
+        controls = sorted(
+            _native_standard_grader_environment_controls(
+                environment,
+                allowed_operator_references=allowed_operator_references,
+            )
+        )
+        if controls:
+            raise ValueError(
+                "Native Harbor standard grading rejects task-controlled environment control(s), "
+                "including judge controls, "
+                f"in {scope}: {', '.join(controls)}: {task_toml}"
+            )
+    if config.verifier.collect:
+        raise ValueError(f"Native Harbor verifier collect hook is incompatible with standard grading: {task_toml}")
+    for step in steps:
+        if step.verifier.collect:
+            raise ValueError(
+                f"Native Harbor step verifier collect hook is incompatible with standard grading: {task_toml}"
+            )
+        step_tests = paths.step_tests_dir(step.name)
+        if _native_path_has_content(step_tests):
+            raise ValueError(
+                "Native Harbor step tests overlay is incompatible with SkillEvaluator standard grading; "
+                f"keep {step_tests} empty or use grading.mode=custom_only"
+            )
+    for scope, verifier_environment in effective_verifiers:
+        if verifier_environment is not None:
+            raise ValueError(
+                "Native Harbor separate verifier context is unsupported with SkillEvaluator standard grading; "
+                f"use a shared verifier for {scope} or grading.mode=custom_only: {task_toml}"
+            )
+
+
+def _validate_native_task_execution_compatibility(
+    task_dir: Path,
+    data: dict[str, Any],
+    *,
+    with_skill: bool,
+    grading_mode: str,
+    allowed_verifier_env: set[str],
+) -> None:
+    """Fail closed where Harbor 0.22 execution can bypass evaluator projections."""
+    task_toml = task_dir / "task.toml"
+    config = _validated_native_task_model(task_dir, data)
+    paths, steps = _validated_native_task_steps(task_dir, config)
+    effective_verifiers = _effective_native_verifiers(config, steps)
+    _reject_native_windows_execution(task_toml, config, effective_verifiers)
+    if not with_skill:
+        _reject_native_baseline_setup(task_toml, config, paths, steps)
+    _reject_native_standard_grading_overrides(
+        task_toml,
+        grading_mode,
+        config,
+        paths,
+        steps,
+        effective_verifiers,
+        allowed_verifier_env,
+    )
+
+
+def _native_task_workdir(
+    task_dir: Path,
+    *,
+    with_skill: bool,
+    grading_mode: str,
+    allow_docker_image: bool = False,
+    runtime_env: dict[str, str] | None = None,
+    verifier_env: dict[str, str] | None = None,
+    sanitize_verifier_compose: bool = False,
+) -> str | None:
     """Read and validate the workdir Harbor will use for a native task."""
     try:
         import tomllib
@@ -4271,10 +4818,30 @@ def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) ->
     environment = data.get("environment", {}) if isinstance(data, dict) else {}
     if not isinstance(environment, dict):
         raise ValueError(f"Native Harbor task [environment] must be a table: {task_dir / 'task.toml'}")
+    _validate_native_task_execution_compatibility(
+        task_dir,
+        data,
+        with_skill=with_skill,
+        grading_mode=grading_mode,
+        allowed_verifier_env=set(verifier_env if verifier_env is not None else runtime_env or {}),
+    )
     environment_env = environment.get("env", {})
     if not isinstance(environment_env, dict):
         raise ValueError(f"Native Harbor task [environment.env] must be a table: {task_dir / 'task.toml'}")
     _validate_native_agent_judge_model_controls(task_dir / "task.toml", environment_env)
+    _validate_native_task_host_env_boundaries(
+        task_dir / "task.toml",
+        data,
+        runtime_env=runtime_env,
+        verifier_env=verifier_env,
+    )
+    _validate_native_verifier_compose_boundaries(
+        task_dir,
+        data,
+        runtime_env=runtime_env,
+        verifier_env=verifier_env,
+        sanitize=sanitize_verifier_compose,
+    )
     _validate_runtime_discovery_env(environment_env)
     _validate_runtime_loader_env(environment_env)
     skills_dir = environment.get("skills_dir")
@@ -4296,117 +4863,72 @@ def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) ->
     return _validated_agent_workdir(workdir)
 
 
+def _mutate_native_task_toml(
+    task_toml: Path,
+    mutation: Callable[[dict[str, Any]], None],
+) -> None:
+    """Mutate a staged native task structurally and revalidate with Harbor."""
+    try:
+        import toml
+        from harbor.models.task.config import TaskConfig
+
+        content = task_toml.read_text(encoding="utf-8")
+        TaskConfig.model_validate_toml(content)
+        data = tomllib.loads(content)
+        mutation(data)
+        rendered = toml.dumps(data)
+        TaskConfig.model_validate_toml(rendered)
+    except Exception as exc:
+        raise ValueError(f"Cannot safely update native Harbor task config: {task_toml}") from exc
+    task_toml.write_text(rendered, encoding="utf-8")
+
+
 def _ensure_native_skills_dir(task_dir: Path) -> None:
     """Pin native tasks to the evaluator-owned runtime skill projection."""
-    task_toml = task_dir / "task.toml"
-    content = task_toml.read_text(encoding="utf-8")
-    lines = content.splitlines()
-    if "[environment]" in lines:
-        environment_index = lines.index("[environment]")
-        section_end = next(
-            (index for index in range(environment_index + 1, len(lines)) if lines[index].strip().startswith("[")),
-            len(lines),
-        )
-        if any(line.strip().startswith("skills_dir") for line in lines[environment_index + 1 : section_end]):
-            return
-        lines.insert(environment_index + 1, 'skills_dir = "/workspace/skills"')
-    else:
-        lines.extend(["", "[environment]", 'skills_dir = "/workspace/skills"'])
-    task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def update(data: dict[str, Any]) -> None:
+        environment = data.setdefault("environment", {})
+        if not isinstance(environment, dict):
+            raise TypeError("environment is not a table")
+        environment["skills_dir"] = "/workspace/skills"
+
+    _mutate_native_task_toml(task_dir / "task.toml", update)
 
 
 def _ensure_skill_evaluator_verifier_env(task_dir: Path, *, verifier_env: dict[str, str] | None) -> None:
     """Ensure staged native tasks forward configured public provider variables."""
-    task_toml = task_dir / "task.toml"
-    content = task_toml.read_text(encoding="utf-8")
-    env_lines = [f'{name} = "${{{name}}}"' for name in _verifier_env_vars(verifier_env)]
-    if all(line in content for line in env_lines):
+    env_names = _verifier_env_vars(verifier_env)
+    if not env_names:
         return
 
-    lines = content.splitlines()
-    if "[verifier.env]" in lines:
-        idx = lines.index("[verifier.env]") + 1
-        existing = set(lines)
-        for line in reversed(env_lines):
-            if line not in existing:
-                lines.insert(idx, line)
-        task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return
+    def update(data: dict[str, Any]) -> None:
+        verifier_missing = "verifier" not in data
+        verifier = data.setdefault("verifier", {})
+        if not isinstance(verifier, dict):
+            raise TypeError("verifier is not a table")
+        if verifier_missing:
+            verifier["timeout_sec"] = 180.0
+        environment = verifier.setdefault("env", {})
+        if not isinstance(environment, dict):
+            raise TypeError("verifier.env is not a table")
+        environment.update({name: f"${{{name}}}" for name in env_names})
 
-    env_block = ["[verifier.env]", *env_lines]
-    if "[verifier]" in lines:
-        start = lines.index("[verifier]") + 1
-        insert_at = len(lines)
-        for idx in range(start, len(lines)):
-            line = lines[idx].strip()
-            if line.startswith("[") and line.endswith("]"):
-                insert_at = idx
-                break
-        lines[insert_at:insert_at] = ["", *env_block]
-        task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return
-
-    insert_at = lines.index("[environment]") if "[environment]" in lines else len(lines)
-    lines[insert_at:insert_at] = ["[verifier]", "timeout_sec = 180.0", "", *env_block, ""]
-    task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _insert_table_block(lines: list[str], anchor: str, block: list[str]) -> None:
-    """Insert a TOML table block after *anchor* and before the next table."""
-    if anchor not in lines:
-        lines.extend(["", anchor])
-    start = lines.index(anchor) + 1
-    insert_at = len(lines)
-    for idx in range(start, len(lines)):
-        stripped = lines[idx].strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            insert_at = idx
-            break
-    prefix = [] if insert_at == 0 or (insert_at > 0 and lines[insert_at - 1] == "") else [""]
-    lines[insert_at:insert_at] = [*prefix, *block]
+    _mutate_native_task_toml(task_dir / "task.toml", update)
 
 
 def _ensure_environment_env(task_dir: Path, runtime_env: dict[str, str]) -> None:
     runtime_env = {**runtime_env, **_EVALUATOR_MANAGED_RUNTIME_ENV}
 
-    task_toml = task_dir / "task.toml"
-    lines = task_toml.read_text(encoding="utf-8").splitlines()
-    header = "[environment.env]"
-    rendered = {key: f"{_toml_quote(key)} = {_toml_quote(runtime_env[key])}" for key in sorted(runtime_env)}
-    env_lines = list(rendered.values())
-    if header in lines:
-        idx = lines.index(header) + 1
-        env_end = len(lines)
-        for end_idx in range(idx, len(lines)):
-            stripped = lines[end_idx].strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
-                env_end = end_idx
-                break
-        seen_keys: set[str] = set()
-        updated_section: list[str] = []
-        for line in lines[idx:env_end]:
-            assignment = line.split("=", 1)[0].strip() if line.strip() and "=" in line else ""
-            matching_key = next(
-                (key for key in runtime_env if assignment in {key, _toml_quote(key)}),
-                None,
-            )
-            if matching_key is not None:
-                if matching_key in seen_keys:
-                    continue
-                updated_section.append(rendered[matching_key])
-                seen_keys.add(matching_key)
-            else:
-                updated_section.append(line)
-        for key, line in rendered.items():
-            if key not in seen_keys:
-                updated_section.append(line)
-        lines[idx:env_end] = updated_section
-        task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return
+    def update(data: dict[str, Any]) -> None:
+        environment = data.setdefault("environment", {})
+        if not isinstance(environment, dict):
+            raise TypeError("environment is not a table")
+        environment_env = environment.setdefault("env", {})
+        if not isinstance(environment_env, dict):
+            raise TypeError("environment.env is not a table")
+        environment_env.update(runtime_env)
 
-    block = [header, *env_lines]
-    _insert_table_block(lines, "[environment]", block)
-    task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _mutate_native_task_toml(task_dir / "task.toml", update)
 
 
 def _ensure_pre_agent_setup_healthcheck(task_dir: Path, pre_agent_setup: list[str]) -> None:
@@ -4415,23 +4937,27 @@ def _ensure_pre_agent_setup_healthcheck(task_dir: Path, pre_agent_setup: list[st
         return
 
     task_toml = task_dir / "task.toml"
-    lines = task_toml.read_text(encoding="utf-8").splitlines()
-    header = "[environment.healthcheck]"
-    if header in lines:
+
+    def update(data: dict[str, Any]) -> None:
+        environment = data.setdefault("environment", {})
+        if not isinstance(environment, dict):
+            raise TypeError("environment is not a table")
+        if environment.get("healthcheck") is not None:
+            raise ValueError("native task already defines an environment healthcheck")
+        environment["healthcheck"] = {
+            "command": command,
+            "interval_sec": 5.0,
+            "timeout_sec": 120.0,
+            "retries": 1,
+        }
+
+    try:
+        _mutate_native_task_toml(task_toml, update)
+    except ValueError as exc:
         raise ValueError(
             f"{task_toml}: harbor.pre_agent_setup cannot be injected because "
-            "the native Harbor task already defines [environment.healthcheck]"
-        )
-
-    block = [
-        header,
-        f"command = {_toml_quote(command)}",
-        "interval_sec = 5.0",
-        "timeout_sec = 120.0",
-        "retries = 1",
-    ]
-    _insert_table_block(lines, "[environment.env]" if "[environment.env]" in lines else "[environment]", block)
-    task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            "the native Harbor task already defines [environment.healthcheck] or is invalid"
+        ) from exc
 
 
 def _ensure_runtime_env_and_pre_agent_setup(
@@ -4597,7 +5123,13 @@ def _stage_native_harbor_tasks_into(
         raise ValueError(f"No Harbor task directories with task.toml found in {native_dir}")
     validate_case_ids(path.name for path in source_task_dirs)
     for source_task_dir in source_task_dirs:
-        _native_task_workdir(source_task_dir)
+        _native_task_workdir(
+            source_task_dir,
+            with_skill=with_skill,
+            grading_mode=grading_mode,
+            runtime_env=runtime_env,
+            verifier_env=verifier_env,
+        )
     _ = task_resources
     _ = agent_workdir
 
@@ -4628,7 +5160,14 @@ def _stage_native_harbor_tasks_into(
         baseline_aliases_prevalidated = True
     for task_dir in task_dirs:
         entry_id = _native_entry_id(task_dir)
-        native_agent_workdir = _native_task_workdir(task_dir)
+        native_agent_workdir = _native_task_workdir(
+            task_dir,
+            with_skill=with_skill,
+            grading_mode=grading_mode,
+            runtime_env=runtime_env,
+            verifier_env=verifier_env,
+            sanitize_verifier_compose=True,
+        )
         _ensure_native_skills_dir(task_dir)
         entry = entries_by_id.get(entry_id)
         if grading_mode in ("default", "default_plus_custom") and entry is None:
@@ -4642,13 +5181,21 @@ def _stage_native_harbor_tasks_into(
 
         tests_dir = task_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
-        _copy_verifier(task_dir)
-        shutil.copy2(TEMPLATES_DIR / "custom_grader_runner.py", tests_dir / "custom_grader_runner.py")
-
         custom_grader = (tests_dir / "grader.py").exists() or (tests_dir / "grader.sh").exists()
-        if (not custom_grader and grading_mode != "custom_only") or (
-            not custom_grader and not (tests_dir / "test.sh").exists()
-        ):
+        authored_custom_tests_complete = grading_mode == "custom_only" and _native_custom_only_tests_are_complete(
+            task_dir
+        )
+        evaluator_payload_required = (
+            grading_mode in ("default", "default_plus_custom") or custom_grader or not authored_custom_tests_complete
+        )
+        if evaluator_payload_required:
+            _copy_verifier(task_dir)
+            shutil.copy2(
+                TEMPLATES_DIR / "custom_grader_runner.py",
+                _evaluator_tests_dir(task_dir) / "custom_grader_runner.py",
+            )
+
+        if not custom_grader and (grading_mode != "custom_only" or not authored_custom_tests_complete):
             custom_grader = _copy_custom_grader(task_dir, skill_path, grading_mode, evals_dir=evals_dir)
 
         if grading_mode in ("default", "default_plus_custom"):
@@ -4678,9 +5225,15 @@ def _stage_native_harbor_tasks_into(
                 custom_grader=True,
             )
             _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=True)
-        elif not (tests_dir / "test.sh").exists():
+        elif not authored_custom_tests_complete:
             raise FileNotFoundError(
-                f"custom_only native Harbor task '{entry_id}' requires tests/grader.py or tests/test.sh"
+                f"custom_only native Harbor task '{entry_id}' requires tests/grader.py or a Harbor-resolvable "
+                "test script for every verifier pass"
+            )
+        if grading_mode == "custom_only" and not _native_custom_only_tests_are_complete(task_dir):
+            raise FileNotFoundError(
+                f"custom_only native Harbor task '{entry_id}' requires tests/grader.py or a Harbor-resolvable "
+                "test script for every verifier pass"
             )
 
         if entry is not None and _entry_declares_task_input(entry, evals_dir / "files"):
@@ -4761,6 +5314,7 @@ def stage_native_harbor_tasks(
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
 ) -> list[Path]:
     """Stage native tasks privately, then publish one exact output snapshot."""
+    _reject_baseline_pre_agent_setup(with_skill=with_skill, pre_agent_setup=pre_agent_setup)
 
     if evaluator_skill_path is None:
         with private_evaluator_skill_snapshot(skill_path, task_source="native_harbor") as private_skill_path:
@@ -5159,8 +5713,8 @@ def _native_projection_entry_ids(native_dir: Path) -> tuple[str, ...]:
             )
             data = tomllib.loads(payload.decode("utf-8"))
             metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
-            if isinstance(metadata, dict) and metadata.get("entry_id"):
-                entry_id = str(metadata["entry_id"])
+            if isinstance(metadata, dict) and "entry_id" in metadata:
+                entry_id = validate_case_id(metadata["entry_id"])
         except (UnicodeError, ValueError):
             # Staging owns the detailed invalid-task diagnostic after the secure
             # snapshot exists. Directory-name fallback remains non-invasive.
@@ -5440,6 +5994,7 @@ def generate_harbor_tasks(
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
 ) -> list[Path]:
     """Generate tasks from one private evals snapshot, then publish exactly."""
+    _reject_baseline_pre_agent_setup(with_skill=with_skill, pre_agent_setup=pre_agent_setup)
 
     if evaluator_skill_path is None:
         if find_evals_file(skill_path) is None:

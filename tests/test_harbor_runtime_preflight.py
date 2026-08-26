@@ -249,6 +249,72 @@ def test_runtime_preflight_accepts_harbor_0132_unscored_agent_success(monkeypatc
     assert result.ok is True
 
 
+def test_agent_only_validation_accepts_actual_harbor_022_single_step_result(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from harbor.models.job.result import JobResult, JobStats
+    from harbor.models.trial.result import TrialResult
+
+    job_dir = tmp_path / "jobs" / "runtime-preflight-opencode"
+    trial_dir = job_dir / "case-001__attempt"
+    trial_dir.mkdir(parents=True)
+    now = datetime(2026, 8, 25, tzinfo=UTC)
+    trial_result = TrialResult.model_validate(
+        {
+            "id": UUID(int=2),
+            "task_name": "nvidia/skillevaluator-case-001",
+            "trial_name": trial_dir.name,
+            "trial_uri": trial_dir.as_uri(),
+            "task_id": {"path": str(job_dir / "task" / "case-001")},
+            "task_checksum": "harbor-0.22-agent-only-fixture",
+            "config": {
+                "task": {"path": str(job_dir / "task" / "case-001")},
+                "trial_name": trial_dir.name,
+                "verifier": {"disable": True},
+            },
+            "agent_info": {
+                "name": "opencode",
+                "version": "test",
+                "model_info": {"name": "test-model"},
+            },
+            "agent_result": {
+                "n_input_tokens": 100,
+                "n_cache_tokens": 20,
+                "n_output_tokens": 10,
+            },
+            "verifier_result": None,
+            "exception_info": None,
+            "started_at": now,
+            "finished_at": now,
+            "step_results": None,
+        }
+    )
+    job_result = JobResult(
+        id=UUID(int=1),
+        started_at=now,
+        updated_at=now,
+        finished_at=now,
+        n_total_trials=1,
+        stats=JobStats.from_trial_results([trial_result], n_total_trials=1),
+        trial_results=[trial_result],
+    )
+    result_path = job_dir / "result.json"
+    result_path.write_text(job_result.model_dump_json(indent=2), encoding="utf-8")
+    (trial_dir / "result.json").write_text(trial_result.model_dump_json(indent=2), encoding="utf-8")
+
+    persisted_job = JobResult.model_validate_json(result_path.read_text(encoding="utf-8"))
+    persisted_trial = TrialResult.model_validate_json((trial_dir / "result.json").read_text(encoding="utf-8"))
+
+    assert persisted_job.stats.n_completed_trials == 1
+    assert persisted_job.stats.n_errored_trials == 0
+    assert persisted_job.stats.n_input_tokens == 100
+    assert persisted_job.stats.n_cache_tokens == 20
+    assert persisted_job.stats.n_output_tokens == 10
+    assert persisted_trial.step_results is None
+    assert runtime_preflight.validate_harbor_agent_only_job_result(result_path, expected_trials=1) == (True, "")
+
+
 def test_agent_only_validation_accepts_harbor_0132_unscored_multistep_agent_success(tmp_path: Path) -> None:
     result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
     trial_result_path = result_path.parent / "case-001__attempt" / "result.json"
@@ -657,6 +723,32 @@ def test_task_timeout_plan_uses_largest_staged_timeout(tmp_path: Path) -> None:
         (task / "task.toml").write_text(f"[agent]\ntimeout_sec = {timeout}.0\n")
 
     assert runner._task_timeout_plan([root], 2.0) == 600.0
+
+
+@pytest.mark.parametrize(
+    "task_toml",
+    [
+        "[agent]\ntimeout_sec = 900.0\n",
+        "[verifier]\ntimeout_sec = 900.0\n",
+        "[environment]\nbuild_timeout_sec = 900.0\n",
+        '[[steps]]\nname = "one"\n[steps.agent]\ntimeout_sec = 900.0\n',
+        '[[steps]]\nname = "one"\n[steps.verifier]\ntimeout_sec = 900.0\n',
+    ],
+    ids=["agent", "verifier", "environment-build", "step-agent", "step-verifier"],
+)
+def test_task_timeout_plan_rejects_staged_timeout_product_overflow(
+    tmp_path: Path,
+    task_toml: str,
+) -> None:
+    from skillevaluator.tier3.evals_config import MAX_HARBOR_TIMEOUT_MULTIPLIER
+    from skillevaluator.tier3.harbor import runner
+
+    task = tmp_path / "tasks" / "case-1"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text(task_toml, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-finite Harbor timeout"):
+        runner._task_timeout_plan([task.parent], MAX_HARBOR_TIMEOUT_MULTIPLIER)
 
 
 def test_model_probe_delegates_to_shared_catalog_client_without_exposing_key(monkeypatch) -> None:
@@ -3587,6 +3679,10 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
 
     assert result["execution_status"] == "failed"
     assert result["execution_errors"] == ["opencode runtime preflight failed: 401 Unauthorized"]
+    assert result["error"] == result["execution_errors"][:1]
+    assert result["execution_error_details_total"] == 1
+    assert result["execution_error_details_shown"] == 1
+    assert result["execution_error_details_truncated"] is False
     assert preflight_run_env["LLM_JUDGE_MODEL"] == "host-legacy"
     assert preflight_run_env["SKILL_EVAL_JUDGE_MODEL"] == "host-legacy"
     full_matrix.assert_not_called()
@@ -3604,6 +3700,8 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
         "model catalog access does not verify runtime credentials for this endpoint"
     }
     persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result_path.stat().st_size <= 2 * 1024 * 1024
+    assert persisted["error"] == persisted["execution_errors"][:1]
     assert persisted["run_config"] == result["run_config"]
     run_config_path = Path(result["run_dir"]) / "run_config.json"
     assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]

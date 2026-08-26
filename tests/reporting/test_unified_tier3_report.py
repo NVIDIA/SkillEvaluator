@@ -15,6 +15,7 @@ from skillevaluator.evaluation.tier3_report import (
     _attach_harbor_evidence_to_conclusions,
     _attach_harbor_evidence_to_recommendations,
     _attach_harbor_evidence_to_suggestions_v2,
+    _cases,
     _evaluator_cards,
     _metric_evidence,
     _normalize_trials,
@@ -29,8 +30,9 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
-from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, MAX_CUSTOM_METRIC_NAME_BYTES
+from skillevaluator.tier3.harbor.report import _extract_findings
+from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot, metrics_for_agents
 
 
 def _write_summary(
@@ -193,6 +195,261 @@ def test_normalize_trials_preserves_only_trusted_standard_invocation_evidence() 
         assert "invocation_evidence_source" not in trial
 
 
+def test_normalize_trials_collapses_multi_step_rows_to_one_logical_attempt() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "trial_id": "case-1__attempt1",
+                "entry_id": "case-1",
+                "metric_set": "skill-evaluator-default-v2",
+                **dict.fromkeys(DEFAULT_METRICS, 0.2),
+                "overall": 0.2,
+                "_traj": {"steps": 2, "prompt_tokens": 10},
+                "skill_invoked": True,
+                "invocation_evidence_source": "trajectory",
+                "warnings": ["first warning"],
+            },
+            {
+                "trial_id": "case-1__attempt1",
+                "entry_id": "case-1",
+                "metric_set": "skill-evaluator-default-v2",
+                **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "overall": 1.0,
+                "_traj": {"steps": 3, "prompt_tokens": 20},
+                "skill_invoked": False,
+                "invocation_evidence_source": "trajectory",
+                "warnings": ["second warning"],
+            },
+        ],
+        ["accuracy"],
+    )
+
+    assert trial["trial_id"] == "case-1__attempt1"
+    assert trial["entry_id"] == "case-1"
+    assert trial["scores"] == {"accuracy": 0.6}
+    assert trial["overall"] == 0.6
+    assert trial["warnings"] == ["first warning", "second warning"]
+    # Step trajectories may be independent or cumulative.  Without the merged
+    # root trajectory, omit counters rather than double-counting resume data.
+    assert "steps" not in trial
+    assert "tokens" not in trial
+    assert "skill_invoked" not in trial
+    assert "invocation_evidence_source" not in trial
+
+
+def test_normalize_trials_omits_unavailable_tokens_but_preserves_steps() -> None:
+    missing, available = _normalize_trials(
+        [
+            {
+                "trial_id": "missing",
+                "entry_id": "missing",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": 4,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "cached_tokens": None,
+                },
+            },
+            {
+                "trial_id": "available",
+                "entry_id": "available",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": 3,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "cached_tokens": None,
+                },
+            },
+        ],
+        [],
+    )
+
+    assert missing["steps"] == 4
+    assert "tokens" not in missing
+    assert available["steps"] == 3
+    assert available["tokens"] == {"prompt": 10, "completion": 4}
+
+
+def test_normalize_trials_omits_unavailable_steps_but_preserves_tokens() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "trial_id": "missing-steps",
+                "entry_id": "missing-steps",
+                "overall": 1.0,
+                "_traj": {
+                    "steps": None,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "cached_tokens": 2,
+                },
+            }
+        ],
+        [],
+    )
+
+    assert "steps" not in trial
+    assert trial["tokens"] == {"prompt": 10, "completion": 4, "cached": 2}
+
+
+def test_normalize_trials_fails_closed_when_a_grouped_standard_row_is_incomplete() -> None:
+    complete = {
+        "trial_id": "case-1__attempt1",
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+    }
+    incomplete = {
+        "trial_id": "case-1__attempt1",
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        "accuracy": 0.0,
+    }
+
+    [trial] = _normalize_trials([complete, incomplete], list(DEFAULT_METRICS))
+
+    assert trial["scores"] == {"accuracy": 0.5}
+    assert trial["overall"] is None
+    assert _cases({"rewards": [complete, incomplete]}) == [{"entry_id": "case-1", "overall": None}]
+
+
+def test_normalize_trials_fails_closed_for_conflicting_grouped_entry_identities() -> None:
+    rows = [
+        {
+            "trial_id": "shared-attempt",
+            "entry_id": entry_id,
+            "metric_set": "skill-evaluator-default-v2",
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        }
+        for entry_id in ("case-1", "case-2")
+    ]
+
+    [trial] = _normalize_trials(rows, list(DEFAULT_METRICS))
+
+    assert trial["overall"] is None
+    assert _cases({"rewards": rows}) == [{"entry_id": "case-1", "overall": None}]
+
+
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_normalize_trials_uses_group_wide_metric_precedence_for_mixed_step_verifiers(
+    reverse_rows: bool,
+) -> None:
+    rows = [
+        {
+            "trial_id": "case-1__attempt1",
+            "entry_id": "case-1",
+            "metric_set": "custom-only",
+            **dict.fromkeys(DEFAULT_METRICS, 0.0),
+            "metrics": {
+                "domain_quality": {"score": 0.2},
+                "skill_execution": {"score": 0.0},
+            },
+            "details": {"skill_execution": {"reason": "spoofed canonical evidence"}},
+            "overall": 0.2,
+        },
+        {
+            "trial_id": "case-1__attempt1",
+            "entry_id": "case-1",
+            "metric_set": "skill-evaluator-default-v2",
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        },
+    ]
+    if reverse_rows:
+        rows.reverse()
+
+    [trial] = _normalize_trials(rows, list(DEFAULT_METRICS))
+
+    assert trial["scores"] == dict.fromkeys(DEFAULT_METRICS, 1.0)
+    assert trial["overall"] == 0.6
+    assert _cases({"rewards": rows}) == [{"entry_id": "case-1", "overall": 0.6}]
+    assert _metric_evidence("skill_execution", rows, _ReportBudget()) == []
+    assert _extract_findings(rows, canonical_scores=dict.fromkeys(DEFAULT_METRICS, 1.0)) == []
+
+
+def test_report_metric_discovery_honors_explicit_custom_only_declaration() -> None:
+    assert (
+        metrics_for_agents(
+            {
+                "codex": {
+                    "with_skill": {},
+                    "rewards": [
+                        {
+                            "metric_set": "custom-only",
+                            **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                            "overall": 0.5,
+                        }
+                    ],
+                }
+            }
+        )
+        == []
+    )
+
+
+def test_best_agent_compares_standard_and_custom_only_agent_overall_scores() -> None:
+    payload = build_agent_eval_payload(
+        "mixed-agent-contracts",
+        {
+            "standard-agent": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "metrics_with_skill": list(DEFAULT_METRICS),
+                "overall_with_skill": 0.8,
+                "rewards": [
+                    {
+                        "entry_id": "standard-case",
+                        "metric_set": "skill-evaluator-default-v2",
+                        **dict.fromkeys(DEFAULT_METRICS, 0.8),
+                        "overall": 0.8,
+                    }
+                ],
+            },
+            "custom-agent": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {},
+                "metrics_with_skill": [],
+                "overall_with_skill": 0.9,
+                "without_skill": {},
+                "metrics_without_skill": [],
+                "overall_without_skill": 0.4,
+                "rewards": [
+                    {
+                        "entry_id": "custom-case",
+                        "metric_set": "custom-only",
+                        "overall": 0.9,
+                        "custom_metrics": {"task_quality": 0.9},
+                    }
+                ],
+                "rewards_baseline": [
+                    {
+                        "entry_id": "custom-case",
+                        "metric_set": "custom-only",
+                        "overall": 0.4,
+                        "custom_metrics": {"task_quality": 0.4},
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["agents"]["standard-agent"]["with_skill"] == 0.8
+    assert payload["agents"]["custom-agent"]["with_skill"] == 0.9
+    assert payload["agents"]["custom-agent"]["baseline"] == 0.4
+    assert payload["agents"]["custom-agent"]["lift"] == 0.5
+    assert payload["best_agent"] == "custom-agent"
+    assert payload["overall_score"] == 0.9
+
+
 def test_case_grounded_harbor_links_win_over_positional_fallback() -> None:
     evidence_links = [
         {"url": "https://harbor.example.test/case-1", "entry_id": "case-1", "label": "case-1"},
@@ -280,6 +537,222 @@ def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None
     assert 'data-tier3-tab="trials"' in html
     assert "Diagnostics" in html
     assert "SkillEvaluator" in html
+
+
+def test_trial_report_renders_unavailable_tokens_as_unavailable() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Steps per Eval Case" in trials_html
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert "With-Skill Per-Evaluator Drill-Down" in trials_html
+    assert re.search(r"<td>4</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": None,
+                        },
+                    },
+                    {
+                        "trial_id": "case-2__attempt1",
+                        "entry_id": "case-2",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    },
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+    assert re.search(r"<td>4</td>\s*<td>14</td>", trials_html)
+    assert re.search(r"<td>3</td>\s*<td>—</td>", trials_html)
+
+
+def test_trial_report_omits_token_chart_when_any_agent_telemetry_is_incomplete() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 3,
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "cached_tokens": None,
+                        },
+                    }
+                ],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_report_omits_token_chart_when_reported_agent_has_no_trials() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            },
+            "opencode": {
+                "execution_status": "failed",
+                "execution_errors": ["malformed judge response"],
+                "expected_attempts": 1,
+                "scored_attempts": 0,
+                "with_skill": {},
+                "rewards": [],
+            },
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    assert set(payload["agents"]) == {"codex", "opencode"}
+
+    trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
+
+    assert "With-Skill Token Usage by Agent" not in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
+
+
+def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"accuracy": 1.0},
+                "rewards": [
+                    {
+                        "trial_id": "case-1__attempt1",
+                        "entry_id": "case-1",
+                        "accuracy": 1.0,
+                        "_traj": {
+                            "steps": 4,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "cached_tokens": 2,
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+    trials_html = _tier3_page(html, "trials", "agents")
+
+    assert 'id="tier3-token-chart"' in trials_html
+    assert '{ label: "Prompt (total)"' in html
+    assert '{ label: "Cached (included in prompt)"' in html
+    assert "if (observed.length !== matching.length) return null;" in html
 
 
 def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path: Path) -> None:
@@ -661,6 +1134,228 @@ def test_reward_custom_metric_discovery_and_evidence_do_not_materialize_full_map
     assert budget.omitted["evaluator_cards"] > 0
 
 
+def test_findings_prefer_custom_details_only_for_custom_metric_collisions() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        "security": 0.9,
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {
+            "security": {"reason": "standard evidence"},
+            "domain_quality": {"reason": "ordinary collision"},
+        },
+        "custom_details": {
+            "security": {"reason": "custom collision"},
+            "domain_quality": {"reason": "custom evidence"},
+        },
+    }
+
+    findings = _extract_findings(
+        [reward],
+        canonical_scores={"security": 0.9, "domain_quality": 0.8},
+    )
+
+    by_metric = {finding["metric"]: finding for finding in findings}
+    assert by_metric["security"]["reasons"] == ["standard evidence"]
+    assert by_metric["domain_quality"]["reasons"] == ["custom evidence"]
+
+
+def test_unified_evidence_prefers_custom_details_only_for_custom_metric_collisions() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "skill-evaluator-default-v2",
+        "security": 0.9,
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {
+            "security": {"reason": "standard evidence"},
+            "domain_quality": {"reason": "ordinary collision"},
+        },
+        "custom_details": {
+            "security": {"reason": "custom collision"},
+            "domain_quality": {"reason": "custom evidence"},
+        },
+    }
+
+    standard = _metric_evidence("security", [reward], _ReportBudget())
+    custom = _metric_evidence("domain_quality", [reward], _ReportBudget())
+
+    assert standard[0]["notes"] == ["standard evidence"]
+    assert custom[0]["notes"] == ["custom evidence"]
+
+
+def test_unified_evidence_does_not_fallback_from_explicit_malformed_custom_detail() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "custom-only",
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {"domain_quality": {"reason": "ordinary collision"}},
+        "custom_details": {"domain_quality": None},
+    }
+
+    evidence = _metric_evidence("domain_quality", [reward], _ReportBudget())
+
+    assert evidence == []
+
+
+def test_unified_evidence_keeps_legacy_custom_detail_fallback_when_custom_key_is_absent() -> None:
+    reward = {
+        "entry_id": "case-1",
+        "metric_set": "custom-only",
+        "custom_metrics": {"domain_quality": 0.8},
+        "details": {"domain_quality": {"reason": "legacy custom evidence"}},
+        "custom_details": {"another_metric": {"reason": "unrelated"}},
+    }
+
+    evidence = _metric_evidence("domain_quality", [reward], _ReportBudget())
+
+    assert evidence[0]["notes"] == ["legacy custom evidence"]
+
+
+@pytest.mark.parametrize("source", ["configured", "reward"])
+def test_custom_evaluator_cards_reject_scores_outside_the_unit_interval(source: str) -> None:
+    custom_with_skill = {"domain_quality": 1e308} if source == "configured" else {}
+    rewards = (
+        [
+            {
+                "metric_set": "custom-only",
+                "overall": 0.5,
+                "custom_metrics": {"domain_quality": 1e308},
+            }
+        ]
+        if source == "reward"
+        else []
+    )
+
+    cards = _evaluator_cards(
+        {},
+        rewards=rewards,
+        custom_with_skill=custom_with_skill,
+        custom_without_skill={},
+        custom_lift={},
+        report_budget=_ReportBudget(),
+    )
+
+    assert not any(card["id"] == "domain_quality" for card in cards)
+
+
+def test_legacy_summary_custom_metric_names_follow_current_publication_policy(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "legacy-custom-metrics"
+    summary = run_dir / "opencode" / "with-skill" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    credential_name = "ghp_" + ("a" * 36)
+    credential_field = "api_key_quality"
+    oversized_name = ("é" * (MAX_CUSTOM_METRIC_NAME_BYTES // 2)) + "x"
+    assert len(oversized_name.encode("utf-8")) == MAX_CUSTOM_METRIC_NAME_BYTES + 1
+    trial_reward = summary.parent / "trials" / "case-001" / "reward.json"
+    trial_reward.parent.mkdir(parents=True)
+    trial_reward.write_text(
+        json.dumps(
+            {
+                "entry_id": "case-001",
+                "metric_set": "custom-only",
+                "overall": 0.8,
+                "custom_metrics": {
+                    credential_name: 0.5,
+                    credential_field: 0.6,
+                    oversized_name: 0.7,
+                    "domain_quality": 0.8,
+                },
+                credential_name: 0.5,
+                credential_field: 0.6,
+                oversized_name: 0.7,
+                "domain_quality": 0.8,
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary.write_text(
+        json.dumps(
+            {
+                "scores": {},
+                "custom_scores": {
+                    credential_name: 0.5,
+                    credential_field: 0.6,
+                    oversized_name: 0.7,
+                    "domain_quality": 0.8,
+                },
+                "overall_score": 0.8,
+                "metrics": [],
+                "num_trials": 1,
+                "num_reward_rows": 1,
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    custom_card_ids = [
+        card["id"] for card in payload["agents"]["opencode"]["evaluator_cards"] if card["label"].startswith("Custom: ")
+    ]
+    assert custom_card_ids == ["domain_quality"]
+    [raw_reward] = payload["provenance"]["raw_trial_rewards"]["opencode"]
+    assert raw_reward["entry_id"] == "case-001"
+    assert raw_reward["metric_set"] == "custom-only"
+    assert raw_reward["overall"] == 0.8
+    assert raw_reward["custom_metrics"] == {"domain_quality": 0.8}
+    assert raw_reward["domain_quality"] == 0.8
+    serialized = json.dumps(payload)
+    assert credential_name not in serialized
+    assert credential_field not in serialized
+    assert oversized_name not in serialized
+
+
+def test_legacy_non_mapping_custom_scores_and_lift_degrade_safely(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "legacy-malformed-custom-maps"
+    agent_dir = run_dir / "opencode"
+
+    for variant, overall, custom_scores in (
+        ("with-skill", 0.8, {"domain_quality": 0.8}),
+        ("without-skill", 0.4, "not-a-custom-score-map"),
+    ):
+        summary = agent_dir / variant / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "scores": {},
+                    "custom_scores": custom_scores,
+                    "overall_score": overall,
+                    "metrics": [],
+                    "num_trials": 0,
+                    "num_reward_rows": 0,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 0,
+                    "scored_attempts": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+    (agent_dir / "custom_lift.json").write_text(json.dumps("not-a-custom-lift-map"), encoding="utf-8")
+
+    result = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    [custom_card] = [
+        card for card in payload["agents"]["opencode"]["evaluator_cards"] if card["id"] == "domain_quality"
+    ]
+    assert custom_card["with_skill"] == 0.8
+    assert custom_card["baseline"] is None
+    assert custom_card["lift"] is None
+
+
 def test_raw_reward_projection_bulk_stops_when_field_budget_is_full() -> None:
     class ExplodingReward(dict[str, float]):
         def items(self):
@@ -874,6 +1569,89 @@ def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None
 
     html = _render_agent_payload(payload)
     assert _embedded_tier3_payload(html)["dataset"][0]["score"] is None
+
+
+def test_canonical_payload_sanitizes_unsafe_integers_for_browser_json_semantics() -> None:
+    safe_integer_metadata = {
+        "max_safe": (1 << 53) - 1,
+        "min_safe": -((1 << 53) - 1),
+        "enabled": True,
+    }
+    unsafe_integer_metadata = {
+        **safe_integer_metadata,
+        "too_large": 10**400,
+        "too_small": -(10**400),
+    }
+    payload = build_agent_eval_payload(
+        "browser-safe-json",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [
+                    {
+                        "entry_id": "case-1",
+                        "security": 1.0,
+                        "overall": 1.0,
+                        "metadata": unsafe_integer_metadata,
+                    }
+                ],
+            }
+        },
+        dataset=[{"id": "case-1", "metadata": unsafe_integer_metadata}],
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    canonical_metadata = (
+        payload["dataset"][0]["metadata"],
+        payload["provenance"]["raw_trial_rewards"]["codex"][0]["metadata"],
+    )
+    for metadata in canonical_metadata:
+        assert metadata["too_large"] is None
+        assert metadata["too_small"] is None
+        assert metadata["max_safe"] == (1 << 53) - 1
+        assert type(metadata["max_safe"]) is int
+        assert metadata["min_safe"] == -((1 << 53) - 1)
+        assert type(metadata["min_safe"]) is int
+        assert metadata["enabled"] is True
+
+    encoded = json.dumps(payload, allow_nan=False)
+    browser_payload = json.loads(encoded, parse_int=float)
+    dataset_metadata = browser_payload["dataset"][0]["metadata"]
+    raw_metadata = browser_payload["provenance"]["raw_trial_rewards"]["codex"][0]["metadata"]
+
+    for metadata in (dataset_metadata, raw_metadata):
+        assert metadata["too_large"] is None
+        assert metadata["too_small"] is None
+        assert metadata["max_safe"] == float((1 << 53) - 1)
+        assert metadata["min_safe"] == -float((1 << 53) - 1)
+        assert metadata["enabled"] is True
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_invalid_legacy_attempt_threshold_does_not_crash_canonical_report(invalid: float | int) -> None:
+    payload = build_agent_eval_payload(
+        "invalid-policy-number",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 1.0),
+            }
+        },
+        attempt_policy={"pass_threshold": invalid},
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["verdict_policy"]["attempt_pass_threshold"] is None
+    json.dumps(payload, allow_nan=False)
 
 
 def test_canonical_html_serializer_rejects_non_finite_numbers() -> None:

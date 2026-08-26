@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
+import pytest
+
 from skillevaluator.tier3.harbor import report
 
 
@@ -77,6 +81,84 @@ def test_findings_carry_evidence_refs():
     assert goal["evidence_refs"][0]["json_pointer"] == "/steps/14"
 
 
+def test_findings_normalize_legacy_string_evidence_refs_without_crashing():
+    reward = _reward(0.1)
+    reward["details"]["goal_accuracy"]["evidence_refs"] = ["trajectory.json#/steps/14"]
+
+    findings = report._extract_findings([reward])
+
+    goal = next(finding for finding in findings if finding["metric"] == "goal_accuracy")
+    assert goal["evidence_refs"] == [
+        {
+            "source": "trajectory.json",
+            "json_pointer": "/steps/14",
+            "kind": "evidence",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("metric", "malformed_detail"),
+    [
+        ("behavior_check", {"results": ["malformed"]}),
+        ("accuracy", []),
+        ("accuracy", {"criteria": [], "reason": 42}),
+        ("goal_accuracy", {"findings": "malformed", "reason": {"nested": "value"}}),
+    ],
+)
+@pytest.mark.parametrize("metric_score", [0.1, 0.9], ids=["failing", "passing"])
+def test_findings_tolerate_malformed_nested_detail_shapes(metric, malformed_detail, metric_score):
+    reward = _reward(metric_score)
+    reward[metric] = metric_score
+    reward["details"][metric] = malformed_detail
+
+    findings = report._extract_findings([reward])
+
+    finding = next(item for item in findings if item["metric"] == metric)
+    assert finding["score"] == pytest.approx(metric_score)
+    assert all(isinstance(reason, str) and len(reason) <= 512 for reason in finding["reasons"])
+
+
+def test_findings_report_rejects_overflowing_reward_numbers_without_crashing():
+    reward = _reward(10**400)
+    reward["details"]["goal_accuracy"]["score"] = 10**400
+
+    assert report._extract_findings([reward]) == []
+    assert report._prioritized_evidence_rewards([reward]) == [reward]
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_findings_best_agent_ignores_invalid_legacy_summary_numbers(invalid: float | int):
+    invalid_scores = dict.fromkeys(report.DISPLAY_METRICS, 1.0)
+    invalid_scores[report.DISPLAY_METRICS[0]] = invalid
+    agents = {
+        "invalid": {
+            "execution_status": "succeeded",
+            "with_skill": invalid_scores,
+        },
+        "valid": {
+            "execution_status": "succeeded",
+            "with_skill": dict.fromkeys(report.DISPLAY_METRICS, 0.5),
+        },
+    }
+
+    assert report._pick_best_agent(agents) == "valid"
+
+
+def test_passing_suggestions_count_mixed_current_and_legacy_logical_trials():
+    suggestions = report._passing_skill_suggestions(
+        [],
+        [
+            {"trial_id": "current-attempt"},
+            {"trial_id": "current-attempt"},
+            {"entry_id": "legacy-one"},
+            {"entry_id": "legacy-two"},
+        ],
+    )
+
+    assert any("currently 3" in suggestion for suggestion in suggestions)
+
+
 def test_generate_suggestions_prompt_includes_refs_and_uses_larger_budget(monkeypatch):
     captured = {}
 
@@ -132,6 +214,38 @@ def test_findings_artifact_includes_suggestions_v2(tmp_path):
     )
     payload = json.loads(art.read_text())
     assert "suggestions_v2" in payload and payload["suggestions_v2"][0]["dimension"] == "goal_accuracy"
+
+
+def test_findings_artifact_bounds_evidence_across_multiple_large_rewards(tmp_path):
+    rewards = []
+    for index in range(8):
+        reward = _reward(0.1)
+        reward["entry_id"] = f"case-{index}"
+        reward["details"]["goal_accuracy"]["evidence_refs"] = [
+            {
+                "source": f"trajectory-{index}.json",
+                "json_pointer": f"/steps/{index}",
+                "kind": "tool_call",
+                "excerpt": "x" * 1_000_000,
+            }
+        ]
+        rewards.append(reward)
+
+    findings = report._extract_findings(rewards)
+    art = report._write_findings_artifact(
+        results_dir=tmp_path,
+        skill_name="demo",
+        agent="codex",
+        findings=findings,
+        suggestions=[],
+        suggestion_mode="not_generated",
+    )
+    payload = json.loads(art.read_text(encoding="utf-8"))
+    goal = next(finding for finding in payload["findings"] if finding["metric"] == "goal_accuracy")
+
+    assert art.stat().st_size <= report.report_data._MAX_JSON_BYTES
+    assert len(goal["evidence_refs"]) == report._MAX_FINDING_EVIDENCE_REFS
+    assert all(len(ref["excerpt"]) < 1_000 for ref in goal["evidence_refs"])
 
 
 # --- New tests for dict-shaped evidence_refs in suggestions_v2 ---

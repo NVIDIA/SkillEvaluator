@@ -165,6 +165,7 @@ The following flags are forwarded to the live-eval engine **only when Tier 3 is 
 | `--autopilot` | off | Generate an evaluation source automatically when missing, then run Tier 3 (implies `--tier3`). |
 | `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents to evaluate. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |
+| `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Forwarded only when Tier 3 is enabled; skill-owned `evals/config.yml` cannot set these values. Never pass secrets. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -305,7 +306,8 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
-| `--env-mode` | `docker` | Where trials run. All 16 values: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `gke`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `local`. Cloud modes are provider-managed Harbor backends enabled by the matching Harbor extra; `local` runs on your host. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends, including Docker, plus SkillEvaluator `local` mode. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved. |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
@@ -430,7 +432,8 @@ skillevaluator doctor --agents codex --env-mode docker
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
-| `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
+| `--env-mode` | `docker` | Backend to check (same 27 modes as [tier3 evaluate](#tier3-evaluate)). |
+| `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs; policy-owned fields are rejected for every eligible backend. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
 | `--verify-models` | off | Live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. |
 
@@ -447,7 +450,8 @@ skillevaluator health-check
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
-| `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
+| `--env-mode` | `docker` | Backend to check (same 27 modes as [tier3 evaluate](#tier3-evaluate)). |
+| `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs; policy-owned fields are rejected for every eligible backend. |
 
 ## models
 

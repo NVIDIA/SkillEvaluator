@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import errno
 import json
 import logging
 import os
@@ -18,6 +20,8 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -25,15 +29,19 @@ from urllib.parse import urlsplit
 import pytest
 from harbor.agents.installed.opencode import OpenCode
 from harbor.environments.base import BaseEnvironment
+from harbor.models.task.config import EnvironmentConfig
+from harbor.models.trial.paths import TrialPaths
 
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.harbor import (
     ENV_MODE_LOCAL,
     HARBOR_ENV_MODES,
+    HARBOR_NATIVE_ENV_MODES,
     LOCAL_AGENT_IMPORT_PATHS,
     LOCAL_ENV_IMPORT_PATH,
     local_sandbox,
 )
+from skillevaluator.tier3.harbor import stream_redaction as stream_redaction_module
 from skillevaluator.tier3.harbor.local_agents import (
     NVIDIA_BUILD_AGENT_IMPORT_PATHS,
     SkillEvaluatorLocalOpenCode,
@@ -48,8 +56,26 @@ from skillevaluator.tier3.harbor.runner import (
     _local_agent_credentials,
     build_harbor_run_command,
 )
+from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
+from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
+from skillevaluator.tier3.harbor.stream_redaction import (
+    CommandOutputLimitError,
+    StreamingLogRedactor,
+    StreamingSecretRedactor,
+    _StreamingKnownPatternRedactor,
+)
 
 _NATIVE_WINDOWS_LOCAL_REASON = "native Windows local mode requires WSL2; these checks exercise the POSIX backend"
+
+
+class _NoopScopedExecEnvironment:
+    @contextlib.contextmanager
+    def scoped_exec_env(self, _env: dict[str, str]):
+        yield
+
+
+class _LocalCallbackBaseError(BaseException):
+    pass
 
 
 def _local_environment(
@@ -70,7 +96,15 @@ def _local_environment(
     environment._inherit_agent_keys = False
     environment._strict_reads = False
     environment._active_processes = {}
+    environment._active_process_secret_values = {}
+    environment._pending_creations = set()
+    environment._creation_secret_values = {}
+    environment._creation_cleanups = {}
+    environment._creation_cleanup_errors = []
+    environment._stop_requested = False
     environment._persistent_env = persistent_env or {}
+    environment._output_callbacks = contextvars.ContextVar("test_local_output_callbacks", default=())
+    environment._exec_env_overlays = contextvars.ContextVar("test_local_exec_env_overlays", default=())
     environment._sandbox = local_sandbox.Sandbox(local_sandbox.SandboxPlan("none", "advisory-only", "test"))
     environment.trial_paths = type(
         "TrialPaths",
@@ -100,8 +134,312 @@ def _local_environment(
     return environment
 
 
+def _initialized_local_environment(
+    tmp_path: Path,
+    *,
+    persistent_env: dict[str, str] | None = None,
+) -> SkillEvaluatorLocalEnvironment:
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    return SkillEvaluatorLocalEnvironment(
+        environment_dir=environment_dir,
+        environment_name="local-streaming-test",
+        session_id="local-streaming-test",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(),
+        runtime_agent="opencode",
+        runtime_root=str(runtime_root),
+        sandbox_mode="off",
+        allow_net=False,
+        persistent_env=persistent_env,
+    )
+
+
 def _provider(name: str, *, api_key: str = "k", base_url: str | None = None) -> ProviderConfig:
     return ProviderConfig(provider=name, model="m", api_key=api_key, base_url=base_url, litellm_model="m", region=None)
+
+
+def test_streaming_log_redactor_is_chunk_partition_invariant() -> None:
+    multiline_secret = "FIRST-HALF\nSECOND-HALF"
+    shorter_secret = "overlap-secret"
+    longer_secret = "overlap-secret-tail"
+    collision_secret = "redacted"
+    known_secret = "".join(("nvapi-", "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8"))  # noqa: FLY002
+    raw = (
+        f"prefix {multiline_secret} {longer_secret} {shorter_secret} "
+        f"{collision_secret} {known_secret} task-granularity suffix"
+    )
+    secrets = {multiline_secret, shorter_secret, longer_secret, collision_secret}
+
+    baseline_redactor = StreamingLogRedactor(secrets)
+    baseline = baseline_redactor.feed(raw) + baseline_redactor.finish()
+    partitions = (
+        [raw],
+        list(raw),
+        [raw[:1], raw[1:17], raw[17:43], raw[43:]],
+        [raw[: len(raw) // 2], raw[len(raw) // 2 :]],
+    )
+
+    for chunks in partitions:
+        redactor = StreamingLogRedactor(secrets)
+        rendered = "".join(redactor.feed(chunk) for chunk in chunks) + redactor.finish()
+        assert rendered == baseline
+
+    assert "task-granularity" in baseline
+    for secret in (*secrets, known_secret):
+        assert secret not in baseline
+
+
+def test_exact_stream_redactor_rejects_missing_compiled_prefix_matcher() -> None:
+    redactor = StreamingSecretRedactor({"invariant-secret"})
+    redactor._first_character_re = None
+
+    with pytest.raises(RuntimeError, match="exact redactor invariant"):
+        redactor.feed("ordinary output")
+
+
+def test_known_pattern_redactor_rejects_unknown_candidate_kind() -> None:
+    redactor = _StreamingKnownPatternRedactor()
+    redactor._candidate_kind = "unexpected"
+    redactor._candidate_prefix = "eyJ"
+    redactor._candidate = ["eyJ"]
+
+    with pytest.raises(RuntimeError, match="known-pattern redactor invariant"):
+        redactor.feed("A")
+
+
+@pytest.mark.parametrize("missing_stream", ("stdin", "stdout", "stderr"))
+def test_local_stream_collector_rejects_missing_required_pipe(missing_stream: str) -> None:
+    streams = {"stdin": object(), "stdout": object(), "stderr": object()}
+    streams[missing_stream] = None
+    process = SimpleNamespace(**streams)
+
+    with pytest.raises(RuntimeError, match="local subprocess pipe invariant"):
+        asyncio.run(
+            SkillEvaluatorLocalEnvironment._collect_streamed_output(
+                process,  # type: ignore[arg-type]
+                b"",
+                None,  # type: ignore[arg-type]
+            )
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_local_output_limit_fails_closed_and_reaps_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_callback: bool,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    child_pid_path = environment._workspace / "output-limit-child-pid"
+    overflow_value = "synthetic-output-overflow-secret"
+    callback_chunks: list[str] = []
+    processes: list[asyncio.subprocess.Process] = []
+    create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def capture_process(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await create_subprocess_exec(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    command = (
+        "(sleep 30) & child=$!; "
+        "printf '%s' \"$child\" > output-limit-child-pid; "
+        "printf 12345; printf 67890 >&2; printf '%s' \"$OUTPUT_SECRET\"; wait"
+    )
+
+    async def exercise() -> None:
+        await environment.start()
+        callback_scope = environment.scoped_output_callback(on_output) if with_callback else contextlib.nullcontext()
+        with callback_scope:
+            await environment.exec(
+                command,
+                env={"OUTPUT_SECRET": overflow_value},
+                # This case exercises output containment, not timeout racing.
+                # Leave enough startup time for loaded CI hosts to emit the
+                # deliberately over-budget bytes before the sleep descendant.
+                timeout_sec=2.0,
+            )
+
+    monkeypatch.setattr(stream_redaction_module, "MAX_COMMAND_OUTPUT_BYTES", 8, raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_process)
+
+    with pytest.raises(CommandOutputLimitError, match=r"Command output exceeded the 8-byte safety limit") as caught:
+        asyncio.run(exercise())
+
+    assert len(processes) == 1
+    assert processes[0].returncode is not None
+    assert child_pid_path.is_file()
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    assert len("".join(callback_chunks).encode()) <= 8
+    assert overflow_value not in "".join(callback_chunks)
+    assert overflow_value not in str(caught.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_output_limit_redacts_detached_proxy_components_from_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    diagnostic = "proxy rejected local-limit-user with local-limit-password\n"
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def exercise() -> None:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            await environment.exec(
+                f"printf %s {shlex.quote(diagnostic)}; sleep 0.05; printf overflow",
+                env={
+                    "HTTPS_PROXY": "https://local-limit-user:local-limit-password@proxy.invalid:8443",
+                },
+            )
+
+    monkeypatch.setattr(
+        stream_redaction_module,
+        "MAX_COMMAND_OUTPUT_BYTES",
+        len(diagnostic.encode()),
+        raising=False,
+    )
+
+    with pytest.raises(CommandOutputLimitError) as caught:
+        asyncio.run(exercise())
+
+    rendered = "".join(callback_chunks) + str(caught.value)
+    assert "proxy rejected" in "".join(callback_chunks)
+    assert "local-limit-user" not in rendered
+    assert "local-limit-password" not in rendered
+
+
+def test_streaming_log_redactor_preserves_nested_known_pattern_starts() -> None:
+    jwt_secret = ".".join(("eyJ" + "A" * 20, "B" * 20, "C" * 20))
+    raw = "ask-" + ("a" * 19 + "A1") + "--" + jwt_secret + "☃"
+    expected = redact_secrets_in_log_line(raw)
+    partitions = (
+        [raw],
+        list(raw),
+        [raw[:5], raw[5:26], raw[26:51], raw[51:]],
+    )
+
+    for chunks in partitions:
+        redactor = StreamingLogRedactor(())
+        rendered = "".join(redactor.feed(chunk) for chunk in chunks) + redactor.finish()
+        assert rendered == expected
+
+    assert jwt_secret not in expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        " crsr_" + "0" * 16 + "sha256~" + "a" * 10 + "☃",
+        "ordinary trailing xsk-abcdefgh",
+        "ordinary trailing sk-short",
+        "ordinary partial nvapi-",
+        "ordinary partial crsr_0123",
+        "ordinary partial eyJ" + "A" * 20,
+        "_" + ".".join(("eyJ" + "A" * 20, "B" * 20, "C" * 20)),
+        "é" + ".".join(("eyJ" + "A" * 20, "B" * 20, "C" * 20)),
+    ],
+)
+def test_streaming_log_redactor_matches_batch_at_adjacent_patterns_and_eof(raw: str) -> None:
+    expected = redact_secrets_in_log_line(raw)
+    for chunks in ([raw], list(raw), [raw[: len(raw) // 2], raw[len(raw) // 2 :]]):
+        redactor = StreamingLogRedactor(())
+        rendered = "".join(redactor.feed(chunk) for chunk in chunks) + redactor.finish()
+        assert rendered == expected
+
+
+def test_streaming_log_redactor_emits_a_proven_long_key_before_its_terminator() -> None:
+    redactor = StreamingLogRedactor(())
+
+    emitted = redactor.feed("sk-" + "a" * 1_000_000)
+
+    assert emitted == "sk-<redacted>"
+    assert redactor.finish() == ""
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "eyJ",
+        "eyJ" + "A" * 20 + ".",
+    ],
+)
+def test_streaming_log_redactor_bounds_oversized_partial_jwt_candidates(prefix: str) -> None:
+    redactor = StreamingLogRedactor(())
+    raw = prefix + "A" * (512 * 1024)
+    emitted: list[str] = []
+
+    for offset in range(0, len(raw), 64 * 1024):
+        emitted.append(redactor.feed(raw[offset : offset + 64 * 1024]))
+
+    # Stage-zero/stage-one ambiguity must not retain attacker-sized output
+    # until EOF. Once the conservative bound is reached, emit the marker and
+    # discard the rest of that segment in bounded chunks.
+    assert any(emitted)
+    rendered = "".join(emitted) + redactor.finish()
+    assert rendered == "jwt-<redacted>"
+    assert len(rendered) < 256
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "eyJ" + "A" * 256 + "." + "B" * 32 + "." + "C" * 32,
+        "eyJ" + "A" * 20 + "." + "B" * 256 + "." + "C" * 32,
+    ],
+)
+def test_oversized_partial_jwt_redaction_discards_later_segments(raw: str) -> None:
+    redactor = StreamingLogRedactor(())
+
+    rendered = redactor.feed(raw + " suffix") + redactor.finish()
+
+    assert rendered == "jwt-<redacted> suffix"
+    assert "B" * 32 not in rendered
+    assert "C" * 32 not in rendered
+
+
+@pytest.mark.parametrize(
+    "known_secret",
+    [
+        "sk-abcdefgh",
+        "nvapi-abcdefgh",
+        "crsr_0123456789abcdef",
+        "sha256~abcdefgh",
+        ".".join(("eyJ" + "A" * 20, "B" * 20, "C" * 20)),
+    ],
+)
+def test_exact_replacement_cannot_create_a_visible_known_secret(known_secret: str) -> None:
+    exact_secret = "SECRET88"
+    raw = exact_secret + known_secret
+    for chunks in ([raw], list(raw), [raw[:7], raw[7:11], raw[11:]]):
+        redactor = StreamingLogRedactor({exact_secret})
+        rendered = "".join(redactor.feed(chunk) for chunk in chunks) + redactor.finish()
+        assert exact_secret not in rendered
+        assert known_secret not in rendered
+
+
+def test_known_replacement_cannot_create_a_visible_exact_secret() -> None:
+    exact_secret = "sk-<redacted>"
+    raw = "sk-Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8"
+    for chunks in ([raw], list(raw), [raw[:5], raw[5:19], raw[19:]]):
+        redactor = StreamingLogRedactor({exact_secret})
+        rendered = "".join(redactor.feed(chunk) for chunk in chunks) + redactor.finish()
+        assert raw not in rendered
+        assert exact_secret not in rendered
 
 
 def test_local_is_a_registered_env_mode() -> None:
@@ -109,18 +447,22 @@ def test_local_is_a_registered_env_mode() -> None:
     assert "local" in HARBOR_ENV_MODES
 
 
-def test_build_command_uses_import_paths_not_env_flag() -> None:
+def test_registered_native_env_modes_match_pinned_harbor_release() -> None:
+    from harbor.models.environment_type import EnvironmentType
+
+    assert frozenset(environment.value for environment in EnvironmentType) == HARBOR_NATIVE_ENV_MODES
+
+
+def test_build_command_uses_unified_flags_for_local_imports() -> None:
     cmd = build_harbor_run_command(dataset_path="/tmp/ds", agent="opencode", job_name="j", env_mode="local")
     joined = " ".join(cmd)
-    assert "--environment-import-path" in cmd
-    assert LOCAL_ENV_IMPORT_PATH in cmd
-    assert "--agent-import-path" in cmd
-    assert LOCAL_AGENT_IMPORT_PATHS["opencode"] in cmd
-    # local mode must NOT pass Harbor's --env, and must NOT pass -a: harbor's
-    # create_agent_from_config prefers the agent NAME over the import path when
-    # both are set, which would run the stock (apt-get bootstrapping) agent.
-    assert "--env" not in cmd
+    assert "--agent-import-path" not in cmd
+    assert "--environment-import-path" not in cmd
     assert "-a" not in cmd
+    assert cmd.count("--agent") == 1
+    assert cmd[cmd.index("--agent") + 1] == LOCAL_AGENT_IMPORT_PATHS["opencode"]
+    assert cmd.count("--env") == 1
+    assert cmd[cmd.index("--env") + 1] == LOCAL_ENV_IMPORT_PATH
     assert "sandbox_mode=require" in joined
     assert "allow_net=true" in joined  # egress on by default for the live agent
     assert "runtime_agent=opencode" in joined
@@ -137,12 +479,16 @@ def test_build_command_wires_strict_read_policy(monkeypatch: pytest.MonkeyPatch)
 
 def test_build_command_docker_mode_uses_secure_import_path() -> None:
     cmd = build_harbor_run_command(dataset_path="/tmp/ds", agent="codex", job_name="j", env_mode="docker")
-    assert "-a" in cmd and cmd[cmd.index("-a") + 1] == "codex"
-    assert "--env" not in cmd
-    assert "--environment-import-path" in cmd
+    assert "--agent-import-path" not in cmd
+    assert "--environment-import-path" not in cmd
+    assert "-a" not in cmd
+    assert cmd.count("--agent") == 1
+    assert cmd[cmd.index("--agent") + 1] == "codex"
+    assert cmd.count("--env") == 1
+    assert cmd[cmd.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 
 
-def test_docker_bridge_command_uses_custom_agent_import_without_native_agent_flag() -> None:
+def test_docker_bridge_command_uses_unified_flags_for_custom_agent_and_secure_environment() -> None:
     import_path = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorNvidiaBuildCodex"
 
     cmd = build_harbor_run_command(
@@ -153,11 +499,13 @@ def test_docker_bridge_command_uses_custom_agent_import_without_native_agent_fla
         agent_import_path=import_path,
     )
 
-    assert "--env" not in cmd
-    assert "--environment-import-path" in cmd
-    assert "--agent-import-path" in cmd
-    assert cmd[cmd.index("--agent-import-path") + 1] == import_path
+    assert "--agent-import-path" not in cmd
+    assert "--environment-import-path" not in cmd
     assert "-a" not in cmd
+    assert cmd.count("--agent") == 1
+    assert cmd[cmd.index("--agent") + 1] == import_path
+    assert cmd.count("--env") == 1
+    assert cmd[cmd.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 
 
 def test_nvidia_build_bridge_agents_are_not_local_mode_agents() -> None:
@@ -167,6 +515,65 @@ def test_nvidia_build_bridge_agents_are_not_local_mode_agents() -> None:
     }
     assert "codex" in LOCAL_AGENT_IMPORT_PATHS
     assert LOCAL_AGENT_IMPORT_PATHS["codex"] != NVIDIA_BUILD_AGENT_IMPORT_PATHS["codex"]
+
+
+def test_harbor_unified_specs_import_non_abstract_skill_evaluator_classes(tmp_path: Path) -> None:
+    import inspect
+
+    from harbor.agents.factory import AgentFactory
+    from harbor.cli.utils import resolve_environment_spec
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
+    from harbor.models.trial.config import AgentConfig, EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    agent_specs = {
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode": ("SkillEvaluatorLocalClaudeCode"),
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalCodex": "SkillEvaluatorLocalCodex",
+        "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalOpenCode": "SkillEvaluatorLocalOpenCode",
+    }
+    for import_path, expected_class_name in agent_specs.items():
+        agent = AgentFactory.create_agent_from_config(
+            AgentConfig(name=import_path, model_name="openai/gpt-4.1-mini"),
+            logs_dir=tmp_path / "agent-logs",
+        )
+
+        assert agent.__class__.__name__ == expected_class_name
+        assert not inspect.isabstract(agent.__class__)
+
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    (environment_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    environment_specs = {
+        LOCAL_ENV_IMPORT_PATH: (
+            "SkillEvaluatorLocalEnvironment",
+            {
+                "runtime_agent": "codex",
+                "runtime_root": str(tmp_path / "runtime"),
+                "sandbox_mode": "off",
+            },
+        ),
+        SECURE_DOCKER_ENV_IMPORT_PATH: ("SkillEvaluatorSecureDockerEnvironment", {}),
+    }
+    for index, (import_path, (expected_class_name, kwargs)) in enumerate(environment_specs.items()):
+        environment_type, resolved_import_path = resolve_environment_spec(import_path)
+        assert environment_type is None
+        assert resolved_import_path == import_path
+        environment = EnvironmentFactory.create_environment_from_config(
+            EnvironmentConfig(
+                type=environment_type,
+                import_path=resolved_import_path,
+                kwargs=kwargs,
+            ),
+            environment_dir=environment_dir,
+            environment_name="unified-import-smoke",
+            session_id=f"unified-import-smoke-{index}",
+            trial_paths=TrialPaths(tmp_path / f"trial-{index}"),
+            task_env_config=TaskEnvironmentConfig(),
+        )
+
+        assert environment.__class__.__name__ == expected_class_name
+        assert not inspect.isabstract(environment.__class__)
 
 
 def test_local_claude_uses_managed_permissions_and_trial_temp_dir(
@@ -219,9 +626,7 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
 
     agent_class = getattr(local_agents, "SkillEvaluatorLocalNvidiaBuildCodex", None)
     assert agent_class is not None
-    agent = object.__new__(agent_class)
-    agent.model_name = "nvidia/nemotron-3-nano-30b-a3b"
-    agent._extra_env = {}
+    agent = agent_class(logs_dir=tmp_path, model_name="nvidia/nemotron-3-nano-30b-a3b")
     agent.render_instruction = lambda instruction: instruction
     agent._resolve_auth_json_path = lambda: None
     agent._build_register_skills_command = lambda: None
@@ -232,7 +637,9 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
     retained_logs: list[tuple[str, str]] = []
     origins: list[str] = []
 
-    class Environment:
+    class Environment(_NoopScopedExecEnvironment):
+        default_user = None
+
         async def upload_file(self, source: object, destination: object) -> None:
             retained_logs.append((str(destination), Path(source).read_text(encoding="utf-8")))
 
@@ -264,6 +671,12 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
     ) -> None:
         _ = (instruction, context)
         origins.append(self._bridge_origin())
+        effective_config = self._build_effective_config()
+        await self._upload_effective_config(
+            environment,
+            effective_config,
+            (self._REMOTE_CODEX_HOME / "config.toml").as_posix(),
+        )
         await self.exec_as_agent(
             environment,
             command="codex exec --model nemotron-3-nano-30b-a3b -- test",
@@ -280,18 +693,18 @@ def test_local_nvidia_build_codex_starts_authenticated_host_bridge_and_cleans_up
     parsed = urlsplit(origins[0])
     assert parsed.hostname == "127.0.0.1"
     assert parsed.port is not None
-    setup_commands = [(command, env) for command, env in calls if "model_provider" in command]
-    assert len(setup_commands) == 1
-    setup_command, setup_env = setup_commands[0]
-    assert f'base_url = "{origins[0]}/v1"' in setup_command
-    assert "api.openai.com" not in setup_command
-    assert "real-nvidia-key" not in setup_command
-    assert setup_env["OPENAI_API_KEY"] not in {"real-nvidia-key", "nvidia-build-loopback"}
+    config_upload = next(content for destination, content in retained_logs if destination.endswith("/config.toml"))
+    config = tomllib.loads(config_upload)
+    assert config["model_provider"] == "openai_compatible"
+    assert config["openai_base_url"] == f"{origins[0]}/v1"
+    assert config["model_providers"]["openai_compatible"]["base_url"] == f"{origins[0]}/v1"
+    assert "api.openai.com" not in config_upload
+    assert "real-nvidia-key" not in config_upload
     client_command, client_env = next((command, env) for command, env in calls if "codex exec" in command)
     assert "env -u NVIDIA_API_KEY" in client_command
     assert "NVIDIA_API_KEY" not in client_env
-    assert client_env["OPENAI_API_KEY"] == setup_env["OPENAI_API_KEY"]
-    assert retained_logs and retained_logs[0][0].endswith("nvidia-build-bridge.log")
+    assert client_env["OPENAI_API_KEY"] not in {"real-nvidia-key", "nvidia-build-loopback"}
+    assert any(destination.endswith("nvidia-build-bridge.log") for destination, _content in retained_logs)
 
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -527,16 +940,21 @@ def test_local_nvidia_build_bridge_repeated_cancellation_releases_slow_header_st
 
 def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from harbor.agents.installed.codex import Codex
 
-    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
-    agent.model_name = "nvidia/meta/llama-3.1-8b-instruct"
+    agent = SkillEvaluatorNvidiaBuildCodex(
+        logs_dir=tmp_path,
+        model_name="nvidia/meta/llama-3.1-8b-instruct",
+    )
     calls: list[tuple[str, dict[str, str]]] = []
     root_calls: list[tuple[str, dict[str, str]]] = []
     uploads: list[tuple[str, str, int]] = []
 
-    class Environment:
+    class Environment(_NoopScopedExecEnvironment):
+        default_user = None
+
         async def upload_file(self, source: object, destination: object) -> None:
             source_path = Path(source)
             uploads.append(
@@ -588,7 +1006,7 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
 
     asyncio.run(agent.run("test", Environment(), None))
 
-    assert len(uploads) == 1
+    assert len(uploads) == 2
     assert uploads[0][0].endswith("nvidia-build-bridge.py")
     secret_handoff = next(
         (command, env) for command, env in root_calls if "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY" in env
@@ -621,16 +1039,18 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
     assert "kill -0" in health_command
     assert "/healthz" not in health_command
     assert all("NVIDIA_API_KEY" not in env for _, env in [*calls, *root_calls])
-    setup_command, setup_env = next((command, env) for command, env in calls if "model_provider" in command)
-    assert 'model_provider = "openai_compatible"' in setup_command
-    assert "[model_providers.openai_compatible]" in setup_command
-    assert 'base_url = "http://127.0.0.1:43123/v1"' in setup_command
-    assert 'wire_api = "responses"' in setup_command
-    assert "openai_base_url" not in setup_command
+    config_upload = next(content for destination, content, _mode in uploads if destination.endswith("/config.toml"))
+    config = tomllib.loads(config_upload)
+    assert config["model_provider"] == "openai_compatible"
+    assert config["openai_base_url"] == "http://127.0.0.1:43123/v1"
+    assert config["model_providers"]["openai_compatible"] == {
+        "name": "OpenAI-compatible provider",
+        "base_url": "http://127.0.0.1:43123/v1",
+        "env_key": "OPENAI_API_KEY",
+        "wire_api": "responses",
+    }
     assert all("openai_base_url" not in command for command, _ in calls)
-    assert "nvidia-secret" not in setup_command
-    assert setup_env["OPENAI_API_KEY"] == client_token
-    assert "OPENAI_BASE_URL" not in setup_env
+    assert "nvidia-secret" not in config_upload
     client_command, client_env = next((command, env) for command, env in calls if "codex exec" in command)
     assert "NVIDIA_API_KEY" not in client_env
     assert "OPENAI_BASE_URL" not in client_env
@@ -924,11 +1344,6 @@ def test_nvidia_build_bridge_rejects_unsafe_environment_before_reading_or_transf
     assert uploads == []
     assert executions == []
 
-    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": "bridge-client-token-secret"}
-    with pytest.raises(RuntimeError, match="protected sensitive-value transport"):
-        asyncio.run(agent.exec_as_agent(UnsafeEnvironment(), command="codex exec -- test"))
-    assert executions == []
-
 
 def test_nvidia_build_bridge_health_failure_cleans_up_before_raising(
     monkeypatch: pytest.MonkeyPatch,
@@ -1073,140 +1488,51 @@ def test_nvidia_build_bridge_wraps_compound_codex_shell_commands_before_unsettin
     agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
     agent.model_name = "nvidia/model"
     agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
-    agent._nvidia_build_bridge_client_env = {
-        "OPENAI_API_KEY": "bridge-client-token-secret",
-        "OPENAI_BASE_URL": "http://127.0.0.1:43123/v1",
-    }
-    agent._extra_env = {
-        "NVIDIA_API_KEY": "extra-upstream-secret",
-        "CODEX_HOME": "/logs/agent/codex-home",
-    }
-    log_records: list[tuple[object, object]] = []
-    agent.logger = SimpleNamespace(debug=lambda message, *args, **kwargs: log_records.append((message, (args, kwargs))))
+    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": "bridge-client-token-secret"}
     captured: list[tuple[str, dict[str, str]]] = []
+    scoped: list[dict[str, str]] = []
     simple_command = "codex exec --model model -- test"
     compound_command = 'if [ -d "$CODEX_HOME/sessions" ]; then cp -R "$CODEX_HOME/sessions" /logs/agent/sessions; fi'
 
     class Environment:
-        async def exec_with_sensitive_env(
-            self,
-            command: str,
-            env: dict[str, str] | None = None,
-            **_kwargs: object,
-        ) -> SimpleNamespace:
-            captured.append((command, dict(env or {})))
-            return SimpleNamespace(return_code=0, stdout="", stderr="")
+        @contextlib.contextmanager
+        def scoped_exec_env(self, values: dict[str, str]):
+            scoped.append(dict(values))
+            yield
 
-    async def reject_logged_exec(
+    async def raw_exec(
         _self: Codex,
         _environment: object,
         command: str,
         env: dict[str, str] | None = None,
         **_kwargs: object,
     ) -> SimpleNamespace:
-        _ = (command, env)
-        raise AssertionError("bridge credentials must bypass Harbor's logging wrapper")
+        captured.append((command, dict(env or {})))
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
 
-    monkeypatch.setattr(Codex, "exec_as_agent", reject_logged_exec)
+    monkeypatch.setattr(Codex, "exec_as_agent", raw_exec)
 
+    environment = Environment()
     for original_command in (simple_command, compound_command):
         asyncio.run(
             agent.exec_as_agent(
-                Environment(),
+                environment,
                 command=original_command,
-                env={"NVIDIA_API_KEY": "per-call-upstream-secret"},
+                env={"NVIDIA_API_KEY": "must-not-leak"},
             )
         )
 
+    unset_prefix = "env -u NVIDIA_API_KEY -u OPENAI_BASE_URL -u OPENAI_API_BASE bash -o pipefail -c"
     assert [command for command, _ in captured] == [
-        f"env -u NVIDIA_API_KEY bash -o pipefail -c {shlex.quote('codex exec --model nvidia/model -- test')}",
-        f"env -u NVIDIA_API_KEY bash -o pipefail -c {shlex.quote(compound_command)}",
+        f"{unset_prefix} {shlex.quote('codex exec --model nvidia/model -- test')}",
+        f"{unset_prefix} {shlex.quote(compound_command)}",
     ]
     assert all("NVIDIA_API_KEY" not in env for _, env in captured)
     assert all(env["OPENAI_API_KEY"] == "bridge-client-token-secret" for _, env in captured)
-    assert all(env["CODEX_HOME"] == "/logs/agent/codex-home" for _, env in captured)
-    assert log_records == []
-
-
-def test_nvidia_build_bridge_client_preserves_pipefail_in_real_inner_shell() -> None:
-    from harbor.agents.installed.base import NonZeroAgentExitCodeError
-
-    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
-    agent.model_name = "nvidia/model"
-    agent._extra_env = {"NVIDIA_API_KEY": "upstream-key-must-be-unset"}
-    agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
-    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": "bridge-client-token-secret"}
-
-    class Environment:
-        async def exec_with_sensitive_env(
-            self,
-            command: str,
-            env: dict[str, str] | None = None,
-            **_kwargs: object,
-        ) -> SimpleNamespace:
-            process = await asyncio.create_subprocess_exec(
-                "bash",
-                "-c",
-                command,
-                env={**os.environ, **(env or {})},
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-            return SimpleNamespace(
-                return_code=process.returncode,
-                stdout=stdout.decode(),
-                stderr=stderr.decode(),
-            )
-
-    with pytest.raises(NonZeroAgentExitCodeError, match="exit code 1"):
-        asyncio.run(agent.exec_as_agent(Environment(), command="false | true"))
-
-
-def test_nvidia_build_bridge_client_failure_does_not_expose_sensitive_output(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from harbor.agents.installed.base import NonZeroAgentExitCodeError
-    from harbor.agents.installed.codex import Codex
-
-    bridge_token = "bridge-client-token-secret"
-    upstream_key = "upstream-nvidia-key-secret"
-    agent = object.__new__(SkillEvaluatorNvidiaBuildCodex)
-    agent.model_name = "nvidia/model"
-    agent._extra_env = {"NVIDIA_API_KEY": upstream_key}
-    agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
-    agent._nvidia_build_bridge_client_env = {"OPENAI_API_KEY": bridge_token}
-
-    class Environment:
-        async def exec_with_sensitive_env(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(
-                return_code=17,
-                stdout=f"provider echoed {bridge_token}",
-                stderr=f"provider echoed {upstream_key}",
-            )
-
-    async def reject_logged_exec(
-        _self: Codex,
-        _environment: object,
-        **_kwargs: object,
-    ) -> SimpleNamespace:
-        raise AssertionError("bridge credentials must bypass Harbor's logging wrapper")
-
-    monkeypatch.setattr(Codex, "exec_as_agent", reject_logged_exec)
-
-    with pytest.raises(NonZeroAgentExitCodeError) as exc_info:
-        asyncio.run(
-            agent.exec_as_agent(
-                Environment(),
-                command="codex exec -- test",
-                env={"NVIDIA_API_KEY": "per-call-upstream-key-secret"},
-            )
-        )
-
-    message = str(exc_info.value)
-    assert message == "NVIDIA Build bridge client command failed with exit code 17"
-    assert bridge_token not in message
-    assert upstream_key not in message
+    assert scoped == [
+        {"OPENAI_API_KEY": "bridge-client-token-secret"},
+        {"OPENAI_API_KEY": "bridge-client-token-secret"},
+    ]
 
 
 def test_nvidia_build_claude_bridge_configures_origin_and_full_model(
@@ -1218,7 +1544,7 @@ def test_nvidia_build_claude_bridge_configures_origin_and_full_model(
     agent.model_name = "nvidia/meta/llama-3.1-8b-instruct"
     calls: list[tuple[str, dict[str, str]]] = []
 
-    class Environment:
+    class Environment(_NoopScopedExecEnvironment):
         async def upload_file(self, _source: object, _destination: object) -> None:
             return None
 
@@ -1496,6 +1822,640 @@ def test_task_env_is_hidden_from_launcher_but_reaches_inner_command(tmp_path: Pa
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_real_local_exec_streams_stdout_and_stderr_through_harbor_callback(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec("printf stdout-value; printf stderr-value >&2")
+
+    result = asyncio.run(exercise())
+
+    assert result.stdout == "stdout-value"
+    assert result.stderr == "stderr-value"
+    assert "".join(text for text, stream in callback_chunks if stream == "stdout") == result.stdout
+    assert "".join(text for text, stream in callback_chunks if stream == "stderr") == result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_streamed_nonzero_exit_preserves_output_and_return_code(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+    secret = "nonzero-stream-secret"
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                'printf "stdout=%s\\n" "$NONZERO_TOKEN"; printf "stderr=%s\\n" "$NONZERO_TOKEN" >&2; exit 7',
+                env={"NONZERO_TOKEN": secret},
+            )
+
+    result = asyncio.run(exercise())
+    callback_stdout = "".join(text for text, stream in callback_chunks if stream == "stdout")
+    callback_stderr = "".join(text for text, stream in callback_chunks if stream == "stderr")
+
+    assert result.return_code == 7
+    assert callback_stdout == result.stdout
+    assert callback_stderr == result.stderr
+    assert secret not in callback_stdout
+    assert secret not in callback_stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize(
+    "proxy_uri",
+    [
+        "https://local-user:local-password@proxy.invalid:8443",
+        "https://local%2Duser:local%2Dpassword@proxy.invalid:8443",
+        "local-user:local-password@proxy.invalid:8443",
+    ],
+    ids=["uri", "percent-encoded", "schemeless"],
+)
+def test_local_nonzero_exit_redacts_detached_proxy_components_from_callback_and_result(
+    tmp_path: Path,
+    proxy_uri: str,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                "printf 'proxy rejected local-user with local-password\\n'; exit 7",
+                env={"HTTPS_PROXY": proxy_uri},
+            )
+
+    result = asyncio.run(exercise())
+    rendered = "".join(text for text, _stream in callback_chunks) + (result.stdout or "") + (result.stderr or "")
+
+    assert result.return_code == 7
+    assert "local-user" not in rendered
+    assert "local-password" not in rendered
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_real_local_exec_redacts_merged_secrets_across_byte_and_line_boundaries(
+    tmp_path: Path,
+) -> None:
+    persistent_secret = "persistent-first\npersistent-second"
+    scoped_secret = "scoped-secret-value"
+    per_call_secret = "per-call-secret-value"
+    environment = _initialized_local_environment(
+        tmp_path,
+        persistent_env={"PERSISTENT_TOKEN": persistent_secret},
+    )
+    callback_chunks: list[tuple[str, str]] = []
+    script = """
+import os
+import time
+
+values = (
+    (1, os.environ["PERSISTENT_TOKEN"]),
+    (2, os.environ["SCOPED_SECRET"]),
+    (1, os.environ["PER_CALL_KEY"]),
+    (2, "unicode-snowman-☃"),
+)
+for descriptor, value in values:
+    payload = value.encode("utf-8")
+    for byte in payload:
+        os.write(descriptor, bytes((byte,)))
+        time.sleep(0.001)
+    os.write(descriptor, b"\\n")
+"""
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with (
+            environment.scoped_exec_env({"SCOPED_SECRET": scoped_secret}),
+            environment.scoped_output_callback(on_output),
+        ):
+            return await environment.exec(command, env={"PER_CALL_KEY": per_call_secret})
+
+    result = asyncio.run(exercise())
+    callback_stdout = "".join(text for text, stream in callback_chunks if stream == "stdout")
+    callback_stderr = "".join(text for text, stream in callback_chunks if stream == "stderr")
+
+    assert callback_stdout == result.stdout
+    assert callback_stderr == result.stderr
+    assert "unicode-snowman-☃" in callback_stderr
+    for secret in (persistent_secret, scoped_secret, per_call_secret):
+        assert secret not in callback_stdout
+        assert secret not in callback_stderr
+        assert secret not in (result.stdout or "")
+        assert secret not in (result.stderr or "")
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_stream_redaction_handles_short_sensitive_and_marker_collision_values(
+    tmp_path: Path,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                'printf "%s|%s|%s" "$API_KEY" "$PUBLIC_LABEL" "$COLLISION_SECRET"',
+                env={
+                    "API_KEY": "x",
+                    "PUBLIC_LABEL": "ok",
+                    "COLLISION_SECRET": "redacted",
+                },
+            )
+
+    result = asyncio.run(exercise())
+    callback_output = "".join(callback_chunks)
+
+    assert callback_output == result.stdout
+    assert "|ok|" in callback_output
+    assert "x" not in callback_output
+    assert "redacted" not in callback_output.lower()
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_stream_redacts_short_compact_credential_names_without_substring_false_positives(
+    tmp_path: Path,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                'printf "%s|%s|%s|%s" "$MYSECRET" "$AUTHENTICATION" "$MONKEY" "$KEYBOARD"',
+                env={
+                    "MYSECRET": "pw",
+                    "AUTHENTICATION": "id",
+                    "MONKEY": "banana",
+                    "KEYBOARD": "clacky",
+                },
+            )
+
+    result = asyncio.run(exercise())
+    callback_output = "".join(callback_chunks)
+
+    assert callback_output == result.stdout
+    assert "pw" not in callback_output
+    assert "id" not in callback_output
+    assert callback_output.endswith("banana|clacky")
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_stream_redacts_known_secret_patterns_across_reader_chunks(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+    sk_secret = "".join(("sk-", "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8"))  # noqa: FLY002
+    nvapi_secret = "".join(("nvapi-", "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8"))  # noqa: FLY002
+    crsr_secret = "".join(("crsr_", "0123456789abcdef"))  # noqa: FLY002
+    openshift_secret = "".join(("sha256~", "Abc.def_Ghi-jkl~mno"))  # noqa: FLY002
+    jwt_secret = ".".join(("eyJ" + "A" * 20, "B" * 20, "C" * 20))
+    script = f"""
+import os
+import time
+
+values = (
+    (1, {sk_secret!r}),
+    (2, {nvapi_secret!r}),
+    (1, {crsr_secret!r}),
+    (2, {openshift_secret!r}),
+    (1, {jwt_secret!r}),
+    (2, "task-granularity"),
+)
+for descriptor, value in values:
+    for byte in value.encode("utf-8"):
+        os.write(descriptor, bytes((byte,)))
+        time.sleep(0.001)
+    os.write(descriptor, b"\\n")
+"""
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(command)
+
+    result = asyncio.run(exercise())
+    callback_stdout = "".join(text for text, stream in callback_chunks if stream == "stdout")
+    callback_stderr = "".join(text for text, stream in callback_chunks if stream == "stderr")
+
+    assert callback_stdout == result.stdout
+    assert callback_stderr == result.stderr
+    assert "task-granularity" in callback_stderr
+    for secret in (sk_secret, nvapi_secret, crsr_secret, openshift_secret, jwt_secret):
+        assert secret not in callback_stdout
+        assert secret not in callback_stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_concurrent_callback_contexts_are_isolated(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    labels = tuple(f"callback-{index}" for index in range(10))
+    callback_outputs: dict[str, list[str]] = {label: [] for label in labels}
+
+    async def exercise() -> dict[str, object]:
+        await environment.start()
+
+        async def run(label: str) -> object:
+            async def on_output(text: str, _stream: str) -> None:
+                callback_outputs[label].append(text)
+
+            with environment.scoped_output_callback(on_output):
+                return await environment.exec(f"printf '{label}-first\\n'; sleep 0.05; printf '{label}-second\\n'")
+
+        results = await asyncio.gather(*(run(label) for label in labels))
+        return dict(zip(labels, results, strict=True))
+
+    results = asyncio.run(exercise())
+
+    for label in labels:
+        rendered = "".join(callback_outputs[label])
+        assert rendered == results[label].stdout
+        for other_label in labels:
+            if other_label != label:
+                assert other_label not in rendered
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_nested_callbacks_run_in_scope_order(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    calls: list[tuple[str, str, str]] = []
+
+    async def outer(text: str, stream: str) -> None:
+        calls.append(("outer", text, stream))
+
+    async def inner(text: str, stream: str) -> None:
+        calls.append(("inner", text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with (
+            environment.scoped_output_callback(outer),
+            environment.scoped_output_callback(inner),
+        ):
+            return await environment.exec("printf 'nested-output\\n'")
+
+    result = asyncio.run(exercise())
+
+    assert result.stdout == "nested-output\n"
+    assert calls == [
+        ("outer", "nested-output\n", "stdout"),
+        ("inner", "nested-output\n", "stdout"),
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_callback_receives_complete_line_before_process_exit(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    first_line = asyncio.Event()
+
+    async def on_output(text: str, stream: str) -> None:
+        if text == "first-line\n" and stream == "stdout":
+            first_line.set()
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            task = asyncio.create_task(environment.exec("printf 'first-line\\n'; sleep 1; printf done"))
+            await asyncio.wait_for(first_line.wait(), timeout=0.5)
+            assert not task.done()
+            return await task
+
+    result = asyncio.run(exercise())
+
+    assert result.stdout == "first-line\ndone"
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_callback_streams_safe_partial_line_before_process_exit(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    partial_output = asyncio.Event()
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        if stream == "stdout":
+            callback_chunks.append(text)
+            if "safe-partial-output" in "".join(callback_chunks):
+                partial_output.set()
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            task = asyncio.create_task(environment.exec("printf safe-partial-output; sleep 1; printf done"))
+            await asyncio.wait_for(partial_output.wait(), timeout=0.5)
+            assert not task.done()
+            return await task
+
+    result = asyncio.run(exercise())
+
+    assert "".join(callback_chunks) == result.stdout == "safe-partial-outputdone"
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_streaming_preserves_exact_json_stdin_bootstrap(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    captured_payloads: list[bytes] = []
+    original_collect = environment._collect_streamed_output
+    per_call_env = {"PER_CALL_VALUE": "☃"}
+
+    async def capture_payload(
+        proc: asyncio.subprocess.Process,
+        stdin_data: bytes,
+        callback_output: object,
+    ) -> tuple[bytes, bytes]:
+        captured_payloads.append(stdin_data)
+        return await original_collect(
+            proc,
+            stdin_data,
+            callback_output,  # type: ignore[arg-type]
+        )
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def exercise() -> tuple[object, bytes]:
+        await environment.start()
+        with (
+            environment.scoped_exec_env({"SCOPED_VALUE": "scoped"}),
+            environment.scoped_output_callback(on_output),
+        ):
+            expected_payload = json.dumps(environment._exec_env(per_call_env)).encode("utf-8")
+            environment._collect_streamed_output = capture_payload  # type: ignore[method-assign]
+            result = await environment.exec('printf %s "$PER_CALL_VALUE"', env=per_call_env)
+        return result, expected_payload
+
+    result, expected_payload = asyncio.run(exercise())
+
+    assert result.stdout == "☃"
+    assert captured_payloads == [expected_payload]
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_exec_without_callback_uses_bounded_stream_collector(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    original_collect = environment._collect_streamed_output
+    callback_outputs: list[object] = []
+
+    async def capture_stream(
+        proc: asyncio.subprocess.Process,
+        stdin_data: bytes,
+        callback_output: object,
+    ) -> tuple[bytes, bytes]:
+        callback_outputs.append(callback_output)
+        return await original_collect(
+            proc,
+            stdin_data,
+            callback_output,  # type: ignore[arg-type]
+        )
+
+    async def exercise() -> object:
+        await environment.start()
+        environment._collect_streamed_output = capture_stream  # type: ignore[method-assign]
+        return await environment.exec("printf bounded-only")
+
+    result = asyncio.run(exercise())
+
+    assert callback_outputs == [None]
+    assert result.stdout == "bounded-only"
+    assert result.stderr == ""
+    assert result.return_code == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_streaming_tolerates_child_closing_json_stdin_early(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+
+    class EarlyExitSandbox:
+        plan = local_sandbox.SandboxPlan("none", "advisory-only", "early-exit-test")
+
+        @staticmethod
+        def wrap(_argv: list[str], **_kwargs: object) -> list[str]:
+            return [sys.executable, "-c", "import os; os._exit(7)"]
+
+    environment._sandbox = EarlyExitSandbox()
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def exercise() -> object:
+        await environment.start()
+        environment._sandbox = EarlyExitSandbox()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec("ignored", env={"FILLER": "v" * (1024 * 1024)})
+
+    result = asyncio.run(exercise())
+
+    assert result.return_code == 7
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.parametrize("error_type", [TimeoutError, _LocalCallbackBaseError, asyncio.CancelledError])
+def test_local_callback_exception_is_propagated_after_process_reap(
+    tmp_path: Path,
+    error_type: type[BaseException],
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_error = error_type("local callback failed")
+    secret = "local-callback-base-error-secret"
+    processes: list[asyncio.subprocess.Process] = []
+    create_subprocess_exec = asyncio.create_subprocess_exec
+    callback_chunks: list[str] = []
+    reaped_by_exec: list[bool] = []
+    caught_errors: list[BaseException] = []
+
+    async def capture_process(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await create_subprocess_exec(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    async def failing_callback(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+        raise callback_error
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            with (
+                pytest.MonkeyPatch.context() as patch,
+                environment.scoped_output_callback(failing_callback),
+            ):
+                patch.setattr(asyncio, "create_subprocess_exec", capture_process)
+                for _ in range(3):
+                    with pytest.raises(error_type) as caught:
+                        await environment.exec(
+                            'printf "%s\\n" "$CALLBACK_SECRET"; sleep 30',
+                            env={"CALLBACK_SECRET": secret},
+                        )
+                    caught_errors.append(caught.value)
+                    reaped_by_exec.append(processes[-1].returncode is not None)
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    await process.wait()
+
+    asyncio.run(exercise())
+
+    assert callback_chunks
+    assert secret not in "".join(callback_chunks)
+    assert secret not in str(callback_error)
+    assert caught_errors == [callback_error] * 3
+    assert len(processes) == 3
+    assert reaped_by_exec == [True] * 3
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_local_callback_error_remains_primary_when_cleanup_reports_failure(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_error = _LocalCallbackBaseError("primary callback failure")
+    secret = "synthetic cleanup report failure"
+    original_terminate = environment._terminate_process_tree
+    cleanup_calls = 0
+
+    async def failing_cleanup(
+        _proc: asyncio.subprocess.Process,
+        _communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
+    ) -> tuple[bytes, bytes]:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        raise PermissionError(errno.EACCES, "Denied", secret)
+
+    async def failing_callback(_text: str, _stream: str) -> None:
+        raise callback_error
+
+    async def exercise() -> tuple[BaseException, bool, bool]:
+        await environment.start()
+        environment._terminate_process_tree = failing_cleanup  # type: ignore[method-assign]
+        with (
+            environment.scoped_output_callback(failing_callback),
+            pytest.raises(_LocalCallbackBaseError) as caught,
+        ):
+            await environment.exec(
+                "printf 'callback-output\\n'; sleep 30",
+                env={"API_KEY": secret},
+            )
+        retained_before_retry = bool(environment._active_processes)
+        environment._terminate_process_tree = original_terminate  # type: ignore[method-assign]
+        await environment.stop(delete=False)
+        return caught.value, retained_before_retry, not environment._active_processes
+
+    caught, retained_before_retry, released_after_retry = asyncio.run(exercise())
+
+    assert caught is callback_error
+    assert isinstance(caught.__cause__, RuntimeError)
+    assert caught.__cause__.__context__ is None
+    assert cleanup_calls == 1
+    assert retained_before_retry
+    assert released_after_retry
+    assert any("cleanup" in note.lower() for note in caught.__notes__)
+    assert secret not in "".join(caught.__notes__)
+    assert secret not in str(caught.__cause__)
+    assert secret not in "".join(traceback.format_exception(caught))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_local_callback_error_message_receives_only_redacted_output(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    secret = "callback-error-message-secret"
+
+    async def failing_callback(text: str, _stream: str) -> None:
+        raise RuntimeError(f"consumer rejected: {text}")
+
+    async def exercise() -> RuntimeError:
+        await environment.start()
+        with (
+            environment.scoped_output_callback(failing_callback),
+            pytest.raises(RuntimeError, match="consumer rejected") as caught,
+        ):
+            await environment.exec(
+                'printf "%s\\n" "$ERROR_TOKEN"; sleep 30',
+                env={"ERROR_TOKEN": secret},
+            )
+        return caught.value
+
+    error = asyncio.run(exercise())
+
+    assert secret not in str(error)
+    assert "consumer rejected" in str(error)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_local_stream_collector_failure_is_propagated_after_process_reap(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    collector_error = RuntimeError("synthetic stream collector failure")
+    processes: list[asyncio.subprocess.Process] = []
+    create_subprocess_exec = asyncio.create_subprocess_exec
+    reaped_by_exec: list[bool] = []
+
+    async def capture_process(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await create_subprocess_exec(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    async def failing_collector(*_args: object, **_kwargs: object) -> tuple[bytes, bytes]:
+        raise collector_error
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def exercise() -> BaseException:
+        await environment.start()
+        environment._collect_streamed_output = failing_collector  # type: ignore[method-assign]
+        try:
+            with (
+                pytest.MonkeyPatch.context() as patch,
+                environment.scoped_output_callback(on_output),
+                pytest.raises(RuntimeError, match="synthetic stream collector failure") as caught,
+            ):
+                patch.setattr(asyncio, "create_subprocess_exec", capture_process)
+                await environment.exec("sleep 30")
+            reaped_by_exec.append(processes[0].returncode is not None)
+            return caught.value
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    await process.wait()
+
+    caught = asyncio.run(exercise())
+
+    assert caught is collector_error
+    assert caught.__cause__ is None
+    assert reaped_by_exec == [True]
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_exec_forwards_strict_read_policy_to_sandbox(tmp_path: Path) -> None:
     environment = _local_environment(tmp_path)
     environment._strict_reads = True
@@ -1674,6 +2634,374 @@ def test_exec_timeout_terminates_background_descendants(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_streamed_timeout_callback_matches_result_and_contains_descendants(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    secret = "stream-timeout-secret-value"
+    child_pid_path = environment._workspace / "stream-timeout-child-pid"
+    callback_chunks: list[tuple[str, str]] = []
+    command = (
+        'printf "%s\\n" "$TIMEOUT_TOKEN"; printf "stderr-before-timeout\\n" >&2; '
+        "(sleep 30) & printf '%s' \"$!\" > stream-timeout-child-pid; wait"
+    )
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                command,
+                env={"TIMEOUT_TOKEN": secret},
+                timeout_sec=1,
+            )
+
+    result = asyncio.run(exercise())
+    callback_stdout = "".join(text for text, stream in callback_chunks if stream == "stdout")
+    callback_stderr = "".join(text for text, stream in callback_chunks if stream == "stderr")
+
+    assert result.return_code == 124
+    assert callback_stdout == result.stdout
+    assert callback_stderr == result.stderr
+    assert callback_stderr == "stderr-before-timeout\nTimed out"
+    assert secret not in callback_stdout
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_local_timeout_redacts_detached_proxy_components_from_callback_and_result(
+    tmp_path: Path,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(
+                "printf 'proxy rejected local-timeout-user with local-timeout-password\\n'; sleep 30",
+                env={
+                    "HTTPS_PROXY": "https://local-timeout-user:local-timeout-password@proxy.invalid:8443",
+                },
+                timeout_sec=0.1,
+            )
+
+    result = asyncio.run(exercise())
+    rendered = "".join(text for text, _stream in callback_chunks) + (result.stdout or "") + (result.stderr or "")
+
+    assert result.return_code == 124
+    assert "local-timeout-user" not in rendered
+    assert "local-timeout-password" not in rendered
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_timeout_diagnostic_cannot_synthesize_sensitive_value(
+    tmp_path: Path,
+    with_callback: bool,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    secret = "Timed out"
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        callback_scope = environment.scoped_output_callback(on_output) if with_callback else contextlib.nullcontext()
+        with callback_scope:
+            return await environment.exec(
+                "sleep 30",
+                env={"TIMEOUT_SECRET": secret},
+                timeout_sec=0.1,
+            )
+
+    result = asyncio.run(exercise())
+    callback_stderr = "".join(text for text, stream in callback_chunks if stream == "stderr")
+
+    assert result.return_code == 124
+    assert secret not in (result.stderr or "")
+    assert secret not in callback_stderr
+    if with_callback:
+        assert callback_stderr == result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("with_callback", [False, True])
+@pytest.mark.parametrize("secret", ["prefix\nTimed out", "\n"])
+def test_timeout_diagnostic_uses_the_live_stderr_redactor_across_its_boundary(
+    tmp_path: Path,
+    with_callback: bool,
+    secret: str,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        callback_scope = environment.scoped_output_callback(on_output) if with_callback else contextlib.nullcontext()
+        with callback_scope:
+            return await environment.exec(
+                "printf prefix >&2; sleep 30",
+                env={"TIMEOUT_SECRET": secret},
+                timeout_sec=0.1,
+            )
+
+    result = asyncio.run(exercise())
+    callback_stderr = "".join(text for text, stream in callback_chunks if stream == "stderr")
+
+    assert result.return_code == 124
+    assert secret not in (result.stderr or "")
+    assert secret not in callback_stderr
+    if with_callback:
+        assert callback_stderr == result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_blocked_callback_does_not_replace_command_timeout_with_cancelled_error(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    release_callback = asyncio.Event()
+
+    async def blocked_callback(_text: str, _stream: str) -> None:
+        await release_callback.wait()
+
+    async def exercise() -> tuple[object, float]:
+        await environment.start()
+        started = time.monotonic()
+        with environment.scoped_output_callback(blocked_callback):
+            result = await environment.exec("printf callback-blocked; sleep 30", timeout_sec=0.1)
+        return result, time.monotonic() - started
+
+    result, elapsed = asyncio.run(exercise())
+
+    assert elapsed < 3
+    assert result.return_code == 124
+    assert "Timed out" in (result.stderr or "")
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_callback_suppressing_one_cleanup_cancellation_is_not_reentered_or_leaked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    environment = _initialized_local_environment(tmp_path)
+    monkeypatch.setattr(local_environment, "_REAP_TERM_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_KILL_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_CANCEL_SECONDS", 0.05)
+    callback_calls = 0
+
+    async def cancellation_suppressing_callback(_text: str, _stream: str) -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # A callback can perform async cleanup after its first
+            # cancellation. A bounded second cancellation must finish that
+            # cleanup path; exec must never invoke it concurrently again.
+            await asyncio.Event().wait()
+
+    async def exercise() -> tuple[object, list[str]]:
+        await environment.start()
+        with environment.scoped_output_callback(cancellation_suppressing_callback):
+            result = await asyncio.wait_for(
+                environment.exec("printf callback-blocked; sleep 30", timeout_sec=0.02),
+                timeout=0.5,
+            )
+        await asyncio.sleep(0)
+        leaked = [
+            repr(task.get_coro())
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and not task.done()
+            and any(
+                name in repr(task.get_coro())
+                for name in ("_collect_streamed_output", "invoke_callback", "_cancel_task_repeatedly")
+            )
+        ]
+        return result, leaked
+
+    result, leaked = asyncio.run(exercise())
+
+    assert result.return_code == 124
+    assert callback_calls == 1
+    assert leaked == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+def test_cancellation_during_timeout_diagnostic_callback_reaps_callback_tasks(
+    tmp_path: Path,
+    repeat_cancellation: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    environment = _initialized_local_environment(tmp_path)
+    monkeypatch.setattr(local_environment, "_REAP_TERM_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_KILL_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_CANCEL_SECONDS", 0.05)
+    callback_started = asyncio.Event()
+    callback_calls = 0
+
+    async def blocked_callback(_text: str, _stream: str) -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        callback_started.set()
+        await asyncio.Event().wait()
+
+    async def exercise() -> tuple[BaseException | None, list[str]]:
+        await environment.start()
+        with environment.scoped_output_callback(blocked_callback):
+            task = asyncio.create_task(environment.exec("sleep 30", timeout_sec=0.02))
+            await asyncio.wait_for(callback_started.wait(), timeout=2)
+            task.cancel()
+            if repeat_cancellation:
+                await asyncio.sleep(0)
+                task.cancel()
+            outcome: BaseException | None = None
+            try:
+                await asyncio.wait_for(task, timeout=1)
+            except BaseException as exc:
+                outcome = exc
+        await asyncio.sleep(0)
+        leaked = [
+            repr(pending.get_coro())
+            for pending in asyncio.all_tasks()
+            if pending is not asyncio.current_task()
+            and not pending.done()
+            and any(
+                name in repr(pending.get_coro()) for name in ("finish", "invoke_callback", "_cancel_task_repeatedly")
+            )
+        ]
+        return outcome, leaked
+
+    outcome, leaked = asyncio.run(exercise())
+
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert callback_calls == 1
+    assert leaked == []
+    assert not environment._active_processes
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+def test_cancellation_during_timeout_callback_cleanup_is_not_swallowed(
+    tmp_path: Path,
+    repeat_cancellation: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    environment = _initialized_local_environment(tmp_path)
+    monkeypatch.setattr(local_environment, "_REAP_TERM_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_KILL_SECONDS", 0.01)
+    monkeypatch.setattr(local_environment, "_REAP_CANCEL_SECONDS", 0.05)
+    callback_cleanup_started = asyncio.Event()
+
+    async def cleanup_awaiting_callback(_text: str, _stream: str) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            callback_cleanup_started.set()
+            await asyncio.Event().wait()
+
+    async def exercise() -> tuple[BaseException | object, list[str]]:
+        await environment.start()
+        with environment.scoped_output_callback(cleanup_awaiting_callback):
+            task = asyncio.create_task(environment.exec("sleep 30", timeout_sec=0.02))
+            # This is set by the timeout finalizer's own first cancellation,
+            # proving caller cancellation lands in its no-exception cleanup
+            # path rather than the preceding bounded wait.
+            await asyncio.wait_for(callback_cleanup_started.wait(), timeout=2)
+            task.cancel()
+            if repeat_cancellation:
+                await asyncio.sleep(0)
+                task.cancel()
+            try:
+                outcome: BaseException | object = await asyncio.wait_for(task, timeout=1)
+            except BaseException as exc:
+                outcome = exc
+        await asyncio.sleep(0)
+        leaked = [
+            repr(pending.get_coro())
+            for pending in asyncio.all_tasks()
+            if pending is not asyncio.current_task()
+            and not pending.done()
+            and any(
+                name in repr(pending.get_coro()) for name in ("finish", "invoke_callback", "_cancel_task_repeatedly")
+            )
+        ]
+        return outcome, leaked
+
+    outcome, leaked = asyncio.run(exercise())
+
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert leaked == []
+    assert not environment._active_processes
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_large_dense_short_secret_has_the_same_completed_outcome_with_callback(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    script = "import os; os.write(1, b'x' * 2_000_000)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def exercise(with_callback: bool) -> object:
+        await environment.start()
+        callback_scope = environment.scoped_output_callback(on_output) if with_callback else contextlib.nullcontext()
+        with callback_scope:
+            return await environment.exec(command, env={"API_KEY": "x"}, timeout_sec=1.5)
+
+    without_callback = asyncio.run(exercise(False))
+    with_callback = asyncio.run(exercise(True))
+
+    assert without_callback.return_code == with_callback.return_code == 0
+    assert without_callback.stdout == with_callback.stdout
+    assert "x" not in (with_callback.stdout or "")
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_streamed_exec_stays_bounded_when_output_closes_before_process_exit(tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> tuple[object, float]:
+        await environment.start()
+        started = time.monotonic()
+        with environment.scoped_output_callback(on_output):
+            result = await environment.exec("exec 1>&- 2>&-; sleep 30", timeout_sec=1)
+        return result, time.monotonic() - started
+
+    result, elapsed = asyncio.run(exercise())
+
+    assert elapsed < 3
+    assert result.return_code == 124
+    assert result.stdout == ""
+    assert result.stderr == "Timed out"
+    assert callback_chunks == [("Timed out", "stderr")]
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_exec_cancellation_terminates_background_descendants(tmp_path: Path) -> None:
     environment = _local_environment(tmp_path)
     child_ready = environment._workspace / "cancel-child-ready"
@@ -1727,6 +3055,295 @@ def test_exec_cancellation_terminates_background_descendants(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+def test_streamed_exec_cancellation_reaps_descendants(
+    tmp_path: Path,
+    repeat_cancellation: bool,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    secret = "stream-cancel-secret-value"
+    child_pid_path = environment._workspace / "stream-cancel-child-pid"
+    callback_started = asyncio.Event()
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+        callback_started.set()
+
+    async def exercise() -> int:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            task = asyncio.create_task(
+                environment.exec(
+                    'printf "%s\\n" "$CANCEL_TOKEN"; (sleep 30) & printf \'%s\' "$!" > stream-cancel-child-pid; wait',
+                    env={"CANCEL_TOKEN": secret},
+                )
+            )
+            await asyncio.wait_for(callback_started.wait(), timeout=5)
+            for _ in range(500):
+                if child_pid_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            assert child_pid_path.exists()
+            task.cancel()
+            if repeat_cancellation:
+                await asyncio.sleep(0)
+                task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+        return int(child_pid_path.read_text(encoding="ascii"))
+
+    child_pid = asyncio.run(exercise())
+
+    assert callback_chunks
+    assert secret not in "".join(callback_chunks)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+def test_streamed_exec_cancellation_during_final_flush_reaps_descendants(
+    tmp_path: Path,
+    repeat_cancellation: bool,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    child_pid_path = environment._workspace / "flush-cancel-child-pid"
+    callback_started = asyncio.Event()
+    command = (
+        "(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & "
+        f"printf '%s' \"$!\" > {shlex.quote(child_pid_path.name)}; "
+        # A lone known-token prefix stays buffered until final redactor flush.
+        "printf s"
+    )
+
+    async def blocked_callback(_text: str, _stream: str) -> None:
+        callback_started.set()
+        await asyncio.Event().wait()
+
+    async def exercise() -> int:
+        await environment.start()
+        with environment.scoped_output_callback(blocked_callback):
+            task = asyncio.create_task(environment.exec(command))
+            await asyncio.wait_for(callback_started.wait(), timeout=5)
+            assert child_pid_path.exists()
+            assert not environment._active_processes
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            with pytest.raises(ProcessLookupError):
+                os.kill(child_pid, 0)
+            task.cancel()
+            if repeat_cancellation:
+                await asyncio.sleep(0)
+                task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+        return int(child_pid_path.read_text(encoding="ascii"))
+
+    child_pid: int | None = None
+    try:
+        child_pid = asyncio.run(exercise())
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if child_pid is None and child_pid_path.exists():
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+def test_cancellation_during_timeout_reap_preserves_cancellation_and_containment(
+    tmp_path: Path,
+    repeat_cancellation: bool,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    child_pid_path = environment._workspace / "timeout-reap-cancel-child-pid"
+    reap_entered = asyncio.Event()
+    original_terminate = environment._terminate_process_tree
+    command = (
+        "(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & "
+        f"printf '%s' \"$!\" > {shlex.quote(child_pid_path.name)}; wait"
+    )
+
+    async def observed_terminate(
+        proc: asyncio.subprocess.Process,
+        communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
+    ) -> tuple[bytes, bytes]:
+        reap_entered.set()
+        return await original_terminate(proc, communication)
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def exercise() -> tuple[BaseException | None, int, bool]:
+        await environment.start()
+        environment._terminate_process_tree = observed_terminate  # type: ignore[method-assign]
+        with environment.scoped_output_callback(on_output):
+            task = asyncio.create_task(environment.exec(command, timeout_sec=0.5))
+            await asyncio.wait_for(reap_entered.wait(), timeout=5)
+            assert child_pid_path.exists()
+            task.cancel()
+            if repeat_cancellation:
+                await asyncio.sleep(0)
+                task.cancel()
+            outcome: BaseException | None = None
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except BaseException as exc:
+                outcome = exc
+        retained_after_exec = bool(environment._active_processes)
+        if retained_after_exec:
+            await environment.stop(delete=False)
+        return outcome, int(child_pid_path.read_text(encoding="ascii")), retained_after_exec
+
+    child_pid: int | None = None
+    try:
+        outcome, child_pid, retained = asyncio.run(exercise())
+        assert isinstance(outcome, asyncio.CancelledError)
+        assert not retained
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if child_pid is None and child_pid_path.exists():
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+def test_cancellation_remains_primary_when_timeout_reap_fails(
+    tmp_path: Path,
+    repeat_cancellation: bool,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    environment = _initialized_local_environment(tmp_path)
+    original_terminate = environment._terminate_process_tree
+    reap_entered = asyncio.Event()
+    release_failure = asyncio.Event()
+    secret = "timeout-reap-cleanup-secret"
+
+    async def failing_terminate(
+        _proc: asyncio.subprocess.Process,
+        _communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
+    ) -> tuple[bytes, bytes]:
+        async def fail_after_release() -> tuple[bytes, bytes]:
+            await release_failure.wait()
+            raise PermissionError(errno.EACCES, "Denied", secret)
+
+        cleanup = asyncio.create_task(fail_after_release())
+        reap_entered.set()
+        return await local_environment._await_task_uninterruptibly(cleanup)
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def exercise() -> tuple[BaseException | None, bool]:
+        await environment.start()
+        environment._terminate_process_tree = failing_terminate  # type: ignore[method-assign]
+        with environment.scoped_output_callback(on_output):
+            task = asyncio.create_task(
+                environment.exec(
+                    "sleep 30",
+                    env={"API_KEY": secret},
+                    timeout_sec=0.02,
+                )
+            )
+            await asyncio.wait_for(reap_entered.wait(), timeout=2)
+            task.cancel()
+            if repeat_cancellation:
+                await asyncio.sleep(0)
+                task.cancel()
+            release_failure.set()
+            outcome: BaseException | None = None
+            try:
+                await asyncio.wait_for(task, timeout=1)
+            except BaseException as exc:
+                outcome = exc
+        retained = bool(environment._active_processes)
+        environment._terminate_process_tree = original_terminate  # type: ignore[method-assign]
+        await environment.stop(delete=False)
+        return outcome, retained
+
+    outcome, retained = asyncio.run(exercise())
+
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert isinstance(outcome.__cause__, RuntimeError)
+    assert outcome.__cause__.__context__ is None
+    assert retained
+    assert secret not in str(outcome.__cause__)
+    assert secret not in "".join(traceback.format_exception(outcome))
+    assert not environment._active_processes
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("lifecycle", ["timeout", "cancel", "repeat-cancel"])
+def test_streamed_exec_escalates_after_launcher_exits_with_term_ignoring_descendant(
+    tmp_path: Path,
+    lifecycle: str,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
+    child_pid_path = environment._workspace / f"term-ignoring-{lifecycle}.pid"
+    command = (
+        "(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & "
+        f"printf '%s' \"$!\" > {shlex.quote(child_pid_path.name)}; "
+        "printf ready; wait"
+    )
+
+    async def on_output(_text: str, _stream: str) -> None:
+        return None
+
+    async def exercise() -> object | None:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            # Leave enough startup margin for loaded CI hosts to launch the
+            # stdin bootstrap and create the descendant before timeout cleanup.
+            task = asyncio.create_task(environment.exec(command, timeout_sec=1.0 if lifecycle == "timeout" else None))
+            for _ in range(500):
+                if child_pid_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            assert child_pid_path.exists()
+            if lifecycle == "timeout":
+                result = await asyncio.wait_for(task, timeout=5)
+                assert result.return_code == 124
+                return result
+            task.cancel()
+            if lifecycle == "repeat-cancel":
+                await asyncio.sleep(0)
+                task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+            return None
+
+    child_pid: int | None = None
+    try:
+        asyncio.run(exercise())
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if child_pid is None and child_pid_path.exists():
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_process_tree_cleanup_is_bounded_and_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillevaluator.tier3.harbor import local_environment
 
@@ -1751,6 +3368,75 @@ def test_process_tree_cleanup_is_bounded_and_escalates(monkeypatch: pytest.Monke
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_process_tree_cleanup_suppresses_permission_race_after_leader_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 4242
+        returncode = None
+
+    async def communication() -> tuple[bytes, bytes]:
+        return b"stdout", b"stderr"
+
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(PermissionError("leader exited")),
+    )
+    monkeypatch.setattr(
+        os,
+        "getpgid",
+        lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+    )
+
+    async def exercise() -> tuple[bytes, bytes]:
+        task = asyncio.create_task(communication())
+        return await SkillEvaluatorLocalEnvironment._terminate_process_tree(  # type: ignore[arg-type]
+            FakeProcess(),
+            task,
+        )
+
+    result = asyncio.run(exercise())
+
+    assert result == (b"stdout", b"stderr")
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_process_tree_cleanup_propagates_live_permission_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 4242
+        returncode = None
+
+    async def communication() -> tuple[bytes, bytes]:
+        await asyncio.Event().wait()
+        return b"", b""
+
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(PermissionError("live process denied")),
+    )
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(communication())
+        try:
+            with pytest.raises(PermissionError, match="live process denied"):
+                await SkillEvaluatorLocalEnvironment._terminate_process_tree(  # type: ignore[arg-type]
+                    FakeProcess(),
+                    task,
+                )
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_process_tree_cleanup_stays_bounded_when_communication_ignores_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1761,16 +3447,15 @@ def test_process_tree_cleanup_stays_bounded_when_communication_ignores_cancellat
     monkeypatch.setattr(local_environment, "_REAP_CANCEL_SECONDS", 0.01, raising=False)
     monkeypatch.setattr(local_environment.os, "killpg", lambda *_args: None)
 
-    async def run_cleanup() -> bool:
+    async def run_cleanup() -> tuple[bool, bool]:
         started = asyncio.Event()
-        release = asyncio.Event()
 
         async def stubborn_communication() -> tuple[bytes, bytes]:
             started.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
-                await release.wait()
+                await asyncio.Event().wait()
             return b"", b""
 
         communication = asyncio.create_task(stubborn_communication())
@@ -1788,12 +3473,10 @@ def test_process_tree_cleanup_stays_bounded_when_communication_ignores_cancellat
         )
         done, _pending = await asyncio.wait({cleanup}, timeout=0.1)
         finished_within_bound = cleanup in done
-        release.set()
-        await communication
         await cleanup
-        return finished_within_bound
+        return finished_within_bound, communication.cancelled()
 
-    assert asyncio.run(run_cleanup()) is True
+    assert asyncio.run(run_cleanup()) == (True, True)
 
 
 def test_stop_reaps_all_tracked_processes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1855,6 +3538,244 @@ def test_exec_cancellation_during_process_creation_terminates_descendants(
                 await created[0].communicate()
 
     asyncio.run(run_cancelled_during_create())
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_exec_cancellation_does_not_wait_forever_for_uncooperative_process_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    environment = _local_environment(tmp_path)
+    create_subprocess_exec = asyncio.create_subprocess_exec
+    monkeypatch.setattr(local_environment, "_CREATION_CANCEL_SECONDS", 0.02, raising=False)
+
+    async def exercise() -> tuple[bool, asyncio.subprocess.Process]:
+        process_created = asyncio.Event()
+        release_creation = asyncio.Event()
+        created: list[asyncio.subprocess.Process] = []
+
+        async def uncooperative_create(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            process = await create_subprocess_exec(*args, **kwargs)
+            created.append(process)
+            process_created.set()
+            try:
+                await release_creation.wait()
+            except asyncio.CancelledError:
+                await release_creation.wait()
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", uncooperative_create)
+        task = asyncio.create_task(environment.exec("sleep 30"))
+        await asyncio.wait_for(process_created.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=0.2)
+        returned_within_bound = task in done
+        release_creation.set()
+        if task not in done:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                task.result()
+        for _ in range(500):
+            if created[0].returncode is not None:
+                break
+            await asyncio.sleep(0.01)
+        return returned_within_bound, created[0]
+
+    returned_within_bound, process = asyncio.run(exercise())
+
+    assert returned_within_bound
+    assert process.returncode is not None
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_stop_fails_closed_until_withheld_process_creation_is_reaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import local_environment
+
+    environment = _local_environment(tmp_path)
+    create_subprocess_exec = asyncio.create_subprocess_exec
+    monkeypatch.setattr(local_environment, "_CREATION_CANCEL_SECONDS", 0.02)
+    created: list[asyncio.subprocess.Process] = []
+
+    async def exercise() -> tuple[asyncio.subprocess.Process, asyncio.subprocess.Process, bool, bool]:
+        process_created = asyncio.Event()
+        release_creation = asyncio.Event()
+
+        active_process = await create_subprocess_exec(
+            "bash",
+            "-c",
+            "sleep 30",
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        active_communication = asyncio.create_task(active_process.communicate())
+        environment._active_processes[active_process] = active_communication
+
+        async def withheld_create(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            process = await create_subprocess_exec(*args, **kwargs)
+            created.append(process)
+            process_created.set()
+            await release_creation.wait()
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", withheld_create)
+        exec_task = asyncio.create_task(environment.exec("sleep 30"))
+        await asyncio.wait_for(process_created.wait(), timeout=5)
+        exec_task.cancel()
+        await asyncio.sleep(0)
+        exec_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(exec_task, timeout=0.2)
+
+        with pytest.raises(RuntimeError, match="could not confirm process creation containment"):
+            await asyncio.wait_for(environment.stop(delete=True), timeout=0.2)
+        root_preserved_while_unresolved = environment._root.exists()
+        process_alive_while_stop_failed = created[0].returncode is None
+        assert active_process.returncode is not None
+        assert active_process not in environment._active_processes
+
+        release_creation.set()
+        for _ in range(500):
+            if created[0].returncode is not None and not environment._creation_cleanups:
+                break
+            await asyncio.sleep(0.01)
+        await environment.stop(delete=True)
+        return created[0], active_process, root_preserved_while_unresolved, process_alive_while_stop_failed
+
+    process: asyncio.subprocess.Process | None = None
+    active_process: asyncio.subprocess.Process | None = None
+    try:
+        process, active_process, root_preserved, process_was_alive = asyncio.run(exercise())
+        assert root_preserved
+        assert process_was_alive
+        assert process.returncode is not None
+        assert not environment._root.exists()
+        assert not environment._pending_creations
+        assert not environment._creation_cleanups
+    finally:
+        leaked_process = process or (created[0] if created else None)
+        for process_to_reap in (leaked_process, active_process):
+            if process_to_reap is not None and process_to_reap.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process_to_reap.pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("secret", ["PermissionError", "Local process creation cleanup failed"])
+def test_failed_late_creation_cleanup_retains_process_for_stop_retry(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    secret: str,
+) -> None:
+    environment = _local_environment(tmp_path)
+    original_terminate = environment._terminate_process_tree
+    process: asyncio.subprocess.Process | None = None
+    caplog.set_level(logging.ERROR, logger="asyncio")
+
+    async def exercise() -> tuple[bool, bool, bool]:
+        nonlocal process
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            "-c",
+            "sleep 30",
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        creation = asyncio.create_task(asyncio.sleep(0, result=process))
+        environment._pending_creations.add(creation)
+        cleanup_attempts = 0
+
+        async def fail_twice_then_reap(
+            proc: asyncio.subprocess.Process,
+            communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
+        ) -> tuple[bytes, bytes]:
+            nonlocal cleanup_attempts
+            cleanup_attempts += 1
+            if cleanup_attempts <= 2:
+                raise PermissionError(errno.EACCES, "Denied", secret)
+            return await original_terminate(proc, communication)
+
+        environment._terminate_process_tree = fail_twice_then_reap  # type: ignore[method-assign]
+        cleanup = environment._schedule_creation_cleanup(creation, secret_values={secret})
+        with pytest.raises(PermissionError):
+            await cleanup
+        await asyncio.sleep(0)
+        retained_after_late_failure = process in environment._active_processes
+
+        with pytest.raises(RuntimeError, match="cleanup is still pending"):
+            await environment.start()
+        with pytest.raises(RuntimeError, match="could not confirm process creation containment") as caught:
+            await environment.stop(delete=True)
+        first_stop_was_redacted = secret not in str(caught.value) and environment._root.exists()
+
+        await environment.stop(delete=True)
+        return retained_after_late_failure, first_stop_was_redacted, process.returncode is not None
+
+    try:
+        retained, first_stop_redacted, reaped = asyncio.run(exercise())
+        assert retained
+        assert first_stop_redacted
+        assert secret not in caplog.text
+        assert reaped
+        assert not environment._active_processes
+        assert not environment._creation_cleanup_errors
+        assert not environment._root.exists()
+    finally:
+        if process is not None and process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_creation_completing_during_stop_redacts_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _local_environment(tmp_path)
+    create_subprocess_exec = asyncio.create_subprocess_exec
+    original_terminate = environment._terminate_process_tree
+    secret = "stop-race-cleanup-secret"
+
+    async def stop_after_create(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await create_subprocess_exec(*args, **kwargs)
+        environment._stop_requested = True
+        return process
+
+    async def fail_before_reap(
+        _proc: asyncio.subprocess.Process,
+        _communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
+    ) -> tuple[bytes, bytes]:
+        raise PermissionError(errno.EACCES, "Denied", secret)
+
+    async def exercise() -> tuple[BaseException, bool]:
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", stop_after_create)
+        environment._terminate_process_tree = fail_before_reap  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError) as caught:
+            await environment.exec("sleep 30", env={"API_KEY": secret})
+        retained = bool(environment._active_processes)
+        environment._terminate_process_tree = original_terminate  # type: ignore[method-assign]
+        await environment.stop(delete=False)
+        return caught.value, retained
+
+    caught, retained = asyncio.run(exercise())
+
+    assert retained
+    assert caught.__context__ is None
+    assert secret not in str(caught)
+    assert secret not in "".join(traceback.format_exception(caught))
+    assert not environment._active_processes
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -1972,6 +3893,102 @@ def test_runtime_injection_env_is_blocked_before_launcher(name: str, tmp_path: P
 
     assert result.return_code == 126
     assert name in (result.stderr or "")
+
+
+@pytest.mark.parametrize("name", ["BASH_ENV", "ENV", "NODE_OPTIONS", "PYTHONPATH"])
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_empty_evaluator_loader_reset_is_removed_before_launcher(name: str, tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+
+    async def exercise() -> object:
+        await environment.start()
+        try:
+            return await environment.exec(f'test -z "${{{name}+x}}"', env={name: ""})
+        finally:
+            await environment.stop(delete=True)
+
+    result = asyncio.run(exercise())
+
+    assert result.return_code == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize(
+    ("command", "cwd", "env", "secret"),
+    [
+        ("true", "/tmp/ordinary-secret-path", {"API_KEY": "/tmp/ordinary-secret-path"}, "/tmp/ordinary-secret-path"),
+        ("true", "/tmp/sk-Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8", None, "sk-Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8"),
+        ('touch "$SECRET_PATH"', None, {"SECRET_PATH": "/tmp/guardrail-secret-path"}, "/tmp/guardrail-secret-path"),
+        ("rm -rf /", None, {"API_KEY": "Local mode command blocked"}, "Local mode command blocked"),
+        ('touch "$API_KEY"', None, {"API_KEY": "/x"}, "/x"),
+    ],
+)
+def test_prelaunch_diagnostics_are_streamed_and_redacted_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    command: str,
+    cwd: str | None,
+    env: dict[str, str] | None,
+    secret: str,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[tuple[str, str]] = []
+    caplog.set_level(logging.WARNING)
+
+    async def on_output(text: str, stream: str) -> None:
+        callback_chunks.append((text, stream))
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(command, cwd=cwd, env=env)
+
+    result = asyncio.run(exercise())
+    callback_stderr = "".join(text for text, stream in callback_chunks if stream == "stderr")
+
+    assert result.return_code == 126
+    assert callback_stderr == result.stderr
+    assert secret not in (result.stderr or "")
+    assert secret not in callback_stderr
+    assert secret not in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize(
+    ("name", "value", "is_sensitive"),
+    [
+        ("MONKEY", "banana", False),
+        ("KEYBOARD", "clacky", False),
+        ("MYSECRET", "legacy-secret-value", True),
+        # The long-value legacy fallback remains intentionally conservative.
+        ("MONKEY", "bananabanana", True),
+        ("API_KEY", "x", True),
+    ],
+)
+def test_output_redaction_balances_component_names_and_legacy_fallback(
+    tmp_path: Path,
+    name: str,
+    value: str,
+    is_sensitive: bool,
+) -> None:
+    environment = _initialized_local_environment(tmp_path)
+    callback_chunks: list[str] = []
+
+    async def on_output(text: str, _stream: str) -> None:
+        callback_chunks.append(text)
+
+    async def exercise() -> object:
+        await environment.start()
+        with environment.scoped_output_callback(on_output):
+            return await environment.exec(f'printf %s "${name}"', env={name: value})
+
+    result = asyncio.run(exercise())
+    callback_output = "".join(callback_chunks)
+
+    assert callback_output == result.stdout
+    assert (value not in callback_output) is is_sensitive
+    if not is_sensitive:
+        assert callback_output == value
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -3051,8 +5068,10 @@ def test_rewrite_env_values_does_not_add_shell_quotes(tmp_path: Path) -> None:
 
 def test_local_opencode_confines_project_discovery_to_the_run_workspace(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     agent = object.__new__(SkillEvaluatorLocalOpenCode)
+    agent.logs_dir = tmp_path
     agent.model_name = "nvidia/openai/gpt-oss-120b"
     agent.mcp_servers = []
     agent._opencode_config = {}
@@ -3360,6 +5379,490 @@ def test_harbor_preflight_system_exit_becomes_a_diagnostic(monkeypatch: pytest.M
     assert _check_prerequisites(env_mode="docker", agents=[]) == [
         "Harbor environment 'docker' is not ready: daemon down"
     ]
+
+
+def test_singularity_prerequisite_requires_the_cli_harbor_invokes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(runner.shutil, "which", lambda executable: None if executable == "singularity" else "/bin/tool")
+
+    assert _check_prerequisites(env_mode="singularity", agents=[]) == [
+        "Harbor environment 'singularity' requires the singularity CLI on PATH."
+    ]
+
+
+def test_islo_prerequisite_requires_nonempty_host_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("ISLO_API_KEY", "   ")
+
+    assert _check_prerequisites(env_mode="islo", agents=[]) == [
+        "Harbor environment 'islo' requires a non-empty ISLO_API_KEY in the host environment."
+    ]
+
+
+def test_modal_custom_config_path_does_not_suppress_harbor_auth_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    config_path = tmp_path / "modal.toml"
+    config_path.write_text("[default]\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(runner.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(
+        EnvironmentFactory,
+        "run_preflight",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit(
+                "Modal requires authentication. Run 'modal token new' to set up credentials, "
+                "or set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET environment variables."
+            )
+        ),
+    )
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "Harbor environment 'modal' is not ready: Modal requires authentication. "
+        "Run 'modal token new' to set up credentials, or set MODAL_TOKEN_ID and "
+        "MODAL_TOKEN_SECRET environment variables."
+    ]
+
+
+def test_modal_custom_config_path_must_be_an_existing_regular_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(tmp_path / "missing.toml"))
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "MODAL_CONFIG_PATH must name an existing regular file."
+    ]
+
+
+def test_modal_custom_config_path_rejects_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(tmp_path))
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "MODAL_CONFIG_PATH must name an existing regular file."
+    ]
+
+
+def test_modal_custom_config_path_stat_error_is_a_bounded_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    class UnreadablePath:
+        def expanduser(self) -> UnreadablePath:
+            return self
+
+        def is_file(self) -> bool:
+            raise OSError("secret path detail")
+
+    monkeypatch.setenv("MODAL_CONFIG_PATH", "/private/config")
+    monkeypatch.setattr(runner, "Path", lambda _value: UnreadablePath())
+
+    assert runner._modal_custom_config_status() == (
+        False,
+        "MODAL_CONFIG_PATH must name an existing regular file.",
+    )
+
+
+def test_modal_custom_config_path_unknown_user_is_a_bounded_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setenv("MODAL_CONFIG_PATH", "~definitely-no-such-user-issue79/modal.toml")
+
+    assert runner._modal_custom_config_status() == (
+        False,
+        "MODAL_CONFIG_PATH must name an existing regular file.",
+    )
+
+
+@pytest.mark.parametrize("configured_path", ["", "   "])
+def test_modal_custom_config_path_must_not_be_blank(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_path: str,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("MODAL_CONFIG_PATH", configured_path)
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "MODAL_CONFIG_PATH must name an existing regular file."
+    ]
+
+
+def test_modal_custom_config_does_not_hide_unrelated_preflight_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    config_path = tmp_path / "modal.toml"
+    config_path.write_text("[default]\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(runner.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(
+        EnvironmentFactory,
+        "run_preflight",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("Modal daemon unavailable")),
+    )
+
+    assert _check_prerequisites(env_mode="modal", agents=[]) == [
+        "Harbor environment 'modal' is not ready: Modal daemon unavailable"
+    ]
+
+
+def _install_fake_kubernetes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kube_config_error: bool = False,
+    pod_list_error: Exception | None = None,
+) -> dict[str, object]:
+    calls: dict[str, object] = {"kube": [], "incluster": 0, "pods": [], "closed": 0}
+
+    class ConfigException(Exception):
+        pass
+
+    def load_kube_config(**kwargs: str) -> None:
+        cast_calls = calls["kube"]
+        assert isinstance(cast_calls, list)
+        cast_calls.append(dict(kwargs))
+        if kube_config_error:
+            raise ConfigException("no kube config")
+
+    def load_incluster_config() -> None:
+        calls["incluster"] = int(calls["incluster"]) + 1
+
+    class ApiClient:
+        def close(self) -> None:
+            calls["closed"] = int(calls["closed"]) + 1
+
+    class CoreV1Api:
+        def __init__(self, api_client: ApiClient) -> None:
+            assert isinstance(api_client, ApiClient)
+
+        def list_namespaced_pod(self, **kwargs: object) -> None:
+            cast_calls = calls["pods"]
+            assert isinstance(cast_calls, list)
+            cast_calls.append(dict(kwargs))
+            if pod_list_error is not None:
+                raise pod_list_error
+
+    kubernetes = SimpleNamespace(
+        client=SimpleNamespace(ApiClient=ApiClient, CoreV1Api=CoreV1Api),
+        config=SimpleNamespace(
+            ConfigException=ConfigException,
+            load_kube_config=load_kube_config,
+            load_incluster_config=load_incluster_config,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "kubernetes", kubernetes)
+    return calls
+
+
+def test_ack_cluster_readiness_uses_explicit_config_context_and_bounded_namespaced_pod_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    calls = _install_fake_kubernetes(monkeypatch)
+
+    runner._check_ack_cluster_readiness(
+        {"namespace": "skill-evals", "context": "production", "kubeconfig": "/config/ack"}
+    )
+
+    assert calls == {
+        "kube": [{"context": "production", "config_file": "/config/ack"}],
+        "incluster": 0,
+        "pods": [{"namespace": "skill-evals", "limit": 1, "_request_timeout": (5, 10)}],
+        "closed": 1,
+    }
+
+
+def test_ack_cluster_readiness_falls_back_to_incluster_and_closes_on_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    calls = _install_fake_kubernetes(
+        monkeypatch,
+        kube_config_error=True,
+        pod_list_error=RuntimeError("namespaced pod list forbidden"),
+    )
+
+    with pytest.raises(RuntimeError, match="namespaced pod list forbidden"):
+        runner._check_ack_cluster_readiness({"namespace": "skill-evals"})
+
+    assert calls == {
+        "kube": [{}],
+        "incluster": 1,
+        "pods": [{"namespace": "skill-evals", "limit": 1, "_request_timeout": (5, 10)}],
+        "closed": 1,
+    }
+
+
+def test_ack_prerequisite_performs_namespaced_pod_list_access_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    captured: list[tuple[dict[str, object], dict[str, str]]] = []
+    subprocess_env = {"PATH": "/usr/bin", "KUBECONFIG": "/config/ack"}
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "_check_ack_cluster_readiness_subprocess",
+        lambda kwargs, *, subprocess_env: captured.append((dict(kwargs), dict(subprocess_env))),
+    )
+
+    assert (
+        _check_prerequisites(
+            env_mode="ack",
+            agents=[],
+            environment_kwargs={"namespace": "skill-evals", "context": "production"},
+            subprocess_env=subprocess_env,
+        )
+        == []
+    )
+    assert captured == [
+        (
+            {"namespace": "skill-evals", "context": "production"},
+            subprocess_env,
+        )
+    ]
+
+
+def test_ack_namespace_access_error_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:pw@proxy.invalid")
+    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "_check_ack_cluster_readiness_subprocess",
+        lambda _kwargs, **_options: (_ for _ in ()).throw(RuntimeError("API rejected user u password pw")),
+    )
+
+    rendered = " ".join(
+        _check_prerequisites(
+            env_mode="ack",
+            agents=[],
+            environment_kwargs={"namespace": "skill-evals"},
+        )
+    )
+
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "<redacted>" in rendered
+
+
+def test_ack_subprocess_probe_uses_exact_harbor_environment_and_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    captured: dict[str, object] = {}
+    child_env = {
+        "PATH": "/usr/bin",
+        "KUBECONFIG": "/config/ack",
+        "KUBERNETES_SERVICE_HOST": "kubernetes.default.svc",
+        "KUBERNETES_SERVICE_PORT": "443",
+    }
+    monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "parent-only-credential")
+
+    class FakeProcess:
+        pid = 1234
+        returncode = 0
+
+        def communicate(self, input_text: str, timeout: int) -> tuple[str, str]:
+            captured["input"] = input_text
+            captured["timeout"] = timeout
+            return "", ""
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        captured["command"] = list(command)
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
+
+    runner._check_ack_cluster_readiness_subprocess(
+        {
+            "namespace": "skill-evals",
+            "context": "production",
+            "kubeconfig": "/config/ack",
+            "node_selector": {"pool": "sandbox"},
+        },
+        subprocess_env=child_env,
+    )
+
+    assert captured["env"] == child_env
+    assert "ALIBABA_CLOUD_ACCESS_KEY_ID" not in captured["env"]
+    assert json.loads(str(captured["input"])) == {
+        "namespace": "skill-evals",
+        "context": "production",
+        "kubeconfig": "/config/ack",
+    }
+    assert captured["timeout"] == runner._ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS
+    assert captured["text"] is True
+    assert captured["stdin"] is subprocess.PIPE
+    assert captured["stdout"] is subprocess.PIPE
+    assert captured["stderr"] is subprocess.PIPE
+    assert captured["start_new_session"] is (os.name == "posix")
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:2] == [sys.executable, "-c"]
+    assert "production" not in " ".join(command)
+    assert "/config/ack" not in " ".join(command)
+
+
+def test_ack_subprocess_probe_redacts_config_values_and_child_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    context = "sensitive-context"
+    kubeconfig = "/private/ack-config"
+    child_env = {"PATH": "/usr/bin", "KUBECONFIG": kubeconfig, "HTTPS_PROXY": "http://u:pw@proxy.invalid"}
+
+    class FailedProcess:
+        pid = 1234
+        returncode = 1
+
+        def communicate(self, _input: str, timeout: int) -> tuple[str, str]:
+            assert timeout == runner._ACK_CLUSTER_READINESS_SUBPROCESS_TIMEOUT_SECONDS
+            return (
+                "",
+                f"namespaced pod list forbidden for context {context} via {kubeconfig}; proxy user u password pw",
+            )
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: FailedProcess())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        runner._check_ack_cluster_readiness_subprocess(
+            {"namespace": "skill-evals", "context": context, "kubeconfig": kubeconfig},
+            subprocess_env=child_env,
+        )
+
+    rendered = str(exc_info.value)
+    assert context not in rendered
+    assert kubeconfig not in rendered
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "namespaced pod list forbidden" in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_ack_subprocess_probe_timeout_kills_the_exec_auth_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    signals: list[tuple[int, signal.Signals]] = []
+
+    class HungProcess:
+        pid = 4321
+        returncode: int | None = None
+
+        def communicate(self, _input: str, timeout: int) -> tuple[str, str]:
+            raise subprocess.TimeoutExpired([sys.executable, "-c", "probe"], timeout)
+
+        def wait(self, timeout: int) -> int:
+            assert timeout == runner._ACK_CLUSTER_READINESS_REAP_TIMEOUT_SECONDS
+            self.returncode = -int(signal.SIGKILL)
+            return self.returncode
+
+        def kill(self) -> None:
+            raise AssertionError("POSIX cleanup must kill the whole process group")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: HungProcess())
+    monkeypatch.setattr(runner.os, "killpg", lambda pid, value: signals.append((pid, value)))
+
+    with pytest.raises(RuntimeError, match="timed out after 20 seconds"):
+        runner._check_ack_cluster_readiness_subprocess(
+            {"namespace": "skill-evals"},
+            subprocess_env={"PATH": "/usr/bin", "KUBECONFIG": "/config/ack"},
+        )
+
+    assert signals == [(4321, signal.SIGKILL)]
+
+
+def test_docker_prerequisite_redacts_proxy_uri_and_short_detached_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:pw@proxy.invalid")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            1,
+            stdout="",
+            stderr="proxy http://u:pw@proxy.invalid rejected user u password pw",
+        ),
+    )
+
+    rendered = " ".join(_check_prerequisites(env_mode="docker", agents=[]))
+
+    assert "http://u:pw@" not in rendered
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "<redacted>" in rendered
+
+
+def test_harbor_preflight_exception_redacts_detached_proxy_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    from skillevaluator.tier3.harbor import runner
+
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/fake/harbor")
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:pw@proxy.invalid")
+    monkeypatch.setattr(
+        EnvironmentFactory,
+        "run_preflight",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("proxy rejected user u password pw")),
+    )
+
+    rendered = " ".join(_check_prerequisites(env_mode="e2b", agents=[]))
+
+    assert " user u " not in rendered
+    assert " password pw" not in rendered
+    assert "<redacted>" in rendered
 
 
 def test_harbor_preflight_does_not_swallow_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:

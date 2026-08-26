@@ -139,14 +139,118 @@ def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
     result = CliRunner().invoke(
-        cli, ["evaluate", str(FIXTURE), "-a", "codex", "--env-mode", "docker", "--skip-baseline"]
+        cli,
+        [
+            "evaluate",
+            str(FIXTURE),
+            "-a",
+            "codex",
+            "--env-mode",
+            "ec2",
+            "--environment-kwarg",
+            "region=us-west-2",
+            "--ek",
+            "launch_mode=attach",
+            "--ek",
+            "instance_id=i-123",
+            "--skip-baseline",
+        ],
     )
     assert result.exit_code == 0, result.output
     opts = captured["options"]
     assert isinstance(opts, EvaluationOptions)
     assert opts.agents == "codex"
-    assert opts.env_mode == "docker"
+    assert opts.env_mode == "ec2"
+    assert opts.environment_kwarg == (
+        "region=us-west-2",
+        "launch_mode=attach",
+        "instance_id=i-123",
+    )
     assert opts.skip_baseline is True
+
+
+def test_cli_validate_forwards_environment_kwargs_to_tier3(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.models.result import ValidationResult
+
+    captured: dict[str, object] = {}
+
+    def _tier1(*_args: object, **_kwargs: object) -> list[ValidationResult]:
+        result = ValidationResult(validator_name="SCHEMA")
+        result.add_success("schema", "ok")
+        return [result]
+
+    def _tier3(*_args: object, **kwargs: object) -> ValidationResult:
+        captured.update(kwargs)
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.add_success("agent_eval", "ok")
+        return result
+
+    monkeypatch.setattr(cli_module, "run_validation", _tier1)
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", _tier3)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(FIXTURE),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--checks",
+            "schema",
+            "--env-mode",
+            "ec2",
+            "--environment-kwarg",
+            "region=us-west-2",
+            "--ek",
+            "launch_mode=attach",
+            "--ek",
+            "instance_id=i-123",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["environment_kwarg"] == (
+        "region=us-west-2",
+        "launch_mode=attach",
+        "instance_id=i-123",
+    )
+
+
+def test_validate_helper_routes_environment_kwargs_to_shared_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator import cli as cli_module
+
+    captured: dict[str, object] = {}
+
+    def _fake_evaluate(self, options: EvaluationOptions, *, progress_reporter=None) -> dict[str, object]:
+        captured["options"] = options
+        return {}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
+
+    cli_module._run_agent_eval_or_skip(
+        FIXTURE,
+        agents="codex",
+        env_mode="ec2",
+        environment_kwarg=(
+            "region=us-west-2",
+            "launch_mode=attach",
+            "instance_id=i-123",
+        ),
+        skip_baseline=False,
+        n_concurrent=None,
+        max_agents=None,
+        validate_source=False,
+    )
+
+    options = captured["options"]
+    assert isinstance(options, EvaluationOptions)
+    assert options.environment_kwarg == (
+        "region=us-west-2",
+        "launch_mode=attach",
+        "instance_id=i-123",
+    )
 
 
 def _autopilot_skill(tmp_path: Path) -> Path:

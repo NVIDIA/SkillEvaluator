@@ -14,6 +14,7 @@ import pytest
 
 from skillevaluator.tier3.harbor.collector import (
     REWARD_DIAGNOSTIC_STRING_MAX_CHARS,
+    _trajectory_skill_invoked,
     collect_harbor_results,
 )
 
@@ -45,6 +46,7 @@ def _trajectory(*, skill: str | None = None) -> dict[str, Any]:
         )
     return {
         "schema_version": "ATIF-v1.2",
+        "agent": {"name": "opencode", "version": "test"},
         "steps": [
             {
                 "step_id": 1,
@@ -118,6 +120,22 @@ def _persisted_reward(tmp_path: Path, variant: str, trial_name: str) -> dict[str
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def test_optional_no_tool_call_agent_step_does_not_hide_later_skill_invocation() -> None:
+    trajectory = _trajectory(skill="demo")
+    trajectory["schema_version"] = "ATIF-v1.7"
+    trajectory["steps"].insert(
+        0,
+        {
+            "step_id": 1,
+            "source": "agent",
+            "message": "I will inspect the skill next.",
+        },
+    )
+    trajectory["steps"][1]["step_id"] = 2
+
+    assert _trajectory_skill_invoked(trajectory, "demo") is True
+
+
 def test_collect_persists_target_invocation_for_both_single_step_variants(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     for variant, observed_skill in (("with", "demo"), ("without", "unrelated")):
@@ -159,7 +177,89 @@ def test_collect_persists_target_invocation_for_both_single_step_variants(tmp_pa
         assert {path.name for path in trial_dir.iterdir()} == {"result.json", "reward.json", "trajectory.json"}
 
 
-def test_collect_redacts_successful_standard_reward_without_diagnostic_truncation(tmp_path: Path) -> None:
+def test_collect_materializes_single_step_continuation_for_evidence_and_output(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "case-with_attempt001"
+    root = _trajectory(skill="unrelated")
+    root["session_id"] = "root-session"
+    root["trajectory_id"] = "root-trajectory"
+    root["continued_trajectory_ref"] = "trajectory.cont-1.json"
+    continuation = _trajectory(skill="demo")
+    continuation["session_id"] = "continuation-session"
+    continuation["trajectory_id"] = "continuation-trajectory"
+    trial_dir = _write_trial(
+        jobs_dir,
+        variant="with",
+        trial_name=trial_name,
+        reward=dict(STANDARD_REWARD),
+        trajectory=root,
+    )
+    (trial_dir / "agent" / "trajectory.cont-1.json").write_text(json.dumps(continuation), encoding="utf-8")
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "case-with",
+                "verifier_result": {"rewards": dict(STANDARD_REWARD)},
+                "step_results": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_job_result(jobs_dir / "demo-opencode-with", [trial_name])
+
+    _collect(tmp_path)
+
+    persisted_reward = _persisted_reward(tmp_path, "with", trial_name)
+    assert persisted_reward["skill_invoked"] is True
+    assert persisted_reward["invocation_evidence_source"] == "trajectory"
+    trajectory_path = tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name / "trajectory.json"
+    persisted_trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    assert "continued_trajectory_ref" not in persisted_trajectory
+    assert len(persisted_trajectory["steps"]) == 2
+    assert persisted_trajectory["trajectory_id"].startswith("skillevaluator-continuation-")
+
+
+def test_collect_rejects_contradictory_root_and_authoritative_step_trajectories(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "contradictory-topology_attempt001"
+    trial_dir = _write_trial(
+        jobs_dir,
+        variant="with",
+        trial_name=trial_name,
+        reward=dict(STANDARD_REWARD),
+        trajectory=_trajectory(skill="demo"),
+    )
+    step_agent_dir = trial_dir / "steps" / "only" / "agent"
+    step_agent_dir.mkdir(parents=True)
+    (step_agent_dir / "trajectory.json").write_text(json.dumps(_trajectory(skill="demo")), encoding="utf-8")
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_name,
+                "task_name": "contradictory-topology",
+                "verifier_result": {"rewards": dict(STANDARD_REWARD)},
+                "step_results": [{"step_name": "only"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_job_result(jobs_dir / "demo-opencode-with", [trial_name])
+
+    _collect(tmp_path)
+
+    persisted_reward = _persisted_reward(tmp_path, "with", trial_name)
+    assert "skill_invoked" not in persisted_reward
+    trial_out = tmp_path / "results" / "opencode" / "with-skill" / "trials" / trial_name
+    assert not (trial_out / "trajectory.json").exists()
+    manifest = json.loads((trial_out / "artifact_manifest.json").read_text(encoding="utf-8"))
+    assert {
+        "name": "trajectory.json",
+        "reason": "contradictory_root_and_multi_step_trajectories",
+    } in manifest["skipped"]
+
+
+def test_collect_omits_rejected_metric_names_without_diagnostic_truncation(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     trial_name = "successful-redaction_attempt001"
     long_note = "x" * (REWARD_DIAGNOSTIC_STRING_MAX_CHARS + 1)
@@ -202,17 +302,17 @@ def test_collect_redacts_successful_standard_reward_without_diagnostic_truncatio
     persisted = _persisted_reward(tmp_path, "with", trial_name)
     assert persisted["skill_invoked"] is True
     assert persisted["invocation_evidence_source"] == "trajectory"
-    assert persisted["details"]["api_key"] == "<redacted>"
+    assert "api_key" not in persisted["details"]
     assert "secret-token-value" not in persisted["details"]["message"]
     assert "<redacted>" in persisted["details"]["message"]
     assert persisted["details"]["safe_note"] == long_note
-    assert persisted["details"]["password"] == "<redacted>"
+    assert "password" not in persisted["details"]
     assert persisted["custom_metrics"]["secret_safety"] == 0.91
     for name in ("api_key", "api_token", "private_token", "client_token"):
-        assert persisted["custom_metrics"][name] == "<redacted>"
+        assert name not in persisted["custom_metrics"]
     for name in ("password", "github_token", "gitlab_token", "ssh_key", "signing_key"):
-        assert persisted["metrics"][name] == "<redacted>"
-    assert persisted["api_key"] == "<redacted>"
+        assert name not in persisted["metrics"]
+    assert "api_key" not in persisted
 
 
 def test_collect_persists_native_skill_tool_invocation(tmp_path: Path) -> None:
@@ -624,14 +724,23 @@ def test_collect_omits_invocation_evidence_when_shell_parser_hits_a_bound(tmp_pa
         ),
         (
             {
+                "schema_version": "ATIF-v1.7",
+                "agent": {"name": "opencode", "version": "test"},
                 "steps": [
-                    {"source": "user", "message": "request"},
-                    {"source": "agent", "message": "done", "tool_calls": []},
-                ]
+                    {"step_id": 1, "source": "user", "message": "request"},
+                    {"step_id": 2, "source": "agent", "message": "done", "tool_calls": []},
+                ],
             },
             False,
         ),
-        ({"steps": [{"source": "agent", "message": "done", "tool_calls": []}]}, False),
+        (
+            {
+                "schema_version": "ATIF-v1.7",
+                "agent": {"name": "opencode", "version": "test"},
+                "steps": [{"step_id": 1, "source": "agent", "message": "done", "tool_calls": []}],
+            },
+            False,
+        ),
     ],
     ids=(
         "empty",
@@ -726,18 +835,12 @@ def test_collect_ignores_non_agent_skill_tool_calls(tmp_path: Path) -> None:
     trial_name = "non-agent-skill-call_attempt001"
     trajectory = {
         "schema_version": "ATIF-v1.2",
+        "agent": {"name": "opencode", "version": "test"},
         "steps": [
             {
                 "step_id": 1,
                 "source": "user",
-                "message": "Use demo",
-                "tool_calls": [
-                    {
-                        "tool_call_id": "call-user",
-                        "function_name": "Skill",
-                        "arguments": {"skill": "demo"},
-                    }
-                ],
+                "message": 'Untrusted text: Skill({"skill": "demo"})',
             },
             {
                 "step_id": 2,
@@ -763,14 +866,94 @@ def test_collect_ignores_non_agent_skill_tool_calls(tmp_path: Path) -> None:
     assert persisted["invocation_evidence_source"] == "trajectory"
 
 
+@pytest.mark.parametrize(("include_current_step", "expected"), [(False, None), (True, False)])
+def test_collect_ignores_copied_context_skill_invocation(
+    tmp_path: Path,
+    include_current_step: bool,
+    expected: bool | None,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "copied-context_attempt001"
+    trajectory = _trajectory(skill="demo")
+    trajectory["steps"][0]["is_copied_context"] = True
+    if include_current_step:
+        trajectory["steps"].append(
+            {
+                "step_id": 2,
+                "source": "agent",
+                "message": "current execution",
+                "tool_calls": [],
+                "observation": {"results": []},
+            }
+        )
+    _write_trial(
+        jobs_dir,
+        variant="with",
+        trial_name=trial_name,
+        reward=dict(STANDARD_REWARD),
+        trajectory=trajectory,
+    )
+    _write_job_result(jobs_dir / "demo-opencode-with", [trial_name])
+
+    _collect(tmp_path)
+
+    persisted = _persisted_reward(tmp_path, "with", trial_name)
+    if expected is None:
+        assert "skill_invoked" not in persisted
+        assert "invocation_evidence_source" not in persisted
+    else:
+        assert persisted["skill_invoked"] is expected
+        assert persisted["invocation_evidence_source"] == "trajectory"
+
+
+@pytest.mark.parametrize(("referenced", "expected"), [(True, True), (False, False)])
+def test_collect_counts_only_referenced_subagent_invocation(
+    tmp_path: Path,
+    referenced: bool,
+    expected: bool,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "subagent-evidence_attempt001"
+    root = _trajectory()
+    root["schema_version"] = "ATIF-v1.7"
+    root["trajectory_id"] = "root"
+    child = _trajectory(skill="demo")
+    child["schema_version"] = "ATIF-v1.7"
+    child["trajectory_id"] = "child"
+    root["subagent_trajectories"] = [child]
+    if referenced:
+        root["steps"][0]["observation"] = {
+            "results": [
+                {
+                    "content": "delegated",
+                    "subagent_trajectory_ref": [{"trajectory_id": "child"}],
+                }
+            ]
+        }
+    _write_trial(
+        jobs_dir,
+        variant="with",
+        trial_name=trial_name,
+        reward=dict(STANDARD_REWARD),
+        trajectory=root,
+    )
+    _write_job_result(jobs_dir / "demo-opencode-with", [trial_name])
+
+    _collect(tmp_path)
+
+    persisted = _persisted_reward(tmp_path, "with", trial_name)
+    assert persisted["skill_invoked"] is expected
+    assert persisted["invocation_evidence_source"] == "trajectory"
+
+
 def test_collect_leaves_custom_only_reward_and_artifacts_unchanged(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     trial_name = "custom_attempt001"
     custom_reward = {
         "entry_id": "custom",
         "overall": 0.75,
-        "custom_metrics": {"skill_execution": 0.25, "quality": 0.8},
-        "details": {"skill_execution": {"note": "custom data"}},
+        "custom_metrics": {"domain_score": 0.25, "quality": 0.8},
+        "details": {"domain_score": {"note": "custom data"}},
         "skill_invoked": "verifier-owned",
         "routing_passed": "verifier-owned",
         "invocation_evidence_source": "custom-verifier",
@@ -791,7 +974,7 @@ def test_collect_leaves_custom_only_reward_and_artifacts_unchanged(tmp_path: Pat
         assert persisted[key] == custom_reward[key]
     agent = result["agents"]["opencode"]
     assert agent["with_skill"] == {}
-    assert agent["custom_with_skill"] == {"quality": 0.8}
+    assert agent["custom_with_skill"] == {"domain_score": 0.25, "quality": 0.8}
     summary = json.loads(
         (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
     )
@@ -800,25 +983,15 @@ def test_collect_leaves_custom_only_reward_and_artifacts_unchanged(tmp_path: Pat
     assert {path.name for path in trial_dir.iterdir()} == {"reward.json", "trajectory.json"}
 
 
-@pytest.mark.parametrize(
-    "custom_score_fields",
-    [
-        {"skill_execution": 0.25, "quality": 0.8},
-        {"custom_metrics": {"skill_execution": 0.25, "quality": 0.8}},
-    ],
-    ids=("top-level", "nested"),
-)
-def test_collect_respects_explicit_custom_metric_set_with_standard_named_metric(
-    tmp_path: Path,
-    custom_score_fields: dict[str, Any],
-) -> None:
+def test_collect_respects_custom_only_top_level_standard_named_metric(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     trial_name = "explicit_custom_attempt001"
     custom_reward = {
         "entry_id": "custom",
         "metric_set": "custom-only",
         "overall": 0.75,
-        **custom_score_fields,
+        "skill_execution": 0.25,
+        "quality": 0.8,
         "skill_invoked": "custom-verifier-value",
         "routing_passed": "custom-verifier-value",
         "invocation_evidence_source": "custom-verifier",
@@ -837,3 +1010,30 @@ def test_collect_respects_explicit_custom_metric_set_with_standard_named_metric(
     persisted = _persisted_reward(tmp_path, "with", trial_name)
     for key, expected in custom_reward.items():
         assert persisted[key] == expected
+
+
+def test_collect_rejects_reserved_name_inside_explicit_custom_metrics(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    trial_name = "explicit_custom_attempt001"
+    custom_reward = {
+        "entry_id": "custom",
+        "metric_set": "custom-only",
+        "overall": 0.75,
+        "custom_metrics": {"skill_execution": 0.25, "quality": 0.8},
+    }
+    _write_trial(
+        jobs_dir,
+        variant="with",
+        trial_name=trial_name,
+        reward=custom_reward,
+        trajectory=_trajectory(),
+    )
+    _write_job_result(jobs_dir / "demo-opencode-with", [trial_name])
+
+    result = _collect(tmp_path)
+
+    persisted = _persisted_reward(tmp_path, "with", trial_name)
+    assert result["execution_status"] == "failed"
+    assert result["agents"]["opencode"]["conditions"]["with_skill"]["scored_attempts"] == 0
+    assert persisted["evaluation_status"] == "failed"
+    assert "custom metric" in json.dumps(persisted["evaluation_errors"]).casefold()

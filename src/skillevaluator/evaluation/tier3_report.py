@@ -67,6 +67,7 @@ _MAX_RAW_REWARD_FIELDS = 96
 _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD = 128
 _MAX_UNPAIRED_CASE_IDS_IN_REPORT = 64
 _MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 
 
 def _finite_float(value: object) -> float | None:
@@ -80,8 +81,21 @@ def _finite_float(value: object) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _token_counter(value: object) -> int | None:
+    """Return one browser-safe token count, preserving unavailable as null."""
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER
+        else None
+    )
+
+
 def _sanitize_json_numbers(value: Any) -> Any:
-    """Copy a canonical payload while replacing non-finite floats with JSON null."""
+    """Copy a payload while replacing numbers browsers cannot represent safely."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if -_MAX_JSON_SAFE_INTEGER <= value <= _MAX_JSON_SAFE_INTEGER else None
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -567,16 +581,21 @@ def build_agent_eval_payload(
     from skillevaluator.tier3.harbor.report_data import (
         build_dataset_snapshot,
         deduplicate_dataset_entries,
-        metrics_for_agents,
+        metrics_for_condition,
     )
 
-    metrics = metrics_for_agents(agents)
     report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]
         model = _agent_model(name, info, run_config)
-        agent_payloads[name] = _build_agent(name, info, metrics, model)
+        agent_payloads[name] = _build_agent(
+            name,
+            info,
+            metrics_for_condition(info, "with_skill"),
+            metrics_for_condition(info, "without_skill"),
+            model,
+        )
 
     if not agent_payloads:
         return None
@@ -596,6 +615,7 @@ def build_agent_eval_payload(
             str(error) for agent in agent_payloads.values() for error in agent.get("execution_errors", []) if error
         )
     )
+    execution_error_details = _aggregate_execution_error_details(agent_payloads, len(execution_errors))
     statuses = [agent.get("execution_status") for agent in agent_payloads.values()]
     if statuses and all(status == "succeeded" for status in statuses):
         execution_status = "succeeded"
@@ -657,6 +677,7 @@ def build_agent_eval_payload(
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": sum(
             _as_nonnegative_int(agent.get("expected_attempts")) for agent in agent_payloads.values()
         ),
@@ -705,6 +726,7 @@ def build_agent_eval_payload(
         "composite_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": summary["expected_attempts"],
         "scored_attempts": summary["scored_attempts"],
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
@@ -849,6 +871,11 @@ _REWARD_HEAVY_KEYS = frozenset({"details", "custom_details"})
 
 def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> list[dict[str, Any]]:
     """Return compact raw Harbor reward dicts (internal + verbose keys stripped)."""
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+    )
+
     source_rewards = info.get("rewards") or []
     total_rewards = len(source_rewards)
     if report_budget.raw_rewards_remaining <= 0:
@@ -874,6 +901,12 @@ def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> li
                 break
             if key in {"custom_metrics", "metrics"} and isinstance(value, dict):
                 value = _bounded_raw_metric_mapping(value, report_budget)
+            elif key not in RESERVED_METRIC_NAMES:
+                candidate = value.get("score") if isinstance(value, dict) else value
+                custom_score_shape = isinstance(candidate, int | float) and not isinstance(candidate, bool)
+                if custom_score_shape and not custom_metric_name_is_publishable(key):
+                    report_budget.omit("raw_reward_fields")
+                    continue
             compact[key] = value
 
         rewards.append(compact)
@@ -883,13 +916,18 @@ def _raw_trial_rewards(info: dict[str, Any], report_budget: _ReportBudget) -> li
 
 def _bounded_raw_metric_mapping(value: dict[Any, Any], report_budget: _ReportBudget) -> dict[str, Any]:
     """Keep a deterministic representative slice of raw custom metric maps."""
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+    )
+
     bounded: dict[str, Any] = {}
     candidates = list(islice(value.items(), _MAX_RAW_METRICS_PER_REWARD + 1))
     for raw_name, raw_value in sorted(candidates, key=lambda item: str(item[0])):
         if len(bounded) >= _MAX_RAW_METRICS_PER_REWARD:
             break
         name = str(raw_name)
-        if len(name) > 256 or name in bounded:
+        if name in bounded or (name not in RESERVED_METRIC_NAMES and not custom_metric_name_is_publishable(name)):
             continue
         bounded[name] = raw_value
     report_budget.omit("raw_metric_values", max(0, len(value) - len(bounded)))
@@ -1083,6 +1121,9 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "environment",
             "runtime_seconds",
             "execution_status",
+            "execution_error_details_total",
+            "execution_error_details_shown",
+            "execution_error_details_truncated",
             "expected_attempts",
             "scored_attempts",
         }
@@ -1091,6 +1132,12 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
     compact_summary["best_agent"] = str(summary.get("best_agent") or payload.get("best_agent") or "")[:256]
     compact_summary["agents_run"] = [str(name)[:256] for name in (summary.get("agents_run") or [])[:64]]
     compact_summary["execution_errors"] = [str(error)[:1024] for error in (summary.get("execution_errors") or [])[:16]]
+    compact_summary.update(
+        _aggregate_execution_error_details(
+            {"summary": summary},
+            len(compact_summary["execution_errors"]),
+        )
+    )
 
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
     compact = {
@@ -1106,6 +1153,9 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "composite_lift": payload.get("composite_lift"),
         "execution_status": payload.get("execution_status"),
         "execution_errors": compact_summary["execution_errors"],
+        "execution_error_details_total": compact_summary.get("execution_error_details_total", 0),
+        "execution_error_details_shown": compact_summary.get("execution_error_details_shown", 0),
+        "execution_error_details_truncated": compact_summary.get("execution_error_details_truncated", False),
         "expected_attempts": payload.get("expected_attempts", 0),
         "scored_attempts": payload.get("scored_attempts", 0),
         "runtime_seconds": payload.get("runtime_seconds", 0.0),
@@ -1154,7 +1204,8 @@ def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
 def _build_agent(
     name: str,
     info: dict[str, Any],
-    metrics: list[str],
+    with_metrics: list[str],
+    baseline_metrics: list[str],
     model: str | None,
 ) -> dict[str, Any]:
     with_scores = info.get("with_skill") or {}
@@ -1167,7 +1218,7 @@ def _build_agent(
     if not baseline_quality_available:
         without_scores = {}
 
-    evaluators = _build_evaluators(metrics, with_scores, without_scores, lift_data)
+    evaluators = _build_evaluators(with_metrics, with_scores, without_scores, lift_data)
     dimensions = _build_dimensions(
         with_scores,
         without_scores,
@@ -1176,19 +1227,40 @@ def _build_agent(
     )
     overall_ws = _mean([d["with_skill"] for d in dimensions])
     overall_bl = _mean([d["baseline"] for d in dimensions])
-    if overall_ws is None and not metrics and with_quality_available:
+    with_mixed_contract = with_quality_available and _condition_has_mixed_metric_contracts(
+        info,
+        flag="mixed_metric_contracts_with_skill",
+        rewards="rewards",
+    )
+    baseline_mixed_contract = baseline_quality_available and _condition_has_mixed_metric_contracts(
+        info,
+        flag="mixed_metric_contracts_without_skill",
+        rewards="rewards_baseline",
+    )
+    if with_mixed_contract or (overall_ws is None and not with_metrics and with_quality_available):
+        # Custom-only runs have no dimension mean. For mixed condition
+        # contracts, the dimension mean covers only standard rows and can
+        # overstate Harbor's logical attempt score used by pass@k. In both
+        # cases, prefer the collector-owned logical overall.
         overall_ws = _finite_float(info.get("overall_with_skill"))
         if overall_ws is None and info.get("rewards_complete") is not False:
             overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
-    if overall_bl is None and not metrics and baseline_quality_available:
+    if baseline_mixed_contract or (overall_bl is None and not baseline_metrics and baseline_quality_available):
         overall_bl = _finite_float(info.get("overall_without_skill"))
         if overall_bl is None and info.get("rewards_baseline_complete") is not False:
             overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
     overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
 
-    trials = _normalize_trials(info.get("rewards") or [], metrics)
-    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)
-    _attach_baseline_pairs(trials, baseline_trials, metrics)
+    trials = _normalize_trials(info.get("rewards") or [], with_metrics)
+    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
+    _attach_baseline_pairs(trials, baseline_trials, with_metrics)
+
+    execution_errors = (
+        [str(error) for error in info.get("execution_errors", [])]
+        if isinstance(info.get("execution_errors"), list)
+        else []
+    )
+    execution_error_details = _aggregate_execution_error_details({name: info}, len(execution_errors))
 
     return {
         "name": name,
@@ -1198,9 +1270,8 @@ def _build_agent(
             if info.get("execution_status") in {"succeeded", "failed", "skipped", "unknown"}
             else "unknown"
         ),
-        "execution_errors": [str(error) for error in info.get("execution_errors", [])]
-        if isinstance(info.get("execution_errors"), list)
-        else [],
+        "execution_errors": execution_errors,
+        **execution_error_details,
         "expected_attempts": _as_nonnegative_int(info.get("expected_attempts")),
         "scored_attempts": _as_nonnegative_int(info.get("scored_attempts")),
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
@@ -1235,12 +1306,15 @@ def _attach_agent_report_details(
     when an alphabetically earlier agent has adversarial custom-metric
     cardinality.
     """
+    custom_with_skill = info.get("custom_with_skill")
+    custom_without_skill = info.get("custom_without_skill")
+    custom_lift = info.get("custom_lift")
     agent_payload["evaluator_cards"] = _evaluator_cards(
         agent_payload.get("evaluators", {}),
         rewards=info.get("rewards") or [],
-        custom_with_skill=info.get("custom_with_skill") or {},
-        custom_without_skill=info.get("custom_without_skill") or {},
-        custom_lift=info.get("custom_lift") or {},
+        custom_with_skill=custom_with_skill if isinstance(custom_with_skill, dict) else {},
+        custom_without_skill=custom_without_skill if isinstance(custom_without_skill, dict) else {},
+        custom_lift=custom_lift if isinstance(custom_lift, dict) else {},
         report_budget=report_budget,
     )
 
@@ -1400,9 +1474,13 @@ def _compact_evidence_refs(raw_refs: object) -> list[str]:
 
 def _custom_metric_value(reward: dict[str, Any], metric: str) -> float | None:
     """Read one custom metric without materializing every custom metric in a reward."""
-    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+        score_value,
+    )
 
-    if metric in RESERVED_METRIC_NAMES:
+    if metric in RESERVED_METRIC_NAMES or not custom_metric_name_is_publishable(metric):
         return None
 
     numeric: float | None = None
@@ -1413,7 +1491,7 @@ def _custom_metric_value(reward: dict[str, Any], metric: str) -> float | None:
         value = source.get(metric)
         if isinstance(value, dict):
             value = value.get("score")
-        candidate = _finite_float(value)
+        candidate = score_value(value)
         if candidate is not None:
             numeric = candidate
     return numeric
@@ -1426,7 +1504,11 @@ def _bounded_custom_metric_names(
     limit: int,
 ) -> tuple[list[str], bool]:
     """Return a bounded custom-name sample and whether more names may exist."""
-    from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+        score_value,
+    )
 
     if limit <= 0:
         return [], False
@@ -1445,9 +1527,10 @@ def _bounded_custom_metric_names(
             value = raw_value.get("score") if isinstance(raw_value, dict) else raw_value
             if (
                 name not in RESERVED_METRIC_NAMES
+                and custom_metric_name_is_publishable(name)
                 and name not in excluded
                 and name not in seen
-                and _finite_float(value) is not None
+                and score_value(value) is not None
             ):
                 seen.add(name)
                 names.append(name)
@@ -1464,6 +1547,8 @@ def _metric_evidence(
     report_budget: _ReportBudget,
     sampling: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, metric_set_for_reward
+
     if report_budget.evidence_remaining <= 0:
         report_budget.omit("evidence_entries", len(rewards))
         return []
@@ -1481,11 +1566,19 @@ def _metric_evidence(
         scanned_trials += 1
         if not isinstance(reward, dict):
             continue
-        details = reward.get("details")
-        detail = details.get(metric) if isinstance(details, dict) else None
-        if not isinstance(detail, dict):
-            custom_details = reward.get("custom_details")
-            detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
+        if metric in DEFAULT_METRICS and metric not in metric_set_for_reward(reward)[1]:
+            continue
+        custom_details = reward.get("custom_details")
+        custom_detail_is_authoritative = (
+            metric not in DEFAULT_METRICS and isinstance(custom_details, dict) and metric in custom_details
+        )
+        if custom_detail_is_authoritative:
+            detail = custom_details[metric]
+        else:
+            details = reward.get("details")
+            detail = details.get(metric) if isinstance(details, dict) else None
+            if not isinstance(detail, dict):
+                detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
         if not isinstance(detail, dict):
             continue
 
@@ -1561,10 +1654,12 @@ def _metric_evidence(
 
 
 def _custom_metric_score(metric: str, configured: dict[str, Any], rewards: list[dict[str, Any]]) -> float | None:
+    from skillevaluator.tier3.harbor.metrics import score_value
+
     value = configured.get(metric)
     if isinstance(value, dict):
         value = value.get("score")
-    configured_score = _finite_float(value)
+    configured_score = score_value(value)
     if configured_score is not None:
         return configured_score
     values = [
@@ -1583,16 +1678,28 @@ def _discover_custom_metric_scores(
     report_budget: _ReportBudget,
 ) -> dict[str, float]:
     """Discover at most ``limit`` custom names and aggregate reward scores once."""
+    from skillevaluator.tier3.harbor.metrics import (
+        RESERVED_METRIC_NAMES,
+        custom_metric_name_is_publishable,
+    )
+
     if limit <= 0:
         report_budget.omit("evaluator_cards", len(custom_with_skill))
         report_budget.omit("custom_metric_discovery_trials", len(rewards))
         return {}
 
     candidates: dict[str, None] = {}
-    for raw_name in islice(iter(custom_with_skill), limit + 1):
+    for raw_name in islice(iter(custom_with_skill), _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD):
         name = str(raw_name)
-        if name not in excluded and name not in candidates:
+        if (
+            name not in RESERVED_METRIC_NAMES
+            and custom_metric_name_is_publishable(name)
+            and name not in excluded
+            and name not in candidates
+        ):
             candidates[name] = None
+            if len(candidates) > limit:
+                break
 
     configured_total = len(custom_with_skill)
     if len(candidates) > limit:
@@ -1723,14 +1830,20 @@ def _evaluator_cards(
 
 
 def _cases(info: dict[str, Any]) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.harbor.metrics import overall_score
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+
     cases: list[dict[str, Any]] = []
-    for reward in info.get("rewards") or []:
-        if not isinstance(reward, dict):
+    rewards = [reward for reward in (info.get("rewards") or []) if isinstance(reward, dict)]
+    for group in logical_trial_reward_groups(rewards):
+        if not group:
             continue
+        reward = group[0]
+        group_is_consistent = _logical_group_entry_identity_is_consistent(group)
         cases.append(
             {
                 "entry_id": reward.get("entry_id"),
-                "overall": reward.get("overall"),
+                "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
             }
         )
     return cases
@@ -1757,40 +1870,68 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
         metric_set_for_reward,
+        metric_set_for_rewards,
         metric_value,
+        overall_score,
     )
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
 
     out: list[dict[str, Any]] = []
-    for reward in rewards:
-        if not isinstance(reward, dict):
+    reward_groups = logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
+    for group in reward_groups:
+        if not group:
             continue
+        reward = group[0]
+        is_multi_row = len(group) > 1
+        group_is_consistent = _logical_group_entry_identity_is_consistent(group)
         declared_metric_set = reward.get("metric_set") or reward.get("metric_set_version")
         standard_metric_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
-        metric_set, standard_metrics = metric_set_for_reward(reward)
-        is_declared_custom = bool(declared_metric_set) and str(declared_metric_set) not in standard_metric_sets
-        scores = {
-            m: numeric
-            for m in metrics
-            if not (is_declared_custom and m in {"skill_execution", "skill_routing"})
-            if (numeric := _finite_float(reward.get(m))) is not None
-        }
+        metric_set, standard_metrics = metric_set_for_rewards(group)
+        declared_metric_sets = [
+            str(value) for item in group if (value := item.get("metric_set") or item.get("metric_set_version"))
+        ]
+        is_declared_custom = len(declared_metric_sets) == len(group) and all(
+            value not in standard_metric_sets for value in declared_metric_sets
+        )
+        standard_rows = [(item, metric_set_for_reward(item)[1]) for item in group]
+        scores: dict[str, float] = {}
+        for metric in metrics:
+            if is_declared_custom and metric in {"skill_execution", "skill_routing"}:
+                continue
+            value = _complete_mean(
+                [metric_value(item, metric) for item, item_metrics in standard_rows if metric in item_metrics]
+            )
+            if value is not None:
+                scores[metric] = value
         trial: dict[str, Any] = {
             "trial_id": reward.get("trial_id"),
             "entry_id": reward.get("entry_id"),
             "scores": scores,
-            "overall": _finite_float(reward.get("overall")),
+            "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
         }
         traj = reward.get("_traj")
-        if isinstance(traj, dict):
-            trial["steps"] = traj.get("steps")
-            trial["tokens"] = {
-                "prompt": traj.get("prompt_tokens", 0),
-                "completion": traj.get("completion_tokens", 0),
-                "cached": traj.get("cached_tokens", 0),
-            }
-        if reward.get("warnings"):
-            trial["warnings"] = list(reward["warnings"])
-        if reward.get("error_recovery"):
+        if not is_multi_row and isinstance(traj, dict):
+            steps = _token_counter(traj.get("steps"))
+            if steps is not None:
+                trial["steps"] = steps
+            prompt_tokens = _token_counter(traj.get("prompt_tokens"))
+            completion_tokens = _token_counter(traj.get("completion_tokens"))
+            cached_tokens = _token_counter(traj.get("cached_tokens"))
+            if prompt_tokens is not None and completion_tokens is not None:
+                trial["tokens"] = {
+                    "prompt": prompt_tokens,
+                    "completion": completion_tokens,
+                }
+                if cached_tokens is not None:
+                    trial["tokens"]["cached"] = cached_tokens
+        warnings = list(
+            dict.fromkeys(
+                str(warning) for item in group if isinstance(item.get("warnings"), list) for warning in item["warnings"]
+            )
+        )
+        if warnings:
+            trial["warnings"] = warnings
+        if not is_multi_row and reward.get("error_recovery"):
             trial["error_recovery"] = reward["error_recovery"]
         is_standard_reward = (
             (not declared_metric_set or str(declared_metric_set) in standard_metric_sets)
@@ -1798,7 +1939,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             and "skill_execution" in standard_metrics
             and metric_value(reward, "skill_execution") is not None
         )
-        if is_standard_reward and reward.get("invocation_evidence_source") == "trajectory":
+        if not is_multi_row and is_standard_reward and reward.get("invocation_evidence_source") == "trajectory":
             for key in ("skill_invoked", "routing_passed"):
                 if type(reward.get(key)) is bool:
                     trial[key] = reward[key]
@@ -2393,7 +2534,7 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
         return 0.50
     try:
         numeric = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.50
     return numeric if math.isfinite(numeric) else 0.50
 
@@ -2462,9 +2603,10 @@ def _agent_quality_verdict(agent: dict[str, Any]) -> str:
     for dimension_id in _DIMENSION_IDS:
         dimension = dimensions.get(dimension_id)
         value = (dimension or {}).get("with_skill", (dimension or {}).get("score"))
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        numeric = _finite_float(value)
+        if numeric is None:
             return VERDICT_NEUTRAL
-        scores.append(float(value))
+        scores.append(numeric)
 
     if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
         return VERDICT_FAIL
@@ -2698,11 +2840,7 @@ def _verdict_policy(attempt_policy: dict[str, Any]) -> dict[str, Any]:
     """Expose the distinct task-attempt, dimension, and overall-lift gates."""
     attempt_threshold = attempt_policy.get("pass_threshold")
     return {
-        "attempt_pass_threshold": (
-            float(attempt_threshold)
-            if isinstance(attempt_threshold, (int, float)) and not isinstance(attempt_threshold, bool)
-            else None
-        ),
+        "attempt_pass_threshold": _finite_float(attempt_threshold),
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
@@ -2716,18 +2854,54 @@ def _mean(values: list[float]) -> float | None:
     return round(sum(numeric) / len(numeric), 4) if numeric else None
 
 
+def _complete_mean(values: list[Any]) -> float | None:
+    """Average values only when every expected constituent is finite."""
+    if not values:
+        return None
+    numeric = [_finite_float(value) for value in values]
+    if any(value is None for value in numeric):
+        return None
+    return round(sum(value for value in numeric if value is not None) / len(numeric), 4)
+
+
+def _logical_group_entry_identity_is_consistent(group: list[dict[str, Any]]) -> bool:
+    """Reject ambiguous multi-row trials whose physical rows claim different cases."""
+    if len(group) <= 1:
+        return True
+    entry_id = group[0].get("entry_id")
+    return isinstance(entry_id, str) and bool(entry_id) and all(item.get("entry_id") == entry_id for item in group)
+
+
+def _condition_has_mixed_metric_contracts(
+    info: dict[str, Any],
+    *,
+    flag: str,
+    rewards: str,
+) -> bool:
+    """Prefer collector-owned contract truth while retaining legacy inference."""
+    explicit = info.get(flag)
+    if isinstance(explicit, bool):
+        return explicit
+
+    from skillevaluator.tier3.harbor.metrics import rewards_have_mixed_metric_contracts
+
+    return rewards_have_mixed_metric_contracts(info.get(rewards))
+
+
 def _logical_reward_mean(rewards: Any, field: str) -> float | None:
     """Average a persisted reward field once per logical Harbor trial."""
     if not isinstance(rewards, list):
         return None
     from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
 
+    groups = logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
     group_means = [
-        group_mean
-        for group in logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
-        if (group_mean := _mean([reward.get(field) for reward in group])) is not None
+        _complete_mean([reward.get(field) for reward in group])
+        if _logical_group_entry_identity_is_consistent(group)
+        else None
+        for group in groups
     ]
-    return _mean(group_means)
+    return _complete_mean(group_means)
 
 
 def _as_float(value: Any) -> float:
@@ -2736,6 +2910,16 @@ def _as_float(value: Any) -> float:
 
 def _as_nonnegative_int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _aggregate_execution_error_details(
+    summaries: dict[str, dict[str, Any]],
+    displayed_count: int,
+) -> dict[str, Any]:
+    """Aggregate hidden diagnostic occurrences without duplicating display text."""
+    from skillevaluator.tier3.harbor.report_data import aggregate_execution_error_details
+
+    return aggregate_execution_error_details(summaries.values(), displayed_count)
 
 
 __all__ = [

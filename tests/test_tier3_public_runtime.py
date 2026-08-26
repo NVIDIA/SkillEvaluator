@@ -26,6 +26,9 @@ from skillevaluator.tier3 import commands as tier3_commands
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import _EVALUATOR_MANAGED_RUNTIME_ENV, _write_task_toml
 from skillevaluator.tier3.harbor.runner import (
+    _check_prerequisites,
+    _environment_extra_install_hint,
+    _environment_kwarg_prerequisite_errors,
     _model_for_agent,
     _nvidia_build_agent_import_path,
     _provider_environment,
@@ -33,6 +36,7 @@ from skillevaluator.tier3.harbor.runner import (
     build_harbor_run_command,
 )
 from skillevaluator.tier3.harbor.runtime_preflight import ModelProbeResult
+from skillevaluator.tier3_environments import HARBOR_NATIVE_ENV_MODES
 
 
 def _load_verifier_template():
@@ -114,8 +118,491 @@ def test_native_environment_is_forwarded_to_harbor() -> None:
     )
 
     assert command[1] == "run"
-    assert command[command.index("--env") + 1] == "e2b"
+    assert "--agent-import-path" not in command
     assert "--environment-import-path" not in command
+    assert "-a" not in command
+    assert command.count("--agent") == 1
+    assert command[command.index("--agent") + 1] == "codex"
+    assert command.count("--env") == 1
+    assert command[command.index("--env") + 1] == "e2b"
+
+
+@pytest.mark.parametrize("timeout_multiplier", [float("nan"), float("inf"), float("-inf")])
+def test_harbor_command_rejects_nonfinite_timeout_multiplier(timeout_multiplier: float) -> None:
+    with pytest.raises(ValueError, match="timeout_multiplier must be a finite number greater than 0"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="nonfinite-timeout",
+            env_mode="docker",
+            timeout_multiplier=timeout_multiplier,
+        )
+
+
+def test_harbor_command_rejects_overflowing_timeout_multiplier() -> None:
+    with pytest.raises(ValueError, match="timeout_multiplier must be a finite number greater than 0"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="overflowing-timeout",
+            env_mode="docker",
+            timeout_multiplier=10**1000,
+        )
+
+
+def test_harbor_command_rejects_finite_multiplier_that_overflows_default_timeouts() -> None:
+    with pytest.raises(ValueError, match="must yield finite Harbor timeouts"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="finite-overflowing-timeout",
+            env_mode="docker",
+            timeout_multiplier=1e308,
+        )
+
+
+def test_native_environment_kwargs_round_trip_through_real_harbor_parser() -> None:
+    from harbor.cli.utils import parse_kwargs
+
+    expected = {
+        "region": "us-west-2",
+        "security_group_ids": ["sg-123", "sg-456"],
+        "use_public_ip": False,
+        "root_volume_size_gb": 80,
+    }
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="native-environment-kwargs",
+        env_mode="ec2",
+        environment_kwargs=expected,
+    )
+
+    encoded = [command[index + 1] for index, value in enumerate(command) if value == "--ek"]
+    assert parse_kwargs(encoded) == expected
+
+
+@pytest.mark.parametrize("env_mode", sorted(HARBOR_NATIVE_ENV_MODES - {"docker"}))
+def test_native_environment_kwargs_reject_unknown_harbor_022_names(env_mode: str) -> None:
+    with pytest.raises(ValueError, match=rf"Harbor 0\.22\.0 environment '{env_mode}'.*totally_ignored"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="unknown-environment-kwarg",
+            env_mode=env_mode,
+            environment_kwargs={"totally_ignored": True},
+        )
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "name", "value"),
+    [
+        ("daytona", "connection_pool_maxsize", 32),
+        ("modal", "modal_vm_runtime", True),
+        ("novita", "dind_dockerd_start_cmd", "dockerd-entrypoint.sh dockerd"),
+    ],
+)
+def test_native_environment_hidden_harbor_022_kwargs_remain_usable(
+    env_mode: str,
+    name: str,
+    value: object,
+) -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="hidden-environment-kwarg",
+        env_mode=env_mode,
+        environment_kwargs={name: value},
+    )
+
+    assert command[command.index("--ek") + 1].startswith(f"{name}=")
+
+
+def test_native_environment_kwargs_resolve_real_harbor_ec2_constructor(tmp_path: Path) -> None:
+    from harbor.cli.utils import parse_kwargs
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.environment_type import EnvironmentType
+    from harbor.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
+    from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    expected = {
+        "region": "us-west-2",
+        "launch_mode": "attach",
+        "instance_id": "i-123",
+    }
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="native-environment-constructor",
+        env_mode="ec2",
+        environment_kwargs=expected,
+    )
+    encoded = [command[index + 1] for index, value in enumerate(command) if value == "--ek"]
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    (environment_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+
+    environment = EnvironmentFactory.create_environment_from_config(
+        TrialEnvironmentConfig(type=EnvironmentType.EC2, kwargs=parse_kwargs(encoded)),
+        environment_dir=environment_dir,
+        environment_name="native-environment-constructor",
+        session_id="test-session",
+        trial_paths=TrialPaths(trial_dir),
+        task_env_config=TaskEnvironmentConfig(),
+    )
+
+    assert type(environment).__name__ == "EC2Environment"
+    assert environment.region == "us-west-2"
+    assert environment.launch_mode == "attach"
+    assert environment.instance_id == "i-123"
+
+
+def test_ack_operator_kwargs_allow_safe_registry_and_scheduling_references() -> None:
+    from harbor.cli.utils import parse_kwargs
+
+    expected = {
+        "namespace": "skill-evals",
+        "image_pull_secret": "registry-credentials",
+        "node_selector": {"pool": "sandbox"},
+        "tolerations": [{"key": "sandbox", "operator": "Exists"}],
+    }
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="ack-operator-kwargs",
+        env_mode="ack",
+        environment_kwargs=expected,
+    )
+
+    encoded = [command[index + 1] for index, value in enumerate(command) if value == "--ek"]
+    assert parse_kwargs(encoded) == expected
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "environment_kwargs", "error"),
+    [
+        ("local", {"region": "us-west-2"}, "not supported for SkillEvaluator local mode"),
+        ("local", {"totally_ignored": True}, "not supported for SkillEvaluator local mode"),
+        ("docker", {"region": "us-west-2"}, "not supported for SkillEvaluator Docker mode"),
+        ("docker", {"totally_ignored": True}, "not supported for SkillEvaluator Docker mode"),
+        ("ec2", {"override_cpus": 999}, "reserved for Harbor runtime policy"),
+        ("ec2", {"extra_docker_compose": ["escape.yml"]}, "reserved for Harbor runtime policy"),
+        ("ec2", {"network_policy": {"network_mode": "public"}}, "reserved for Harbor runtime policy"),
+        ("ack", {"pod_overrides": {"spec": {"hostNetwork": True}}}, "reserved for Harbor runtime policy"),
+        ("ack", {"pod_privileged": True}, "reserved for Harbor runtime policy"),
+        ("ack", {"extra_volumes": [{"hostPath": {"path": "/"}}]}, "reserved for Harbor runtime policy"),
+    ],
+)
+def test_environment_kwargs_cannot_override_sandbox_or_runtime_policy(
+    env_mode: str,
+    environment_kwargs: dict[str, object],
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="untrusted-environment-kwargs",
+            env_mode=env_mode,
+            environment_kwargs=environment_kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "name", "value"),
+    [
+        ("ack", "build_job_namespace", "privileged-builds"),
+        ("ack", "buildkit_address", "tcp://buildkit.internal:1234"),
+        ("ack", "dind_image", "untrusted/dind:latest"),
+        ("ack", "memory_limit_multiplier", 0),
+        ("ack", "pod_annotations", {"inject-sidecar": "enabled"}),
+        ("ack", "pod_labels", {"network-policy": "bypass"}),
+        ("ack", "sandbox_env_vars", {"LD_PRELOAD": "/escape.so"}),
+        ("ack", "service_account", "cluster-admin"),
+        ("ack", "use_buildkit", True),
+        ("blaxel", "dind_extra_args", {"host": "tcp://0.0.0.0:2375"}),
+        ("cua-cloud", "claim_spec", {"serviceAccountName": "cluster-admin"}),
+        ("daytona", "network_block_all", False),
+        ("ec2", "iam_instance_profile", "administrator"),
+        ("ec2", "strict_host_key_checking", "no"),
+        ("gke", "memory_limit_multiplier", 0),
+        ("modal", "volumes", {"/workspace": "shared"}),
+        ("opensandbox", "volumes", [{"host_path": "/"}]),
+        ("openshift", "service_account_name", "cluster-admin"),
+        ("singularity", "singularity_no_mount", ""),
+        ("use-computer", "resources", {"cpu": 128, "memory": 1048576}),
+        ("vercel", "ports", [22, 2375]),
+    ],
+)
+def test_backend_aliases_cannot_bypass_sandbox_runtime_policy(
+    env_mode: str,
+    name: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match=rf"reserved for Harbor runtime policy: {name}"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="backend-policy-alias",
+            env_mode=env_mode,
+            environment_kwargs={name: value},
+        )
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "environment_kwargs"),
+    [
+        (
+            "ack",
+            {
+                "namespace": "skill-evals",
+                "use_sandbox_claim": True,
+                "sandbox_image": "registry.example/harbor-sandbox:v1",
+                # SandboxSet template metadata is an intentional operator
+                # integration surface, unlike legacy direct pod overrides.
+                "sandbox_labels": {"pool": "eval"},
+                "sandbox_annotations": {"owner": "operator"},
+                "skip_image_check": False,
+            },
+        ),
+        (
+            "ec2",
+            {
+                "region": "us-west-2",
+                "ami_id": "ami-123",
+                "instance_type": "m7i-flex.large",
+                "root_volume_size_gb": 80,
+                "bootstrap_docker": False,
+            },
+        ),
+        (
+            "gke",
+            {
+                "cluster_name": "cluster",
+                "region": "us-central1",
+                "namespace": "skill-evals",
+                "registry_location": "us-central1",
+                "registry_name": "skill-evals",
+                "cloud_build_machine_type": "E2_HIGHCPU_32",
+                "cloud_build_disk_size_gb": 500,
+            },
+        ),
+        (
+            "opensandbox",
+            {
+                "entrypoint": ["/bin/sh", "-lc", "sleep infinity"],
+                "extensions": {"provider.example/feature": "enabled"},
+                "sandbox_timeout_sec": 7200,
+            },
+        ),
+    ],
+)
+def test_backend_operator_functionality_outside_policy_boundary_remains_usable(
+    env_mode: str,
+    environment_kwargs: dict[str, object],
+) -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="allowed-backend-options",
+        env_mode=env_mode,
+        environment_kwargs=environment_kwargs,
+    )
+
+    assert command.count("--ek") == len(environment_kwargs)
+
+
+def test_skill_config_cannot_supply_environment_kwargs(tmp_path: Path) -> None:
+    evals = tmp_path / "evals"
+    evals.mkdir()
+    (evals / "config.yml").write_text(
+        "schema_version: 1\n"
+        "harbor:\n"
+        "  environment_kwargs:\n"
+        "    extra_docker_compose:\n"
+        "      - /tmp/privileged-compose.yml\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvalsConfigError, match=r"unknown harbor key.*environment_kwargs"):
+        load_evals_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "environment_kwargs", "expected"),
+    [
+        ("ec2", {}, "region"),
+        ("ec2", {"region": "us-west-2"}, "ami_id"),
+        ("ec2", {"region": "us-west-2", "launch_mode": "attach"}, "instance_id"),
+        (
+            "gke",
+            {"cluster_name": "cluster", "region": "us-west1", "namespace": "evals"},
+            "registry_location, registry_name",
+        ),
+        ("ack", {}, "namespace"),
+    ],
+)
+def test_native_environment_required_kwargs_fail_before_mutation(
+    env_mode: str,
+    environment_kwargs: dict[str, object],
+    expected: str,
+) -> None:
+    assert expected in _environment_kwarg_prerequisite_errors(env_mode, environment_kwargs)[0]
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "environment_kwargs", "expected"),
+    [
+        (
+            "gke",
+            {
+                "cluster_name": 1,
+                "region": [],
+                "namespace": {},
+                "registry_location": False,
+                "registry_name": "valid",
+            },
+            "cluster_name, region, namespace, registry_location",
+        ),
+        ("ack", {"namespace": []}, "namespace"),
+        ("ec2", {"region": False, "ami_id": "ami-123"}, "region"),
+        ("ec2", {"region": "us-west-2", "ami_id": 123}, "ami_id"),
+        ("ec2", {"region": "us-west-2", "launch_mode": [], "instance_id": "i-123"}, "launch_mode"),
+        ("ec2", {"region": "us-west-2", "launch_mode": "attach", "instance_id": {}}, "instance_id"),
+    ],
+)
+def test_native_environment_required_kwargs_reject_non_string_values_without_crashing(
+    env_mode: str,
+    environment_kwargs: dict[str, object],
+    expected: str,
+) -> None:
+    errors = _environment_kwarg_prerequisite_errors(env_mode, environment_kwargs)
+
+    assert len(errors) == 1
+    assert expected in errors[0]
+
+
+def test_native_environment_required_kwargs_accept_valid_ec2_attach_configuration() -> None:
+    assert (
+        _environment_kwarg_prerequisite_errors(
+            "ec2",
+            {"region": "us-west-2", "launch_mode": "attach", "instance_id": "i-123"},
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "ssh_key_path",
+    ["", "/definitely/missing/harbor-ssh-key", "~definitely-no-such-user-issue79/key"],
+)
+def test_ec2_environment_kwargs_reject_nonexistent_ssh_key_path(ssh_key_path: str) -> None:
+    errors = _environment_kwarg_prerequisite_errors(
+        "ec2",
+        {"region": "us-west-2", "ami_id": "ami-123", "ssh_key_path": ssh_key_path},
+    )
+
+    assert len(errors) == 1
+    assert "ssh_key_path" in errors[0]
+    assert "existing regular file" in errors[0]
+
+
+def test_ec2_environment_kwargs_accept_existing_ssh_key_path(tmp_path: Path) -> None:
+    ssh_key = tmp_path / "id_ed25519"
+    ssh_key.write_text("placeholder", encoding="utf-8")
+
+    assert (
+        _environment_kwarg_prerequisite_errors(
+            "ec2",
+            {"region": "us-west-2", "ami_id": "ami-123", "ssh_key_path": str(ssh_key)},
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("subnet_id", [None, ""])
+def test_ec2_private_ephemeral_environment_requires_subnet(subnet_id: str | None) -> None:
+    environment_kwargs: dict[str, object] = {
+        "region": "us-west-2",
+        "ami_id": "ami-123",
+        "use_public_ip": False,
+    }
+    if subnet_id is not None:
+        environment_kwargs["subnet_id"] = subnet_id
+
+    errors = _environment_kwarg_prerequisite_errors("ec2", environment_kwargs)
+
+    assert len(errors) == 1
+    assert "use_public_ip=False requires" in errors[0]
+    assert "subnet_id" in errors[0]
+
+
+def test_ec2_private_ephemeral_environment_accepts_nonempty_subnet() -> None:
+    assert (
+        _environment_kwarg_prerequisite_errors(
+            "ec2",
+            {
+                "region": "us-west-2",
+                "ami_id": "ami-123",
+                "use_public_ip": False,
+                "subnet_id": "subnet-123",
+            },
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("environment_kwargs", "subprocess_env", "ready"),
+    [
+        ({}, {}, False),
+        ({}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, True),
+        ({"domain": "sandbox.example.test"}, {}, True),
+        ({"domain": None}, {}, False),
+        ({"domain": None}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, True),
+        ({"domain": ""}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, False),
+        ({"domain": "   "}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, False),
+    ],
+)
+def test_opensandbox_domain_preflight_uses_effective_child_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    environment_kwargs: dict[str, object],
+    subprocess_env: dict[str, str],
+    ready: bool,
+) -> None:
+    from harbor.environments.factory import EnvironmentFactory
+
+    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda *_args, **_kwargs: None)
+
+    errors = _check_prerequisites(
+        env_mode="opensandbox",
+        agents=[],
+        environment_kwargs=environment_kwargs,
+        subprocess_env=subprocess_env,
+    )
+
+    assert (errors == []) is ready
+    if not ready:
+        assert len(errors) == 1
+        assert "domain" in errors[0]
+
+
+def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_mode() -> None:
+    errors = _environment_kwarg_prerequisite_errors(
+        "ec2",
+        {"region": "us-west-2", "launch_mode": " attach ", "instance_id": "i-123"},
+    )
+
+    assert errors == ["Harbor environment 'ec2' requires launch_mode to be 'ephemeral' or 'attach'"]
+
+
+def test_native_environment_install_hints_use_real_harbor_022_extra_names() -> None:
+    assert "harbor[gke]==0.22.0" in _environment_extra_install_hint("ack")
+    assert "harbor[cloud]==0.22.0" not in _environment_extra_install_hint("ack")
+    assert "harbor[cua]==0.22.0" in _environment_extra_install_hint("cua-cloud")
+    assert "no Python extra" in _environment_extra_install_hint("openshift")
 
 
 def test_judge_model_overrides_are_forwarded_only_as_harbor_verifier_env() -> None:
@@ -174,9 +661,13 @@ def test_docker_bridge_command_combines_custom_agent_and_secure_environment() ->
         agent_import_path=import_path,
     )
 
-    assert command[command.index("--agent-import-path") + 1] == import_path
+    assert "--agent-import-path" not in command
+    assert "--environment-import-path" not in command
     assert "-a" not in command
-    assert "--environment-import-path" in command
+    assert command[command.index("--agent") + 1] == import_path
+    assert command[command.index("--env") + 1] == (
+        "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureDockerEnvironment"
+    )
 
 
 def test_local_bridge_command_uses_custom_agent_import_path() -> None:
@@ -190,9 +681,13 @@ def test_local_bridge_command_uses_custom_agent_import_path() -> None:
         agent_import_path=import_path,
     )
 
-    assert command[command.index("--agent-import-path") + 1] == import_path
-    assert "--environment-import-path" in command
+    assert "--agent-import-path" not in command
+    assert "--environment-import-path" not in command
     assert "-a" not in command
+    assert command[command.index("--agent") + 1] == import_path
+    assert command[command.index("--env") + 1] == (
+        "skillevaluator.tier3.harbor.local_environment:SkillEvaluatorLocalEnvironment"
+    )
 
 
 def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
@@ -354,6 +849,55 @@ def test_doctor_rejects_alias_model_collision_consistently(monkeypatch) -> None:
     normalized = " ".join(result.output.split())
     assert "refer to the same agent" in normalized
     assert "specify only one model for claude-code" in normalized
+
+
+def test_doctor_ack_preflight_uses_the_exact_resolved_bedrock_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ProviderConfig(
+        provider="bedrock",
+        model="us.anthropic.claude-test",
+        api_key=None,
+        base_url=None,
+        litellm_model="bedrock/us.anthropic.claude-test",
+        region="us-west-2",
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "eks-exec-auth-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "eks-exec-auth-secret")
+    monkeypatch.setenv("KUBECONFIG", "/config/eks")
+    monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "ambient-parent-only")
+    monkeypatch.setattr(tier3_commands, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(
+        tier3_commands,
+        "_check_prerequisites",
+        lambda **kwargs: captured.update(kwargs) or [],
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "doctor",
+            "--agents",
+            "claude-code",
+            "--env-mode",
+            "ack",
+            "--environment-kwarg",
+            "namespace=skill-evals",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["env_mode"] == "ack"
+    assert captured["environment_kwargs"] == {"namespace": "skill-evals"}
+    child_env = captured["subprocess_env"]
+    assert isinstance(child_env, dict)
+    assert child_env["KUBECONFIG"] == "/config/eks"
+    assert child_env["AWS_ACCESS_KEY_ID"] == "eks-exec-auth-key"
+    assert child_env["AWS_SECRET_ACCESS_KEY"] == "eks-exec-auth-secret"
+    assert child_env["AWS_REGION"] == "us-west-2"
+    assert child_env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+    assert "ALIBABA_CLOUD_ACCESS_KEY_ID" not in child_env
 
 
 def test_generated_task_stages_public_provider_variables_for_the_verifier(tmp_path) -> None:

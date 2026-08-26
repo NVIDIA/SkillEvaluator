@@ -10,7 +10,6 @@ import importlib
 import io
 import json
 import os
-import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -485,6 +484,77 @@ def test_reporters_redact_exact_values_and_secret_shaped_details() -> None:
     assert "<redacted>" in rendered
 
 
+@pytest.mark.parametrize(
+    "proxy_uri",
+    [
+        "http://proxy-user:proxy-password@proxy.example:8080",
+        "https://proxy-user:password@fragment@proxy.example:8443",
+        "https://bearer-token@proxy.example",
+        "socks5://user%3Apassword@proxy.example:1080",
+    ],
+)
+def test_progress_redacts_proxy_uri_userinfo_even_before_secret_values_are_registered(proxy_uri: str) -> None:
+    progress = _progress_module()
+
+    extracted = progress.secret_values_from_environment({"HTTP_PROXY": proxy_uri})
+    rendered = progress.redact_progress_detail(f"Cannot connect to proxy {proxy_uri}", secret_values=set())
+
+    assert proxy_uri in extracted
+    assert "proxy-user" not in rendered
+    assert "proxy-password" not in rendered
+    assert "password@fragment" not in rendered
+    assert "bearer-token" not in rendered
+    assert "user%3Apassword" not in rendered
+    assert "<redacted>@proxy.example" in rendered
+
+
+@pytest.mark.parametrize(
+    ("proxy_uri", "diagnostic", "secrets"),
+    [
+        (
+            "http://proxy-user:proxy-password@proxy.example:8080",
+            "proxy auth failed for proxy-user with proxy-password",
+            ("proxy-user", "proxy-password"),
+        ),
+        (
+            "http://proxy%2Duser:proxy%2Dpassword@proxy.example:8080",
+            "proxy auth failed for proxy-user with proxy-password",
+            ("proxy-user", "proxy-password"),
+        ),
+        (
+            "proxy-user:proxy-password@proxy.example:8080",
+            "proxy auth failed for proxy-user with proxy-password",
+            ("proxy-user", "proxy-password"),
+        ),
+    ],
+)
+def test_progress_registers_proxy_userinfo_components(
+    proxy_uri: str,
+    diagnostic: str,
+    secrets: tuple[str, ...],
+) -> None:
+    progress = _progress_module()
+
+    extracted = progress.secret_values_from_environment({"HTTPS_PROXY": proxy_uri})
+    rendered = progress.redact_progress_detail(diagnostic, secret_values=extracted)
+
+    assert all(secret in extracted for secret in secrets)
+    assert all(secret not in rendered for secret in secrets)
+
+
+@pytest.mark.parametrize("short_secret", ["x", "pw", "usr"])
+def test_progress_redacts_short_exact_credential_fragments_as_standalone_tokens(short_secret: str) -> None:
+    progress = _progress_module()
+    rendered = progress.redact_progress_detail(
+        f"proxy rejected credential {short_secret}; password remains a normal word",
+        secret_values={short_secret},
+    )
+
+    assert f" {short_secret};" not in rendered
+    assert "<redacted>" in rendered
+    assert "password remains" in rendered
+
+
 def test_progress_detail_strips_osc_title_and_hyperlink_payloads() -> None:
     progress = _progress_module()
 
@@ -496,6 +566,15 @@ def test_progress_detail_strips_osc_title_and_hyperlink_payloads() -> None:
     assert "malicious.example" not in rendered
     assert "\x1b" not in rendered
     assert rendered == "safe text click done"
+
+
+def test_progress_redaction_scales_linearly_for_large_non_uri_text() -> None:
+    progress = _progress_module()
+    payload = "x" * (1024 * 1024)
+
+    rendered = progress.redact_progress_detail(payload)
+
+    assert rendered == payload
 
 
 def test_plain_reporter_redacts_secrets_from_plan_values() -> None:
@@ -696,6 +775,44 @@ def _stub_runner(
     return runner, skill
 
 
+def test_run_result_bounds_multibyte_launch_errors_for_report_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    github_token = "ghp_" + ("A" * 36)
+    launch_errors = [f"launch {index}: {github_token}\x1b[2J" + ("😀" * 2_048) for index in range(256)]
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        run_agent=lambda **_kwargs: launch_errors,
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    result_path = Path(result["result_path"])
+    serialized = result_path.read_bytes()
+    persisted = json.loads(serialized)
+    assert len(serialized) <= 2 * 1024 * 1024
+    assert persisted["execution_status"] == "failed"
+    assert persisted["execution_error_details_total"] == len(launch_errors)
+    assert persisted["execution_error_details_shown"] == len(persisted["execution_errors"])
+    assert persisted["execution_error_details_truncated"] is True
+    assert persisted["error"] == persisted["execution_errors"][:1]
+    assert github_token not in serialized.decode("utf-8")
+    assert "\\u001b" not in serialized.decode("utf-8")
+
+    from skillevaluator.tier3.harbor import report_data
+
+    diagnostics: list[dict[str, Any]] = []
+    assert report_data._load_bounded_json(result_path, diagnostics, artifact="result") == persisted
+    assert diagnostics == []
+
+
 def _configure_native_task_source(
     monkeypatch: pytest.MonkeyPatch,
     runner,
@@ -733,6 +850,76 @@ def _configure_native_task_source(
         return [output / "case-1"]
 
     monkeypatch.setattr(runner, "stage_native_harbor_tasks", emit_native)
+
+
+def test_ack_eval_preflight_uses_the_exact_prospective_bedrock_child_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.provider_config import ProviderConfig
+    from skillevaluator.tier3.harbor import runner as runner_module
+
+    real_harbor_subprocess_environment = runner_module._harbor_subprocess_environment
+    real_provider_environment = runner_module._provider_environment
+    captured: dict[str, Any] = {}
+    launched_env: dict[str, str] = {}
+
+    def capture_preflight(**kwargs: Any) -> list[str]:
+        captured.update(kwargs)
+        return []
+
+    def capture_launch(**kwargs: Any) -> list[str]:
+        launched_env.update(kwargs["run_env"])
+        return []
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        environment_check=capture_preflight,
+        run_agent=capture_launch,
+        provider_name="bedrock",
+        provider_model="us.anthropic.claude-test",
+    )
+    provider = ProviderConfig(
+        provider="bedrock",
+        model="us.anthropic.claude-test",
+        api_key=None,
+        base_url=None,
+        litellm_model="bedrock/us.anthropic.claude-test",
+        region="us-west-2",
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "eks-exec-auth-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "eks-exec-auth-secret")
+    monkeypatch.setenv("KUBECONFIG", "/config/eks")
+    monkeypatch.setenv("SKILL_EVAL_JUDGE_MODEL", "judge-model")
+    monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "ambient-parent-only")
+    monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(runner, "_provider_environment", real_provider_environment)
+    monkeypatch.setattr(runner, "_harbor_subprocess_environment", real_harbor_subprocess_environment)
+    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({"SAFE_RUNTIME_FLAG": "enabled"}, []))
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["claude-code"],
+        env_mode="ack",
+        environment_kwargs={"namespace": "skill-evals"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert result["execution_status"] == "succeeded"
+    child_env = captured["subprocess_env"]
+    assert isinstance(child_env, dict)
+    assert child_env == launched_env
+    assert child_env["KUBECONFIG"] == "/config/eks"
+    assert child_env["AWS_ACCESS_KEY_ID"] == "eks-exec-auth-key"
+    assert child_env["AWS_SECRET_ACCESS_KEY"] == "eks-exec-auth-secret"
+    assert child_env["AWS_REGION"] == "us-west-2"
+    assert child_env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+    assert child_env["SAFE_RUNTIME_FLAG"] == "enabled"
+    assert child_env["LLM_JUDGE_MODEL"] == "judge-model"
+    assert child_env["SKILL_EVAL_JUDGE_MODEL"] == "judge-model"
+    assert "ALIBABA_CLOUD_ACCESS_KEY_ID" not in child_env
 
 
 @pytest.mark.parametrize("agent_runtime_preflight", [True, False])
@@ -2574,13 +2761,12 @@ def test_harbor_failure_detail_redacts_runtime_secrets_without_streaming(
     secret = "plain-runtime-secret"
     monkeypatch.setattr(runner, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
     monkeypatch.setattr(
-        runner.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            ["harbor", "run"],
-            17,
-            stdout=f"OPENAI_API_KEY={secret}\nraw agent output",
-            stderr=f"token={secret}\nraw verifier output",
+        runner,
+        "_run_bounded_harbor_process",
+        lambda *_args, **_kwargs: runner._BoundedHarborProcessResult(
+            returncode=17,
+            output_tail=f"OPENAI_API_KEY={secret}\nraw agent output\ntoken={secret}\nraw verifier output",
+            output_exceeded=False,
         ),
     )
 
@@ -2602,6 +2788,46 @@ def test_harbor_failure_detail_redacts_runtime_secrets_without_streaming(
 
     assert ok is False
     assert secret not in detail
+    assert "<redacted>" in detail
+
+
+def test_harbor_failure_detail_redacts_before_tail_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    secret = "SYNTHETIC_SECRET_ABCDEF"
+    monkeypatch.setattr(runner, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
+    monkeypatch.setattr(
+        runner,
+        "_run_bounded_harbor_process",
+        lambda *_args, **_kwargs: runner._BoundedHarborProcessResult(
+            returncode=17,
+            output_tail="prefix|" + secret + "x" * 1988,
+            output_exceeded=False,
+        ),
+    )
+
+    ok, detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="codex",
+        job_name="demo-codex-with",
+        env_mode="docker",
+        model="gpt-5",
+        jobs_dir=tmp_path,
+        run_env={"CUSTOM_RUNTIME_VALUE": secret},
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+
+    assert ok is False
+    assert secret not in detail
+    assert "CRET_ABCDEF" not in detail
     assert "<redacted>" in detail
 
 

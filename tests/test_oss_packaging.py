@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import re
 import subprocess
 import sys
 import tarfile
 import tomllib
 import zipfile
+from importlib.metadata import metadata
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -19,6 +22,11 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from skillevaluator.cli import cli
+from skillevaluator.tier3_environments import (
+    HARBOR_ENVIRONMENT_EXTRAS,
+    HARBOR_ENVIRONMENTS,
+    HARBOR_NATIVE_ENV_MODES,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_REQUIRED_FILES = (
@@ -119,6 +127,219 @@ def test_public_extras_use_public_dependency_sources() -> None:
     )
 
 
+def test_harbor_022_dependency_contract_keeps_base_install_isolated() -> None:
+    project = _project()
+    extras = project["project"]["optional-dependencies"]
+    base_requirements = [Requirement(raw) for raw in project["project"]["dependencies"]]
+    llm_requirements = [Requirement(raw) for raw in extras["llm"]]
+    tier3_requirements = [Requirement(raw) for raw in extras["tier3"]]
+
+    base_names = {canonicalize_name(requirement.name) for requirement in base_requirements}
+    harbor_requirements = [
+        requirement for requirement in tier3_requirements if canonicalize_name(requirement.name) == "harbor"
+    ]
+    litellm_requirements = [
+        requirement for requirement in llm_requirements if canonicalize_name(requirement.name) == "litellm"
+    ]
+
+    assert base_names.isdisjoint({"harbor", "litellm"})
+    assert len(harbor_requirements) == 1
+    assert not harbor_requirements[0].extras
+    assert str(harbor_requirements[0].specifier) == "==0.22.0"
+    assert len(litellm_requirements) == 1
+    litellm_specifier = litellm_requirements[0].specifier
+    assert litellm_specifier.contains(Version("1.92.0"), prereleases=True)
+    assert litellm_specifier.contains(Version("1.93.0"), prereleases=True)
+    assert not litellm_specifier.contains(Version("1.94.0.dev0"), prereleases=True)
+    declared_names = base_names | {
+        canonicalize_name(Requirement(raw).name) for requirements in extras.values() for raw in requirements
+    }
+    assert "claude-agent-sdk" not in declared_names
+
+    lock = _lock()
+    locked_versions = {
+        name: [Version(package["version"]) for package in lock["package"] if package["name"] == name]
+        for name in ("harbor", "litellm")
+    }
+    assert locked_versions["harbor"] == [Version("0.22.0")]
+    assert len(locked_versions["litellm"]) == 1
+    assert litellm_specifier.contains(locked_versions["litellm"][0], prereleases=True)
+
+    root_lock = next(package for package in lock["package"] if package["name"] == "skillevaluator")
+    locked_requirements = root_lock["metadata"]["requires-dist"]
+    locked_harbor = [requirement for requirement in locked_requirements if requirement["name"] == "harbor"]
+    locked_litellm = [requirement for requirement in locked_requirements if requirement["name"] == "litellm"]
+    assert [requirement["specifier"] for requirement in locked_harbor] == ["==0.22.0"]
+    assert [requirement["specifier"] for requirement in locked_litellm] == [">=1.92.0,<1.94.0.dev0"]
+
+
+def test_harbor_environment_extra_mapping_matches_installed_metadata() -> None:
+    provided_extras = set(metadata("harbor").get_all("Provides-Extra") or ())
+    system_or_base_backends = {"docker", "openshift", "apple-container", "singularity"}
+
+    assert len(HARBOR_ENVIRONMENTS) == 27
+    assert len(HARBOR_NATIVE_ENV_MODES) == 26
+    assert frozenset(HARBOR_ENVIRONMENTS) - {"local"} == HARBOR_NATIVE_ENV_MODES
+    assert set(HARBOR_ENVIRONMENT_EXTRAS) == HARBOR_NATIVE_ENV_MODES
+    assert {mode for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items() if extra is None} == system_or_base_backends
+    assert {extra for extra in HARBOR_ENVIRONMENT_EXTRAS.values() if extra is not None} <= provided_extras
+    assert {
+        mode: extra for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items() if extra is not None and extra != mode
+    } == {"ack": "gke", "cua-cloud": "cua"}
+    assert HARBOR_ENVIRONMENT_EXTRAS["ack"] == "gke"
+    assert "cloud" in provided_extras
+    assert HARBOR_ENVIRONMENT_EXTRAS["cua-cloud"] == "cua"
+
+
+def _harbor_022_environment_kwargs_from_installed_source() -> dict[str, frozenset[str]]:
+    """Read the pinned Harbor sources without importing optional backend SDKs."""
+    harbor_spec = importlib.util.find_spec("harbor")
+    assert harbor_spec is not None and harbor_spec.origin is not None
+    environments_root = Path(harbor_spec.origin).parent / "environments"
+
+    source_trees: dict[Path, ast.Module] = {
+        path: ast.parse(path.read_text(encoding="utf-8")) for path in environments_root.rglob("*.py")
+    }
+    class_index: dict[str, tuple[ast.ClassDef, ast.Module]] = {}
+    for tree in source_trees.values():
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                class_index[node.name] = (node, tree)
+
+    def literal_kwarg_accesses(node: ast.AST, *, name: str | None = None, attribute: str | None = None) -> set[str]:
+        keys: set[str] = set()
+        for candidate in ast.walk(node):
+            source: ast.AST | None = None
+            if isinstance(candidate, ast.Call) and isinstance(candidate.func, ast.Attribute):
+                if candidate.func.attr in {"get", "pop"} and candidate.args:
+                    source = candidate.func.value
+                    key_node = candidate.args[0]
+                else:
+                    continue
+            elif isinstance(candidate, ast.Subscript):
+                source = candidate.value
+                key_node = candidate.slice
+            else:
+                continue
+            source_matches = (name is not None and isinstance(source, ast.Name) and source.id == name) or (
+                attribute is not None and isinstance(source, ast.Attribute) and source.attr == attribute
+            )
+            if source_matches and isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                keys.add(key_node.value)
+        return keys
+
+    resolved_classes: dict[str, frozenset[str]] = {}
+
+    def class_kwargs(class_name: str) -> frozenset[str]:
+        if class_name in resolved_classes:
+            return resolved_classes[class_name]
+        class_node, module_tree = class_index[class_name]
+        names: set[str] = set()
+        for base in class_node.bases:
+            base_name = (
+                base.id if isinstance(base, ast.Name) else base.attr if isinstance(base, ast.Attribute) else None
+            )
+            if base_name in class_index:
+                names.update(class_kwargs(base_name))
+        initializer = next(
+            (node for node in class_node.body if isinstance(node, ast.FunctionDef) and node.name == "__init__"),
+            None,
+        )
+        if initializer is not None:
+            names.update(
+                argument.arg
+                for argument in (
+                    *initializer.args.posonlyargs,
+                    *initializer.args.args,
+                    *initializer.args.kwonlyargs,
+                )
+                if argument.arg != "self"
+            )
+            if initializer.args.kwarg is not None:
+                names.update(literal_kwarg_accesses(initializer, name=initializer.args.kwarg.arg))
+        names.update(literal_kwarg_accesses(module_tree, attribute="_kwargs"))
+        resolved = frozenset(names)
+        resolved_classes[class_name] = resolved
+        return resolved
+
+    factory_tree = source_trees[environments_root / "factory.py"]
+    registry = next(
+        node.value
+        for node in factory_tree.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "_ENVIRONMENT_REGISTRY"
+    )
+    assert isinstance(registry, ast.Dict)
+
+    from harbor.models.environment_type import EnvironmentType
+
+    contract: dict[str, frozenset[str]] = {}
+    for key, value in zip(registry.keys, registry.values, strict=True):
+        assert isinstance(key, ast.Attribute)
+        assert isinstance(value, ast.Call)
+        class_name_node = value.args[1]
+        assert isinstance(class_name_node, ast.Constant) and isinstance(class_name_node.value, str)
+        contract[EnvironmentType[key.attr].value] = class_kwargs(class_name_node.value)
+    return contract
+
+
+def test_harbor_022_environment_kwarg_contract_matches_installed_source() -> None:
+    from skillevaluator import tier3_environments
+
+    contract = getattr(tier3_environments, "HARBOR_V022_ENVIRONMENT_KWARGS", None)
+
+    assert contract is not None
+    assert contract == _harbor_022_environment_kwargs_from_installed_source()
+
+
+def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
+    agents = (REPO_ROOT / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8")
+    cli_reference = (REPO_ROOT / "docs" / "cli-reference.mdx").read_text(encoding="utf-8")
+    configuration = (REPO_ROOT / "docs" / "configuration.mdx").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    eval_config = (REPO_ROOT / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8")
+    public_docs = f"{agents}\n{cli_reference}\n{configuration}\n{tier3}\n{eval_config}"
+    normalized_docs = " ".join(public_docs.split())
+
+    assert "27 environment modes" in public_docs
+    assert "26 Harbor-native backends" in public_docs
+    assert "All 16 values" not in public_docs
+    assert "same 16 values" not in public_docs
+    assert "14 additional Harbor-native backends" not in public_docs
+    assert all(f"`{mode}`" in agents for mode in HARBOR_ENVIRONMENTS)
+    for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items():
+        if extra is not None:
+            assert f"| `{mode}` | Harbor-native | `harbor[{extra}]==0.22.0`" in agents
+    assert "`harbor[cloud]==0.22.0`" not in public_docs
+    assert "OpenSandbox requires either a non-empty `domain`" in normalized_docs
+    assert "does not contact AWS" in normalized_docs
+    assert "does not contact the GKE cluster" in normalized_docs
+    assert "no harbor python extra" in agents.lower()
+    assert "`--environment-kwarg`, `--ek`" in cli_reference
+    assert "repeatable" in cli_reference
+    assert "harbor.environment_kwargs" not in eval_config
+    assert all(name in public_docs for name in ("cluster_name", "registry_location", "ami_id", "instance_id"))
+    assert "never pass secrets" in public_docs
+    assert "only for Harbor-native non-Docker backends" in normalized_docs
+    assert "`docker` and `local` reject any environment kwargs" in normalized_docs
+    assert "operator-only" in normalized_docs
+    assert "skill-owned `evals/config.yml` cannot set" in normalized_docs
+    assert "Harbor runtime policy" in normalized_docs
+    assert all(
+        name in public_docs
+        for name in ("override_cpus", "mounts", "network_policy", "extra_docker_compose", "keep_containers")
+    )
+    kwarg_examples = [
+        block
+        for document in (agents, cli_reference, configuration, tier3, eval_config)
+        for block in re.findall(r"```(?:bash|shell|yaml)[^\n]*\n.*?```", document, flags=re.DOTALL)
+        if "--environment-kwarg " in block or "--ek " in block
+    ]
+    assert kwarg_examples
+    assert all(re.search(r"--env-mode (?:ec2|gke|ack)\b", block) for block in kwarg_examples)
+
+
 def test_public_extras_exclude_internal_runtime_dependencies() -> None:
     project = _project()
     extras = project["project"]["optional-dependencies"]
@@ -193,6 +414,31 @@ def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     assert len(idna_requirements) == 1
     assert str(idna_requirements[0].specifier) == "<4,>=3.10"
     assert "IDNA (BSD-3-Clause)" in notices
+
+
+def test_tier3_direct_dependencies_have_complete_license_notices() -> None:
+    tier3 = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["tier3"]]
+    direct_packages = {
+        canonicalize_name(requirement.name)
+        for requirement in tier3
+        if canonicalize_name(requirement.name) != "skillevaluator"
+    }
+    expected_notices = {
+        "harbor": "Harbor (Apache-2.0)",
+        "mcp": "MCP (MIT)",
+        "pyjwt": "PyJWT (MIT)",
+    }
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+
+    assert direct_packages == expected_notices.keys()
+    assert all(notice in notices for notice in expected_notices.values())
+
+
+def test_public_docker_docs_explain_project_dotenv_rejection() -> None:
+    agents_and_sandboxes = (REPO_ROOT / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8")
+
+    assert "Docker Compose project `.env` files are rejected before startup" in agents_and_sandboxes
+    assert "`harbor.runtime_env`" in agents_and_sandboxes
 
 
 def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -> None:
@@ -462,6 +708,15 @@ def test_ci_scans_source_and_built_distributions_for_oss_boundary_violations() -
     assert workflow.index("uv build --python 3.13 --no-sources") < workflow.index(artifact_scan)
 
 
+def test_ci_installs_the_built_tier3_wheel_on_python_312_and_313() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    package_job = workflow.split("  package:\n", 1)[1].split("\n  tier3-macos:\n", 1)[0]
+
+    assert "for python_version in 3.12 3.13; do" in package_job
+    assert 'uv venv --python "$python_version" "$venv"' in package_job
+    assert 'uv pip install --python "$venv/bin/python" "${wheel}[tier3]"' in package_job
+
+
 def test_retired_private_upload_artifact_is_not_part_of_public_gitignore() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
     retired_artifact = "." + "harbor" + "-viewer-upload/"  # oss-boundary-anchor: gitignore-retired-upload-artifact
@@ -578,6 +833,27 @@ def test_tier3_docs_explain_cost_controls_and_local_mode_tradeoffs() -> None:
     assert "--env-mode local" in tier3
     assert "does **not** automatically eliminate model charges" in tier3
     assert "weaker isolation than Docker" in tier3
+
+
+def test_tier3_docs_name_the_supported_harbor_backend_version() -> None:
+    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(tier3.split())
+
+    assert "The `tier3` extra installs Harbor 0.22.0" in normalized
+    assert "The exact Harbor pin is deliberate" in normalized
+    assert "stable Harbor 0.22.0 rather than unreleased `main`" in normalized
+    assert "litellm>=1.92.0,<1.94.0.dev0" in normalized
+    assert "static Tier 1 installs do not pull it in" in normalized
+    assert "0.13.2" not in normalized
+
+
+def test_tier3_docs_describe_the_current_nvidia_build_docker_handoff() -> None:
+    sandboxes = (REPO_ROOT / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(sandboxes.split())
+
+    assert "host-only key file" not in normalized
+    assert "trusted parent process over stdin" in normalized
+    assert "short-lived, container-only stdin handoff" in normalized
 
 
 def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:

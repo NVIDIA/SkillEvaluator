@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
+GITLEAKS_CONFIG = ROOT / ".gitleaks.toml"
 
 REQUIRED_CI_JOBS = {
     "test-python-312": "Tests (Python 3.12)",
@@ -134,6 +136,7 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
     assert jobs["tier2-windows"]["runs-on"] == "windows-latest"
     assert "tests/embedding" in _runs(jobs["tier2-macos"])
     assert "tests/embedding" in _runs(jobs["tier2-windows"])
+    assert "tests/test_harbor_runner_status.py" in _runs(jobs["tier2-windows"])
     assert jobs["tier3-macos"]["runs-on"] == "macos-latest"
     assert "tests/test_tier3_progress.py" in _runs(jobs["tier3-macos"])
     assert jobs["native-windows-local-mode"]["runs-on"] == "windows-latest"
@@ -174,6 +177,31 @@ def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() ->
     assert "vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true'" in codeql_if
 
 
+def test_gitleaks_synthetic_harbor_allowlists_are_exactly_scoped() -> None:
+    config = tomllib.loads(GITLEAKS_CONFIG.read_text(encoding="utf-8"))
+    allowlists = {entry["description"]: entry for entry in config["allowlists"]}
+
+    expected = {
+        "Synthetic NVIDIA Build token used by streaming redaction tests": (
+            "^Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8$",
+            r"^tests/test_harbor_local_mode\.py$",
+        ),
+        "Synthetic main-container values used by Docker isolation tests": (
+            r"^main-(persistent|task|scoped)-secret-[0-9]{5}$",
+            r"^tests/test_harbor_secure_docker_environment\.py$",
+        ),
+    }
+    for description, (regex, path) in expected.items():
+        entry = allowlists[description]
+        assert entry == {
+            "description": description,
+            "condition": "AND",
+            "targetRules": ["generic-api-key"],
+            "regexes": [regex],
+            "paths": [path],
+        }
+
+
 def test_dco_stays_unconditional_and_has_no_path_filter() -> None:
     dco = _load("dco.yml")
 
@@ -200,6 +228,8 @@ def test_changed_workflows_pin_every_action_to_a_commit() -> None:
 
 def test_changed_workflows_do_not_persist_checkout_credentials() -> None:
     for workflow_name in ("ci.yml", "security.yml"):
-        checkout_steps = [step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")]
+        checkout_steps = [
+            step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")
+        ]
         assert checkout_steps
         assert all(step.get("with", {}).get("persist-credentials") == "false" for step in checkout_steps)

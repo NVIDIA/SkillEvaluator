@@ -2655,16 +2655,27 @@
 
             {% if tier3.trials %}
 
+            {% set t3_trial_agent_groups = (tier3.trials or []) | groupby('agent') %}
+            {% set t3_token_coverage = namespace(all_agents_complete=(t3_trial_agent_groups | length == (tier3.agents or {}) | length)) %}
+            {% for t3_agent_group in t3_trial_agent_groups %}
+                {% set t3_agent_token_trials = t3_agent_group.list | selectattr('tokens', 'defined') | list %}
+                {% if t3_agent_token_trials | length != t3_agent_group.list | length %}
+                    {% set t3_token_coverage.all_agents_complete = false %}
+                {% endif %}
+            {% endfor %}
+            {% set t3_step_trials = (tier3.trials or []) | selectattr('steps', 'defined') | list %}
             {# Charts moved above the heatmap so the visualization narrative is summary-chart -> pivot -> drill-down #}
+            {% if t3_token_coverage.all_agents_complete or t3_step_trials %}
             <details class="t3-details" open>
                 <summary>Trial Charts</summary>
                 <div class="t3-details-body">
                 <div class="chart-grid">
-                    <div class="chart-card"><h3>Token Usage by Agent</h3><canvas id="tier3-token-chart" height="250"></canvas></div>
-                    <div class="chart-card"><h3>Steps per Eval Case</h3><canvas id="tier3-steps-chart" height="250"></canvas></div>
+                    {% if t3_token_coverage.all_agents_complete %}<div class="chart-card"><h3>With-Skill Token Usage by Agent</h3><canvas id="tier3-token-chart" height="250"></canvas></div>{% endif %}
+                    {% if t3_step_trials %}<div class="chart-card"><h3>With-Skill Steps per Eval Case</h3><canvas id="tier3-steps-chart" height="250"></canvas></div>{% endif %}
                 </div>
                 </div>
             </details>
+            {% endif %}
 
             {# ----- Attempt Details: SkillEvaluator-style per-case attempt-score breakdown ----- #}
             {% set t3_pass_threshold = (t3_attempt_policy.pass_threshold if t3_attempt_policy.pass_threshold is not none else 0.5) | float %}
@@ -2774,7 +2785,7 @@
 
             {# ----- Detailed per-evaluator drill-down (collapsed; preserves all original info) ----- #}
             <details class="t3-details">
-                <summary>Per-Evaluator Drill-Down</summary>
+                <summary>With-Skill Per-Evaluator Drill-Down</summary>
                 <div class="t3-details-body">
                 <div class="t3-filter-bar">
                     <input class="t3-filter-input" type="search" placeholder="Filter by agent, case, score..." oninput="tier3FilterTable(this, 't3-trials-table')" aria-label="Filter trials">
@@ -2801,8 +2812,8 @@
                                 {% set s = scores.get(eval_id) %}
                                 <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% endif %}">{{ "%.2f" | format(s) if s is not none else "—" }}</td>
                             {% endfor %}
-                            <td>{{ trial.steps or 0 }}</td>
-                            <td>{{ ((tokens.prompt or 0) + (tokens.completion or 0)) }}</td>
+                            <td>{{ trial.steps if trial.steps is number else "—" }}</td>
+                            <td>{% if tokens.prompt is number and tokens.completion is number %}{{ tokens.prompt + tokens.completion }}{% else %}—{% endif %}</td>
                             <td>{% if trial.warnings %}<span class="t3-pill warning">{{ trial.warnings | length }}</span>{% else %}—{% endif %}</td>
                         </tr>
                     {% endfor %}
@@ -3678,13 +3689,27 @@
             }
             function tokenTotalsByAgent() {
                 var totals = {};
+                var trialCounts = {};
                 (tier3Data.trials || []).forEach(function(trial){
                     var name = trial.agent || "default";
-                    if (!totals[name]) totals[name] = {prompt:0, completion:0, cached:0};
+                    trialCounts[name] = (trialCounts[name] || 0) + 1;
                     var tokens = trial.tokens || {};
-                    totals[name].prompt += Number(tokens.prompt || 0);
-                    totals[name].completion += Number(tokens.completion || 0);
-                    totals[name].cached += Number(tokens.cached || 0);
+                    var prompt = tokens.prompt;
+                    var completion = tokens.completion;
+                    if (typeof prompt !== "number" || !Number.isFinite(prompt) || prompt < 0 ||
+                        typeof completion !== "number" || !Number.isFinite(completion) || completion < 0) return;
+                    if (!totals[name]) totals[name] = {prompt:0, completion:0, cached:0, observed:0, cachedComplete:true};
+                    totals[name].prompt += prompt;
+                    totals[name].completion += completion;
+                    totals[name].observed += 1;
+                    if (typeof tokens.cached !== "number" || !Number.isFinite(tokens.cached) || tokens.cached < 0) {
+                        totals[name].cachedComplete = false;
+                    } else {
+                        totals[name].cached += tokens.cached;
+                    }
+                });
+                Object.keys(totals).forEach(function(name){
+                    if (totals[name].observed !== trialCounts[name]) delete totals[name];
                 });
                 return totals;
             }
@@ -3703,8 +3728,12 @@
                             label: name,
                             data: entries.map(function(entry){
                                 var matching = (tier3Data.trials || []).filter(function(t){ return (t.agent || "default") === name && (t.entry_id || t.trial_id || "?") === entry; });
-                                if (!matching.length) return 0;
-                                return matching.reduce(function(sum, t){ return sum + Number(t.steps || 0); }, 0) / matching.length;
+                                if (!matching.length) return null;
+                                var observed = matching.map(function(t){ return t.steps; }).filter(function(value){
+                                    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+                                });
+                                if (observed.length !== matching.length) return null;
+                                return observed.reduce(function(sum, value){ return sum + value; }, 0) / observed.length;
                             }),
                             backgroundColor: palette[idx % palette.length] + "cc",
                             borderRadius: 4
@@ -3773,14 +3802,14 @@
                         data: {
                             labels: tokenAgents,
                             datasets: [
-                                { label: "Prompt", data: tokenAgents.map(function(a){ return tokenTotals[a].prompt; }), backgroundColor: "#3b82f6cc", borderRadius: 3 },
+                                { label: "Prompt (total)", data: tokenAgents.map(function(a){ return tokenTotals[a].prompt; }), backgroundColor: "#3b82f6cc", borderRadius: 3 },
                                 { label: "Completion", data: tokenAgents.map(function(a){ return tokenTotals[a].completion; }), backgroundColor: "#22c55ecc", borderRadius: 3 },
-                                { label: "Cached", data: tokenAgents.map(function(a){ return tokenTotals[a].cached; }), backgroundColor: "#8b5cf6cc", borderRadius: 3 }
+                                { label: "Cached (included in prompt)", data: tokenAgents.map(function(a){ return tokenTotals[a].cachedComplete ? tokenTotals[a].cached : null; }), backgroundColor: "#8b5cf6cc", borderRadius: 3 }
                             ]
                         },
                         options: {
                             responsive: true,
-                            scales: { x: { stacked: true, ticks: { color: colors.tick }, grid: { color: colors.grid } }, y: { stacked: true, ticks: { color: colors.label }, grid: { display: false } } },
+                            scales: { x: { ticks: { color: colors.tick }, grid: { color: colors.grid } }, y: { beginAtZero: true, ticks: { color: colors.label }, grid: { display: false } } },
                             plugins: { legend: { labels: { color: colors.label } } }
                         }
                     }));

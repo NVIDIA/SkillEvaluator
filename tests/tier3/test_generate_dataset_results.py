@@ -12,6 +12,7 @@ import pytest
 from skillevaluator.tier3 import generate_dataset
 from skillevaluator.tier3.generate_dataset import (
     _discover_trajectories,
+    _generate_full,
     _run_agent_collect_trajectories,
     _to_agentskills_dataset,
 )
@@ -298,3 +299,21 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
+
+
+def test_no_llm_negative_case_does_not_name_the_skill():
+    """Default --no-llm negative prompt must stay off-skill, not ask what the skill does."""
+    skill = {
+        "name": "pdf-extractor",
+        "description": "Extracts tables from PDF files",
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "pdf-extractor-neg-001")
+    assert negative["expected_skill"] is None
+    assert "pdf-extractor" not in negative["question"]
+    assert "pdf-extractor" not in negative["ground_truth"]
+    for behavior in negative["expected_behavior"]:
+        assert "pdf-extractor" not in behavior
+    assert "without reading or applying this skill" in negative["expected_behavior"][0]

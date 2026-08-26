@@ -295,13 +295,13 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "id": f"{name}-neg-001",
             "question": hint_qs[3]
             if len(hint_qs) > 3
-            else f"What does the {name} skill do and what are its capabilities?",
+            else "What's a good way to organize weekend errands in a new city?",
             "expected_skill": None,
             "expected_script": None,
-            "ground_truth": f"The agent explained the {name} skill's capabilities and when to use it, without executing any scripts",
+            "ground_truth": "The agent answered an unrelated question without loading or applying this skill",
             "expected_behavior": [
-                "The agent responded conversationally without executing tools or scripts",
-                f"The agent's response accurately describes what {name} does",
+                "The agent responded without reading or applying this skill",
+                "The agent did not invoke this skill's tools or scripts",
                 SECURITY_BEHAVIOR,
             ],
         },

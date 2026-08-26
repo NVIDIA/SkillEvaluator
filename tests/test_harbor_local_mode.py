@@ -3789,6 +3789,23 @@ def test_runtime_injection_env_is_blocked_before_launcher(name: str, tmp_path: P
     assert name in (result.stderr or "")
 
 
+@pytest.mark.parametrize("name", ["BASH_ENV", "ENV", "NODE_OPTIONS", "PYTHONPATH"])
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+def test_empty_evaluator_loader_reset_is_removed_before_launcher(name: str, tmp_path: Path) -> None:
+    environment = _initialized_local_environment(tmp_path)
+
+    async def exercise() -> object:
+        await environment.start()
+        try:
+            return await environment.exec(f'test -z "${{{name}+x}}"', env={name: ""})
+        finally:
+            await environment.stop(delete=True)
+
+    result = asyncio.run(exercise())
+
+    assert result.return_code == 0, result.stderr
+
+
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 @pytest.mark.parametrize(
     ("command", "cwd", "env", "secret"),

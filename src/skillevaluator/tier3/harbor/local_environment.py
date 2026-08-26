@@ -1645,6 +1645,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         for key, value in env.items():
             normalized = key.upper()
             if normalized in _BLOCKED_COMMAND_ENV_NAMES or normalized.startswith(_BLOCKED_COMMAND_ENV_PREFIXES):
+                # Docker tasks deliberately reset loader-controlled variables
+                # to the empty string.  In local mode, absence is the safer
+                # equivalent; reject every non-empty value and drop the reset.
+                if value == "":
+                    continue
                 raise ValueError(
                     f"environment variable {key} can execute or alter code before confinement and is not allowed"
                 )

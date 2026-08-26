@@ -1013,6 +1013,38 @@ def test_merge_attempt_jobs_preserves_regular_trial_artifacts(tmp_path: Path) ->
     assert parsed_config.job_name == aggregate_dir.name
 
 
+def test_merge_attempt_jobs_normalizes_mixed_naive_and_aware_timestamps(tmp_path: Path) -> None:
+    from harbor.viewer.scanner import JobScanner
+
+    job_dir = tmp_path / "attempt-001"
+    _write_current_harbor_attempt(
+        job_dir,
+        trial_name="case-001__trial",
+        root_completed=1,
+    )
+    root_result_path = job_dir / "result.json"
+    root_result = json.loads(root_result_path.read_text(encoding="utf-8"))
+    root_result.update(
+        {
+            "started_at": "2026-08-25T19:00:00",
+            "updated_at": "2026-08-25T19:01:00",
+            "finished_at": "2026-08-25T19:01:00",
+        }
+    )
+    root_result_path.write_text(json.dumps(root_result, indent=2), encoding="utf-8")
+    aggregate_dir = tmp_path / "aggregate"
+
+    runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    merged = JobScanner(tmp_path).get_job_result(aggregate_dir.name)
+    assert merged is not None
+    assert merged.started_at.tzinfo is not None
+    assert merged.updated_at.tzinfo is not None
+    assert merged.finished_at is not None
+    assert merged.finished_at.tzinfo is not None
+    assert merged.started_at <= merged.updated_at
+
+
 def _write_current_harbor_attempt(
     job_dir: Path,
     *,

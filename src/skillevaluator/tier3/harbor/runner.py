@@ -2698,6 +2698,17 @@ def _job_root_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int,
 _AGGREGATE_TRIAL_NAME_MAX_BYTES = 224
 
 
+def _utc_aware_datetime(value: datetime) -> datetime:
+    """Normalize Harbor timestamps before ordering mixed local/UTC results.
+
+    Harbor 0.22 job summaries can contain naive host-local timestamps while
+    their child trial results use explicit UTC offsets.  ``astimezone`` treats
+    a naive value as host-local time, matching the process that wrote the job
+    summary, and gives the aggregate one comparable UTC representation.
+    """
+    return value.astimezone(UTC)
+
+
 def _utf8_prefix(value: str, max_bytes: int) -> str:
     """Return a UTF-8-safe prefix bounded by encoded byte length."""
     encoded = value.encode("utf-8")
@@ -2817,9 +2828,11 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 except Exception:
                     source_job_model = None
                 if source_job_model is not None:
-                    source_started_at.append(source_job_model.started_at)
+                    source_started_at.append(_utc_aware_datetime(source_job_model.started_at))
                     source_updated_at.append(
-                        source_job_model.updated_at or source_job_model.finished_at or source_job_model.started_at
+                        _utc_aware_datetime(
+                            source_job_model.updated_at or source_job_model.finished_at or source_job_model.started_at
+                        )
                     )
             root_trial_results: dict[str, dict[str, Any]] = {}
             if isinstance(source_job_result, dict) and isinstance(source_job_result.get("trial_results"), list):
@@ -2951,11 +2964,17 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
             encoding="utf-8",
         )
 
-        trial_finished_at = [result.finished_at for result in merged_trial_results if result.finished_at is not None]
+        trial_finished_at = [
+            _utc_aware_datetime(result.finished_at) for result in merged_trial_results if result.finished_at is not None
+        ]
         aggregate_updated_at = max([*trial_finished_at, *source_updated_at], default=datetime.now(UTC))
         aggregate_started_at = min(
             [
-                *(result.started_at for result in merged_trial_results if result.started_at is not None),
+                *(
+                    _utc_aware_datetime(result.started_at)
+                    for result in merged_trial_results
+                    if result.started_at is not None
+                ),
                 *source_started_at,
             ],
             default=aggregate_updated_at,

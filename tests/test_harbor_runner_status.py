@@ -113,7 +113,7 @@ def test_bounded_harbor_process_drops_partial_secret_at_output_limit() -> None:
     secret = "SYNTHETIC_SECRET_ABCDEF"
     prefix = "ordinary-prefix|"
     accepted_secret_prefix = secret[:-3]
-    script = f"import os; os.write(2, {(prefix + secret + '|overflow').encode()!r})"
+    script = f"import os,time; os.write(2, {(prefix + secret + '|overflow').encode()!r}); time.sleep(30)"
 
     result = runner._run_bounded_harbor_process(
         [sys.executable, "-c", script],
@@ -449,6 +449,41 @@ def test_windows_tree_cleanup_uses_verified_system32_taskkill_despite_path_and_c
     assert selected_taskkill.is_absolute()
     assert selected_taskkill.resolve() == trusted_taskkill.resolve()
     assert selected_taskkill.resolve() != decoy_taskkill.resolve()
+
+
+def test_windows_tree_cleanup_fails_closed_when_taskkill_misses_an_exited_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WindowsOs:
+        name = "nt"
+
+    class FakeProcess:
+        def __init__(self, *, pid: int, returncode: int | None) -> None:
+            self.pid = pid
+            self.returncode = returncode
+            self.killed = False
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return int(self.returncode or 0)
+
+    taskkill_process = FakeProcess(pid=99, returncode=1)
+    root_process = FakeProcess(pid=4242, returncode=0)
+    monkeypatch.setattr(runner, "os", WindowsOs())
+    monkeypatch.setattr(runner, "_verified_windows_taskkill_path", lambda: Path("/trusted/taskkill.exe"))
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: taskkill_process)
+
+    with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed"):
+        runner._terminate_harbor_process_tree(root_process)  # type: ignore[arg-type]
+
+    assert root_process.killed is False
 
 
 @pytest.mark.parametrize("candidate_kind", ["missing", "directory"])

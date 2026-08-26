@@ -8,8 +8,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - PII scanning no longer treats Markdown ATX headings as code comments, so
   emails in headings such as `# Contact: ...` are flagged. Hash lines inside
-  Python string literals and YAML block scalars are scanned too, while real
-  comments stay skipped ([#88](https://github.com/NVIDIA/SkillEvaluator/issues/88)).
+  Python strings, YAML scalars, and shell heredocs are scanned too. Real
+  comments stay skipped, including YAML frontmatter, fenced code, and
+  `requirements.txt` ([#88](https://github.com/NVIDIA/SkillEvaluator/issues/88)).
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

@@ -24,6 +24,9 @@ import tokenize
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+import yaml
+from yaml.events import ScalarEvent
+
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
     HOME_PATH_SUBMITTER_ENV_VARS,
@@ -124,7 +127,20 @@ _SKILLSPECTOR_LLM_FAILURE_MARKERS = (
 )
 _LLM_VERDICTS = frozenset({"true_positive", "false_positive", "uncertain"})
 _LLM_CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
-_YAML_BLOCK_SCALAR_OPENER = re.compile(r":\s*[|>][-+]?\d*\s*$")
+_HEREDOC_OPEN = re.compile(r"""<<-?(?!<)\s*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))""")
+_FENCE_OPEN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+_PYTHON_FENCE_LANGS = frozenset({"python", "py", "python3"})
+_YAML_FENCE_LANGS = frozenset({"yaml", "yml"})
+_SHELL_FENCE_LANGS = frozenset({"sh", "bash", "shell", "zsh"})
+
+
+def _leading_hash_or_slash_comment_lines(lines: list[str]) -> frozenset[int]:
+    """Lines whose first non-space text is `#` or `//`."""
+    return frozenset(index for index, line in enumerate(lines, 1) if line.lstrip().startswith(("#", "//")))
+
+
+def _shift_line_numbers(line_numbers: frozenset[int], offset: int) -> frozenset[int]:
+    return frozenset(number + offset for number in line_numbers)
 
 
 def _python_comment_line_numbers(source: str) -> frozenset[int]:
@@ -138,28 +154,116 @@ def _python_comment_line_numbers(source: str) -> frozenset[int]:
             if token.line.lstrip().startswith("#"):
                 skip.add(token.start[0])
     except (tokenize.TokenError, IndentationError, SyntaxError):
-        return frozenset()
+        return _leading_hash_or_slash_comment_lines(source.split("\n"))
     return frozenset(skip)
 
 
-def _yaml_comment_line_numbers(lines: list[str]) -> frozenset[int]:
-    """Line numbers that are YAML comments, excluding block/folded scalar content."""
-    skip: set[int] = set()
-    block_indent: int | None = None
-    for line_number, line in enumerate(lines, 1):
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if block_indent is not None:
-            if indent > block_indent:
+def _yaml_scalar_content_lines(source: str) -> frozenset[int] | None:
+    """1-indexed lines covered by YAML scalars, or None when the document cannot be parsed."""
+    try:
+        covered: set[int] = set()
+        for event in yaml.parse(source, Loader=yaml.SafeLoader):
+            if not isinstance(event, ScalarEvent):
                 continue
-            block_indent = None
-        if line.lstrip().startswith("#"):
-            skip.add(line_number)
+            start = event.start_mark.line
+            end = event.end_mark.line - (1 if event.end_mark.column == 0 else 0)
+            for index in range(start, max(start, end) + 1):
+                covered.add(index + 1)
+        return frozenset(covered)
+    except yaml.YAMLError:
+        return None
+
+
+def _yaml_comment_line_numbers(lines: list[str]) -> frozenset[int]:
+    """YAML `#` comments only. Scalar content, including block and quoted forms, is scanned."""
+    covered = _yaml_scalar_content_lines("\n".join(lines))
+    if covered is None:
+        return frozenset()
+    return frozenset(
+        index for index, line in enumerate(lines, 1) if line.lstrip().startswith("#") and index not in covered
+    )
+
+
+def _shell_comment_line_numbers(lines: list[str]) -> frozenset[int]:
+    """Shell `#` comments, excluding heredoc payloads."""
+    skip: set[int] = set()
+    delimiter: str | None = None
+    strip_tabs = False
+    for index, line in enumerate(lines, 1):
+        if delimiter is not None:
+            candidate = line.rstrip("\r\n")
+            if strip_tabs:
+                candidate = candidate.lstrip("\t")
+            if candidate == delimiter:
+                delimiter = None
             continue
-        opener = line.split("#", 1)[0].rstrip()
-        if _YAML_BLOCK_SCALAR_OPENER.search(opener):
-            block_indent = indent
+        if line.lstrip().startswith("#"):
+            skip.add(index)
+            continue
+        opened = _HEREDOC_OPEN.search(line)
+        if opened:
+            delimiter = opened.group(1) or opened.group(2) or opened.group(3)
+            strip_tabs = "<<-" in opened.group(0)
+    return frozenset(skip)
+
+
+def _fence_language(info: str) -> str:
+    token = info.strip().split()[0] if info.strip() else ""
+    return token.strip("{.}").lower()
+
+
+def _is_closing_fence(line: str, marker: str) -> bool:
+    stripped = line.strip()
+    return len(stripped) >= len(marker) and set(stripped) <= {marker[0]}
+
+
+def _comments_for_language(language: str, lines: list[str]) -> frozenset[int]:
+    if language in _PYTHON_FENCE_LANGS:
+        return _python_comment_line_numbers("\n".join(lines))
+    if language in _YAML_FENCE_LANGS:
+        return _yaml_comment_line_numbers(lines)
+    if language in _SHELL_FENCE_LANGS:
+        return _shell_comment_line_numbers(lines)
+    return _leading_hash_or_slash_comment_lines(lines)
+
+
+def _markdown_frontmatter_end(lines: list[str]) -> int | None:
+    if not lines or lines[0].strip() != "---":
+        return None
+    try:
+        return next(index for index, line in enumerate(lines[1:], 1) if line.strip() == "---")
+    except StopIteration:
+        return None
+
+
+def _markdown_fence_comment_line_numbers(lines: list[str], start: int) -> frozenset[int]:
+    skip: set[int] = set()
+    index = start
+    while index < len(lines):
+        match = _FENCE_OPEN.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        marker = match.group(2)
+        language = _fence_language(match.group(3))
+        body_start = index + 1
+        body_end = body_start
+        while body_end < len(lines) and not _is_closing_fence(lines[body_end], marker):
+            body_end += 1
+        skip.update(_shift_line_numbers(_comments_for_language(language, lines[body_start:body_end]), body_start))
+        index = body_end + 1
+    return frozenset(skip)
+
+
+def _markdown_comment_line_numbers(lines: list[str]) -> frozenset[int]:
+    """Skip YAML frontmatter comments and fenced-code comments, not ATX headings."""
+    skip: set[int] = set()
+    body_at = 0
+    fm_end = _markdown_frontmatter_end(lines)
+    if fm_end is not None:
+        skip.update(_shift_line_numbers(_yaml_comment_line_numbers(lines[1:fm_end]), 1))
+        body_at = fm_end + 1
+    skip.update(_markdown_fence_comment_line_numbers(lines, body_at))
     return frozenset(skip)
 
 
@@ -171,8 +275,10 @@ def _comment_line_numbers(file_path: Path, lines: list[str]) -> frozenset[int]:
     if suffix in {".yaml", ".yml"}:
         return _yaml_comment_line_numbers(lines)
     if suffix == ".sh":
-        return frozenset(index for index, line in enumerate(lines, 1) if line.lstrip().startswith("#"))
-    return frozenset()
+        return _shell_comment_line_numbers(lines)
+    if suffix in {".md", ".markdown"}:
+        return _markdown_comment_line_numbers(lines)
+    return _leading_hash_or_slash_comment_lines(lines)
 
 
 def _skillspector_llm_stderr_failed(stderr: str) -> bool:
@@ -646,9 +752,7 @@ class SecurityValidator(ValidatorBase):
         for field in ("failure", "failed"):
             marker = data.get(field)
             if marker is not None and not isinstance(marker, bool):
-                result.add_error(
-                    f"skillspector JSON field '{field}' must be a boolean; security scan did not complete"
-                )
+                result.add_error(f"skillspector JSON field '{field}' must be a boolean; security scan did not complete")
                 return False
             if marker is True:
                 result.add_error("skillspector reported a failure; security scan did not complete")
@@ -757,8 +861,7 @@ class SecurityValidator(ValidatorBase):
             value = skill.get(field)
             if value is not None and not isinstance(value, str):
                 result.add_error(
-                    f"skillspector JSON field 'skill.{field}' must be a string or null; "
-                    "security scan did not complete"
+                    f"skillspector JSON field 'skill.{field}' must be a string or null; security scan did not complete"
                 )
                 return False
         metadata = data.get("metadata") or {}
@@ -792,9 +895,7 @@ class SecurityValidator(ValidatorBase):
             result.add_error("skillspector JSON field 'components' must be a list; security scan did not complete")
             return False
         if isinstance(components, list) and not all(isinstance(component, dict) for component in components):
-            result.add_error(
-                "skillspector JSON 'components' entries must be objects; security scan did not complete"
-            )
+            result.add_error("skillspector JSON 'components' entries must be objects; security scan did not complete")
             return False
         normalized_components = components or []
         for index, component in enumerate(normalized_components):
@@ -822,9 +923,7 @@ class SecurityValidator(ValidatorBase):
         minimum_score = SecurityValidator._minimum_skillspector_risk_score(
             issues,
             normalized_components,
-            use_executable_multiplier=(
-                component_has_executable or metadata.get("has_executable_scripts") is True
-            ),
+            use_executable_multiplier=(component_has_executable or metadata.get("has_executable_scripts") is True),
         )
         if score < minimum_score:
             result.add_error(
@@ -845,9 +944,7 @@ class SecurityValidator(ValidatorBase):
             result.add_error("skillspector JSON field 'suppressed' must be a list; security scan did not complete")
             return False
         if isinstance(suppressed, list) and not all(isinstance(item, dict) for item in suppressed):
-            result.add_error(
-                "skillspector JSON 'suppressed' entries must be objects; security scan did not complete"
-            )
+            result.add_error("skillspector JSON 'suppressed' entries must be objects; security scan did not complete")
             return False
         normalized_suppressed_count = suppressed_count or 0
         normalized_suppressed = suppressed or []
@@ -893,11 +990,7 @@ class SecurityValidator(ValidatorBase):
             )
             for index, issue in enumerate(ordered[: len(_SKILLSPECTOR_DIMINISHING_WEIGHTS)]):
                 location = issue.get("location") or {}
-                multiplier = (
-                    1.3
-                    if use_executable_multiplier and location.get("file") in executable_paths
-                    else 1.0
-                )
+                multiplier = 1.3 if use_executable_multiplier and location.get("file") in executable_paths else 1.0
                 score += (
                     _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
                     * _SKILLSPECTOR_DIMINISHING_WEIGHTS[index]
@@ -966,8 +1059,7 @@ class SecurityValidator(ValidatorBase):
             for field in ("pattern", "finding", "explanation")
         ):
             result.add_error(
-                f"{prefix}' must include a non-empty pattern, finding, or explanation; "
-                "security scan did not complete"
+                f"{prefix}' must include a non-empty pattern, finding, or explanation; security scan did not complete"
             )
             return False
 
@@ -999,8 +1091,7 @@ class SecurityValidator(ValidatorBase):
                 isinstance(line_number, bool) or not isinstance(line_number, int) or line_number < 1
             ):
                 result.add_error(
-                    f"{prefix}.location.{field}' must be a positive integer or null; "
-                    "security scan did not complete"
+                    f"{prefix}.location.{field}' must be a positive integer or null; security scan did not complete"
                 )
                 return False
         return True

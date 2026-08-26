@@ -4,9 +4,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Fixed
-
-- Tier 3 paired pass@k evidence now respects Python's active integer-string
+- SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
+  no longer truncated to MIT and allowed
+  ([#86](https://github.com/NVIDIA/SkillEvaluator/issues/86)).
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission
   markers.

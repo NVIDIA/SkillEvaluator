@@ -215,7 +215,7 @@ LICENSE_HEADER_SCAN_LINES = 50
 LICENSE_HEADER_EXTENSIONS = {".py", ".sh", ".js", ".ts", ".yaml", ".yml", ".md", ".txt", ".json"}
 
 # SPDX header pattern for source files
-SPDX_LICENSE_PATTERN = r"SPDX-License-Identifier:\s*([A-Za-z0-9.\-+]+)"
+SPDX_LICENSE_PATTERN = r"SPDX-License-Identifier:\s*([^\n]+)"
 
 
 # =============================================================================

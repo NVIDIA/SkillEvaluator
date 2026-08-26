@@ -465,6 +465,67 @@ description: Multiple files with SPDX
         assert result.passed
         assert "MIT" in result.metadata.get("license", "")
 
+    def test_spdx_or_expression_with_gpl_is_blocked(self, tmp_path: Path):
+        """MIT OR GPL-3.0 in an SPDX header must not be truncated to allowed MIT (#86)."""
+        skill_dir = tmp_path / "spdx-or-gpl"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-or-gpl
+description: Skill whose only license signal is an SPDX OR expression
+---
+
+# SPDX OR
+""")
+        (skill_dir / "script.py").write_text("""# SPDX-License-Identifier: MIT OR GPL-3.0
+print("hi")
+""")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert "GPL-3.0" in (result.metadata.get("license") or "")
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert not any("License: MIT (ALLOWED" in message for message in result.messages)
+
+    def test_spdx_and_expression_with_gpl_is_blocked(self, tmp_path: Path):
+        """Apache-2.0 AND GPL-3.0 must evaluate the copyleft half, not only Apache-2.0."""
+        skill_dir = tmp_path / "spdx-and-gpl"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-and-gpl
+description: Skill whose only license signal is an SPDX AND expression
+---
+
+# SPDX AND
+""")
+        (skill_dir / "script.py").write_text("# SPDX-License-Identifier: Apache-2.0 AND GPL-3.0\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+        assert result.metadata.get("license_status") != "allowed"
+
+    def test_spdx_or_expression_of_allowed_licenses_passes(self, tmp_path: Path):
+        """Compound expressions stay allowed when every symbol is permissive."""
+        skill_dir = tmp_path / "spdx-or-mit"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-or-mit
+description: Skill whose SPDX header is MIT OR MIT-0
+---
+
+# SPDX OR allowed
+""")
+        (skill_dir / "script.py").write_text("# SPDX-License-Identifier: MIT OR MIT-0\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata.get("license_status") == "allowed"
+        assert "MIT OR MIT-0" in (result.metadata.get("license") or "")
+
 
 # =============================================================================
 # NO LICENSE / UNKNOWN LICENSE TESTS

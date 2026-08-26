@@ -253,6 +253,78 @@ See helper.py.
         email_findings = [finding for finding in result.errors + result.warnings if "email" in finding.lower()]
         assert email_findings == [], f"Python comment emails should stay skipped. Findings: {email_findings}"
 
+    def test_detects_email_in_python_string_literal(self, tmp_path: Path):
+        """Hash lines inside Python string literals are content, not comments."""
+        skill_dir = tmp_path / "py-string-email-skill"
+        skill_dir.mkdir()
+
+        (skill_dir / "SKILL.md").write_text("""---
+name: py-string-email-skill
+description: A skill whose Python helper embeds an email in a string
+---
+
+# Helper
+
+See helper.py.
+""")
+        (skill_dir / "helper.py").write_text(
+            'PROMPT = """\n# Contact: jane@acme.com\n"""\n'
+        )
+
+        validator = SecurityValidator()
+        result = validator.validate_pii_only(skill_dir)
+
+        all_findings = result.errors + result.warnings
+        assert any("jane@acme.com" in finding for finding in all_findings), (
+            f"Expected email detection inside a Python string. Findings: {all_findings}"
+        )
+
+    def test_detects_email_in_yaml_block_scalar(self, tmp_path: Path):
+        """Hash lines inside YAML block scalars are content, not comments."""
+        skill_dir = tmp_path / "yaml-block-email-skill"
+        skill_dir.mkdir()
+
+        (skill_dir / "SKILL.md").write_text("""---
+name: yaml-block-email-skill
+description: A skill whose YAML prompt embeds an email in a block scalar
+---
+
+# Prompts
+
+See prompts.yaml.
+""")
+        (skill_dir / "prompts.yaml").write_text("prompt: |\n  # Contact: jane@acme.com\n")
+
+        validator = SecurityValidator()
+        result = validator.validate_pii_only(skill_dir)
+
+        all_findings = result.errors + result.warnings
+        assert any("jane@acme.com" in finding for finding in all_findings), (
+            f"Expected email detection inside a YAML block scalar. Findings: {all_findings}"
+        )
+
+    def test_yaml_comment_email_is_not_flagged(self, tmp_path: Path):
+        """YAML hash comments remain skipped so they are not newly flagged as PII."""
+        skill_dir = tmp_path / "yaml-comment-skill"
+        skill_dir.mkdir()
+
+        (skill_dir / "SKILL.md").write_text("""---
+name: yaml-comment-skill
+description: A skill whose YAML helper only mentions email in a comment
+---
+
+# Helper
+
+See prompts.yaml.
+""")
+        (skill_dir / "prompts.yaml").write_text("# Contact: jane@acme.com\nname: demo\n")
+
+        validator = SecurityValidator()
+        result = validator.validate_pii_only(skill_dir)
+
+        email_findings = [finding for finding in result.errors + result.warnings if "email" in finding.lower()]
+        assert email_findings == [], f"YAML comment emails should stay skipped. Findings: {email_findings}"
+
     def test_detects_a_non_placeholder_corporate_email(self, tmp_path: Path):
         """Organization-owned domains must not bypass generic email detection."""
         skill_dir = tmp_path / "corporate-email-skill"

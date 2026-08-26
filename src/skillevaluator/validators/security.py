@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import io
 import math
 import os
 import re
 import shutil
 import tempfile
+import tokenize
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
@@ -122,7 +124,55 @@ _SKILLSPECTOR_LLM_FAILURE_MARKERS = (
 )
 _LLM_VERDICTS = frozenset({"true_positive", "false_positive", "uncertain"})
 _LLM_CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
-_COMMENT_SKIP_EXTENSIONS = frozenset({".py", ".sh", ".yaml", ".yml"})
+_YAML_BLOCK_SCALAR_OPENER = re.compile(r":\s*[|>][-+]?\d*\s*$")
+
+
+def _python_comment_line_numbers(source: str) -> frozenset[int]:
+    """Line numbers whose first non-space token is a Python comment."""
+    skip: set[int] = set()
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        for token in tokens:
+            if token.type != tokenize.COMMENT:
+                continue
+            if token.line.lstrip().startswith("#"):
+                skip.add(token.start[0])
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return frozenset()
+    return frozenset(skip)
+
+
+def _yaml_comment_line_numbers(lines: list[str]) -> frozenset[int]:
+    """Line numbers that are YAML comments, excluding block/folded scalar content."""
+    skip: set[int] = set()
+    block_indent: int | None = None
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if block_indent is not None:
+            if indent > block_indent:
+                continue
+            block_indent = None
+        if line.lstrip().startswith("#"):
+            skip.add(line_number)
+            continue
+        opener = line.split("#", 1)[0].rstrip()
+        if _YAML_BLOCK_SCALAR_OPENER.search(opener):
+            block_indent = indent
+    return frozenset(skip)
+
+
+def _comment_line_numbers(file_path: Path, lines: list[str]) -> frozenset[int]:
+    """Lines to skip as comments for the file's actual comment syntax."""
+    suffix = file_path.suffix.lower()
+    if suffix == ".py":
+        return _python_comment_line_numbers("\n".join(lines))
+    if suffix in {".yaml", ".yml"}:
+        return _yaml_comment_line_numbers(lines)
+    if suffix == ".sh":
+        return frozenset(index for index, line in enumerate(lines, 1) if line.lstrip().startswith("#"))
+    return frozenset()
 
 
 def _skillspector_llm_stderr_failed(stderr: str) -> bool:
@@ -1467,6 +1517,7 @@ class SecurityValidator(ValidatorBase):
 
         lines = content.split("\n")
         author_emails = self._frontmatter_author_emails(file_path, lines)
+        comment_lines = _comment_line_numbers(file_path, lines)
         global_exceptions = self.pii_patterns.get("exceptions", {}).get("allowed_paths", [])
         compiled = self._compile_pii_patterns(global_exceptions)
 
@@ -1482,6 +1533,7 @@ class SecurityValidator(ValidatorBase):
                 findings,
                 protected_usernames,
                 author_emails,
+                comment_lines,
             )
         return findings
 
@@ -1524,13 +1576,6 @@ class SecurityValidator(ValidatorBase):
                 compiled.append((category, regex, exceptions, pattern_def))
         return compiled
 
-    @staticmethod
-    def _is_code_comment_line(file_path: Path, stripped: str) -> bool:
-        """Return True for # or // comments in code and YAML, not Markdown headings."""
-        if file_path.suffix.lower() not in _COMMENT_SKIP_EXTENSIONS:
-            return False
-        return stripped.startswith(("#", "//"))
-
     def _scan_lines_for_pattern(
         self,
         lines: list[str],
@@ -1542,13 +1587,14 @@ class SecurityValidator(ValidatorBase):
         findings: list[dict],
         protected_usernames: set[str] | None = None,
         author_emails: dict[int, str] | None = None,
+        comment_lines: frozenset[int] | None = None,
     ) -> None:
         """Check all lines against a single compiled PII pattern."""
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
+        comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
         for line_num, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if self._is_code_comment_line(file_path, stripped):
+            if line_num in comment_lines:
                 continue
 
             scan_line = line

@@ -151,7 +151,7 @@ class LicenseValidator(ValidatorBase):
                 if file_detection := self._check_license_file(asset_path):
                     return file_detection
             else:
-                return detection
+                return self._resolve_frontmatter_and_file(detection, asset_path, result)
 
         # Tier 2: LICENSE file
         if detection := self._check_license_file(asset_path):
@@ -197,6 +197,75 @@ class LicenseValidator(ValidatorBase):
         """Check if license value references a file."""
         lower = license_value.lower()
         return any(ref in lower for ref in _FILE_REFERENCE_KEYWORDS)
+
+    def _resolve_frontmatter_and_file(
+        self,
+        frontmatter: LicenseDetection,
+        asset_path: Path,
+        result: ValidationResult,
+    ) -> LicenseDetection:
+        """Reconcile a concrete frontmatter license with a LICENSE file, if present.
+
+        Matching IDs keep the frontmatter result. A blocked ID on either side
+        is returned so validation fails closed. Distinct allowed IDs emit a
+        mismatch finding instead of silently preferring frontmatter.
+        """
+        file_detection = self._check_license_file(asset_path)
+        if file_detection is None or not frontmatter.license_id or not file_detection.license_id:
+            return frontmatter
+
+        fm_norm = self._normalize_license_id(frontmatter.license_id)
+        file_norm = self._normalize_license_id(file_detection.license_id)
+        if fm_norm == file_norm:
+            return frontmatter
+
+        return self._resolve_license_conflict(frontmatter, file_detection, fm_norm, file_norm, result)
+
+    def _resolve_license_conflict(
+        self,
+        frontmatter: LicenseDetection,
+        file_detection: LicenseDetection,
+        fm_norm: str,
+        file_norm: str,
+        result: ValidationResult,
+    ) -> LicenseDetection:
+        """Choose which detection to validate when frontmatter and LICENSE disagree."""
+        result.add_message(
+            f"Frontmatter license '{frontmatter.license_id}' differs from "
+            f"{file_detection.file_path} license '{file_detection.license_id}'"
+        )
+        if file_norm in self._normalized_blocklist:
+            result.add_message(f"Tier 2: Detected {file_detection.license_id} from {file_detection.file_path}")
+            return file_detection
+        if fm_norm in self._normalized_blocklist:
+            return frontmatter
+        if fm_norm in self._normalized_allowlist and file_norm in self._normalized_allowlist:
+            self._add_license_mismatch_finding(result, frontmatter, file_detection)
+        return frontmatter
+
+    @staticmethod
+    def _add_license_mismatch_finding(
+        result: ValidationResult,
+        frontmatter: LicenseDetection,
+        file_detection: LicenseDetection,
+    ) -> None:
+        """Fail closed when two allowed licenses disagree."""
+        result.add_structured_finding(
+            Finding(
+                category="LICENSE",
+                severity="HIGH",
+                check_name="frontmatter_license_mismatch",
+                message=(
+                    f"Frontmatter license '{frontmatter.license_id}' conflicts with "
+                    f"{file_detection.file_path} license '{file_detection.license_id}'"
+                ),
+                file_path=file_detection.file_path or frontmatter.file_path or "unknown",
+                suggestion=(
+                    "Make the SKILL.md license field match the LICENSE file, or remove one of the declarations."
+                ),
+            ),
+            is_error=True,
+        )
 
     def _check_license_file(self, asset_path: Path) -> LicenseDetection | None:
         """Tier 2: Parse LICENSE files and match against known patterns."""

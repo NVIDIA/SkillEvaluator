@@ -68,8 +68,10 @@ All notable changes to SkillEvaluator are documented in this file.
   directions at large case counts, and documents exact-rational omission
   markers.
 - Tier 3 now decodes bounded native Codex `exec` wrappers into their static
-  tool calls, preserving call order, observations, and evidence provenance
-  while leaving unsupported or malformed JavaScript untrusted.
+  tool calls. It preserves call order and outer-call provenance, maps an outer
+  observation only when its rendered inner call is known, keeps ambiguous
+  observations explicit, and reports unsupported or malformed JavaScript as
+  untrusted instead of a clean security result.
 
 ## 0.2.1 - 2026-08-24
 

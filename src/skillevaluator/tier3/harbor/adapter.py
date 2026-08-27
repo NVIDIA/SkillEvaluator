@@ -1960,6 +1960,11 @@ def _copy_verifier(task_dir: Path) -> None:
         shutil.copy2(lc, tests_dir / "log_converters.py")
     else:
         logger.warning("log_converters helper not found at %s", lc)
+    normalizer = _EVAL_CORE_DIR / "codex_tool_call_normalizer.py"
+    if normalizer.exists():
+        shutil.copy2(normalizer, tests_dir / "codex_tool_call_normalizer.py")
+    else:
+        logger.warning("Codex tool-call normalizer not found at %s", normalizer)
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:

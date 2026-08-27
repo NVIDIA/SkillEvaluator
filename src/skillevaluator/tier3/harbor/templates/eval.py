@@ -61,6 +61,22 @@ except ImportError:  # pragma: no cover -- older task bundles
         return None, meta
 
 
+try:
+    from codex_tool_call_normalizer import (
+        AMBIGUOUS_OUTER_EXEC_OBSERVATION,
+        UNOBSERVED_INNER_CALL,
+        UNSUPPORTED_NATIVE_CODEX_EXEC,
+        normalize_tool_call,
+    )
+except ImportError:  # pragma: no cover -- source-tree import only
+    from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+        AMBIGUOUS_OUTER_EXEC_OBSERVATION,
+        UNOBSERVED_INNER_CALL,
+        UNSUPPORTED_NATIVE_CODEX_EXEC,
+        normalize_tool_call,
+    )
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -225,130 +241,21 @@ ACCEPTABLE_ALTERNATE_SCORE = 0.75
 # ── ATIF Helpers ─────────────────────────────────────────────────────────────
 
 
-def _skip_js_quoted(source, start, quote):
-    index = start + 1
-    while index < len(source):
-        if source[index] == "\\":
-            index += 2
-        elif source[index] == quote:
-            return index + 1
-        else:
-            index += 1
-    return -1
-
-
-def _decode_static_js_object(source, start):
-    rendered = []
-    depth = 0
-    index = start
-    previous_significant = ""
-    while index < len(source):
-        char = source[index]
-        if char == '"':
-            end = _skip_js_quoted(source, index, char)
-            if end < 0:
-                return None
-            rendered.append(source[index:end])
-            previous_significant = '"'
-            index = end
-            continue
-        if char in "'`" or source.startswith(("//", "/*"), index):
-            return None
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-        if (char.isalpha() or char in "_$") and previous_significant in {"{", ","}:
-            end = index + 1
-            while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
-                end += 1
-            cursor = end
-            while cursor < len(source) and source[cursor].isspace():
-                cursor += 1
-            if cursor < len(source) and source[cursor] == ":":
-                rendered.append(json.dumps(source[index:end]))
-                previous_significant = '"'
-                index = end
-                continue
-        rendered.append(char)
-        if not char.isspace():
-            previous_significant = char
-        index += 1
-        if depth == 0:
-            try:
-                arguments = json.loads("".join(rendered))
-            except (json.JSONDecodeError, TypeError):
-                return None
-            return (arguments, index) if isinstance(arguments, dict) else None
-    return None
-
-
-_JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
-_CODEX_CALL_RE = re.compile(
-    rf"const\s+({_JS_IDENTIFIER})\s*=\s*await\s+tools\.({_JS_IDENTIFIER})\s*\(\s*"
-)
-_CODEX_RENDER_RE = re.compile(
-    rf"text\s*\(\s*(?:JSON\.stringify\(\s*({_JS_IDENTIFIER})\s*\)|"
-    rf"({_JS_IDENTIFIER})(?:\.({_JS_IDENTIFIER}))?)\s*\)\s*;"
-)
-
-
-def _static_codex_tool_calls(source):
-    calls = []
-    variables = set()
-    pragma = re.match(r"[ \t]*// @exec:[^\r\n]*\r?\n", source)
-    index = pragma.end() if pragma else 0
-    while index < len(source):
-        while index < len(source) and source[index].isspace():
-            index += 1
-        if index == len(source):
-            break
-
-        call = _CODEX_CALL_RE.match(source, index)
-        if call:
-            variable, function_name = call.groups()
-            if variable in variables:
-                return None
-            decoded = _decode_static_js_object(source, call.end())
-            if decoded is None:
-                return None
-            arguments, end = decoded
-            close = re.match(r"\s*\)\s*;", source[end:])
-            if close is None:
-                return None
-            variables.add(variable)
-            calls.append((function_name, arguments))
-            index = end + close.end()
-            continue
-
-        render = _CODEX_RENDER_RE.match(source, index)
-        if render and next((name for name in render.groups() if name), None) in variables:
-            index = render.end()
-            continue
-        return None
-    return calls
-
-
-def _normalize_tool_call(tc):
-    if tc.get("function_name") != "exec":
-        return [tc]
-    arguments = tc.get("arguments") or {}
-    if not isinstance(arguments, dict) or not isinstance(arguments.get("input"), str):
-        return [tc]
-    calls = _static_codex_tool_calls(arguments["input"])
-    if not calls:
-        return [tc]
-    return [
-        {**tc, "function_name": function_name, "arguments": inner_arguments}
-        for function_name, inner_arguments in calls
-    ]
-
-
 def iter_tool_calls(traj):
     for step in traj.get("steps", []):
         for raw_index, tc in enumerate(step.get("tool_calls") or []):
-            for normalized in _normalize_tool_call(tc):
+            for normalized in normalize_tool_call(tc):
                 yield step, {**normalized, "_atif_raw_tool_index": raw_index}
+
+
+def _tool_call_observation(step, tc):
+    if tc.get("_atif_observation_status") not in (None, "mapped_outer_exec_result"):
+        return ""
+    return "".join(
+        str(result.get("content", ""))
+        for result in (step.get("observation") or {}).get("results") or []
+        if result.get("source_call_id") == tc.get("tool_call_id") or not result.get("source_call_id")
+    )
 
 
 def get_all_tool_calls(traj):
@@ -356,12 +263,14 @@ def get_all_tool_calls(traj):
     for step, tc in iter_tool_calls(traj):
         fn = tc.get("function_name") or ""
         args = tc.get("arguments") or {}
-        obs_text = ""
-        obs = step.get("observation") or {}
-        for r in obs.get("results") or []:
-            if r.get("source_call_id") == tc.get("tool_call_id") or not r.get("source_call_id"):
-                obs_text += str(r.get("content", ""))
-        calls.append({"fn": fn, "args": args, "args_text": json.dumps(args).lower(), "obs": obs_text.lower()})
+        calls.append(
+            {
+                "fn": fn,
+                "args": args,
+                "args_text": json.dumps(args).lower(),
+                "obs": _tool_call_observation(step, tc).lower(),
+            }
+        )
     return calls
 
 
@@ -417,18 +326,16 @@ def extract_tool_calls_as_dicts(traj):
         if step.get("source") != "agent":
             continue
         for _, tc in iter_tool_calls({"steps": [step]}):
-            obs_text = ""
-            obs = step.get("observation") or {}
-            for r in obs.get("results") or []:
-                if r.get("source_call_id") == tc.get("tool_call_id") or not r.get("source_call_id"):
-                    obs_text += str(r.get("content", ""))
-            result.append(
-                {
-                    "action": tc.get("function_name", ""),
-                    "action_input": tc.get("arguments") or {},
-                    "observation": obs_text,
-                }
-            )
+            call = {
+                "action": tc.get("function_name", ""),
+                "action_input": tc.get("arguments") or {},
+                "observation": _tool_call_observation(step, tc),
+            }
+            if status := tc.get("_atif_normalization_status"):
+                call["normalization_status"] = status
+            if status := tc.get("_atif_observation_status"):
+                call["observation_status"] = status
+            result.append(call)
     return result
 
 
@@ -552,13 +459,6 @@ def _collect_file_change_evidence(traj):
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
             continue
-        observations_by_id = {}
-        for result in (step.get("observation") or {}).get("results") or []:
-            call_id = str(result.get("source_call_id") or "")
-            content = str(result.get("content") or "")
-            if call_id and content:
-                observations_by_id[call_id] = content
-
         for _, tc in iter_tool_calls({"steps": [step]}):
             fn = str(tc.get("function_name") or "")
             fn_lower = fn.lower()
@@ -581,7 +481,7 @@ def _collect_file_change_evidence(traj):
             if not is_write_call or (not body and not file_path):
                 continue
 
-            obs = observations_by_id.get(str(tc.get("tool_call_id") or ""), "")
+            obs = _tool_call_observation(step, tc)
             entry_parts = [f"Agent called: {fn}"]
             if file_path:
                 entry_parts.append(f"Path: {file_path}")
@@ -650,7 +550,7 @@ def _evidence_excerpt(text, limit=_METRIC_EVIDENCE_EXCERPT_CHARS):
     return _truncate_for_behavior(_redact_evidence_text(text), limit)
 
 
-def _evidence_ref(*, source, kind, label, json_pointer=None, path=None, excerpt="", status=None):
+def _evidence_ref(*, source, kind, label, json_pointer=None, path=None, excerpt="", status=None, evidence_id=None):
     ref = {
         "source": source,
         "kind": kind,
@@ -664,6 +564,8 @@ def _evidence_ref(*, source, kind, label, json_pointer=None, path=None, excerpt=
         ref["excerpt"] = _evidence_excerpt(excerpt)
     if status:
         ref["status"] = status
+    if evidence_id:
+        ref["evidence_id"] = evidence_id
     return ref
 
 
@@ -673,7 +575,7 @@ def _dedupe_evidence_refs(refs):
     for ref in refs:
         key = (
             str(ref.get("source") or ""),
-            str(ref.get("json_pointer") or ""),
+            str(ref.get("evidence_id") or ref.get("json_pointer") or ""),
             str(ref.get("kind") or ""),
             str(ref.get("path") or ""),
         )
@@ -704,7 +606,7 @@ def _final_response_ref(traj):
     return []
 
 
-def _tool_call_ref(step_idx, tool_idx, tc, *, kind):
+def _tool_call_ref(step_idx, tc, *, kind):
     fn = str(tc.get("function_name") or "")
     args = tc.get("arguments") or {}
     if not isinstance(args, dict):
@@ -717,13 +619,16 @@ def _tool_call_ref(step_idx, tool_idx, tc, *, kind):
         path = _first_expected_artifact_path(command)
     excerpt = command or path or json.dumps(args, sort_keys=True)
     label_detail = command or path or fn
+    json_pointer = f"/steps/{step_idx}/tool_calls/{tc['_atif_raw_tool_index']}"
+    inner_index = tc.get("_atif_inner_tool_index")
     return _evidence_ref(
         source="trajectory.json",
-        json_pointer=f"/steps/{step_idx}/tool_calls/{tc.get('_atif_raw_tool_index', tool_idx)}",
+        json_pointer=json_pointer,
         kind=kind,
         label=f"{fn}: {label_detail}" if label_detail else fn,
         path=path or None,
         excerpt=excerpt,
+        evidence_id=f"{json_pointer}/normalized/{inner_index}" if inner_index is not None else None,
     )
 
 
@@ -732,10 +637,10 @@ def _tool_call_refs(traj):
     for step_idx, step in enumerate(traj.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        for tool_idx, (_, tc) in enumerate(iter_tool_calls({"steps": [step]})):
+        for _, tc in iter_tool_calls({"steps": [step]}):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
-            refs.append(_tool_call_ref(step_idx, tool_idx, tc, kind="tool_call"))
+            refs.append(_tool_call_ref(step_idx, tc, kind="tool_call"))
     return refs
 
 
@@ -768,7 +673,7 @@ def _file_change_refs(traj):
     for step_idx, step in enumerate(traj.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        for tool_idx, (_, tc) in enumerate(iter_tool_calls({"steps": [step]})):
+        for _, tc in iter_tool_calls({"steps": [step]}):
             if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
                 return refs
             fn = str(tc.get("function_name") or "")
@@ -782,7 +687,7 @@ def _file_change_refs(traj):
             )
             if not is_write:
                 continue
-            refs.append(_tool_call_ref(step_idx, tool_idx, tc, kind="file_change"))
+            refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
     return refs
 
 
@@ -2737,6 +2642,20 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
     target_skill_seen = False
     for tc in tool_calls:
         action = str(tc.get("action", ""))
+        if tc.get("normalization_status") == UNSUPPORTED_NATIVE_CODEX_EXEC:
+            findings.append(
+                _security_finding(
+                    finding_type="unsupported_tool_wrapper",
+                    severity="warning",
+                    message="Unsupported native Codex exec wrapper could not be safely normalized",
+                    evidence="[unsupported native Codex exec wrapper]",
+                    source="agent_tool_call",
+                    score_impact=True,
+                    tool=action,
+                    target_skill_used_before=target_skill_seen,
+                )
+            )
+            continue
         action_lower = action.lower()
         action_text = _action_text(tc)
         action_text_lower = action_text.lower()
@@ -2892,6 +2811,20 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
     }
 
 
+def _has_unsupported_native_codex_call(tool_calls):
+    return any(tc.get("normalization_status") == UNSUPPORTED_NATIVE_CODEX_EXEC for tc in tool_calls)
+
+
+def _unsupported_native_codex_result(reason):
+    return {
+        "passed": None,
+        "score": 0.5,
+        "reason": reason,
+        "supported": False,
+        "unsupported_evidence": [UNSUPPORTED_NATIVE_CODEX_EXEC],
+    }
+
+
 def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptable_skills=None):
     if not expected_skill:
         return {"passed": True, "score": 1.0, "reason": "No expected_skill -- skipped"}
@@ -2948,6 +2881,10 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
                         "reason": reason,
                         "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
                     }
+    if _has_unsupported_native_codex_call(tool_calls):
+        return _unsupported_native_codex_result(
+            "Skill activation could not be evaluated because a native Codex exec wrapper was unsupported"
+        )
     for tc in tool_calls:
         action = str(tc.get("action", ""))
         cmd = _command_text(tc)
@@ -2991,6 +2928,10 @@ def check_script_execution(tool_calls, expected_script):
         cmd = _command_text(call)
         if expected_script in cmd:
             return {"passed": True, "score": 1.0, "reason": f"Executed {expected_script}"}
+    if _has_unsupported_native_codex_call(tool_calls):
+        return _unsupported_native_codex_result(
+            "Script execution could not be evaluated because a native Codex exec wrapper was unsupported"
+        )
     for tc in tool_calls:
         obs = str(tc.get("observation", "")).lower()
         if expected_script.lower() in obs:
@@ -3001,6 +2942,10 @@ def check_script_execution(tool_calls, expected_script):
 
 
 def check_workflow_order(tool_calls, skill_tool_names=None, expected_skill=None):
+    if _has_unsupported_native_codex_call(tool_calls):
+        return _unsupported_native_codex_result(
+            "Workflow order could not be evaluated because a native Codex exec wrapper was unsupported"
+        )
     sequence = []
     if skill_tool_names:
         sequence.append("read_skill")
@@ -3069,6 +3014,11 @@ def check_negative_case(tool_calls, skill_under_test, skill_tool_names=None):
                 return {"passed": False, "score": 0.0, "reason": f"Incorrectly executed {skill_under_test} scripts"}
             if target_reference is None:
                 saw_unknown = True
+    if _has_unsupported_native_codex_call(tool_calls):
+        return _unsupported_native_codex_result(
+            f"Could not safely determine whether {skill_under_test} was triggered because a native Codex exec "
+            "wrapper was unsupported"
+        )
     if saw_unknown:
         return {
             "passed": None,
@@ -3086,6 +3036,7 @@ def check_routing(
     workspace_mode="isolated",
     acceptable_skills=None,
 ):
+    unsupported_native_codex_call = _has_unsupported_native_codex_call(tool_calls)
     read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower()]
     skills_read, wrong_skills = [], []
     matched_expected = False
@@ -3142,6 +3093,10 @@ def check_routing(
             if str(s) not in allowed_skills and not match:
                 wrong_skills.append(f"Skill({s})")
     if not skills_read:
+        if unsupported_native_codex_call:
+            return _unsupported_native_codex_result(
+                "Skill routing could not be evaluated because a native Codex exec wrapper was unsupported"
+            )
         return {
             "passed": False,
             "score": 0.0,
@@ -3161,6 +3116,10 @@ def check_routing(
                 "matched_alternates": sorted(set(matched_alternates)),
             },
         }
+    if unsupported_native_codex_call:
+        return _unsupported_native_codex_result(
+            "Skill routing could not be evaluated because a native Codex exec wrapper was unsupported"
+        )
     if matched_alternate and not matched_expected:
         return {
             "passed": True,
@@ -3210,6 +3169,29 @@ def check_error_recovery(tool_calls, expected_script=None):
     for idx, tc in enumerate(tool_calls):
         if tc["action"].lower() in exec_actions or _is_execution_action(str(tc["action"])):
             exec_calls.append((idx, tc))
+
+    unsupported_evidence = {
+        tc.get("normalization_status")
+        for tc in tool_calls
+        if tc.get("normalization_status") == UNSUPPORTED_NATIVE_CODEX_EXEC
+    }
+    unsupported_evidence.update(
+        tc.get("observation_status")
+        for _, tc in exec_calls
+        if tc.get("observation_status") in {AMBIGUOUS_OUTER_EXEC_OBSERVATION, UNOBSERVED_INNER_CALL}
+    )
+    if unsupported_evidence:
+        return {
+            "passed": None,
+            "score": 0.5,
+            "reason": "Error recovery could not be evaluated from untrusted Codex wrapper observations",
+            "supported": False,
+            "unsupported_evidence": sorted(unsupported_evidence),
+            "first_attempt_clean": False,
+            "corrections": [],
+            "skill_faults": 0,
+            "agent_faults": 0,
+        }
 
     error_kw = [
         "error",
@@ -3301,6 +3283,10 @@ def check_error_recovery(tool_calls, expected_script=None):
 def check_tool_efficiency(tool_calls, expected_skill=None, expected_script=None):
     if not tool_calls:
         return {"passed": True, "score": 1.0, "reason": "No tool calls"}
+    if _has_unsupported_native_codex_call(tool_calls):
+        return _unsupported_native_codex_result(
+            "Tool efficiency could not be evaluated because a native Codex exec wrapper was unsupported"
+        )
     productive, wasted = 0, 0
     for tc in tool_calls:
         action = tc["action"].lower()

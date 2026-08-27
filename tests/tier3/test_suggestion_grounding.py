@@ -70,6 +70,39 @@ def _reward_multi_metric(metric_score=0.1):
     }
 
 
+def _reward_with_normalized_tool_refs():
+    return {
+        "entry_id": "evaluator-plugin-004",
+        "goal_accuracy": 0.1,
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "behavior_check": 1.0,
+        "details": {
+            "goal_accuracy": {
+                "reason": "two commands need distinct remediation",
+                "evidence_refs": [
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/0/tool_calls/0",
+                        "evidence_id": "/steps/0/tool_calls/0/normalized/0",
+                        "kind": "tool_call",
+                        "excerpt": "first command",
+                    },
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/0/tool_calls/0",
+                        "evidence_id": "/steps/0/tool_calls/0/normalized/1",
+                        "kind": "tool_call",
+                        "excerpt": "second command",
+                    },
+                ],
+            },
+        },
+    }
+
+
 def test_findings_carry_evidence_refs():
     findings = report._extract_findings([_reward(0.1)])
     goal = next(f for f in findings if f["metric"] == "goal_accuracy")
@@ -202,6 +235,36 @@ def test_suggestions_evidence_refs_lookup_uses_all_metrics(monkeypatch):
     assert refs and isinstance(refs[0], dict)
     assert refs[0]["json_pointer"] == "/steps/5"
     assert refs[0]["kind"] == "tool_call"
+
+
+def test_normalized_tool_evidence_refs_remain_distinct_and_resolve_by_compact_identity(monkeypatch):
+    compact_ref = "trajectory.json#/steps/0/tool_calls/0/normalized/1"
+    captured = {}
+
+    def fake_hub(prompt, **_kw):
+        captured["prompt"] = prompt
+        return (
+            f'[{{"suggestion": "Fix the second command", "dimension": "goal_accuracy", "evidence_refs": ["{compact_ref}"]}}]',
+            None,
+        )
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
+    reward = _reward_with_normalized_tool_refs()
+    findings = report._extract_findings([reward])
+
+    assert len(findings[0]["evidence_refs"]) == 2
+    result = report._generate_suggestions_structured("demo", findings, [reward])
+
+    assert compact_ref in captured["prompt"]
+    assert result[0]["evidence_refs"] == [
+        {
+            "source": "trajectory.json",
+            "json_pointer": "/steps/0/tool_calls/0",
+            "evidence_id": "/steps/0/tool_calls/0/normalized/1",
+            "kind": "tool_call",
+            "excerpt": "second command",
+        }
+    ]
 
 
 def test_suggestions_structured_evidence_refs_are_dicts_not_strings(monkeypatch):

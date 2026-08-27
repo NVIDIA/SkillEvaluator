@@ -85,6 +85,30 @@ def test_cli_findings_body_renders_evidence_pointer():
     assert "/steps/14" in text and "evidence:" in text
 
 
+def test_cli_findings_body_renders_normalized_tool_compact_identity():
+    text = report._render_findings_body(
+        [
+            {
+                "metric": "goal_accuracy",
+                "label": "GOAL ACCURACY",
+                "severity": "warning",
+                "score": 0.5,
+                "reasons": ["second command failed"],
+                "evidence_refs": [
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/0/tool_calls/0",
+                        "evidence_id": "/steps/0/tool_calls/0/normalized/1",
+                        "kind": "tool_call",
+                    }
+                ],
+            }
+        ]
+    ).plain
+
+    assert "trajectory.json#/steps/0/tool_calls/0/normalized/1" in text
+
+
 def test_cli_findings_include_custom_metric_details():
     findings = report._extract_findings([_reward_with_custom_metric()])
     custom = next(f for f in findings if f["metric"] == "domain_quality")

@@ -6,7 +6,7 @@
 import pytest
 
 from skillevaluator.validators import markdown as markdown_validator
-from skillevaluator.validators.markdown import markdown_link_targets
+from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
 _CLOSED_NON_NAVIGATION_HTML_TAGS = (
     "script",
@@ -38,6 +38,30 @@ _CLOSED_NON_NAVIGATION_HTML_TAGS = (
 )
 def test_non_navigation_markdown_does_not_produce_links(content: str) -> None:
     assert markdown_link_targets(content) == []
+
+
+@pytest.mark.parametrize(
+    ("content", "target"),
+    [
+        ("![diagram](inline.png)", "inline.png"),
+        ("![diagram][asset]\n\n[asset]: reference.png", "reference.png"),
+    ],
+)
+def test_image_targets_are_opt_in(content: str, target: str) -> None:
+    assert markdown_link_targets(content) == []
+    assert markdown_link_targets(content, include_images=True) == [target]
+
+
+def test_opted_in_images_preserve_order_and_escaped_destinations() -> None:
+    content = "[first](first.md) ![diagram](a&b.png) [last](last.md)"
+
+    assert markdown_link_targets(content, include_images=True) == ["first.md", "a&b.png", "last.md"]
+
+
+def test_local_path_normalization_can_preserve_directory_targets() -> None:
+    assert normalized_local_path("docs/") is None
+    assert normalized_local_path("docs/", allow_directory=True) == "docs"
+    assert normalized_local_path("") == "."
 
 
 @pytest.mark.parametrize(

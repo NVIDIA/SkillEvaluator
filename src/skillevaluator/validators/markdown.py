@@ -29,7 +29,7 @@ _SCRIPT_DOUBLE_ESCAPED_STATES = frozenset({"double-escaped", "double-escaped-das
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 
 
-def normalized_local_path(href: str) -> str | None:
+def normalized_local_path(href: str, *, allow_directory: bool = False) -> str | None:
     """Return a once-decoded, normalized local path from a link destination."""
     href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
     try:
@@ -47,7 +47,7 @@ def normalized_local_path(href: str) -> str | None:
             return None
     except ValueError:
         return None
-    if path.endswith(("/", "/.", "/..")):
+    if not allow_directory and path.endswith(("/", "/.", "/..")):
         return None
     return posixpath.normpath(path)
 
@@ -179,8 +179,8 @@ def _walk_tokens(tokens: Iterable[Token]) -> Iterator[Token]:
             yield from _walk_tokens(token.children)
 
 
-def markdown_link_targets(content: str) -> list[str]:
-    """Return parser-normalized Markdown link destinations in document order."""
+def markdown_link_targets(content: str, *, include_images: bool = False) -> list[str]:
+    """Return parser-normalized Markdown destinations in document order."""
     frontmatter = FRONTMATTER_PATTERN.match(content)
     markdown_content = content
     if frontmatter:
@@ -197,6 +197,10 @@ def markdown_link_targets(content: str) -> list[str]:
             href = token.attrGet("href")
             if isinstance(href, str):
                 html_parts.append(f'<a href="{escape(href, quote=True)}"></a>')
+        elif include_images and token.type == "image":
+            source = token.attrGet("src")
+            if isinstance(source, str):
+                html_parts.append(f'<a href="{escape(source, quote=True)}"></a>')
         elif token.type in {"html_inline", "html_block"}:
             html_parts.append(token.content)
 

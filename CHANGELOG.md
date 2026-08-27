@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Dead-link validation now uses the shared CommonMark parser, covering
+  reference-style and HTML links while preserving Markdown image checks and
+  consistently normalizing local destinations. Root-absolute URLs are ignored
+  instead of being treated as host paths; href-only diagnostics collapse
+  repeated links to the same normalized target.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

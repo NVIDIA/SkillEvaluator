@@ -57,13 +57,17 @@ jobs:
       - name: Verify full Git checkout
         run: |
           test -d .git
-          test "$(git rev-list --count HEAD)" -gt 0
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          git rev-parse --verify "HEAD^{commit}" >/dev/null
       - name: Scan Git history
+        # Mirror the v8.30.0 Git log defaults except --all -> HEAD; re-derive
+        # these options when bumping the image. This excludes unrelated refs.
         run: >-
           docker run --rm
           --volume "$PWD:/repo:ro"
           ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
-          git --no-banner --redact --verbose /repo
+          git --no-banner --redact --verbose
+          --log-opts="--full-history --diff-filter=tuxdb HEAD --" /repo
 
   dependency-review:
     name: Dependency review

@@ -174,6 +174,27 @@ def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() ->
     assert "vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true'" in codeql_if
 
 
+def test_gitleaks_scans_full_history_reachable_from_checked_out_head() -> None:
+    job = _load("security.yml")["jobs"]["gitleaks"]
+    checkout = next(
+        step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")
+    )
+    verify = next(step for step in job["steps"] if step.get("name") == "Verify full Git checkout")
+    scan = next(step for step in job["steps"] if step.get("name") == "Scan Git history")
+
+    assert str(checkout["with"]["fetch-depth"]) == "0"
+    assert 'test "$(git rev-parse --is-shallow-repository)" = "false"' in verify["run"]
+    assert 'git rev-parse --verify "HEAD^{commit}"' in verify["run"]
+    assert (
+        "gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9"
+        in scan["run"]
+    )
+    log_opts = re.search(r'--log-opts="([^"]+)"', scan["run"])
+    assert log_opts is not None
+    assert log_opts.group(1) == "--full-history --diff-filter=tuxdb HEAD --"
+    assert "--all" not in log_opts.group(1).split()
+
+
 def test_dco_stays_unconditional_and_has_no_path_filter() -> None:
     dco = _load("dco.yml")
 

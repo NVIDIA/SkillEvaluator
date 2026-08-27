@@ -267,6 +267,63 @@ pandas
         all_messages = result.errors + result.warnings
         assert any("unpinned" in m.lower() for m in all_messages)
 
+    @pytest.mark.parametrize(
+        "requirement",
+        [
+            'requests; python_version < "3.13"',
+            'requests; python_version != "3.12"',
+            'requests;python_version<"3.13"',
+            'requests ; python_version < "3.13"',
+            'requests; sys_platform == "win32"',
+            'requests[security]; python_version >= "3.9"',
+        ],
+    )
+    def test_environment_marker_comparisons_do_not_hide_unpinned_requirements(
+        self, tmp_path: Path, requirement: str
+    ):
+        """Marker operators must not count as package version constraints."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text(f"{requirement}\n", encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == []
+        assert result.warnings == [f"requirements.txt:1 - Unpinned: {requirement}"]
+
+    @pytest.mark.parametrize(
+        "requirement",
+        [
+            'requests>=2; python_version < "3.13"',
+            "requests>=2.0,<3.0",
+            "requests==2.31.0",
+            "requests~=2.31",
+            "requests!=2.30.0",
+            "requests @ https://example.invalid/a;v=1/requests.whl",
+            'requests @ https://example.invalid/requests.whl ; python_version < "3.13"',
+        ],
+    )
+    def test_marker_handling_preserves_constrained_and_direct_requirements(
+        self, tmp_path: Path, requirement: str
+    ):
+        """Existing version constraints and direct-reference behavior remain accepted."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text(f"{requirement}\n", encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == []
+        assert result.warnings == []
+
+    def test_banned_requirement_with_marker_remains_an_error(self, tmp_path: Path):
+        """Banned-package errors keep precedence over marker-aware warnings."""
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text('pycrypto; python_version < "3.13"\n', encoding="utf-8")
+
+        result = HygieneValidator()._check_requirements_file(requirements)
+
+        assert result.errors == ["requirements.txt:1 - Banned package: pycrypto"]
+        assert result.warnings == []
+
     def test_detects_banned_packages(self, tmp_path: Path):
         """Test detection of banned/deprecated packages."""
         skill_dir = tmp_path / "banned-deps-skill"

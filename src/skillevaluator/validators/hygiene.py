@@ -166,10 +166,14 @@ class HygieneValidator(ValidatorBase):
                 continue
 
             pkg_name = match.group(1).lower()
+            # Marker comparisons do not constrain the package version. Leave
+            # direct references intact because their URLs may contain ";";
+            # markers on direct references therefore keep existing behavior.
+            constraint_part = line if "@" in line else line.partition(";")[0]
 
             if pkg_name in banned_lower:
                 result.add_error(f"{req_file.name}:{line_num} - Banned package: {pkg_name}")
-            elif not re.search(r"[=<>!]", line):
+            elif not re.search(r"[=<>!]", constraint_part):
                 result.add_warning(f"{req_file.name}:{line_num} - Unpinned: {line}")
 
         if not result.errors and not result.warnings:

@@ -67,6 +67,9 @@ All notable changes to SkillEvaluator are documented in this file.
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission
   markers.
+- Tier 3 now decodes bounded native Codex `exec` wrappers into their static
+  tool calls, preserving call order, observations, and evidence provenance
+  while leaving unsupported or malformed JavaScript untrusted.
 
 ## 0.2.1 - 2026-08-24
 

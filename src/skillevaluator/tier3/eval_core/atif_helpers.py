@@ -19,11 +19,133 @@ from typing import Any
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 
 
+def _skip_js_quoted(source: str, start: int, quote: str) -> int:
+    index = start + 1
+    while index < len(source):
+        if source[index] == "\\":
+            index += 2
+        elif source[index] == quote:
+            return index + 1
+        else:
+            index += 1
+    return -1
+
+
+def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], int] | None:
+    """Decode a JSON-compatible object literal, including unquoted property names."""
+    rendered: list[str] = []
+    depth = 0
+    index = start
+    previous_significant = ""
+    while index < len(source):
+        char = source[index]
+        if char == '"':
+            end = _skip_js_quoted(source, index, char)
+            if end < 0:
+                return None
+            rendered.append(source[index:end])
+            previous_significant = '"'
+            index = end
+            continue
+        if char in "'`" or source.startswith(("//", "/*"), index):
+            return None
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        if (char.isalpha() or char in "_$") and previous_significant in {"{", ","}:
+            end = index + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
+                end += 1
+            cursor = end
+            while cursor < len(source) and source[cursor].isspace():
+                cursor += 1
+            if cursor < len(source) and source[cursor] == ":":
+                rendered.append(json.dumps(source[index:end]))
+                previous_significant = '"'
+                index = end
+                continue
+        rendered.append(char)
+        if not char.isspace():
+            previous_significant = char
+        index += 1
+        if depth == 0:
+            try:
+                arguments = json.loads("".join(rendered))
+            except (json.JSONDecodeError, TypeError):
+                return None
+            return (arguments, index) if isinstance(arguments, dict) else None
+    return None
+
+
+_JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
+_CODEX_CALL_RE = re.compile(
+    rf"const\s+({_JS_IDENTIFIER})\s*=\s*await\s+tools\.({_JS_IDENTIFIER})\s*\(\s*"
+)
+_CODEX_RENDER_RE = re.compile(
+    rf"text\s*\(\s*(?:JSON\.stringify\(\s*({_JS_IDENTIFIER})\s*\)|"
+    rf"({_JS_IDENTIFIER})(?:\.({_JS_IDENTIFIER}))?)\s*\)\s*;"
+)
+
+
+def _static_codex_tool_calls(source: str) -> list[tuple[str, dict[str, Any]]] | None:
+    """Decode the complete, bounded statement grammar emitted by native Codex."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    variables: set[str] = set()
+    pragma = re.match(r"[ \t]*// @exec:[^\r\n]*\r?\n", source)
+    index = pragma.end() if pragma else 0
+    while index < len(source):
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if index == len(source):
+            break
+
+        call = _CODEX_CALL_RE.match(source, index)
+        if call:
+            variable, function_name = call.groups()
+            if variable in variables:
+                return None
+            decoded = _decode_static_js_object(source, call.end())
+            if decoded is None:
+                return None
+            arguments, end = decoded
+            close = re.match(r"\s*\)\s*;", source[end:])
+            if close is None:
+                return None
+            variables.add(variable)
+            calls.append((function_name, arguments))
+            index = end + close.end()
+            continue
+
+        render = _CODEX_RENDER_RE.match(source, index)
+        if render and next((name for name in render.groups() if name), None) in variables:
+            index = render.end()
+            continue
+        return None
+    return calls
+
+
+def _normalize_tool_call(tc: dict[str, Any]) -> list[dict[str, Any]]:
+    if tc.get("function_name") != "exec":
+        return [tc]
+    arguments = tc.get("arguments") or {}
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("input"), str):
+        return [tc]
+    calls = _static_codex_tool_calls(arguments["input"])
+    if not calls:
+        return [tc]
+    return [
+        {**tc, "function_name": function_name, "arguments": inner_arguments}
+        for function_name, inner_arguments in calls
+    ]
+
+
 def iter_tool_calls(traj: dict[str, Any]):
     """Yield ``(step_dict, tool_call_dict)`` for every tool call in the trajectory."""
     for step in traj.get("steps", []):
-        for tc in step.get("tool_calls") or []:
-            yield step, tc
+        for raw_index, tc in enumerate(step.get("tool_calls") or []):
+            for normalized in _normalize_tool_call(tc):
+                yield step, {**normalized, "_atif_raw_tool_index": raw_index}
 
 
 def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -143,7 +265,7 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
         if reasoning:
             parts.append(f"Agent reasoning: {str(reasoning)[:200]}")
 
-        for tc in step.get("tool_calls") or []:
+        for _, tc in iter_tool_calls({"steps": [step]}):
             fn = tc.get("function_name", "")
             args = tc.get("arguments") or {}
             parts.append(f"Agent called: {fn}({json.dumps(args)[:200]})")
@@ -267,7 +389,7 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
             if call_id and content:
                 observations_by_id[call_id] = content
 
-        for tc in step.get("tool_calls") or []:
+        for _, tc in iter_tool_calls({"steps": [step]}):
             fn = str(tc.get("function_name") or "")
             fn_lower = fn.lower()
             args = tc.get("arguments") or {}
@@ -447,7 +569,7 @@ def _tool_call_ref(step_idx: int, tool_idx: int, tc: dict[str, Any], *, kind: st
     label_detail = command or path or fn
     return _evidence_ref(
         source="trajectory.json",
-        json_pointer=f"/steps/{step_idx}/tool_calls/{tool_idx}",
+        json_pointer=f"/steps/{step_idx}/tool_calls/{tc.get('_atif_raw_tool_index', tool_idx)}",
         kind=kind,
         label=f"{fn}: {label_detail}" if label_detail else fn,
         path=path or None,
@@ -460,7 +582,7 @@ def _tool_call_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     for step_idx, step in enumerate(traj.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        for tool_idx, tc in enumerate(step.get("tool_calls") or []):
+        for tool_idx, (_, tc) in enumerate(iter_tool_calls({"steps": [step]})):
             if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
                 return refs
             refs.append(_tool_call_ref(step_idx, tool_idx, tc, kind="tool_call"))
@@ -496,7 +618,7 @@ def _file_change_refs(traj: dict[str, Any]) -> list[dict[str, Any]]:
     for step_idx, step in enumerate(traj.get("steps", [])):
         if step.get("source") != "agent":
             continue
-        for tool_idx, tc in enumerate(step.get("tool_calls") or []):
+        for tool_idx, (_, tc) in enumerate(iter_tool_calls({"steps": [step]})):
             if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
                 return refs
             fn = str(tc.get("function_name") or "")
@@ -749,7 +871,7 @@ def build_verified_facts(
             if step.get("source") != "agent":
                 continue
             # Check tool call arguments: command/cmd/code and file-path args
-            for tc in step.get("tool_calls") or []:
+            for _, tc in iter_tool_calls({"steps": [step]}):
                 args = tc.get("arguments") or {}
                 if not isinstance(args, dict):
                     continue
@@ -914,7 +1036,7 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
             continue
-        for tc in step.get("tool_calls") or []:
+        for _, tc in iter_tool_calls({"steps": [step]}):
             obs_text = ""
             obs = step.get("observation") or {}
             for r in obs.get("results") or []:

@@ -11,12 +11,12 @@ import math
 import os
 import shlex
 import ssl
+import stat
 import subprocess
 from collections.abc import Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from threading import BoundedSemaphore, Thread
 from time import monotonic
@@ -842,34 +842,73 @@ def _first_trial_exception_detail(job_dir: Path) -> str:
     return ""
 
 
-def _mounted_agent_artifacts_present(job_dir: Path) -> bool:
-    """Return whether any trial exposed agent artifacts on the host filesystem.
+_MAX_ARTIFACT_SCAN_ENTRIES = 4096
 
-    Harbor keeps single-step logs in the trial's ``agent`` directory and moves
-    multi-step logs into ``steps/<step>/agent``. A completed agent run leaves at
-    least one non-empty file in one of those directories. An empty tree means
-    the daemon resolved the mount source on its own machine and the host never
-    received the writes.
+
+def _has_visible_artifact(directory: Path) -> bool:
+    """Return whether a directory tree contains a non-empty regular file.
+
+    The tree is written by the evaluated container, so nothing here follows
+    symlinks: a link could point anywhere on the host and make an unrelated file
+    look like proof that the mount worked. Links are skipped rather than
+    resolved, and only regular files reached without traversing one count.
     """
-    try:
-        trial_dirs = [child for child in job_dir.iterdir() if child.is_dir()]
-    except OSError:
-        return False
-    for trial_dir in trial_dirs:
-        agent_dirs = [trial_dir / "agent"]
-        steps_dir = trial_dir / "steps"
-        with suppress(OSError):
-            agent_dirs.extend(child / "agent" for child in steps_dir.iterdir() if child.is_dir())
-        for agent_dir in agent_dirs:
-            if not agent_dir.is_dir():
-                continue
+    pending = [directory]
+    scanned = 0
+    while pending and scanned < _MAX_ARTIFACT_SCAN_ENTRIES:
+        current = pending.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            scanned += 1
+            if scanned > _MAX_ARTIFACT_SCAN_ENTRIES:
+                break
             try:
-                for entry in agent_dir.rglob("*"):
-                    if entry.is_file() and entry.stat().st_size > 0:
-                        return True
+                info = entry.lstat()
             except OSError:
                 continue
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(entry)
+            elif stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                return True
     return False
+
+
+def _agent_artifact_dirs(trial_dir: Path, trial_result: Mapping[str, object]) -> list[Path]:
+    """Return the agent directories Harbor populates for one trial.
+
+    Single-step trials keep them at ``<trial>/agent``; multi-step trials keep one
+    per step at ``<trial>/steps/<step_name>/agent``. Harbor declares
+    ``StepConfig.name`` as a bare ``str``, so a step name may span several path
+    components -- and for the same reason it is not trusted to stay inside the
+    trial directory.
+    """
+    if isinstance(trial_result.get("agent_result"), dict):
+        return [trial_dir / "agent"]
+
+    step_results = trial_result.get("step_results")
+    if not isinstance(step_results, list):
+        return []
+
+    steps_dir = trial_dir / "steps"
+    agent_dirs: list[Path] = []
+    for step_result in step_results:
+        if not isinstance(step_result, dict):
+            continue
+        step_name = step_result.get("step_name")
+        if not isinstance(step_name, str):
+            continue
+        relative = PurePosixPath(step_name)
+        if relative.is_absolute() or not relative.parts:
+            continue
+        if any(part in ("", ".", "..") for part in relative.parts):
+            continue
+        agent_dirs.append(steps_dir.joinpath(*relative.parts) / "agent")
+    return agent_dirs
 
 
 def validate_harbor_agent_only_job_result(
@@ -958,6 +997,7 @@ def validate_harbor_agent_only_job_result(
             f"Harbor agent-only job did not produce {expected_trials} trial result(s); found {len(trial_result_paths)}"
         )
 
+    agent_artifact_dirs: list[Path] = []
     for trial_result_path in trial_result_paths:
         try:
             trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
@@ -965,6 +1005,8 @@ def validate_harbor_agent_only_job_result(
             return False, f"Harbor produced an unreadable trial result at {trial_result_path}: {exc}"
         if not isinstance(trial_result, dict):
             return False, f"Harbor trial result at {trial_result_path} is not a JSON object"
+        # Collected before the single-step branch below returns early via ``continue``.
+        agent_artifact_dirs.extend(_agent_artifact_dirs(trial_result_path.parent, trial_result))
         if "exception_info" not in trial_result:
             return False, f"Harbor trial result at {trial_result_path} is missing exception_info"
         if trial_result["exception_info"] is not None:
@@ -1010,7 +1052,7 @@ def validate_harbor_agent_only_job_result(
                     f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} has no agent result"
                 )
 
-    if env_mode == "docker" and not _mounted_agent_artifacts_present(job_dir):
+    if env_mode == "docker" and not any(_has_visible_artifact(agent_dir) for agent_dir in agent_artifact_dirs):
         return False, (
             f"Harbor reported a completed agent run but left no agent artifacts under {job_dir}, "
             "so the results directory is not visible to the Docker daemon. Container writes go to a "

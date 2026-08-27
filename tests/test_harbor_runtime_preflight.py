@@ -3729,3 +3729,99 @@ def test_agent_only_validation_ignores_empty_files_when_checking_visibility(tmp_
 
     assert ok is False
     assert "not visible to the Docker daemon" in detail
+
+
+def _write_multistep_agent_only_result(jobs_dir: Path, step_name: str) -> Path:
+    """Write a completed agent-only job whose single trial has one named step."""
+    result_path = _write_harbor_0132_unscored_result(jobs_dir)
+    (result_path.parent / "case-001__attempt" / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": "case-001__attempt",
+                "agent_result": None,
+                "exception_info": None,
+                "step_results": [
+                    {
+                        "step_name": step_name,
+                        "agent_result": {"n_input_tokens": 100},
+                        "exception_info": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return result_path
+
+
+def test_agent_only_validation_finds_nested_step_agent_artifacts(tmp_path: Path) -> None:
+    """Harbor declares StepConfig.name as a bare str, so a step name may nest."""
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "phase/author")
+    agent_dir = result_path.parent / "case-001__attempt" / "steps" / "phase" / "author" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "opencode.txt").write_text("agent transcript", encoding="utf-8")
+
+    assert runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    ) == (True, "")
+
+
+def test_agent_only_validation_rejects_empty_nested_step_agent_directory(tmp_path: Path) -> None:
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "phase/author")
+    (result_path.parent / "case-001__attempt" / "steps" / "phase" / "author" / "agent").mkdir(parents=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_ignores_step_names_that_escape_the_trial(tmp_path: Path) -> None:
+    """A traversing step name must not be joined onto the trial directory."""
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "../../escape")
+    outside = tmp_path / "jobs" / "escape" / "agent"
+    outside.mkdir(parents=True)
+    (outside / "opencode.txt").write_text("attacker controlled", encoding="utf-8")
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_does_not_follow_agent_authored_symlinks(tmp_path: Path) -> None:
+    """A link into the host must not be accepted as proof the mount worked."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    outside = tmp_path / "outside.log"
+    outside.write_text("host file the container does not own", encoding="utf-8")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "claimed.log").symlink_to(outside)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_does_not_follow_symlinked_agent_subdirectories(tmp_path: Path) -> None:
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "opencode.txt").write_text("host file the container does not own", encoding="utf-8")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "sessions").symlink_to(outside_dir, target_is_directory=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail

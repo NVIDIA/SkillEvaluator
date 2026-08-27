@@ -3,10 +3,12 @@
 
 """Structural Markdown helpers for deterministic validators."""
 
+import posixpath
 import re
 from collections.abc import Iterable, Iterator
 from html import escape
 from html.parser import HTMLParser
+from urllib.parse import unquote, urlsplit
 
 import yaml
 from markdown_it import MarkdownIt
@@ -24,6 +26,30 @@ _SCRIPT_START_RE = re.compile(r"<script(?=[\t\n\r\f />])", re.IGNORECASE | re.AS
 _SCRIPT_END_RE = re.compile(r"</script(?=[\t\n\r\f />])", re.IGNORECASE | re.ASCII)
 _SCRIPT_ESCAPED_STATES = frozenset({"escaped", "escaped-dash", "escaped-dash-dash"})
 _SCRIPT_DOUBLE_ESCAPED_STATES = frozenset({"double-escaped", "double-escaped-dash", "double-escaped-dash-dash"})
+_URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
+
+
+def normalized_local_path(href: str) -> str | None:
+    """Return a once-decoded, normalized local path from a link destination."""
+    href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
+    try:
+        parsed = urlsplit(href)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc:
+        return None
+
+    path = unquote(parsed.path).replace("\\", "/")
+    if path.startswith("/"):
+        return None
+    try:
+        if urlsplit(path).scheme:
+            return None
+    except ValueError:
+        return None
+    if path.endswith(("/", "/.", "/..")):
+        return None
+    return posixpath.normpath(path)
 
 
 def _find_script_end(content: str, start: int) -> int | None:

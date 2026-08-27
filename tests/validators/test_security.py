@@ -69,9 +69,25 @@ def _skillspector_json_report(
         "issues": normalized_issues,
         "suppressed_count": 0,
         "suppressed": [],
+        "execution_successful": True,
+        "analysis_completeness": {
+            "total_components": 0,
+            "scanned_components": 0,
+            "coverage_percent": 100.0,
+            "is_complete": True,
+            "status": "complete",
+            "execution_successful": True,
+            "fully_inspected_files": 0,
+            "partially_inspected_files": 0,
+            "entirely_uninspected_files": 0,
+            "ledger_exceptions": [],
+            "scope_exclusions": [],
+            "analyzer_statuses": [],
+            "limitations": [],
+        },
         "metadata": {
             "has_executable_scripts": False,
-            "skillspector_version": "1.0.0",
+            "skillspector_version": "2.10.0",
             "llm_requested": llm_requested,
             "llm_available": llm_available,
             "meta_analysis_applied": False,
@@ -1275,6 +1291,53 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.status == "incomplete"
         assert any("unexpected suppressed findings" in error.lower() for error in result.errors)
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_2_10_partial_scan_reports_incomplete_before_recommendation(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        """LOW/CAUTION is the documented projection of an incomplete 2.10 scan."""
+        payload = _skillspector_json_report()
+        payload["risk_assessment"].update(
+            {
+                "recommendation": "CAUTION",
+                "max_issue_severity": "NONE",
+            }
+        )
+        payload["metadata"]["skillspector_version"] = "2.10.0"
+        payload["execution_successful"] = True
+        payload["analysis_completeness"] = {
+            "total_components": 4,
+            "scanned_components": 4,
+            "coverage_percent": 100.0,
+            "is_complete": False,
+            "status": "partial",
+            "execution_successful": True,
+            "fully_inspected_files": 4,
+            "partially_inspected_files": 0,
+            "entirely_uninspected_files": 0,
+            "ledger_exceptions": [
+                {"reason_code": "reference_unresolved", "fatal": False} for _ in range(12)
+            ],
+            "scope_exclusions": [],
+            "analyzer_statuses": [],
+            "limitations": [],
+        }
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("analysis_completeness" in error and "partial" in error for error in result.errors)
+        assert not any("recommendation" in error for error in result.errors)
+
     @pytest.mark.parametrize(
         ("payload", "expected_error"),
         (
@@ -1415,11 +1478,34 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "DO_NOT_INSTALL"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "CAUTION"},
                     "issues": [],
                 },
                 "risk_assessment.recommendation",
-                id="contradictory-risk-recommendation",
+                id="complete-low-caution-recommendation",
+            ),
+            pytest.param(
+                {
+                    "execution_successful": False,
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
+                    "issues": [],
+                },
+                "execution_successful=false",
+                id="unsuccessful-execution",
+            ),
+            pytest.param(
+                {
+                    "execution_successful": True,
+                    "analysis_completeness": {
+                        "is_complete": True,
+                        "status": "complete",
+                        "execution_successful": "true",
+                    },
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
+                    "issues": [],
+                },
+                "analysis_completeness.execution_successful",
+                id="invalid-completeness-execution-marker",
             ),
             pytest.param(
                 {

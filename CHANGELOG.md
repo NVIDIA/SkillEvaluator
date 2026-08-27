@@ -67,6 +67,10 @@ All notable changes to SkillEvaluator are documented in this file.
   for runtime-error phrases when the recorded exception belongs to the
   verifier, health check, or task. Correct answers that discuss errors such as
   `401 Unauthorized` are no longer misreported as agent runtime failures.
+- SkillSpector 2.10 incomplete scans now report the authoritative analysis-
+  completeness failure instead of a false recommendation/severity
+  contradiction. Complete reports and older reports without completeness
+  metadata retain their existing validation behavior.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

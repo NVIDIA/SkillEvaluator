@@ -764,6 +764,70 @@ class SecurityValidator(ValidatorBase):
             result.add_error("skillspector JSON field 'success' must be a boolean; security scan did not complete")
             return False
 
+        execution_successful = data.get("execution_successful")
+        if "execution_successful" in data and not isinstance(execution_successful, bool):
+            result.add_error(
+                "skillspector JSON field 'execution_successful' must be a boolean; "
+                "security scan did not complete"
+            )
+            return False
+        if execution_successful is False:
+            result.add_error("skillspector reported execution_successful=false; security scan did not complete")
+            return False
+
+        analysis_completeness = data.get("analysis_completeness")
+        if "analysis_completeness" in data:
+            if not isinstance(analysis_completeness, dict):
+                result.add_error(
+                    "skillspector JSON field 'analysis_completeness' must be an object; "
+                    "security scan did not complete"
+                )
+                return False
+            is_complete = analysis_completeness.get("is_complete")
+            if not isinstance(is_complete, bool):
+                result.add_error(
+                    "skillspector JSON field 'analysis_completeness.is_complete' must be a boolean; "
+                    "security scan did not complete"
+                )
+                return False
+            completeness_status = analysis_completeness.get("status")
+            if not isinstance(completeness_status, str) or completeness_status not in {
+                "complete",
+                "partial",
+                "failed",
+            }:
+                result.add_error(
+                    "skillspector JSON field 'analysis_completeness.status' is not recognized; "
+                    "security scan did not complete"
+                )
+                return False
+            completeness_execution_successful = analysis_completeness.get("execution_successful")
+            if not isinstance(completeness_execution_successful, bool):
+                result.add_error(
+                    "skillspector JSON field 'analysis_completeness.execution_successful' must be a boolean; "
+                    "security scan did not complete"
+                )
+                return False
+            if (
+                execution_successful is not None
+                and execution_successful is not completeness_execution_successful
+            ):
+                result.add_error(
+                    "skillspector JSON execution_successful fields contradict each other; "
+                    "security scan did not complete"
+                )
+                return False
+            if (
+                not is_complete
+                or completeness_status != "complete"
+                or not completeness_execution_successful
+            ):
+                result.add_error(
+                    "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+                    f"(status '{completeness_status}'); security scan did not complete"
+                )
+                return False
+
         status = data.get("status")
         if status is not None and not isinstance(status, str):
             result.add_error("skillspector JSON field 'status' must be a string; security scan did not complete")

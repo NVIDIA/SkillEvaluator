@@ -2101,7 +2101,6 @@ def test_runtime_preflight_deadline_uses_effective_staged_task_timeout(
         output_dir=tmp_path / "results",
         agent_runtime_preflight=True,
         timeout_multiplier=12.0,
-        agent_timeout_seconds=300.0,
     )
 
     assert "error" not in result

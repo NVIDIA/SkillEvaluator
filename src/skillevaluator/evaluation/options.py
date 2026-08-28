@@ -43,7 +43,6 @@ class EvaluationOptions:
     harbor_keep_jobs: bool = False
     agent_runtime_preflight: bool | None = None
     timeout_multiplier: float | None = None
-    agent_timeout_seconds: float | None = None
     override_cpus: int | None = None
     override_memory_mb: int | None = None
     override_storage_mb: int | None = None

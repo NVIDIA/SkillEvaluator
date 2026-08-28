@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import shlex
@@ -1289,110 +1288,6 @@ def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> flo
     return round(max(timeouts) * timeout_multiplier, 3) if timeouts else None
 
 
-def _validate_agent_timeout_seconds(value: float | None) -> float | None:
-    """Validate an operator-owned base timeout override."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError("agent_timeout_seconds must be a finite number greater than 0")
-    normalized = float(value)
-    if not math.isfinite(normalized) or normalized <= 0:
-        raise ValueError("agent_timeout_seconds must be a finite number greater than 0")
-    return normalized
-
-
-def _set_staged_agent_timeout(task_file: Path, timeout_seconds: float) -> None:
-    """Override only ``[agent].timeout_sec`` in one staged Harbor task."""
-    try:
-        data = tomllib.loads(task_file.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ValueError(f"Cannot apply agent timeout policy to staged task: {task_file}") from exc
-    agent = data.get("agent") if isinstance(data, dict) else None
-    if agent is not None and not isinstance(agent, dict):
-        raise ValueError(f"Staged Harbor task [agent] must be a table: {task_file}")
-
-    lines = task_file.read_text(encoding="utf-8").splitlines()
-    agent_header = next(
-        (index for index, line in enumerate(lines) if re.fullmatch(r"\s*\[agent\]\s*(?:#.*)?", line)),
-        None,
-    )
-    rendered = f"timeout_sec = {timeout_seconds!r}"
-    if agent_header is None and agent is None:
-        if lines and lines[-1]:
-            lines.append("")
-        lines.extend(["[agent]", rendered])
-    else:
-        if agent_header is None:
-            raise ValueError(f"Staged Harbor task must use a canonical [agent] table: {task_file}")
-        section_end = next(
-            (index for index in range(agent_header + 1, len(lines)) if re.match(r"\s*\[", lines[index])),
-            len(lines),
-        )
-        timeout_line = next(
-            (index for index in range(agent_header + 1, section_end) if re.match(r"\s*timeout_sec\s*=", lines[index])),
-            None,
-        )
-        if timeout_line is None:
-            lines.insert(agent_header + 1, rendered)
-        else:
-            indent = lines[timeout_line][: len(lines[timeout_line]) - len(lines[timeout_line].lstrip())]
-            lines[timeout_line] = f"{indent}{rendered}"
-
-    content = "\n".join(lines) + "\n"
-    try:
-        updated = tomllib.loads(content)
-    except tomllib.TOMLDecodeError as exc:  # pragma: no cover - guarded by focused contract tests
-        raise ValueError(f"Agent timeout policy produced an invalid staged task: {task_file}") from exc
-    updated_agent = updated.get("agent") if isinstance(updated, dict) else None
-    if not isinstance(updated_agent, dict) or float(updated_agent.get("timeout_sec", 0)) != timeout_seconds:
-        raise ValueError(f"Agent timeout policy did not take effect for staged task: {task_file}")
-    write_output_file_atomically(task_file, content.encode("utf-8"))
-
-
-def _apply_agent_timeout_policy(
-    task_roots: list[tuple[str, Path]],
-    *,
-    requested_base_seconds: float | None,
-    timeout_multiplier: float,
-) -> dict[str, Any]:
-    """Apply the operator override to both arms and return bounded run evidence."""
-    requested = _validate_agent_timeout_seconds(requested_base_seconds)
-    observations: list[tuple[str, float, float]] = []
-    for root_label, root in sorted(task_roots, key=lambda item: item[0]):
-        for task_file in sorted(root.glob("*/task.toml"), key=lambda path: path.parent.name):
-            if requested is not None:
-                _set_staged_agent_timeout(task_file, requested)
-            try:
-                data = tomllib.loads(task_file.read_text(encoding="utf-8"))
-            except (OSError, tomllib.TOMLDecodeError):
-                continue
-            agent = data.get("agent") if isinstance(data, dict) else None
-            value = agent.get("timeout_sec") if isinstance(agent, dict) else None
-            if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
-                base = float(value)
-                observations.append(
-                    (f"{root_label}/{task_file.parent.name}", base, round(base * timeout_multiplier, 3))
-                )
-
-    digest_payload = json.dumps(observations, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    bases = [base for _identity, base, _effective in observations]
-    effective = [value for _identity, _base, value in observations]
-    return {
-        "requested_base_seconds": requested,
-        "source": "operator" if requested is not None else "staged_task",
-        "task_count": len(observations),
-        "observed_base_seconds": {
-            "minimum": min(bases) if bases else None,
-            "maximum": max(bases) if bases else None,
-        },
-        "effective_seconds": {
-            "minimum": min(effective) if effective else None,
-            "maximum": max(effective) if effective else None,
-        },
-        "task_timeout_manifest_sha256": hashlib.sha256(digest_payload).hexdigest(),
-    }
-
-
 def _model_for_agent(
     agent: str,
     *,
@@ -2031,7 +1926,6 @@ def _run_harbor_eval_impl(
     env_mode: str = DEFAULT_ENV_MODE,
     env_mode_source: str = "CLI",
     timeout_multiplier: float | None = None,
-    agent_timeout_seconds: float | None = None,
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
@@ -2050,11 +1944,6 @@ def _run_harbor_eval_impl(
     if not agents:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="no agents selected"))
         return {"error": ["At least one Harbor agent is required."]}
-    try:
-        agent_timeout_seconds = _validate_agent_timeout_seconds(agent_timeout_seconds)
-    except ValueError as exc:
-        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
     if env_mode == ENV_MODE_LOCAL:
         from skillevaluator.tier3.harbor import local_sandbox
 
@@ -2421,14 +2310,6 @@ def _run_harbor_eval_impl(
             "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
-            "agent_timeout_policy": {
-                "requested_base_seconds": agent_timeout_seconds,
-                "source": "operator" if agent_timeout_seconds is not None else "staged_task",
-                "task_count": 0,
-                "observed_base_seconds": {"minimum": None, "maximum": None},
-                "effective_seconds": {"minimum": None, "maximum": None},
-                "task_timeout_manifest_sha256": None,
-            },
             "base_image_mode": base_image_mode,
             "jobs_retained": keep_harbor_jobs,
             "server_tool_policy": server_tool_policy,
@@ -2653,29 +2534,15 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return _persist_pre_execution_failure([str(exc)])
 
-    timeout_roots = [(f"{agent}/with", with_dir) for agent, (with_dir, _without_dir) in agent_task_dirs.items()]
-    timeout_roots.extend(
-        (f"{agent}/without", without_dir)
-        for agent, (_with_dir, without_dir) in agent_task_dirs.items()
-        if without_dir is not None
-    )
-    try:
-        run_config["harbor"]["agent_timeout_policy"] = _apply_agent_timeout_policy(
-            timeout_roots,
-            requested_base_seconds=agent_timeout_seconds,
-            timeout_multiplier=float(timeout_multiplier),
-        )
-    except (OSError, ValueError) as exc:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
-        return _persist_pre_execution_failure([str(exc)])
-
     task_names = expected_task_names or []
     expected_trials = len(task_names) * n_attempts
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
     preflight_trials = len(agents) if agent_runtime_preflight else 0
+    timeout_roots = [with_dir for with_dir, _without_dir in agent_task_dirs.values()]
+    timeout_roots.extend(without_dir for _with_dir, without_dir in agent_task_dirs.values() if without_dir is not None)
     task_timeout_seconds = _task_timeout_plan(
-        [root for _label, root in timeout_roots],
+        timeout_roots,
         float(timeout_multiplier),
     )
     reporter.start(

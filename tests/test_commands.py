@@ -279,7 +279,7 @@ def test_validate_tier_aliases_and_selector(monkeypatch) -> None:
     assert result.exit_code != 0
 
 
-def test_validate_tier3_forwards_operator_runtime_policy(monkeypatch) -> None:
+def test_validate_tier3_forwards_server_tool_policy(monkeypatch) -> None:
     from skillevaluator import cli as cli_module
     from skillevaluator.models.result import ValidationResult
 
@@ -305,15 +305,12 @@ def test_validate_tier3_forwards_operator_runtime_policy(monkeypatch) -> None:
                 "--tier3",
                 "--checks",
                 "schema",
-                "--agent-timeout-seconds",
-                "420",
                 "--server-tool-policy",
                 "provider_compatible_v1",
             ],
         )
 
     assert result.exit_code == 0, result.output
-    assert captured["agent_timeout_seconds"] == 420.0
     assert captured["server_tool_policy"] == "provider_compatible_v1"
 
 
@@ -617,7 +614,7 @@ def test_run_agent_eval_partial_run_returns_ran_with_errors(monkeypatch, tmp_pat
     assert (result.metadata or {}).get("execution_status") != "skipped"
 
 
-def test_run_agent_eval_builds_options_with_operator_runtime_policy(
+def test_run_agent_eval_builds_options_with_server_tool_policy(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -647,14 +644,12 @@ def test_run_agent_eval_builds_options_with_operator_runtime_policy(
         skip_baseline=False,
         n_concurrent=None,
         max_agents=None,
-        agent_timeout_seconds=420.0,
         server_tool_policy="provider_compatible_v1",
         validate_source=False,
     )
 
     assert result.passed is True
     options = captured["options"]
-    assert options.agent_timeout_seconds == 420.0
     assert options.server_tool_policy == "provider_compatible_v1"
 
 

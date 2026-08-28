@@ -33,13 +33,24 @@ _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 
 
 def _guarded_html_inline(state: StateInline, silent: bool) -> bool:
-    """Avoid rescanning the same suffix for each unclosed inline comment."""
+    """Avoid rescanning suffixes for HTML fragments with no possible terminator."""
+    terminator = None
     if state.src.startswith("<!--", state.pos) and not state.src.startswith(("<!-->", "<!--->"), state.pos):
+        terminator = "-->"
+    elif state.src.startswith("<?", state.pos):
+        terminator = "?>"
+    elif state.src.startswith("<![CDATA[", state.pos):
+        terminator = "]]>"
+    elif state.src.startswith("<!", state.pos) and state.pos + 2 < len(state.src):
+        letter = state.src[state.pos + 2]
+        if "A" <= letter <= "Z" or "a" <= letter <= "z":
+            terminator = ">"
+    if terminator is not None:
         # Each inline source has its own offsets, even within the same document.
-        if state.env.get("_comment_source") is not state.src:
-            state.env["_comment_source"] = state.src
-            state.env["_last_comment_end"] = state.src.rfind("-->")
-        if state.pos > state.env["_last_comment_end"]:
+        if state.env.get("_html_source") is not state.src:
+            state.env["_html_source"] = state.src
+            state.env["_html_ends"] = {end: state.src.rfind(end) for end in ("-->", "?>", "]]>", ">")}
+        if state.pos > state.env["_html_ends"][terminator]:
             return False
     return html_inline(state, silent)
 

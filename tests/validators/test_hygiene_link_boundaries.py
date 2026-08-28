@@ -40,7 +40,7 @@ def test_invalid_utf8_does_not_alias_an_existing_replacement_character(tmp_path:
     assert normalized_local_path("%FF.md") != normalized_local_path("%FE.md")
 
 
-@pytest.mark.parametrize("value", ["9" * 5000, "[" * 1500 + "0" + "]" * 1500])
+@pytest.mark.parametrize("value", ["9" * 5000, "[" * 1500 + "0" + "]" * 1500], ids=["huge-integer", "deep-sequence"])
 def test_frontmatter_limits_do_not_abort_validation(tmp_path: Path, value: str) -> None:
     result = _validate_document(tmp_path, f"---\nvalue: {value}\n---\n[guide](missing.md)\n")
     assert result.errors == ["Dead link in guide.md: missing.md"]
@@ -78,8 +78,11 @@ def test_link_diagnostics_cannot_inject_report_lines(tmp_path: Path, reporter_ty
 
 
 @pytest.mark.parametrize("kib", [8, 16, 32, 64])
-def test_unclosed_comment_scanning_is_linear(kib: int, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Measure regex input work rather than imposing a flaky wall-clock limit."""
+@pytest.mark.parametrize(
+    "opener", ["<!--", "<?", "<![CDATA[", "<!a"], ids=["comment", "processing", "cdata", "declaration"]
+)
+def test_unclosed_html_scanning_is_linear(kib: int, opener: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measure regex input work for the four guarded forms, not all Markdown."""
     regex_input = 0
     original_rule = markdown_validator.html_inline
 
@@ -90,17 +93,47 @@ def test_unclosed_comment_scanning_is_linear(kib: int, monkeypatch: pytest.Monke
         return original_rule(state, silent)
 
     monkeypatch.setattr(markdown_validator, "html_inline", counted_rule)
-    content = '<a href="before.md">before</a>' + "<!--" * (kib * 256)
+    content = '<a href="before.md">before</a>' + opener * (kib * 1024 // len(opener))
     assert markdown_link_targets(content) == ["before.md"]
     assert regex_input <= 2 * len(content)
 
 
-@pytest.mark.parametrize("comment", ["<!-- comment -->", "<!-- <!-- nested -->"])
-def test_comment_guard_preserves_closed_comments_and_later_links(comment: str) -> None:
-    content = f"[first](first.md) {comment} [last](last.md)\n\n" + "<!--" * 2
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        '<!-- <a href="hidden.md">hidden</a> -->',
+        '<!-- <!-- <a href="hidden.md">hidden</a> -->',
+        "<!-->",
+        "<!--->",
+        '<?<a href="hidden.md">hidden</a>?>',
+        '<![CDATA[<a href="hidden.md">hidden</a>]]>',
+        '<!a <a href="hidden.md">',
+    ],
+)
+def test_html_guard_preserves_closed_fragments_and_later_links(fragment: str) -> None:
+    content = f"[first](first.md) {fragment} [last](last.md)\n\n" + "<!--" * 2
     assert markdown_link_targets(content) == ["first.md", "last.md"]
 
 
-def test_comment_guard_uses_each_inline_sources_offsets() -> None:
-    content = "prefix <!--\n\nnext [visible](visible.md) <!-- closed -->"
+@pytest.mark.parametrize(
+    "opener,closed",
+    [
+        ("<!--", '<!-- <a href="hidden.md">hidden</a> -->'),
+        ("<?", '<?<a href="hidden.md">hidden</a>?>'),
+        ("<![CDATA[", '<![CDATA[<a href="hidden.md">hidden</a>]]>'),
+        ("<!a", '<!a <a href="hidden.md">'),
+    ],
+)
+def test_html_guard_uses_each_inline_sources_offsets(opener: str, closed: str) -> None:
+    content = f"prefix {opener}\n\nnext [visible](visible.md) {closed}"
     assert markdown_link_targets(content) == ["visible.md"]
+
+
+@pytest.mark.parametrize("reporter_type", [CLIReporter, MarkdownReporter])
+def test_link_diagnostics_bound_escaped_unicode(tmp_path: Path, reporter_type: type) -> None:
+    result = _validate_document(tmp_path, '<a href="missing/' + "\U0001f600" * 200 + '">bad</a>')
+    assert len(result.errors) == 1
+    assert result.errors[0].endswith("...")
+    assert len(result.errors[0]) < 220
+    assert "\\U0001f600" in result.errors[0]
+    assert len(reporter_type().render_all([result])) < 3000

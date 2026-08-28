@@ -22,7 +22,8 @@ _TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 
 def _link_display(value: str) -> str:
     """Keep untrusted link diagnostics bounded and on one physical line."""
-    return ascii(value[:160])[1:-1] + ("..." if len(value) > 160 else "")
+    escaped = ascii(value[:160])[1:-1]
+    return escaped[:160] + ("..." if len(value) > 160 or len(escaped) > 160 else "")
 
 
 class HygieneValidator(ValidatorBase):

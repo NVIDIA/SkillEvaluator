@@ -4,6 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Catalog validation now writes `catalog-summary.json` at the reports root with
+  per-skill pass/fail status, optional severity rollups from child JSON reports,
+  and paths to per-skill report directories.
+
 ### Fixed
 
 - Tier 3 accuracy and custom goal judges now retry one malformed (including

@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import math
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -691,6 +693,89 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
     console_.print(Text.assemble(("      reports     ", MUTED), (f"{reports_root}/<skill>/", MUTED)))
 
 
+CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
+
+
+def _latest_skill_json_report(skill_report_dir: Path) -> Path | None:
+    """Return the newest per-skill machine-readable report when present."""
+    if not skill_report_dir.is_dir():
+        return None
+    candidates = sorted(skill_report_dir.glob("skillevaluator-output-*.json"), reverse=True)
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def _catalog_skill_entry(
+    skill_name: str,
+    skill_report_dir: Path,
+    *,
+    passed: bool,
+    reason: str,
+) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "name": skill_name,
+        "passed": passed,
+        "report_dir": skill_name,
+    }
+    if not passed:
+        entry["reason"] = reason
+
+    json_report = _latest_skill_json_report(skill_report_dir)
+    if json_report is None:
+        return entry
+
+    entry["json_report"] = json_report.name
+    try:
+        payload = json.loads(json_report.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return entry
+    if not isinstance(payload, dict):
+        return entry
+
+    for key in ("overall_passed", "overall_status", "incomplete_scans", "severity_counts"):
+        if key in payload:
+            entry[key] = payload[key]
+    return entry
+
+
+def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) -> Path:
+    """Write a machine-readable fleet rollup for catalog validation."""
+    total = len(skills)
+    passed = sum(1 for skill in skills if skill.get("passed"))
+    failed = total - passed
+    severity_totals = {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+    }
+    for skill in skills:
+        counts = skill.get("severity_counts")
+        if not isinstance(counts, dict):
+            continue
+        for key in severity_totals:
+            value = counts.get(key)
+            if isinstance(value, int):
+                severity_totals[key] += value
+
+    summary: dict[str, object] = {
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "overall_passed": failed == 0,
+        "reports_root": output_dir.name,
+        "summary_path": CATALOG_SUMMARY_FILENAME,
+        "severity_totals": severity_totals,
+        "skills": skills,
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / CATALOG_SUMMARY_FILENAME
+    output_path.write_text(json.dumps(summary, indent=2, default=str, allow_nan=False), encoding="utf-8")
+    return output_path
+
+
 def _validate_catalog(
     ctx: click.Context,
     *,
@@ -725,6 +810,17 @@ def _validate_catalog(
             failures.append((skill_dir.name, str(getattr(exc, "message", exc))))
         except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
             failures.append((skill_dir.name, f"unexpected error: {exc}"))
+    failure_map = dict(failures)
+    skill_entries = [
+        _catalog_skill_entry(
+            skill_dir.name,
+            output_dir / skill_dir.name,
+            passed=skill_dir.name not in failure_map,
+            reason=failure_map.get(skill_dir.name, ""),
+        )
+        for skill_dir in skill_dirs
+    ]
+    _write_catalog_summary(output_dir, skill_entries)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     if failures:
         raise click.ClickException(

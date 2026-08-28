@@ -3810,6 +3810,59 @@ def test_agent_only_validation_does_not_follow_agent_authored_symlinks(tmp_path:
     assert "not visible to the Docker daemon" in detail
 
 
+def test_agent_only_validation_does_not_follow_symlinked_agent_directory(tmp_path: Path) -> None:
+    """The walk must reject a link at its root, not just links found below it."""
+    result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "opencode.txt").write_text("host file the container does not own", encoding="utf-8")
+    agent_dir = result_path.parent / "case-001__attempt" / "agent"
+    agent_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_agent_only_validation_does_not_follow_nested_step_ancestor_symlink(tmp_path: Path) -> None:
+    """Each path component leading to a nested step's agent tree is untrusted."""
+    result_path = _write_multistep_agent_only_result(tmp_path / "jobs", "phase/author")
+    outside_phase = tmp_path / "outside-phase"
+    outside_agent = outside_phase / "author" / "agent"
+    outside_agent.mkdir(parents=True)
+    (outside_agent / "opencode.txt").write_text("host file the container does not own", encoding="utf-8")
+    steps_dir = result_path.parent / "case-001__attempt" / "steps"
+    steps_dir.mkdir()
+    (steps_dir / "phase").symlink_to(outside_phase, target_is_directory=True)
+
+    ok, detail = runtime_preflight.validate_harbor_agent_only_job_result(
+        result_path, expected_trials=1, env_mode="docker"
+    )
+
+    assert ok is False
+    assert "not visible to the Docker daemon" in detail
+
+
+def test_visible_artifact_scan_stops_enumerating_at_entry_limit(monkeypatch, tmp_path: Path) -> None:
+    """The limit must bound directory enumeration, not only later stat calls."""
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    empty_file = agent_dir / "empty.log"
+    empty_file.touch()
+
+    def hostile_iterdir(_directory: Path):
+        for _ in range(runtime_preflight._MAX_ARTIFACT_SCAN_ENTRIES + 1):
+            yield empty_file
+        raise AssertionError("artifact scan enumerated beyond its declared limit")
+
+    monkeypatch.setattr(Path, "iterdir", hostile_iterdir)
+
+    assert runtime_preflight._has_visible_artifact(agent_dir, root=tmp_path) is False
+
+
 def test_agent_only_validation_does_not_follow_symlinked_agent_subdirectories(tmp_path: Path) -> None:
     result_path = _write_harbor_0132_unscored_result(tmp_path / "jobs")
     outside_dir = tmp_path / "outside"

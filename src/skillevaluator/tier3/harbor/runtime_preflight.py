@@ -16,7 +16,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from queue import Empty, Queue
 from threading import BoundedSemaphore, Thread
 from time import monotonic
@@ -845,7 +845,13 @@ def _first_trial_exception_detail(job_dir: Path) -> str:
 _MAX_ARTIFACT_SCAN_ENTRIES = 4096
 
 
-def _has_visible_artifact(directory: Path) -> bool:
+def _is_link_or_reparse(info: os.stat_result) -> bool:
+    """Return whether an entry can redirect traversal to another host path."""
+    file_attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _has_visible_artifact(directory: Path, *, root: Path) -> bool:
     """Return whether a directory tree contains a non-empty regular file.
 
     The tree is written by the evaluated container, so nothing here follows
@@ -853,28 +859,46 @@ def _has_visible_artifact(directory: Path) -> bool:
     look like proof that the mount worked. Links are skipped rather than
     resolved, and only regular files reached without traversing one count.
     """
-    pending = [directory]
+    try:
+        relative = directory.relative_to(root)
+    except ValueError:
+        return False
+
+    # ``lstat`` on only the final directory is not enough: an earlier path
+    # component can itself redirect the walk. Validate every component from the
+    # trusted job directory before entering the agent-authored tree.
+    current = root
+    for part in relative.parts:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError:
+            return False
+        if _is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            return False
+
+    pending = [current]
     scanned = 0
     while pending and scanned < _MAX_ARTIFACT_SCAN_ENTRIES:
         current = pending.pop()
         try:
-            entries = list(current.iterdir())
+            entries = current.iterdir()
+            for entry in entries:
+                scanned += 1
+                if scanned > _MAX_ARTIFACT_SCAN_ENTRIES:
+                    return False
+                try:
+                    info = entry.lstat()
+                except OSError:
+                    continue
+                if _is_link_or_reparse(info):
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(entry)
+                elif stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                    return True
         except OSError:
             continue
-        for entry in entries:
-            scanned += 1
-            if scanned > _MAX_ARTIFACT_SCAN_ENTRIES:
-                break
-            try:
-                info = entry.lstat()
-            except OSError:
-                continue
-            if stat.S_ISLNK(info.st_mode):
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                pending.append(entry)
-            elif stat.S_ISREG(info.st_mode) and info.st_size > 0:
-                return True
     return False
 
 
@@ -902,8 +926,8 @@ def _agent_artifact_dirs(trial_dir: Path, trial_result: Mapping[str, object]) ->
         step_name = step_result.get("step_name")
         if not isinstance(step_name, str):
             continue
-        relative = PurePosixPath(step_name)
-        if relative.is_absolute() or not relative.parts:
+        relative = Path(step_name)
+        if relative.anchor or not relative.parts:
             continue
         if any(part in ("", ".", "..") for part in relative.parts):
             continue
@@ -1052,7 +1076,9 @@ def validate_harbor_agent_only_job_result(
                     f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} has no agent result"
                 )
 
-    if env_mode == "docker" and not any(_has_visible_artifact(agent_dir) for agent_dir in agent_artifact_dirs):
+    if env_mode == "docker" and not any(
+        _has_visible_artifact(agent_dir, root=job_dir) for agent_dir in agent_artifact_dirs
+    ):
         return False, (
             f"Harbor reported a completed agent run but left no agent artifacts under {job_dir}, "
             "so the results directory is not visible to the Docker daemon. Container writes go to a "

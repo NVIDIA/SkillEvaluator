@@ -104,6 +104,48 @@ def test_auto_reporter_selects_terminal_appropriate_presentation(monkeypatch: py
     assert isinstance(progress.create_progress_reporter("off", stream=_TTYBuffer()), progress.NullProgressReporter)
 
 
+def test_plain_plan_labels_the_maximum_scaled_top_level_agent_timeout() -> None:
+    progress = _progress_module()
+    output = io.StringIO()
+    reporter = progress.PlainProgressReporter(stream=output, refresh_interval=60)
+    plan = _plan(progress)
+    plan = progress.Tier3RunPlan(
+        **{field: getattr(plan, field) for field in plan.__dataclass_fields__ if field != "task_timeout_seconds"},
+        task_timeout_seconds=300.0,
+    )
+
+    reporter.start(plan)
+    reporter.close()
+
+    rendered = output.getvalue()
+    assert "max-scaled-top-level-agent-timeout=300s" in rendered
+    assert "task-timeout" not in rendered
+
+
+def test_rich_plan_labels_the_maximum_scaled_top_level_agent_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+    from rich.console import Console
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    plan = _plan(progress)
+    plan = progress.Tier3RunPlan(
+        **{field: getattr(plan, field) for field in plan.__dataclass_fields__ if field != "task_timeout_seconds"},
+        task_timeout_seconds=300.0,
+    )
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+
+    reporter.start(plan)
+    rendered = io.StringIO()
+    Console(file=rendered, force_terminal=False, width=180).print(_FakeLive.instances[0].renderables[-1])
+    reporter.close()
+
+    text = rendered.getvalue()
+    assert "Max scaled top-level agent timeout" in text
+    assert "Task timeout" not in text
+
+
 @pytest.mark.parametrize("term", ["dumb", "unknown"])
 def test_auto_reporter_uses_immediate_plain_output_for_non_interactive_tty(
     monkeypatch: pytest.MonkeyPatch,

@@ -46,6 +46,11 @@ HARBOR_AGENTS = HARBOR_AGENTS_SUPPORTED | HARBOR_AGENTS_EXPERIMENTAL
 
 AGENT_ALIASES = {"claude": "claude-code"}
 
+# Accuracy, custom goal, and behavior can each make two sequential 90-second
+# direct public-provider attempts. The remaining minute covers verifier
+# overhead and fail-closed artifact writes.
+DEFAULT_LLM_VERIFIER_TIMEOUT_SEC = 600.0
+
 
 def canonical_agent_name(agent: str) -> str:
     """Return the Harbor agent identifier for a public CLI/config name."""
@@ -55,6 +60,7 @@ def canonical_agent_name(agent: str) -> str:
 __all__ = [
     "AGENT_ALIASES",
     "DEFAULT_ENV_MODE",
+    "DEFAULT_LLM_VERIFIER_TIMEOUT_SEC",
     "ENV_MODE_LOCAL",
     "HARBOR_AGENTS",
     "HARBOR_AGENTS_EXPERIMENTAL",

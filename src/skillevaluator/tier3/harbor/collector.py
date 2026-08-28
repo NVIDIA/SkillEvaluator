@@ -561,7 +561,10 @@ def _agent_runtime_failure_reason(trial_dir: Path) -> str:
     exception_type, exception_reason = _trial_exception_details(trial_dir)
     agent_reason = _agent_log_runtime_failure_reason(
         trial_dir,
-        include_text_logs=bool(exception_reason),
+        include_text_logs=(
+            exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES
+            or exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES
+        ),
     )
     if agent_reason:
         return agent_reason

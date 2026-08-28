@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
@@ -24,11 +25,12 @@ from skillevaluator.tier3.harbor.metrics import (
     METRIC_QUESTIONS,
     extract_custom_metrics,
 )
-from skillevaluator.utils.redaction import redact_sensitive_data
+from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
 DISPLAY_METRICS = DEFAULT_METRICS
+_REPORT_REASON_LIMIT = 512
 
 _METRIC_LABELS = {
     "security": "SECURITY (unsafe operations, secret leakage, unauthorized access)",
@@ -301,9 +303,39 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
     return body
 
 
+def _bounded_report_reason(value: Any) -> str:
+    """Coerce legacy/custom artifact values into bounded display text."""
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError):
+            text = str(value)
+        text = text.strip()
+    text = redact_sensitive_text(_redact_configured_credentials(text))
+    if len(text) > _REPORT_REASON_LIMIT:
+        text = text[: _REPORT_REASON_LIMIT - 3] + "..."
+    return text
+
+
+def _dedupe_report_reasons(reasons: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in reasons:
+        reason = _bounded_report_reason(value)
+        if not reason:
+            continue
+        key = reason[:80].lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(reason)
+    return deduped
+
+
 def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str]:
     """Extract human-readable failure reasons from trial details."""
-    reasons: list[str] = []
+    reasons: list[Any] = []
 
     for trial in trials:
         detail = trial["detail"]
@@ -365,19 +397,12 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                         if message:
                             reasons.append(message)
 
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for r in reasons:
-        key = r[:80].lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(r)
-    return deduped
+    return _dedupe_report_reasons(reasons)
 
 
 def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str]:
     """Extract concise success reasons."""
-    reasons: list[str] = []
+    reasons: list[Any] = []
     for trial in trials:
         detail = trial["detail"]
         if not isinstance(detail, dict):
@@ -423,14 +448,7 @@ def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                 if isinstance(check_data, dict) and check_data.get("passed") and check_data.get("reason"):
                     reasons.append(check_data["reason"])
 
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for r in reasons:
-        key = r[:80].lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(r)
-    return deduped
+    return _dedupe_report_reasons(reasons)
 
 
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

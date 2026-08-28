@@ -375,6 +375,21 @@ def test_generated_task_stages_public_provider_variables_for_the_verifier(tmp_pa
     assert 'OPENAI_API_KEY = "${OPENAI_API_KEY}"' in task
 
 
+def test_generated_task_verifier_timeout_covers_all_structured_judge_attempts(tmp_path) -> None:
+    _write_task_toml(
+        tmp_path,
+        {"id": "timeout-test", "expected_skill": "demo"},
+        has_skill=True,
+        runtime_env={},
+    )
+
+    task = tomllib.loads((tmp_path / "task.toml").read_text(encoding="utf-8"))
+
+    # Accuracy, custom goal, and behavior can each make two sequential
+    # 90-second provider attempts. Leave a full minute for verifier overhead.
+    assert task["verifier"]["timeout_sec"] >= (3 * 2 * 90) + 60
+
+
 def test_generated_task_keeps_evaluator_provider_variables_out_of_agent_environment(tmp_path) -> None:
     _write_task_toml(
         tmp_path,

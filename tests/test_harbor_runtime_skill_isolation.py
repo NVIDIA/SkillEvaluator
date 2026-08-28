@@ -257,6 +257,7 @@ def test_native_tasks_preserve_authored_judge_model_in_verifier_env(
     if grading_mode == "default":
         expected["SKILL_EVAL_LLM_PROVIDER"] = "${SKILL_EVAL_LLM_PROVIDER}"
     assert task_config["verifier"]["env"] == expected
+    assert task_config["verifier"]["timeout_sec"] == 180.0
 
 
 @pytest.mark.parametrize(
@@ -282,6 +283,21 @@ def test_native_tasks_reject_judge_model_controls_in_agent_environment(tmp_path:
 
     with pytest.raises(ValueError, match=r"environment.env.*judge|judge.*environment.env"):
         stage_native_harbor_tasks(target, tmp_path / "native-agent-judge-control")
+
+
+def test_native_task_injected_verifier_timeout_covers_all_structured_judge_attempts(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+
+    task = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-injected-verifier-timeout",
+        grading_mode="default",
+        verifier_env={"SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}"},
+    )[0]
+    task_config = tomllib.loads((task / "task.toml").read_text(encoding="utf-8"))
+
+    assert task_config["verifier"]["timeout_sec"] >= (3 * 2 * 90) + 60
 
 
 def test_native_task_reuses_existing_exact_provider_placeholder_when_injecting(tmp_path: Path) -> None:

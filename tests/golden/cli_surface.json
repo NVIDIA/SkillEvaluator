@@ -1745,6 +1745,24 @@
               "type": "float"
             },
             {
+              "name": "agent_timeout_seconds",
+              "opts": [
+                "--agent-timeout-seconds"
+              ],
+              "param_type": "option",
+              "type": "float"
+            },
+            {
+              "choices": [
+                "provider_compatible_v1"
+              ],
+              "name": "server_tool_policy",
+              "opts": [
+                "--server-tool-policy"
+              ],
+              "param_type": "option"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "harbor_keep_jobs",
@@ -3045,6 +3063,24 @@
           ],
           "param_type": "option",
           "type": "float"
+        },
+        {
+          "name": "agent_timeout_seconds",
+          "opts": [
+            "--agent-timeout-seconds"
+          ],
+          "param_type": "option",
+          "type": "float"
+        },
+        {
+          "choices": [
+            "provider_compatible_v1"
+          ],
+          "name": "server_tool_policy",
+          "opts": [
+            "--server-tool-policy"
+          ],
+          "param_type": "option"
         },
         {
           "default": "False",

@@ -559,6 +559,11 @@ def test_live_eval_help_uses_skill_evaluator_runtime_and_grading_names() -> None
     assert "--server-tool-policy [provider_compatible_v1]" in evaluate.output
     assert "--agent-timeout-seconds FLOAT" in evaluate.output
 
+    validate = runner.invoke(cli, ["validate", "--help"])
+    assert validate.exit_code == 0
+    assert "--server-tool-policy [provider_compatible_v1]" in validate.output
+    assert "--agent-timeout-seconds FLOAT" in validate.output
+
     grader = runner.invoke(cli, ["init-custom-grader", "--help"])
     assert grader.exit_code == 0
     assert "default_plus_custom" in grader.output

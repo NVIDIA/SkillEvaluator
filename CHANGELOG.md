@@ -4,6 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The primary `skillevaluator validate --tier3` workflow now exposes
+  `--agent-timeout-seconds` and `--server-tool-policy`, matching the standalone
+  Tier 3 evaluator so operator-owned runtime policy is preserved through both
+  CLI entry points.
+
 ### Fixed
 
 - PII scanning no longer treats Markdown ATX headings as code comments, so

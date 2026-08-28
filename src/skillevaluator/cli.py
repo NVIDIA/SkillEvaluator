@@ -451,6 +451,8 @@ def _run_agent_eval_or_skip(
     include_skills: tuple[Path, ...] = (),
     copy_repo: bool = False,
     timeout_multiplier: float | None = None,
+    agent_timeout_seconds: float | None = None,
+    server_tool_policy: str | None = None,
     harbor_keep_jobs: bool = False,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
@@ -501,6 +503,8 @@ def _run_agent_eval_or_skip(
         include_skills=include_skills,
         copy_repo=copy_repo,
         timeout_multiplier=timeout_multiplier,
+        agent_timeout_seconds=agent_timeout_seconds,
+        server_tool_policy=server_tool_policy,
         harbor_keep_jobs=harbor_keep_jobs,
     )
     try:
@@ -1106,6 +1110,22 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Scale Harbor step timeouts.",
 )
 @click.option(
+    "--agent-timeout-seconds",
+    type=float,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Override each staged task's base agent timeout before applying the timeout multiplier.",
+)
+@click.option(
+    "--server-tool-policy",
+    type=SERVER_TOOL_POLICY_CHOICE,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Apply an operator-selected provider capability policy to server-hosted agent tools.",
+)
+@click.option(
     "--harbor-keep-jobs",
     is_flag=True,
     cls=GroupedOption,
@@ -1149,6 +1169,8 @@ def validate(
     include_skills: tuple[Path, ...],
     copy_repo: bool,
     timeout_multiplier: float | None,
+    agent_timeout_seconds: float | None,
+    server_tool_policy: str | None,
     harbor_keep_jobs: bool,
     report_formats: tuple[str, ...],
     output_dir: Path,
@@ -1389,6 +1411,8 @@ def validate(
             include_skills=include_skills,
             copy_repo=copy_repo,
             timeout_multiplier=timeout_multiplier,
+            agent_timeout_seconds=agent_timeout_seconds,
+            server_tool_policy=server_tool_policy,
             harbor_keep_jobs=harbor_keep_jobs,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,

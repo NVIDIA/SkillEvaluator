@@ -224,7 +224,7 @@ class LicenseValidator(ValidatorBase):
         unrecognized: list[str] = []
         for license_name in LICENSE_FILE_NAMES:
             license_path = asset_path / license_name
-            if not license_path.is_file():
+            if not license_path.is_file() or not _is_license_declaration_filename(license_name):
                 continue
             try:
                 content = license_path.read_text(encoding="utf-8", errors="ignore")

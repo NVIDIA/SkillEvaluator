@@ -473,6 +473,22 @@ Copyright (C) 1991, 1999 Free Software Foundation, Inc.
         assert result.metadata.get("license_status") == "unrecognized"
         assert result.metadata.get("license_status") != "allowed"
 
+    def test_notice_apache_attribution_does_not_conflict_with_mit(self, tmp_path: Path):
+        """NOTICE stays informational; Apache text there must not mismatch MIT LICENSE."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-with-apache-notice",
+            "MIT",
+            MIT_LICENSE_TEXT,
+        )
+        (skill_dir / "NOTICE").write_text(APACHE_2_LICENSE_TEXT)
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert result.passed
+        assert all(f.check_name != "frontmatter_license_mismatch" for f in result.findings)
+        assert result.metadata.get("license_status") == "allowed"
+
     def test_strict_dual_license_expression_with_unknown_component_fails(self, tmp_path: Path):
         """Strict mode should fail when any expression component is unknown."""
         skill_dir = create_skill_with_declared_license_and_file(

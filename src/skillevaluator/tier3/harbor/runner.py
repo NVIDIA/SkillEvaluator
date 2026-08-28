@@ -2261,6 +2261,17 @@ def _run_harbor_eval_impl(
     probe_degraded: list[str] = []
     credential_validation_targets: list[dict[str, Any]] = []
     judge_config = _judge_model_config(provider, provider_env, grading_mode)
+    provider_route = _provider_route_evidence(provider)
+    if judge_config.get("enabled") is True:
+        # The judge may select a model distinct from the evaluator fallback,
+        # but it still uses the evaluator's resolved ProviderConfig route.
+        # Persist only the bounded route type and digest; never the URL or key.
+        judge_config.update(
+            {
+                "type": provider_route["type"],
+                "route_identity_sha256": provider_route["route_identity_sha256"],
+            }
+        )
 
     def add_probe_target(label: str, selected_provider: ProviderConfig) -> None:
         route_key = (
@@ -2416,7 +2427,7 @@ def _run_harbor_eval_impl(
             "jobs_retained": keep_harbor_jobs,
             "server_tool_policy": server_tool_policy,
         },
-        "provider": {"name": provider.provider, "model": provider.model},
+        "provider": provider_route,
         "judge": judge_config,
         "credential_validation": {
             "status": "degraded" if probe_degraded else "verified",

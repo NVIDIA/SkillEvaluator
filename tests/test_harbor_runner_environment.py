@@ -1089,10 +1089,24 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "enabled": True,
         "provider": "nv_build",
         "model": "legacy-judge-model",
+        "type": "nvidia_build",
+        "route_identity_sha256": result["run_config"]["judge"]["route_identity_sha256"],
         "source": "LLM_JUDGE_MODEL",
         "override_applied": True,
         "catalog_verification": "degraded",
     }
+    assert result["run_config"]["provider"] == {
+        "name": "nv_build",
+        "type": "nvidia_build",
+        "model": "test-model",
+        "route_identity_sha256": result["run_config"]["provider"]["route_identity_sha256"],
+    }
+    assert (
+        result["run_config"]["judge"]["route_identity_sha256"]
+        == result["run_config"]["provider"]["route_identity_sha256"]
+    )
+    assert "provider.example" not in str(result["run_config"])
+    assert "provider-key" not in str(result["run_config"])
     timeout_policy = result["run_config"]["harbor"]["agent_timeout_policy"]
     assert timeout_policy["requested_base_seconds"] == 300.0
     assert timeout_policy["task_count"] == 4

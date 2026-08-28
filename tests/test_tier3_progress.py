@@ -998,6 +998,56 @@ def test_credential_validation_includes_distinct_standard_grading_route(
     }
 
 
+def test_run_config_provider_and_judge_routes_are_secret_free_and_route_specific(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def run(label: str, base_url: str) -> dict[str, Any]:
+        with monkeypatch.context() as scoped:
+            runner, skill = _stub_runner(
+                scoped,
+                tmp_path / label,
+                provider_name="openai-compatible",
+                provider_model="shared-model",
+                provider_base_url=base_url,
+            )
+            result = runner.run_harbor_eval(
+                skill,
+                ["codex"],
+                output_dir=tmp_path / label / "results",
+                agent_runtime_preflight=False,
+            )
+        assert "error" not in result
+        return result["run_config"]
+
+    first = run(
+        "first",
+        "https://user:first-secret@gateway.example/team/v1?token=hidden",
+    )
+    second = run(
+        "second",
+        "https://user:second-secret@gateway.example/other/v1?token=hidden",
+    )
+
+    for config in (first, second):
+        assert config["provider"]["name"] == "openai-compatible"
+        assert config["provider"]["model"] == "shared-model"
+        assert config["provider"]["type"] == "custom_gateway"
+        assert len(config["provider"]["route_identity_sha256"]) == 64
+        assert config["judge"]["provider"] == "openai-compatible"
+        assert config["judge"]["model"] == "shared-model"
+        assert config["judge"]["type"] == "custom_gateway"
+        assert config["judge"]["route_identity_sha256"] == config["provider"]["route_identity_sha256"]
+        serialized = json.dumps(config)
+        assert "gateway.example" not in serialized
+        assert "first-secret" not in serialized
+        assert "second-secret" not in serialized
+        assert "token" not in serialized
+
+    assert first["provider"]["route_identity_sha256"] != second["provider"]["route_identity_sha256"]
+    assert first["judge"]["route_identity_sha256"] != second["judge"]["route_identity_sha256"]
+
+
 def test_missing_native_task_source_stops_before_credential_probes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1274,6 +1324,8 @@ def test_native_standard_grading_host_override_is_the_exact_judge_probe(
         "enabled": True,
         "provider": "openai",
         "model": "host-judge-model",
+        "type": "native_openai",
+        "route_identity_sha256": result["run_config"]["judge"]["route_identity_sha256"],
         "source": override_name,
         "override_applied": True,
         "catalog_verification": "verified",

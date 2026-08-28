@@ -9,9 +9,29 @@ All notable changes to SkillEvaluator are documented in this file.
 - License detection no longer treats a frontmatter `license` identifier as
   authoritative when a LICENSE file declares a different license. Claiming
   MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is
-  reconciled, an unidentified license file is not treated as absent, and a
-  blocking conflict no longer publishes `license_status=allowed`
+  reconciled, NOTICE files stay informational, an unidentified license file is
+  not treated as absent, and a blocking conflict no longer publishes
+  `license_status=allowed`
   ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
+- Tier 3 accuracy and custom goal judges now retry one malformed (including
+  empty) or schema-invalid response with a 4096-token output budget before
+  failing closed, preventing a transient formatting error from making an otherwise
+  successful trial and its full comparison arm unscoreable. Generated and
+  injected Harbor verifier configs now reserve 600 seconds for six sequential
+  direct provider attempts plus fail-closed artifact writes. Explicit native
+  task timeouts remain owner-controlled and are not rewritten, and whole jobs
+  defer to Harbor's task-configured phase controls instead of a hidden two-hour
+  cap
+  ([#70](https://github.com/NVIDIA/SkillEvaluator/issues/70)).
+- PII scanning no longer treats Markdown ATX headings as code comments, so
+  emails in headings such as `# Contact: ...` are flagged. Hash lines inside
+  Python strings, YAML scalars, and shell heredocs are scanned too. Real
+  comments stay skipped, including YAML frontmatter, fenced code, and
+  `requirements.txt` ([#88](https://github.com/NVIDIA/SkillEvaluator/issues/88)).
+- Tier 3 Harbor collection no longer scans an agent's unstructured transcript
+  for runtime-error phrases when the recorded exception belongs to the
+  verifier, health check, or task. Correct answers that discuss errors such as
+  `401 Unauthorized` are no longer misreported as agent runtime failures.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

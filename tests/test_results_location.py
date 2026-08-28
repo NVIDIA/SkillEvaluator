@@ -246,8 +246,19 @@ def test_latest_results_rejects_authenticated_current_run_with_malformed_config_
         lambda result: result["agents"]["opencode"].update({"with_skill": []}),
         lambda result: result["agents"]["opencode"]["model_resolution"].update({"model": "other-model"}),
         lambda result: result.pop("execution_status"),
+        lambda result: result.update({"error_code": "SKILLEVALUATOR-SERVICE-999"}),
+        lambda result: result.update({"error_code": "SKILLEVALUATOR-AUTH-002"}),
     ],
-    ids=("empty", "extra-agent", "non-object-agent", "non-object-scores", "model-mismatch", "missing-status"),
+    ids=(
+        "empty",
+        "extra-agent",
+        "non-object-agent",
+        "non-object-scores",
+        "model-mismatch",
+        "missing-status",
+        "unregistered-error-code",
+        "success-with-error-code",
+    ),
 )
 def test_latest_results_rejects_authenticated_current_run_with_malformed_result_schema(
     tmp_path: Path,

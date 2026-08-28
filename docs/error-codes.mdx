@@ -1,0 +1,82 @@
+---
+title: "Error Code Reference"
+description: "Stable, vendor-neutral error codes for SkillEvaluator execution failures."
+---
+
+SkillEvaluator emits `error_code` as the stable support-facing identifier for a
+terminal evaluator execution failure. Automation should use this field instead
+of matching human-readable messages.
+
+```json title="Failed evaluation result"
+{
+  "execution_status": "failed",
+  "error_code": "SKILLEVALUATOR-AUTH-002",
+  "execution_errors": ["Provider verification failed."]
+}
+```
+
+`execution_errors` remains available for backward compatibility and human
+diagnosis. Lowercase fields such as `failure_kind`, when present on a provider
+probe, are diagnostic subtypes rather than stable support identifiers. Their
+values may be more implementation-specific than `error_code`.
+
+## Contract
+
+Codes match this uppercase ASCII schema:
+
+```text
+^SKILLEVALUATOR-[A-Z][A-Z0-9]*-[0-9]{3}$
+```
+
+The in-package registry is authoritative and append-only. A released code is
+never renamed, reused, or assigned a different meaning. A string that matches
+the schema but is absent from the registry is not a valid SkillEvaluator error
+code.
+
+Python integrations can obtain a serialization-ready JSON Schema with
+`skillevaluator.error_codes.error_code_schema()`. Each call returns a fresh
+dictionary; changing it does not modify the authoritative registry.
+
+When several failures end one evaluation, `error_code` keeps their code only
+when every classified failure agrees. Conflicting or absent classifications
+produce `SKILLEVALUATOR-UNKNOWN-001`. `execution_errors` retains the available
+human-readable details. Older result files may omit `error_code`; readers
+continue to accept those files for compatibility.
+
+## Registered codes
+
+| Code | Meaning |
+| --- | --- |
+| `SKILLEVALUATOR-AUTH-002` | Provider authentication failed |
+| `SKILLEVALUATOR-AUTH-003` | Provider authorization failed |
+| `SKILLEVALUATOR-CONFIG-001` | Evaluator configuration was invalid |
+| `SKILLEVALUATOR-DEPENDENCY-001` | A required dependency was unavailable |
+| `SKILLEVALUATOR-DEPENDENCY-003` | The configured model was not found |
+| `SKILLEVALUATOR-DEPENDENCY-005` | A required dependency timed out |
+| `SKILLEVALUATOR-DEPENDENCY-006` | A required dependency rate-limited the evaluator |
+| `SKILLEVALUATOR-DEPENDENCY-007` | The selected dependency operation is unsupported |
+| `SKILLEVALUATOR-DEPENDENCY-008` | A required dependency returned an invalid response |
+| `SKILLEVALUATOR-DEPENDENCY-009` | A required dependency returned another HTTP failure |
+| `SKILLEVALUATOR-UNKNOWN-001` | The evaluator could not classify the failure |
+| `SKILLEVALUATOR-RUNTIME-005` | The evaluator could not start a runtime process |
+| `SKILLEVALUATOR-RUNTIME-007` | Evaluator runtime execution timed out |
+| `SKILLEVALUATOR-RUNTIME-008` | An evaluator runtime process exited unsuccessfully |
+| `SKILLEVALUATOR-CONTRACT-007` | The evaluator runtime produced an invalid job result |
+
+Provider and runtime preflight classifications use structured failure metadata
+such as the failure subtype and HTTP status. They never infer a code from error
+message text. In particular, an unavailable provider response maps as follows:
+
+| Structured signal | Code |
+| --- | --- |
+| HTTP 429 | `SKILLEVALUATOR-DEPENDENCY-006` |
+| HTTP 408 or an explicit timeout | `SKILLEVALUATOR-DEPENDENCY-005` |
+| HTTP 5xx or no more specific signal | `SKILLEVALUATOR-DEPENDENCY-001` |
+
+Local runtime-preflight failures use the `RUNTIME` domain. A process spawn
+failure, execution timeout, or unsuccessful exit is not classified as a
+dependency failure. A missing or invalid runtime job result uses the `CONTRACT`
+domain because the process ran but did not satisfy the result contract.
+
+See [Reports & Results](reports.mdx#machine-readable-contract) for the result
+artifacts that carry this field.

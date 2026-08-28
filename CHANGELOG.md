@@ -4,6 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added an append-only, vendor-neutral error-code registry for evaluator
+  execution failures. Terminal provider and runtime-preflight results now
+  include a structured `error_code` while preserving `execution_errors` and
+  existing lowercase provider failure subtypes for compatibility.
+
 ### Fixed
 
 - Tier 3 accuracy and custom goal judges now retry one malformed (including

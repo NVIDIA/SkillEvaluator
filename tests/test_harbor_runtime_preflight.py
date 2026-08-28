@@ -65,6 +65,30 @@ from skillevaluator.tier3.harbor import runtime_preflight
 from skillevaluator.tier3.harbor.collector import validate_harbor_job_result
 
 
+def test_model_probe_rejects_contradictory_structured_error_code() -> None:
+    with pytest.raises(ValueError, match="contradicts"):
+        runtime_preflight.ModelProbeResult(
+            False,
+            "openai",
+            "requested-model",
+            "safe detail",
+            failure_kind="authentication",
+            http_status=401,
+            error_code="SKILLEVALUATOR-CONFIG-001",
+        )
+
+    timeout = runtime_preflight.ModelProbeResult(
+        False,
+        "openai",
+        "requested-model",
+        "safe detail",
+        failure_kind="unavailable",
+        error_code="SKILLEVALUATOR-DEPENDENCY-005",
+        timed_out=True,
+    )
+    assert timeout.error_code == "SKILLEVALUATOR-DEPENDENCY-005"
+
+
 def _dataset(tmp_path: Path) -> Path:
     dataset = tmp_path / "tasks"
     (dataset / "case-002").mkdir(parents=True)
@@ -521,6 +545,8 @@ def test_runtime_preflight_redacts_and_sanitizes_retained_trial_exception(
 
     assert result.ok is False
     assert "NonZeroAgentExitCodeError" in result.detail
+    assert result.error_code == "SKILLEVALUATOR-CONTRACT-007"
+    assert "DEPENDENCY" not in result.error_code
     assert secret not in result.detail
     assert "\x1b" not in result.detail
     assert len(result.detail) <= 2000
@@ -601,6 +627,8 @@ def test_runtime_preflight_reports_agent_start_failure(monkeypatch, tmp_path: Pa
 
     assert result.ok is False
     assert result.agent == "opencode"
+    assert result.error_code == "SKILLEVALUATOR-RUNTIME-008"
+    assert "DEPENDENCY" not in result.error_code
     assert "401 Unauthorized" in result.detail
 
 
@@ -626,8 +654,31 @@ def test_runtime_preflight_timeout_is_bounded(monkeypatch, tmp_path: Path) -> No
     )
 
     assert result.ok is False
+    assert result.error_code == "SKILLEVALUATOR-RUNTIME-007"
+    assert "DEPENDENCY" not in result.error_code
     assert "timed out after 30s" in result.detail
     assert secret not in result.detail
+
+
+def test_runtime_preflight_process_spawn_failure_is_local_runtime_error(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(runtime_preflight, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
+    monkeypatch.setattr(
+        runtime_preflight.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("runtime executable unavailable")),
+    )
+
+    result = runtime_preflight.run_agent_runtime_preflight(
+        dataset=_dataset(tmp_path),
+        agent="opencode",
+        model="model",
+        env_mode="local",
+        jobs_dir=tmp_path / "jobs",
+        run_env={},
+    )
+
+    assert result.error_code == "SKILLEVALUATOR-RUNTIME-005"
+    assert "DEPENDENCY" not in result.error_code
 
 
 def test_runtime_preflight_rejects_empty_task_tree(tmp_path: Path) -> None:
@@ -644,6 +695,7 @@ def test_runtime_preflight_rejects_empty_task_tree(tmp_path: Path) -> None:
     )
 
     assert result.ok is False
+    assert result.error_code == "SKILLEVALUATOR-CONFIG-001"
     assert "no staged tasks" in result.detail.lower()
 
 
@@ -3586,6 +3638,7 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
     )
 
     assert result["execution_status"] == "failed"
+    assert result["error_code"] == "SKILLEVALUATOR-UNKNOWN-001"
     assert result["execution_errors"] == ["opencode runtime preflight failed: 401 Unauthorized"]
     assert preflight_run_env["LLM_JUDGE_MODEL"] == "host-legacy"
     assert preflight_run_env["SKILL_EVAL_JUDGE_MODEL"] == "host-legacy"
@@ -3604,6 +3657,7 @@ def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path
         "model catalog access does not verify runtime credentials for this endpoint"
     }
     persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    assert persisted["error_code"] == "SKILLEVALUATOR-UNKNOWN-001"
     assert persisted["run_config"] == result["run_config"]
     run_config_path = Path(result["run_dir"]) / "run_config.json"
     assert json.loads(run_config_path.read_text(encoding="utf-8")) == result["run_config"]

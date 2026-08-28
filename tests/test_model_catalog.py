@@ -18,6 +18,7 @@ import pytest
 from skillevaluator import model_catalog
 from skillevaluator.model_catalog import (
     ModelCatalogError,
+    ModelCatalogFailureKind,
     ModelRecord,
     fetch_anthropic_model_record,
     fetch_model_records,
@@ -531,7 +532,26 @@ def test_fetch_never_exposes_http_body_reason_url_or_key(monkeypatch) -> None:
 
     message = str(caught.value)
     assert message == "model catalog returned HTTP 401"
+    assert caught.value.error_code == "SKILLEVALUATOR-AUTH-002"
     assert all(secret not in message for secret in ("top-secret-key", "secret-path", "query-secret", "password"))
+
+
+def test_catalog_error_rejects_code_that_contradicts_structured_metadata() -> None:
+    with pytest.raises(ValueError, match="contradicts"):
+        ModelCatalogError(
+            "safe detail",
+            kind=ModelCatalogFailureKind.AUTHENTICATION,
+            http_status=401,
+            error_code="SKILLEVALUATOR-CONFIG-001",
+        )
+
+    timeout = ModelCatalogError(
+        "safe detail",
+        kind=ModelCatalogFailureKind.UNAVAILABLE,
+        error_code="SKILLEVALUATOR-DEPENDENCY-005",
+        timed_out=True,
+    )
+    assert timeout.error_code == "SKILLEVALUATOR-DEPENDENCY-005"
 
 
 @pytest.mark.parametrize(
@@ -566,6 +586,19 @@ def test_fetch_classifies_http_failures_without_exposing_response(
 
     assert getattr(caught.value, "kind", None) == expected_kind
     assert getattr(caught.value, "http_status", None) == status
+    assert (
+        caught.value.error_code
+        == {
+            401: "SKILLEVALUATOR-AUTH-002",
+            403: "SKILLEVALUATOR-AUTH-003",
+            404: "SKILLEVALUATOR-DEPENDENCY-007",
+            405: "SKILLEVALUATOR-DEPENDENCY-007",
+            408: "SKILLEVALUATOR-DEPENDENCY-005",
+            429: "SKILLEVALUATOR-DEPENDENCY-006",
+            500: "SKILLEVALUATOR-DEPENDENCY-001",
+            418: "SKILLEVALUATOR-DEPENDENCY-009",
+        }[status]
+    )
     assert "top-secret-key" not in str(caught.value)
 
 

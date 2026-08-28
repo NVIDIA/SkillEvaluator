@@ -13,7 +13,7 @@ import shlex
 import ssl
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from enum import StrEnum
 from pathlib import Path
 from queue import Empty, Queue
@@ -33,6 +33,7 @@ from botocore.exceptions import (
     ClientError,
     ConfigNotFound,
     ConfigParseError,
+    ConnectTimeoutError,
     CredentialRetrievalError,
     DataNotFoundError,
     EndpointProviderError,
@@ -52,6 +53,7 @@ from botocore.exceptions import (
     ParamValidationError,
     PartialCredentialsError,
     ProfileNotFound,
+    ReadTimeoutError,
     RefreshWithMFAUnsupportedError,
     ServiceNotInRegionError,
     SSOTokenLoadError,
@@ -65,6 +67,7 @@ from botocore.exceptions import (
     SSLError as BotocoreSSLError,
 )
 
+from skillevaluator.error_codes import EvaluatorErrorCode, provider_failure_error_code, validate_error_code
 from skillevaluator.model_catalog import (
     ModelCatalogError,
     ModelCatalogFailureKind,
@@ -89,6 +92,15 @@ class PreflightResult:
     model: str
     detail: str
     job_name: str
+    error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.ok:
+            if self.error_code is not None:
+                raise ValueError("successful runtime preflight cannot carry an error code")
+            return
+        resolved = self.error_code or EvaluatorErrorCode.UNKNOWN
+        object.__setattr__(self, "error_code", validate_error_code(resolved))
 
 
 @dataclass(frozen=True)
@@ -102,6 +114,23 @@ class ModelProbeResult:
     failure_kind: ModelCatalogFailureKind | None = None
     http_status: int | None = None
     catalog_authoritative: bool = True
+    error_code: str | None = None
+    timed_out: InitVar[bool] = False
+
+    def __post_init__(self, timed_out: bool) -> None:
+        if self.ok:
+            if self.error_code is not None or timed_out:
+                raise ValueError("successful model probe cannot carry failure metadata")
+            return
+        expected = provider_failure_error_code(
+            self.failure_kind,
+            self.http_status,
+            timed_out=timed_out,
+        ).value
+        resolved = expected if self.error_code is None else validate_error_code(self.error_code)
+        if self.failure_kind is not None and resolved != expected:
+            raise ValueError("model probe error code contradicts structured failure metadata")
+        object.__setattr__(self, "error_code", resolved)
 
 
 class CredentialProbeDisposition(StrEnum):
@@ -1034,6 +1063,7 @@ def _bedrock_exception_result(
 ) -> ModelProbeResult:
     """Convert a Bedrock SDK failure to a redacted, policy-safe result."""
     http_status = None
+    error_code: EvaluatorErrorCode | None = None
     if isinstance(exc, ClientError):
         failure_kind, http_status = _bedrock_client_error_kind(exc)
     elif (
@@ -1062,6 +1092,8 @@ def _bedrock_exception_result(
         and _bedrock_credential_process(session) is not None
     ):
         failure_kind = ModelCatalogFailureKind.UNAVAILABLE
+        if exc.errno == errno.ETIMEDOUT:
+            error_code = EvaluatorErrorCode.DEPENDENCY_TIMEOUT
     elif _is_bedrock_local_cached_token_error(exc):
         failure_kind = ModelCatalogFailureKind.AUTHENTICATION
     elif isinstance(exc, ValueError):
@@ -1077,6 +1109,9 @@ def _bedrock_exception_result(
             failure_kind = ModelCatalogFailureKind.UNKNOWN
     elif isinstance(exc, BotocoreSSLError) and _is_invalid_bedrock_ca_bundle(session):
         failure_kind = ModelCatalogFailureKind.INVALID_CONFIGURATION
+    elif isinstance(exc, (ConnectTimeoutError, ReadTimeoutError)):
+        failure_kind = ModelCatalogFailureKind.UNAVAILABLE
+        error_code = EvaluatorErrorCode.DEPENDENCY_TIMEOUT
     elif isinstance(exc, BotoCoreError):
         failure_kind = ModelCatalogFailureKind.UNAVAILABLE
     else:
@@ -1088,6 +1123,8 @@ def _bedrock_exception_result(
         f"Bedrock model catalog request failed: {type(exc).__name__}",
         failure_kind=failure_kind,
         http_status=http_status,
+        error_code=error_code,
+        timed_out=error_code == EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
     )
 
 
@@ -1175,6 +1212,7 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
             provider.model,
             f"model {provider.model} is not listed",
             catalog_authoritative=catalog_authoritative,
+            error_code=EvaluatorErrorCode.MODEL_NOT_FOUND,
         )
     return ModelProbeResult(
         True,
@@ -1214,6 +1252,8 @@ def _probe_bedrock_model_with_deadline(
             provider.model,
             "Bedrock model catalog request timed out",
             failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+            error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+            timed_out=True,
         )
 
     def run_probe() -> None:
@@ -1241,6 +1281,8 @@ def _probe_bedrock_model_with_deadline(
             provider.model,
             "Bedrock model catalog request timed out",
             failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+            error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+            timed_out=True,
         )
 
     try:
@@ -1266,6 +1308,8 @@ def _probe_bedrock_model_with_deadline(
             provider.model,
             "Bedrock model catalog request timed out",
             failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+            error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+            timed_out=True,
         )
 
 
@@ -1298,6 +1342,8 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
             str(exc),
             failure_kind=exc.kind,
             http_status=exc.http_status,
+            error_code=exc.error_code,
+            timed_out=exc.error_code == EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
         )
     available = {record.id for record in records}
     if provider.model not in available:
@@ -1310,6 +1356,8 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
                     provider.model,
                     "model catalog request timed out",
                     failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+                    error_code=EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+                    timed_out=True,
                 )
             try:
                 resolved = fetch_anthropic_model_record(
@@ -1326,6 +1374,7 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
                         f"model {provider.model} is not available",
                         failure_kind=ModelCatalogFailureKind.MODEL_NOT_FOUND,
                         http_status=404,
+                        error_code=EvaluatorErrorCode.MODEL_NOT_FOUND,
                     )
                 return ModelProbeResult(
                     False,
@@ -1334,6 +1383,8 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
                     str(exc),
                     failure_kind=exc.kind,
                     http_status=exc.http_status,
+                    error_code=exc.error_code,
+                    timed_out=exc.error_code == EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
                 )
             return ModelProbeResult(
                 True,
@@ -1341,7 +1392,13 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
                 provider.model,
                 f"model {provider.model} resolves to {resolved.id}",
             )
-        return ModelProbeResult(False, provider.provider, provider.model, f"model {provider.model} is not listed")
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"model {provider.model} is not listed",
+            error_code=EvaluatorErrorCode.MODEL_NOT_FOUND,
+        )
     return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")
 
 
@@ -1364,7 +1421,14 @@ def run_agent_runtime_preflight(
     task_name = _first_task_name(dataset)
     job_name = f"runtime-preflight-{agent}"
     if task_name is None:
-        return PreflightResult(False, agent, model, "No staged tasks are available for runtime preflight.", job_name)
+        return PreflightResult(
+            False,
+            agent,
+            model,
+            "No staged tasks are available for runtime preflight.",
+            job_name,
+            EvaluatorErrorCode.INVALID_CONFIGURATION,
+        )
 
     command = build_harbor_run_command(
         dataset_path=dataset,
@@ -1401,17 +1465,32 @@ def run_agent_runtime_preflight(
             model,
             f"Agent runtime preflight timed out after {timeout_seconds}s.",
             job_name,
+            EvaluatorErrorCode.EXECUTION_TIMEOUT,
         )
     except OSError as exc:
-        return PreflightResult(False, agent, model, f"Agent runtime preflight could not start: {exc}", job_name)
+        return PreflightResult(
+            False,
+            agent,
+            model,
+            f"Agent runtime preflight could not start: {exc}",
+            job_name,
+            EvaluatorErrorCode.PROCESS_SPAWN_FAILED,
+        )
 
     if completed.returncode != 0:
         output = "\n".join(part for part in (completed.stderr, completed.stdout) if part).strip()
         detail = _redact_detail(output, run_env) or f"harbor run exited {completed.returncode}"
-        return PreflightResult(False, agent, model, detail, job_name)
+        return PreflightResult(False, agent, model, detail, job_name, EvaluatorErrorCode.PROCESS_EXITED)
 
     ok, detail = validate_harbor_agent_only_job_result(
         jobs_dir / job_name / "result.json",
         expected_trials=1,
     )
-    return PreflightResult(ok, agent, model, _redact_detail(detail, run_env), job_name)
+    return PreflightResult(
+        ok,
+        agent,
+        model,
+        _redact_detail(detail, run_env),
+        job_name,
+        None if ok else EvaluatorErrorCode.JOB_RESULT_INVALID,
+    )

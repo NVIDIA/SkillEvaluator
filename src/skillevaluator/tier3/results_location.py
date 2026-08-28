@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from skillevaluator.error_codes import is_registered_error_code
 from skillevaluator.tier3.output_provenance import GENERATED_OUTPUT_MARKER, is_generated_output_root
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
@@ -366,6 +367,7 @@ def _current_result_identity_is_valid(candidate: Path, run_config: dict[object, 
     ):
         return False
     attempt_policy = result.get("attempt_policy")
+    error_code = result.get("error_code")
     if (
         not isinstance(result.get("skill_name"), str)
         or not result["skill_name"]
@@ -379,6 +381,8 @@ def _current_result_identity_is_valid(candidate: Path, run_config: dict[object, 
         or not isinstance(attempt_policy.get("stop_on_pass"), bool)
         or not isinstance(attempt_policy.get("score_definition"), str)
         or not attempt_policy["score_definition"]
+        or (error_code is not None and result.get("execution_status") != "failed")
+        or (error_code is not None and not is_registered_error_code(error_code))
     ):
         return False
     return _recorded_path_matches(result.get("run_dir"), candidate) and _recorded_path_matches(

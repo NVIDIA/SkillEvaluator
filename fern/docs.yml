@@ -65,6 +65,9 @@ navigation:
       - page: Reports & Results
         path: ../docs/reports.mdx
         slug: reports
+      - page: Error Code Reference
+        path: ../docs/error-codes.mdx
+        slug: error-codes
       - page: "BENCHMARK.md Rollout and Backfill"
         path: ../docs/benchmark-rollout.mdx
         slug: benchmark-rollout

@@ -1098,16 +1098,16 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     assert timeout_policy["task_count"] == 4
     assert timeout_policy["observed_base_seconds"] == {"minimum": 300.0, "maximum": 300.0}
     assert timeout_policy["effective_seconds"] == {"minimum": 900.0, "maximum": 900.0}
-    for agent, arm in (("opencode", "with"), ("opencode", "without"), ("claude-code", "with"), ("claude-code", "without")):
+    for agent, arm in (
+        ("opencode", "with"),
+        ("opencode", "without"),
+        ("claude-code", "with"),
+        ("claude-code", "without"),
+    ):
         task_config = tomllib.loads(
-            (
-                Path(result["run_dir"])
-                / "_harbor-tasks"
-                / agent
-                / arm
-                / "case-001"
-                / "task.toml"
-            ).read_text(encoding="utf-8")
+            (Path(result["run_dir"]) / "_harbor-tasks" / agent / arm / "case-001" / "task.toml").read_text(
+                encoding="utf-8"
+            )
         )
         assert task_config["agent"]["timeout_sec"] == 300.0
 

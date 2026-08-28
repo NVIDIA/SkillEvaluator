@@ -1219,9 +1219,7 @@ def _resolve_agent_runtime_plan(
             env_mode=env_mode,
         )
         resolved_server_tool_policy = (
-            resolve_claude_server_tool_policy(agent_provider, server_tool_policy)
-            if agent == "claude-code"
-            else None
+            resolve_claude_server_tool_policy(agent_provider, server_tool_policy) if agent == "claude-code" else None
         )
         subprocess_env = _harbor_subprocess_environment(
             env_mode=env_mode,
@@ -1326,19 +1324,11 @@ def _set_staged_agent_timeout(task_file: Path, timeout_seconds: float) -> None:
         if agent_header is None:
             raise ValueError(f"Staged Harbor task must use a canonical [agent] table: {task_file}")
         section_end = next(
-            (
-                index
-                for index in range(agent_header + 1, len(lines))
-                if re.match(r"\s*\[", lines[index])
-            ),
+            (index for index in range(agent_header + 1, len(lines)) if re.match(r"\s*\[", lines[index])),
             len(lines),
         )
         timeout_line = next(
-            (
-                index
-                for index in range(agent_header + 1, section_end)
-                if re.match(r"\s*timeout_sec\s*=", lines[index])
-            ),
+            (index for index in range(agent_header + 1, section_end) if re.match(r"\s*timeout_sec\s*=", lines[index])),
             None,
         )
         if timeout_line is None:
@@ -2646,10 +2636,7 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return _persist_pre_execution_failure([str(exc)])
 
-    timeout_roots = [
-        (f"{agent}/with", with_dir)
-        for agent, (with_dir, _without_dir) in agent_task_dirs.items()
-    ]
+    timeout_roots = [(f"{agent}/with", with_dir) for agent, (with_dir, _without_dir) in agent_task_dirs.items()]
     timeout_roots.extend(
         (f"{agent}/without", without_dir)
         for agent, (_with_dir, without_dir) in agent_task_dirs.items()

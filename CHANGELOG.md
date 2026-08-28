@@ -13,6 +13,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Claude Code now preserves WebSearch/WebFetch on the verified NVIDIA
+  inference-api Azure Anthropic route while suppressing experimental beta
+  headers that route does not support. AWS Bedrock and unknown compatibility
+  routes remain fail-closed with those server tools disabled.
 - Tier 3 accuracy and custom goal judges now retry one malformed (including
   empty) or schema-invalid response with a 4096-token output budget before
   failing closed, preventing a transient formatting error from making an otherwise

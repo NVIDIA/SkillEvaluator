@@ -70,6 +70,7 @@ from skillevaluator.tier3.harbor.progress import (
 from skillevaluator.tier3.harbor.provider_tool_policy import (
     CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
     CLAUDE_SERVER_TOOL_POLICY_ENV,
+    CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1,
     SERVER_TOOL_POLICY_PROVIDER_COMPATIBLE_V1,
     resolve_claude_server_tool_policy,
     validate_server_tool_policy,
@@ -2228,13 +2229,17 @@ def _run_harbor_eval_impl(
         agent
         for agent, plan in runtime_plans.items()
         if agent == "claude-code"
-        and plan.server_tool_policy == CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1
+        and plan.server_tool_policy
+        in {
+            CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
+            CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1,
+        }
         and env_mode not in {"docker", ENV_MODE_LOCAL}
     ]
     if unsupported_policy_agents:
         detail = (
             f"server_tool_policy={server_tool_policy} requires the SkillEvaluator Claude Code wrapper for "
-            f"provider-incompatible server tools; use Docker/local for: {', '.join(unsupported_policy_agents)}"
+            f"provider-specific runtime controls; use Docker/local for: {', '.join(unsupported_policy_agents)}"
         )
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=detail))
         return {"error": [detail]}

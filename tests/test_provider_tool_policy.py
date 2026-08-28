@@ -16,6 +16,7 @@ from skillevaluator.tier3.harbor.provider_tool_policy import (
     CLAUDE_SERVER_TOOL_POLICY_BRIDGE_V1,
     CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
     CLAUDE_SERVER_TOOL_POLICY_ENV,
+    CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1,
     CLAUDE_SERVER_TOOL_POLICY_NATIVE_V1,
     SERVER_TOOL_POLICY_PROVIDER_COMPATIBLE_V1,
     resolve_claude_server_tool_policy,
@@ -23,13 +24,13 @@ from skillevaluator.tier3.harbor.provider_tool_policy import (
 )
 
 
-def _provider(name: str, *, base_url: str | None) -> ProviderConfig:
+def _provider(name: str, *, base_url: str | None, model: str = "test-model") -> ProviderConfig:
     return ProviderConfig(
         provider=name,
-        model="test-model",
+        model=model,
         api_key="provider-key",
         base_url=base_url,
-        litellm_model=("anthropic/test-model" if name == "anthropic" else "openai/test-model"),
+        litellm_model=(f"anthropic/{model}" if name == "anthropic" else f"openai/{model}"),
     )
 
 
@@ -39,11 +40,35 @@ def _provider(name: str, *, base_url: str | None) -> ProviderConfig:
         (_provider("anthropic", base_url=None), CLAUDE_SERVER_TOOL_POLICY_NATIVE_V1),
         (_provider("anthropic", base_url="https://api.anthropic.com"), CLAUDE_SERVER_TOOL_POLICY_NATIVE_V1),
         (
-            _provider("anthropic", base_url="https://inference-api.nvidia.com"),
+            _provider(
+                "anthropic",
+                base_url="https://inference-api.nvidia.com",
+                model="azure/anthropic/claude-opus-4-6",
+            ),
+            CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1,
+        ),
+        (
+            _provider(
+                "anthropic",
+                base_url="https://inference-api.nvidia.com",
+                model="aws/anthropic/bedrock-claude-opus-4-6",
+            ),
             CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
         ),
         (
-            _provider("openai-compatible", base_url="https://gateway.example/v1"),
+            _provider(
+                "anthropic",
+                base_url="https://gateway.example/v1",
+                model="azure/anthropic/claude-opus-4-6",
+            ),
+            CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
+        ),
+        (
+            _provider(
+                "anthropic",
+                base_url="https://inference-api.nvidia.com",
+                model="future/anthropic/claude-opus-4-6",
+            ),
             CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
         ),
         (
@@ -52,12 +77,35 @@ def _provider(name: str, *, base_url: str | None) -> ProviderConfig:
         ),
         (_provider("bedrock", base_url=None), CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1),
     ],
+    ids=[
+        "native-default",
+        "native-explicit",
+        "azure-gateway",
+        "aws-bedrock-gateway",
+        "unknown-gateway",
+        "unknown-inference-profile",
+        "nv-build",
+        "bedrock",
+    ],
 )
 def test_provider_compatible_policy_resolves_from_actual_route(
     provider: ProviderConfig,
     expected: str,
 ) -> None:
     assert resolve_claude_server_tool_policy(provider, SERVER_TOOL_POLICY_PROVIDER_COMPATIBLE_V1) == expected
+
+
+def test_aws_bedrock_model_profile_is_disabled_even_with_native_looking_url() -> None:
+    provider = _provider(
+        "anthropic",
+        base_url="https://api.anthropic.com",
+        model="aws/anthropic/bedrock-claude-opus-4-6",
+    )
+
+    assert (
+        resolve_claude_server_tool_policy(provider, SERVER_TOOL_POLICY_PROVIDER_COMPATIBLE_V1)
+        == CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1
+    )
 
 
 def test_unknown_public_policy_is_rejected() -> None:
@@ -90,6 +138,37 @@ def test_gateway_claude_runtime_plan_carries_operator_policy(
 
     assert plan.server_tool_policy == CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1
     assert plan.subprocess_env[CLAUDE_SERVER_TOOL_POLICY_ENV] == CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1
+    assert CLAUDE_SERVER_TOOL_POLICY_ENV not in plan.staged_env
+
+
+def test_azure_gateway_claude_runtime_plan_preserves_server_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "agent-key",
+            "ANTHROPIC_BASE_URL": "https://inference-api.nvidia.com",
+        },
+    )
+
+    plan = runner._resolve_agent_runtime_plan(
+        provider=_provider("openai-compatible", base_url="https://inference-api.nvidia.com"),
+        agents=["claude-code"],
+        models={"claude-code": "azure/anthropic/claude-opus-4-6"},
+        configured_runtime_env={},
+        env_mode="local",
+        model_sources={"claude-code": "CLI"},
+        server_tool_policy=SERVER_TOOL_POLICY_PROVIDER_COMPATIBLE_V1,
+    )["claude-code"]
+
+    assert plan.provider.model == "azure/anthropic/claude-opus-4-6"
+    assert plan.server_tool_policy == CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1
+    assert (
+        plan.subprocess_env[CLAUDE_SERVER_TOOL_POLICY_ENV] == CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1
+    )
     assert CLAUDE_SERVER_TOOL_POLICY_ENV not in plan.staged_env
 
 
@@ -175,6 +254,53 @@ def test_gateway_local_claude_wrapper_enforces_policy_on_real_run_command(
     assert "--disallowedTools WebSearch,WebFetch" in launcher
     assert separator == " -- "
     assert prompt == "'search for evidence'"
+    assert captured["env"] == {
+        "ANTHROPIC_API_KEY": "test-key",
+        "CLAUDE_CODE_TMPDIR": "/logs/agent/claude-tmp",
+    }
+
+
+def test_azure_gateway_wrapper_preserves_web_tools_and_disables_experimental_betas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_parent_exec(self, environment, command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs.get("env")
+
+    monkeypatch.setattr(
+        "harbor.agents.installed.base.BaseInstalledAgent.exec_as_agent",
+        fake_parent_exec,
+    )
+    monkeypatch.setenv(
+        CLAUDE_SERVER_TOOL_POLICY_ENV,
+        CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1,
+    )
+
+    agent = local_agents.SkillEvaluatorLocalClaudeCode(
+        logs_dir=tmp_path,
+        model_name="azure/anthropic/claude-opus-4-6",
+    )
+    asyncio.run(
+        agent.exec_as_agent(
+            object(),
+            "claude --verbose --permission-mode=bypassPermissions --print -- 'search for evidence'",
+            env={"ANTHROPIC_API_KEY": "test-key"},
+        )
+    )
+
+    launcher, separator, prompt = str(captured["command"]).partition(" -- ")
+    assert "--permission-mode=auto" in launcher
+    assert "--disallowedTools" not in launcher
+    assert separator == " -- "
+    assert prompt == "'search for evidence'"
+    assert captured["env"] == {
+        "ANTHROPIC_API_KEY": "test-key",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+        "CLAUDE_CODE_TMPDIR": "/logs/agent/claude-tmp",
+    }
 
 
 def test_native_policy_preserves_claude_command(monkeypatch: pytest.MonkeyPatch) -> None:

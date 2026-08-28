@@ -34,6 +34,7 @@ from skillevaluator.tier3.harbor.nvidia_build_bridge import (
 from skillevaluator.tier3.harbor.provider_tool_policy import (
     CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
     CLAUDE_SERVER_TOOL_POLICY_ENV,
+    CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1,
     CLAUDE_SERVER_TOOL_POLICY_RESOLUTIONS,
 )
 from skillevaluator.tier3.harbor.sensitive_stdin import (
@@ -55,6 +56,7 @@ _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 
 _CLAUDE_UNSUPPORTED_SERVER_TOOLS = "WebSearch,WebFetch"
+_CLAUDE_DISABLE_EXPERIMENTAL_BETAS_ENV = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
 
 
 async def _await_task_uninterruptibly(
@@ -113,13 +115,19 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
     return f"{rewrite(launcher)}{separator}{prompt}"
 
 
-def _apply_claude_server_tool_policy(command: str) -> str:
-    """Apply the operator-resolved Claude server-tool capability contract."""
+def _resolved_claude_server_tool_policy() -> str | None:
+    """Return the validated operator-resolved Claude capability contract."""
     policy = os.environ.get(CLAUDE_SERVER_TOOL_POLICY_ENV, "").strip()
     if not policy:
-        return command
+        return None
     if policy not in CLAUDE_SERVER_TOOL_POLICY_RESOLUTIONS:
         raise RuntimeError(f"Unsupported Claude server-tool policy resolution: {policy}")
+    return policy
+
+
+def _apply_claude_server_tool_policy(command: str) -> str:
+    """Apply the operator-resolved Claude server-tool capability contract."""
+    policy = _resolved_claude_server_tool_policy()
     if policy != CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1:
         return command
 
@@ -131,6 +139,17 @@ def _apply_claude_server_tool_policy(command: str) -> str:
         command,
         lambda launcher: f"{launcher} --disallowedTools {_CLAUDE_UNSUPPORTED_SERVER_TOOLS}",
     )
+
+
+def _apply_claude_server_tool_environment(env: dict[str, str] | None) -> dict[str, str] | None:
+    """Inject route-specific Claude Code compatibility controls into its child env."""
+    policy = _resolved_claude_server_tool_policy()
+    if policy != CLAUDE_SERVER_TOOL_POLICY_NATIVE_NO_EXPERIMENTAL_BETAS_V1:
+        return env
+
+    routed_env = dict(env or {})
+    routed_env[_CLAUDE_DISABLE_EXPERIMENTAL_BETAS_ENV] = "1"
+    return routed_env
 
 
 class SkillEvaluatorClaudeCode(ClaudeCode):
@@ -147,7 +166,7 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
         return await super().exec_as_agent(
             environment,
             command=_apply_claude_server_tool_policy(command),
-            env=env,
+            env=_apply_claude_server_tool_environment(env),
             cwd=cwd,
             timeout_sec=timeout_sec,
         )

@@ -11,6 +11,11 @@ All notable changes to SkillEvaluator are documented in this file.
   run passed -- agent output travels over the Docker exec API rather than through
   the mounts -- and every scored trial then failed with `RewardFileNotFoundError`
   while the rewards sat inside the daemon's own filesystem.
+- PII scanning no longer treats Markdown ATX headings as code comments, so
+  emails in headings such as `# Contact: ...` are flagged. Hash lines inside
+  Python strings, YAML scalars, and shell heredocs are scanned too. Real
+  comments stay skipped, including YAML frontmatter, fenced code, and
+  `requirements.txt` ([#88](https://github.com/NVIDIA/SkillEvaluator/issues/88)).
 - Tier 3 Harbor collection no longer scans an agent's unstructured transcript
   for runtime-error phrases when the recorded exception belongs to the
   verifier, health check, or task. Correct answers that discuss errors such as

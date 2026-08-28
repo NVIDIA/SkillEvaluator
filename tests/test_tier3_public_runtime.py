@@ -241,6 +241,7 @@ def test_evaluate_forwards_native_environment_without_legacy_sandbox_configurati
         results_dir=None,
         harbor_keep_jobs=False,
         timeout_multiplier=None,
+        agent_timeout_seconds=300,
         override_cpus=None,
         override_memory_mb=None,
         override_storage_mb=None,
@@ -248,6 +249,7 @@ def test_evaluate_forwards_native_environment_without_legacy_sandbox_configurati
 
     assert captured["env_mode"] == "e2b"
     assert captured["grading_mode"] == "default_plus_custom"
+    assert captured["agent_timeout_seconds"] == 300
     assert "sandbox_config" not in captured
 
 

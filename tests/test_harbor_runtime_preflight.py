@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -657,6 +658,87 @@ def test_task_timeout_plan_uses_largest_staged_timeout(tmp_path: Path) -> None:
         (task / "task.toml").write_text(f"[agent]\ntimeout_sec = {timeout}.0\n")
 
     assert runner._task_timeout_plan([root], 2.0) == 600.0
+
+
+def test_operator_agent_timeout_overrides_native_tasks_in_both_arms(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    roots: list[tuple[str, Path]] = []
+    for arm in ("with", "without"):
+        root = tmp_path / arm
+        task = root / "native-case"
+        task.mkdir(parents=True)
+        (task / "task.toml").write_text(
+            "[agent]\ntimeout_sec = 600.0\n\n[verifier]\ntimeout_sec = 180.0\n",
+            encoding="utf-8",
+        )
+        roots.append((f"claude-code/{arm}", root))
+
+    evidence = runner._apply_agent_timeout_policy(
+        roots,
+        requested_base_seconds=300,
+        timeout_multiplier=3.0,
+    )
+
+    for _label, root in roots:
+        staged = tomllib.loads((root / "native-case" / "task.toml").read_text(encoding="utf-8"))
+        assert staged["agent"]["timeout_sec"] == 300.0
+        assert staged["verifier"]["timeout_sec"] == 180.0
+    assert runner._task_timeout_plan([root for _label, root in roots], 3.0) == 900.0
+    assert evidence["requested_base_seconds"] == 300.0
+    assert evidence["source"] == "operator"
+    assert evidence["task_count"] == 2
+    assert evidence["observed_base_seconds"] == {"minimum": 300.0, "maximum": 300.0}
+    assert evidence["effective_seconds"] == {"minimum": 900.0, "maximum": 900.0}
+    assert len(evidence["task_timeout_manifest_sha256"]) == 64
+
+
+def test_absent_operator_timeout_preserves_native_task_policy(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    root = tmp_path / "with"
+    task = root / "native-case"
+    task.mkdir(parents=True)
+    task_file = task / "task.toml"
+    task_file.write_text("[agent]\ntimeout_sec = 600.0\n", encoding="utf-8")
+
+    evidence = runner._apply_agent_timeout_policy(
+        [("claude-code/with", root)],
+        requested_base_seconds=None,
+        timeout_multiplier=3.0,
+    )
+
+    assert tomllib.loads(task_file.read_text(encoding="utf-8"))["agent"]["timeout_sec"] == 600.0
+    assert evidence["requested_base_seconds"] is None
+    assert evidence["source"] == "staged_task"
+    assert evidence["effective_seconds"] == {"minimum": 1800.0, "maximum": 1800.0}
+
+
+def test_operator_timeout_adds_agent_policy_when_native_task_uses_harbor_default(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    root = tmp_path / "with"
+    task = root / "native-case"
+    task.mkdir(parents=True)
+    task_file = task / "task.toml"
+    task_file.write_text('[task]\nname = "nvidia/native-case"\n', encoding="utf-8")
+
+    evidence = runner._apply_agent_timeout_policy(
+        [("claude-code/with", root)],
+        requested_base_seconds=300,
+        timeout_multiplier=3.0,
+    )
+
+    assert tomllib.loads(task_file.read_text(encoding="utf-8"))["agent"]["timeout_sec"] == 300.0
+    assert evidence["effective_seconds"] == {"minimum": 900.0, "maximum": 900.0}
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True])
+def test_operator_agent_timeout_rejects_invalid_values(value: object) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    with pytest.raises(ValueError, match="finite number greater than 0"):
+        runner._validate_agent_timeout_seconds(value)  # type: ignore[arg-type]
 
 
 def test_model_probe_delegates_to_shared_catalog_client_without_exposing_key(monkeypatch) -> None:

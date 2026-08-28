@@ -1771,6 +1771,12 @@ def dedup_scan(
     help="Run one real agent smoke task before the full evaluation matrix [default: enabled].",
 )
 @click.option("--timeout-multiplier", type=float, default=None)
+@click.option(
+    "--agent-timeout-seconds",
+    type=float,
+    default=None,
+    help="Override each staged task's base agent timeout before applying the timeout multiplier.",
+)
 @click.option("--override-cpus", type=int, default=None)
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
@@ -1809,6 +1815,7 @@ def evaluate(
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     timeout_multiplier: float | None,
+    agent_timeout_seconds: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
@@ -1844,6 +1851,7 @@ def evaluate(
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
         timeout_multiplier=timeout_multiplier,
+        agent_timeout_seconds=agent_timeout_seconds,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,

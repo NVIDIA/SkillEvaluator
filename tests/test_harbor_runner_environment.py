@@ -985,6 +985,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     def emit(_skill, target, *, with_skill, runtime_env, **_kwargs):
         task = target / "case-001"
         task.mkdir(parents=True)
+        (task / "task.toml").write_text("[agent]\ntimeout_sec = 600.0\n", encoding="utf-8")
         emitted.append(
             (
                 str(target.relative_to(tmp_path / "results")),
@@ -1033,6 +1034,8 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         env_mode="docker",
         keep_harbor_jobs=True,
         agent_runtime_preflight=False,
+        agent_timeout_seconds=300,
+        timeout_multiplier=3,
     )
 
     assert "error" not in result
@@ -1076,6 +1079,23 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "override_applied": True,
         "catalog_verification": "degraded",
     }
+    timeout_policy = result["run_config"]["harbor"]["agent_timeout_policy"]
+    assert timeout_policy["requested_base_seconds"] == 300.0
+    assert timeout_policy["task_count"] == 4
+    assert timeout_policy["observed_base_seconds"] == {"minimum": 300.0, "maximum": 300.0}
+    assert timeout_policy["effective_seconds"] == {"minimum": 900.0, "maximum": 900.0}
+    for agent, arm in (("opencode", "with"), ("opencode", "without"), ("claude-code", "with"), ("claude-code", "without")):
+        task_config = tomllib.loads(
+            (
+                Path(result["run_dir"])
+                / "_harbor-tasks"
+                / agent
+                / arm
+                / "case-001"
+                / "task.toml"
+            ).read_text(encoding="utf-8")
+        )
+        assert task_config["agent"]["timeout_sec"] == 300.0
 
 
 @pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])

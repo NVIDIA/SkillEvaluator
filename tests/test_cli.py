@@ -557,6 +557,7 @@ def test_live_eval_help_uses_skill_evaluator_runtime_and_grading_names() -> None
     assert "--autopilot" in evaluate.output
     assert "--progress [auto|rich|plain|off]" in evaluate.output
     assert "--server-tool-policy [provider_compatible_v1]" in evaluate.output
+    assert "--agent-timeout-seconds FLOAT" in evaluate.output
 
     grader = runner.invoke(cli, ["init-custom-grader", "--help"])
     assert grader.exit_code == 0

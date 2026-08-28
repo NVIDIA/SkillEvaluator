@@ -515,6 +515,14 @@
           "type": "float"
         },
         {
+          "name": "agent_timeout_seconds",
+          "opts": [
+            "--agent-timeout-seconds"
+          ],
+          "param_type": "option",
+          "type": "float"
+        },
+        {
           "name": "override_cpus",
           "opts": [
             "--override-cpus"
@@ -2406,6 +2414,14 @@
               "name": "timeout_multiplier",
               "opts": [
                 "--timeout-multiplier"
+              ],
+              "param_type": "option",
+              "type": "float"
+            },
+            {
+              "name": "agent_timeout_seconds",
+              "opts": [
+                "--agent-timeout-seconds"
               ],
               "param_type": "option",
               "type": "float"

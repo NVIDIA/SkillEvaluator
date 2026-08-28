@@ -121,12 +121,18 @@ def test_service_defaults_to_null_progress_reporter(monkeypatch: pytest.MonkeyPa
         return {"execution_status": "succeeded", "execution_errors": []}
 
     monkeypatch.setattr(commands, "evaluate", _fake_engine)
-    options = EvaluationOptions(skill_path=FIXTURE, agents="codex", env_mode="docker")
+    options = EvaluationOptions(
+        skill_path=FIXTURE,
+        agents="codex",
+        env_mode="docker",
+        agent_timeout_seconds=300,
+    )
 
     EvaluationService().evaluate(options)
 
     assert captured["skill_path"] == FIXTURE
     assert isinstance(captured["progress_reporter"], NullProgressReporter)
+    assert captured["agent_timeout_seconds"] == 300
 
 
 def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,7 +145,18 @@ def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
     result = CliRunner().invoke(
-        cli, ["evaluate", str(FIXTURE), "-a", "codex", "--env-mode", "docker", "--skip-baseline"]
+        cli,
+        [
+            "evaluate",
+            str(FIXTURE),
+            "-a",
+            "codex",
+            "--env-mode",
+            "docker",
+            "--skip-baseline",
+            "--agent-timeout-seconds",
+            "300",
+        ],
     )
     assert result.exit_code == 0, result.output
     opts = captured["options"]
@@ -147,6 +164,7 @@ def test_cli_evaluate_uses_shared_service(monkeypatch: pytest.MonkeyPatch) -> No
     assert opts.agents == "codex"
     assert opts.env_mode == "docker"
     assert opts.skip_baseline is True
+    assert opts.agent_timeout_seconds == 300
 
 
 def _autopilot_skill(tmp_path: Path) -> Path:

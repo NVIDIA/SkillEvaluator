@@ -12,7 +12,9 @@ from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_di
 from skillevaluator.tier3.eval_core.log_converters import (
     load_trajectory_with_fallback,
     synthetic_trajectory_from_claude_stream_jsonl,
+    synthetic_trajectory_from_codex_txt,
     synthetic_trajectory_from_cursor_cli,
+    synthetic_trajectory_from_opencode_json,
 )
 
 
@@ -89,3 +91,81 @@ def test_load_prefers_claude_log_over_cursor_when_both(tmp_path: Path):
     assert meta["source"] == "claude-code.txt"
     tcs = extract_tool_calls_as_dicts(data)
     assert any(tc["action"] == "Bash" for tc in tcs)
+
+
+def test_opencode_json_tool_use_and_read():
+    log = (
+        '{"type":"text","part":{"type":"text","text":"Reading skill"}}\n'
+        '{"type":"tool_use","part":{"type":"tool","tool":"read","callID":"call-1",'
+        '"state":{"status":"completed","input":{"filePath":"/workspace/skills/calculator/SKILL.md"},'
+        '"output":"# Calculator skill"}}}\n'
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"call-2",'
+        '"state":{"status":"completed","input":{"command":"cat skills/foo/SKILL.md"},'
+        '"output":"ok","metadata":{"exit":0}}}}\n'
+    )
+    traj = synthetic_trajectory_from_opencode_json(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 2
+    read_call = next(tc for tc in tcs if tc["action"] == "read")
+    assert "/calculator/" in json.dumps(read_call["action_input"])
+    assert "Calculator" in read_call["observation"]
+    bash_call = next(tc for tc in tcs if tc["action"] == "bash")
+    assert "cat" in json.dumps(bash_call["action_input"]).lower()
+
+
+def test_opencode_error_only_log_returns_none():
+    log = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "name": "UnknownError",
+                "data": {"message": "ResourceExhausted: Worker local total request limit reached"},
+            },
+        }
+    )
+    assert synthetic_trajectory_from_opencode_json(log + "\n") is None
+
+
+def test_codex_structured_jsonl_reuses_opencode_parser():
+    log = (
+        '{"type":"tool_use","part":{"type":"tool","tool":"read","callID":"c1",'
+        '"state":{"status":"completed","input":{"path":"/workspace/skills/demo/SKILL.md"},'
+        '"output":"# Demo"}}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    assert traj["schema_version"] == "ATIF-v1.2-synthetic-codex-log"
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    assert tcs[0]["action"] == "read"
+
+
+def test_codex_plain_text_errors_return_none():
+    text = "ERROR responses_websocket: HTTP error: 405 Method Not Allowed\n"
+    assert synthetic_trajectory_from_codex_txt(text) is None
+
+
+def test_load_falls_back_to_opencode_txt(tmp_path: Path):
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    (logs / "opencode.txt").write_text(
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+        '"state":{"status":"completed","input":{"command":"echo hi"},"output":"hi"}}}\n',
+        encoding="utf-8",
+    )
+    traj_path = logs / "trajectory.json"
+    data, meta = load_trajectory_with_fallback(traj_path, logs)
+    assert data is not None
+    assert meta["source"] == "opencode.txt"
+
+
+def test_opencode_non_dict_tool_input_is_not_treated_as_shell_command():
+    log = (
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+        '"state":{"status":"completed","input":"cat /etc/passwd","output":"blocked"}}}\n'
+    )
+    traj = synthetic_trajectory_from_opencode_json(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert tcs[0]["action_input"] == {}

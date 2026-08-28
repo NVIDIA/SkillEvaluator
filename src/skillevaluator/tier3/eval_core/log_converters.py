@@ -385,6 +385,153 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
     }
 
 
+def _normalize_opencode_tool(tool_name: str, raw_input: Any) -> tuple[str, dict[str, Any]]:
+    """Map OpenCode tool names and inputs to ATIF tool-call fields."""
+    if not isinstance(raw_input, dict):
+        return tool_name, {}
+    name = str(tool_name or "").strip()
+    lowered = name.lower()
+    arguments = dict(raw_input)
+    if lowered in {"read", "read_file"}:
+        function_name = "read"
+        if "filePath" in arguments and "path" not in arguments:
+            arguments["path"] = arguments["filePath"]
+        if "file_path" in arguments and "path" not in arguments:
+            arguments["path"] = arguments["file_path"]
+    elif lowered in {"bash", "shell"}:
+        function_name = "bash"
+    elif lowered in {"write", "edit"}:
+        function_name = lowered
+        if "filePath" in arguments and "path" not in arguments:
+            arguments["path"] = arguments["filePath"]
+    else:
+        function_name = name or lowered or "tool"
+    return function_name, arguments
+
+
+def _opencode_output_text(state: dict[str, Any]) -> str:
+    output = state.get("output")
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        message = output.get("message") or output.get("text")
+        if message is not None:
+            return str(message)
+        return json.dumps(output, ensure_ascii=False)
+    return str(output)
+
+
+def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
+    """Parse OpenCode ``run --format=json`` JSONL (tee'd to ``opencode.txt``)."""
+    if not text or not text.strip():
+        return None
+
+    steps: list[dict[str, Any]] = []
+    saw_content = False
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(evt, dict):
+            continue
+
+        et = str(evt.get("type") or "")
+        if et == "text":
+            part = evt.get("part")
+            if not isinstance(part, dict):
+                continue
+            msg = str(part.get("text") or "").strip()
+            if not msg:
+                continue
+            saw_content = True
+            if steps and not steps[-1].get("tool_calls"):
+                prev = (steps[-1].get("message") or "").strip()
+                steps[-1]["message"] = (prev + "\n" + msg).strip() if prev else msg
+            else:
+                steps.append(
+                    {
+                        "source": "agent",
+                        "message": msg,
+                        "tool_calls": [],
+                        "observation": {"results": []},
+                    }
+                )
+            continue
+
+        if et != "tool_use":
+            continue
+
+        part = evt.get("part")
+        if not isinstance(part, dict):
+            continue
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        status = str(state.get("status") or "").lower()
+        if status in {"pending", "running"}:
+            continue
+
+        tool_name = str(part.get("tool") or part.get("name") or "")
+        call_id = str(part.get("callID") or part.get("call_id") or part.get("id") or "")
+        function_name, arguments = _normalize_opencode_tool(tool_name, state.get("input"))
+        if not call_id:
+            call_id = f"opencode-{len(steps) + 1}"
+
+        saw_content = True
+        step = {
+            "source": "agent",
+            "message": "",
+            "tool_calls": [
+                {
+                    "tool_call_id": call_id,
+                    "function_name": function_name,
+                    "arguments": arguments,
+                }
+            ],
+            "observation": {"results": []},
+        }
+        output_text = _opencode_output_text(state)
+        if output_text:
+            step["observation"]["results"].append(
+                {
+                    "source_call_id": call_id,
+                    "content": output_text[:8000],
+                }
+            )
+        steps.append(step)
+
+    if not saw_content or not steps:
+        return None
+    return {
+        "steps": steps,
+        "schema_version": "ATIF-v1.2-synthetic-opencode-log",
+        "final_metrics": {},
+    }
+
+
+def synthetic_trajectory_from_codex_txt(text: str) -> dict[str, Any] | None:
+    """Reconstruct ATIF from Codex tee logs when they contain structured JSONL."""
+    if not text or not text.strip():
+        return None
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if all(line.startswith("{") and line.endswith("}") for line in lines):
+        synth = synthetic_trajectory_from_opencode_json(text)
+        if synth and synth.get("steps"):
+            synth["schema_version"] = "ATIF-v1.2-synthetic-codex-log"
+            return synth
+    return None
+
+
 def load_trajectory_with_fallback(
     trajectory_path: Path,
     logs_dir: Path | None = None,
@@ -434,6 +581,24 @@ def load_trajectory_with_fallback(
         if synth and synth.get("steps"):
             meta["source"] = "cline.txt"
             meta["note"] = "Synthetic ATIF from Cline CLI JSONL log"
+            return synth, meta
+
+    opencode_path = logs / "opencode.txt"
+    if opencode_path.exists():
+        raw = opencode_path.read_text(encoding="utf-8", errors="replace")
+        synth = synthetic_trajectory_from_opencode_json(raw)
+        if synth and synth.get("steps"):
+            meta["source"] = "opencode.txt"
+            meta["note"] = "Synthetic ATIF from OpenCode JSON stream"
+            return synth, meta
+
+    codex_path = logs / "codex.txt"
+    if codex_path.exists():
+        raw = codex_path.read_text(encoding="utf-8", errors="replace")
+        synth = synthetic_trajectory_from_codex_txt(raw)
+        if synth and synth.get("steps"):
+            meta["source"] = "codex.txt"
+            meta["note"] = "Synthetic ATIF from Codex structured log"
             return synth, meta
 
     return None, meta

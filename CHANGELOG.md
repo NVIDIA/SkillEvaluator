@@ -4,6 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
+  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
+  `trajectory.json` is missing or empty.
+
 ### Fixed
 
 - Tier 3 accuracy and custom goal judges now retry one malformed (including

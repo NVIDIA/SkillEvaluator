@@ -2100,13 +2100,13 @@ def test_runtime_preflight_deadline_uses_effective_staged_task_timeout(
         ["codex"],
         output_dir=tmp_path / "results",
         agent_runtime_preflight=True,
-        timeout_multiplier=10.0,
+        timeout_multiplier=12.0,
         agent_timeout_seconds=300.0,
     )
 
     assert "error" not in result
-    assert captured["timeout_multiplier"] == 10.0
-    assert captured["timeout_seconds"] == 3120
+    assert captured["timeout_multiplier"] == 12.0
+    assert captured["timeout_seconds"] == 3720
 
 
 def test_cleanup_failure_degrades_terminal_progress_after_retention_finalizes(

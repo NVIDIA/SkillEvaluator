@@ -191,6 +191,7 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
         (None, 1020),
         (900.0, 1020),
         (3000.0, 3120),
+        (3600.0, 3720),
         (900.1, 1021),
     ],
 )

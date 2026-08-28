@@ -14,6 +14,10 @@ All notable changes to SkillEvaluator are documented in this file.
   not alias other files, lookup failures remain per-link findings, and link
   diagnostics are bounded and escaped. Malformed frontmatter and repeated
   unclosed HTML comments no longer abort or stall supporting-document checks.
+- Tier 3 Harbor collection no longer scans an agent's unstructured transcript
+  for runtime-error phrases when the recorded exception belongs to the
+  verifier, health check, or task. Correct answers that discuss errors such as
+  `401 Unauthorized` are no longer misreported as agent runtime failures.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

@@ -35,6 +35,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from skillevaluator.tier3.case_ids import safe_child, validate_case_ids, validate_output_directory_path
+from skillevaluator.tier3.harbor import DEFAULT_LLM_VERIFIER_TIMEOUT_SEC
 from skillevaluator.tier3.harbor.secure_copy import (
     copy_file_secure,
     copytree_secure,
@@ -1823,7 +1824,7 @@ has_skill = {str(has_skill).lower()}
 timeout_sec = 300.0
 
 [verifier]
-timeout_sec = 180.0
+timeout_sec = {DEFAULT_LLM_VERIFIER_TIMEOUT_SEC}
 
 [verifier.env]
 {_verifier_env_block(verifier_env if verifier_env is not None else runtime_env)}
@@ -4347,7 +4348,13 @@ def _ensure_skill_evaluator_verifier_env(task_dir: Path, *, verifier_env: dict[s
         return
 
     insert_at = lines.index("[environment]") if "[environment]" in lines else len(lines)
-    lines[insert_at:insert_at] = ["[verifier]", "timeout_sec = 180.0", "", *env_block, ""]
+    lines[insert_at:insert_at] = [
+        "[verifier]",
+        f"timeout_sec = {DEFAULT_LLM_VERIFIER_TIMEOUT_SEC}",
+        "",
+        *env_block,
+        "",
+    ]
     task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

@@ -85,8 +85,19 @@ class HygieneValidator(ValidatorBase):
                 continue
 
             seen_targets: set[str] = set()
+            seen_invalid: set[str] = set()
             for link_href in markdown_link_targets(content, include_images=True):
-                local_path = normalized_local_path(link_href, allow_directory=True)
+                try:
+                    local_path = normalized_local_path(link_href, allow_directory=True, reject_anchors=True)
+                except ValueError:
+                    if link_href in seen_invalid:
+                        continue
+                    seen_invalid.add(link_href)
+                    result.add_error(
+                        f"Invalid local link in {_link_display(md_file.name)}: {_link_display(link_href)} "
+                        "(absolute or drive-relative path)"
+                    )
+                    continue
                 if local_path is None or local_path in seen_targets:
                     continue
                 seen_targets.add(local_path)

@@ -11,9 +11,11 @@ All notable changes to SkillEvaluator are documented in this file.
   consistently normalizing local destinations. Root-absolute URLs are ignored
   instead of being treated as host paths; href-only diagnostics collapse
   repeated links to the same normalized target. Invalid destination bytes do
-  not alias other files, lookup failures remain per-link findings, and link
-  diagnostics are bounded and escaped. Malformed frontmatter and repeated
-  unclosed HTML comments no longer abort or stall supporting-document checks.
+  not alias other files, relative URLs that normalize to absolute or
+  drive-relative paths are reported without lookup, lookup failures remain
+  per-link findings, and link diagnostics are bounded and escaped. Malformed
+  frontmatter and repeated unclosed HTML comments no longer abort or stall
+  supporting-document checks.
 - Tier 3 Harbor collection no longer scans an agent's unstructured transcript
   for runtime-error phrases when the recorded exception belongs to the
   verifier, health check, or task. Correct answers that discuss errors such as

@@ -58,8 +58,14 @@ def _guarded_html_inline(state: StateInline, silent: bool) -> bool:
 _MARKDOWN_PARSER.inline.ruler.at("html_inline", _guarded_html_inline)
 
 
-def normalized_local_path(href: str, *, allow_directory: bool = False) -> str | None:
-    """Return a once-decoded, normalized local path from a link destination."""
+def normalized_local_path(href: str, *, allow_directory: bool = False, reject_anchors: bool = False) -> str | None:
+    """Normalize a local destination, optionally rejecting anchors acquired in normalization.
+
+    Explicit URL schemes and URLs whose raw path begins with ``/`` remain
+    outside local checks. Unparseable URLs also return ``None``.
+    With ``reject_anchors``, a relative URL that gains an absolute or
+    drive-relative path raises ``ValueError`` instead of being skipped.
+    """
     href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
     try:
         parsed = urlsplit(href)
@@ -71,14 +77,16 @@ def normalized_local_path(href: str, *, allow_directory: bool = False) -> str | 
     # Preserve invalid UTF-8 bytes instead of aliasing distinct destinations to
     # the replacement character. Scheme classification belongs to the raw URL.
     path = unquote(parsed.path, errors="surrogateescape").replace("\\", "/")
-    if path.startswith("/"):
+    if parsed.path.startswith("/"):
+        return None
+    normalized = posixpath.normpath(path)
+    if PureWindowsPath(normalized).anchor:
+        if reject_anchors:
+            raise ValueError("absolute or drive-relative path")
         return None
     if not allow_directory and path.endswith(("/", "/.", "/..")):
         return None
-    path = posixpath.normpath(path)
-    if PureWindowsPath(path).anchor:
-        return None
-    return path
+    return normalized
 
 
 def _find_script_end(content: str, start: int) -> int | None:

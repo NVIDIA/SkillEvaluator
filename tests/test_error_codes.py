@@ -107,6 +107,8 @@ def test_error_code_registry_is_immutable_and_schema_is_serializable() -> None:
         ("unavailable", None, True, "SKILLEVALUATOR-DEPENDENCY-005"),
         ("unavailable", 503, False, "SKILLEVALUATOR-DEPENDENCY-001"),
         ("unavailable", None, False, "SKILLEVALUATOR-DEPENDENCY-001"),
+        ("local_process", None, False, "SKILLEVALUATOR-RUNTIME-005"),
+        ("local_process", None, True, "SKILLEVALUATOR-RUNTIME-007"),
     ],
 )
 def test_provider_failure_mapping_is_structured_and_stable(

@@ -65,6 +65,7 @@ class ModelCatalogFailureKind(StrEnum):
     MODEL_NOT_FOUND = "model_not_found"
     OTHER_HTTP = "other_http"
     UNKNOWN = "unknown"
+    LOCAL_PROCESS = "local_process"
 
 
 class ModelCatalogError(RuntimeError):

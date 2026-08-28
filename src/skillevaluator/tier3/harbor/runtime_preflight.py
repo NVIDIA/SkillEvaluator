@@ -1063,7 +1063,7 @@ def _bedrock_exception_result(
 ) -> ModelProbeResult:
     """Convert a Bedrock SDK failure to a redacted, policy-safe result."""
     http_status = None
-    error_code: EvaluatorErrorCode | None = None
+    timed_out = False
     if isinstance(exc, ClientError):
         failure_kind, http_status = _bedrock_client_error_kind(exc)
     elif (
@@ -1091,9 +1091,8 @@ def _bedrock_exception_result(
         and exc.errno in _BEDROCK_CREDENTIAL_PROCESS_TRANSIENT_ERRNOS
         and _bedrock_credential_process(session) is not None
     ):
-        failure_kind = ModelCatalogFailureKind.UNAVAILABLE
-        if exc.errno == errno.ETIMEDOUT:
-            error_code = EvaluatorErrorCode.DEPENDENCY_TIMEOUT
+        failure_kind = ModelCatalogFailureKind.LOCAL_PROCESS
+        timed_out = exc.errno == errno.ETIMEDOUT
     elif _is_bedrock_local_cached_token_error(exc):
         failure_kind = ModelCatalogFailureKind.AUTHENTICATION
     elif isinstance(exc, ValueError):
@@ -1111,7 +1110,7 @@ def _bedrock_exception_result(
         failure_kind = ModelCatalogFailureKind.INVALID_CONFIGURATION
     elif isinstance(exc, (ConnectTimeoutError, ReadTimeoutError)):
         failure_kind = ModelCatalogFailureKind.UNAVAILABLE
-        error_code = EvaluatorErrorCode.DEPENDENCY_TIMEOUT
+        timed_out = True
     elif isinstance(exc, BotoCoreError):
         failure_kind = ModelCatalogFailureKind.UNAVAILABLE
     else:
@@ -1123,8 +1122,7 @@ def _bedrock_exception_result(
         f"Bedrock model catalog request failed: {type(exc).__name__}",
         failure_kind=failure_kind,
         http_status=http_status,
-        error_code=error_code,
-        timed_out=error_code == EvaluatorErrorCode.DEPENDENCY_TIMEOUT,
+        timed_out=timed_out,
     )
 
 

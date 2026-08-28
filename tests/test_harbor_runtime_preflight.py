@@ -3171,9 +3171,18 @@ credential_process = "{sys.executable}" "{credential_process}"
     assert str(credential_process) not in result.detail
 
 
+@pytest.mark.parametrize(
+    ("error_number", "expected_error_code"),
+    [
+        (errno.EAGAIN, "SKILLEVALUATOR-RUNTIME-005"),
+        (errno.ETIMEDOUT, "SKILLEVALUATOR-RUNTIME-007"),
+    ],
+)
 def test_bedrock_model_probe_degrades_transient_credential_process_spawn_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    error_number: int,
+    expected_error_code: str,
 ) -> None:
     original_init = botocore_credentials.ProcessProvider.__init__
 
@@ -3181,7 +3190,7 @@ def test_bedrock_model_probe_degrades_transient_credential_process_spawn_error(
         original_init(self, *args, **kwargs)
 
         def fail_to_spawn(*_args, **_kwargs):
-            raise BlockingIOError(errno.EAGAIN, "private temporary spawn failure")
+            raise OSError(error_number, "private temporary spawn failure")
 
         self._popen = fail_to_spawn
 
@@ -3206,7 +3215,9 @@ credential_process = private-command
 
     result = runtime_preflight.probe_model(provider, timeout_seconds=5)
 
-    assert result.failure_kind == "unavailable"
+    assert result.failure_kind == "local_process"
+    assert result.error_code == expected_error_code
+    assert "DEPENDENCY" not in result.error_code
     assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
     assert "private" not in result.detail
 

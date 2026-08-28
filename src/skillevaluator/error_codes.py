@@ -171,6 +171,8 @@ def provider_failure_error_code(
     """Map structured provider failure metadata without inspecting message text."""
     kind = str(failure_kind) if failure_kind is not None else "unknown"
     status = http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
+    if kind == "local_process":
+        return EvaluatorErrorCode.EXECUTION_TIMEOUT if timed_out else EvaluatorErrorCode.PROCESS_SPAWN_FAILED
     if kind == "unavailable":
         if status == 429:
             return EvaluatorErrorCode.RATE_LIMITED

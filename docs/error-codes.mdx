@@ -75,7 +75,8 @@ message text. In particular, an unavailable provider response maps as follows:
 
 Local runtime-preflight failures use the `RUNTIME` domain. A process spawn
 failure, execution timeout, or unsuccessful exit is not classified as a
-dependency failure. A missing or invalid runtime job result uses the `CONTRACT`
+dependency failure. This includes local credential-helper process spawn and
+timeout failures. A missing or invalid runtime job result uses the `CONTRACT`
 domain because the process ran but did not satisfy the result contract.
 
 See [Reports & Results](reports.mdx#machine-readable-contract) for the result

@@ -909,6 +909,98 @@ def test_openai_compatible_codex_stages_selected_provider_pair() -> None:
     }
 
 
+@pytest.mark.parametrize("provider_name", ["openai", "openai-compatible"])
+def test_codex_explicit_openai_pair_overrides_only_the_agent_route(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+) -> None:
+    monkeypatch.setattr(
+        runner.os,
+        "environ",
+        {
+            "PATH": "/usr/bin",
+            "OPENAI_API_KEY": "codex-key",
+            "OPENAI_BASE_URL": "https://inference-api.nvidia.com/v1/",
+        },
+    )
+    evaluator = ProviderConfig(
+        provider=provider_name,
+        model="judge-model",
+        api_key="evaluator-key",
+        base_url="https://inference-api.nvidia.com",
+        litellm_model="openai/judge-model",
+    )
+
+    plan = runner._resolve_agent_runtime_plan(
+        provider=evaluator,
+        agents=["codex"],
+        models={"codex": "azure/openai/gpt-5.6"},
+        configured_runtime_env={},
+        env_mode="docker",
+        model_sources={"codex": "CLI"},
+    )["codex"]
+
+    assert plan.staged_env == {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "OPENAI_BASE_URL": "${OPENAI_BASE_URL}",
+    }
+    assert plan.subprocess_env["OPENAI_API_KEY"] == "codex-key"
+    assert plan.subprocess_env["OPENAI_BASE_URL"] == "https://inference-api.nvidia.com/v1"
+    assert plan.subprocess_env["SKILL_EVAL_LLM_API_KEY"] == "evaluator-key"
+    assert plan.subprocess_env["SKILL_EVAL_LLM_BASE_URL"] == "https://inference-api.nvidia.com"
+    assert plan.provider.api_key == "codex-key"
+    assert plan.provider.base_url == "https://inference-api.nvidia.com/v1"
+    assert (
+        runner._provider_route_evidence(plan.provider)["route_identity_sha256"]
+        != (runner._provider_route_evidence(evaluator)["route_identity_sha256"])
+    )
+
+    staged_verifier = runner._staged_verifier_environment(runner._provider_environment(evaluator))
+    assert staged_verifier["OPENAI_API_KEY"] == "${SKILL_EVAL_LLM_API_KEY}"
+    assert staged_verifier["OPENAI_BASE_URL"] == "${SKILL_EVAL_LLM_BASE_URL}"
+    assert staged_verifier["SKILL_EVAL_LLM_API_KEY"] == "${SKILL_EVAL_LLM_API_KEY}"
+    assert staged_verifier["SKILL_EVAL_LLM_BASE_URL"] == "${SKILL_EVAL_LLM_BASE_URL}"
+
+
+@pytest.mark.parametrize("provider_name", ["openai", "openai-compatible"])
+@pytest.mark.parametrize(
+    "host_pair",
+    [
+        {"OPENAI_API_KEY": "codex-key"},
+        {"OPENAI_BASE_URL": "https://inference-api.nvidia.com/v1"},
+    ],
+)
+def test_codex_rejects_a_partial_explicit_openai_pair(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    host_pair: dict[str, str],
+) -> None:
+    monkeypatch.setattr(runner.os, "environ", {"PATH": "/usr/bin", **host_pair})
+
+    if provider_name == "openai" and set(host_pair) == {"OPENAI_API_KEY"}:
+        # OPENAI_API_KEY by itself is the documented evaluator credential, not
+        # an independent agent override.  Codex safely inherits its ProviderConfig.
+        plan = runner._resolve_agent_runtime_plan(
+            provider=_provider(provider_name),
+            agents=["codex"],
+            models={"codex": "test-model"},
+            configured_runtime_env={},
+            env_mode="docker",
+        )["codex"]
+        assert plan.provider.base_url == "https://provider.example/v1"
+        assert plan.provider.api_key == "provider-key"
+        return
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY and OPENAI_BASE_URL must be set together"):
+        runner._resolve_agent_runtime_plan(
+            provider=_provider(provider_name),
+            agents=["codex"],
+            models={"codex": "test-model"},
+            configured_runtime_env={},
+            env_mode="docker",
+        )
+
+
 def test_local_anthropic_opencode_is_rejected_explicitly() -> None:
     with pytest.raises(ValueError, match="local mode"):
         runner._resolve_agent_runtime_plan(

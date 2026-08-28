@@ -2106,6 +2106,12 @@ def test_runtime_preflight_deadline_uses_effective_staged_task_timeout(
     assert "error" not in result
     assert captured["timeout_multiplier"] == 12.0
     assert captured["timeout_seconds"] == 3720
+    timeout_policy = result["run_config"]["harbor"]["agent_timeout_policy"]
+    assert timeout_policy["source"] == "staged_task"
+    assert timeout_policy["status"] == "complete"
+    assert timeout_policy["task_count"] == 2
+    assert timeout_policy["effective_seconds"] == {"minimum": 3600.0, "maximum": 3600.0}
+    assert len(timeout_policy["task_timeout_manifest_sha256"]) == 64
 
 
 def test_cleanup_failure_degrades_terminal_progress_after_retention_finalizes(

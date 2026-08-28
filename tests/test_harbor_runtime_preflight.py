@@ -676,6 +676,78 @@ def test_task_timeout_plan_uses_largest_staged_timeout(tmp_path: Path) -> None:
     assert runner._task_timeout_plan([root], 2.0) == 600.0
 
 
+def test_staged_agent_timeout_policy_is_read_only_and_fingerprinted(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    roots: list[tuple[str, Path]] = []
+    original: dict[Path, str] = {}
+    for arm, timeout in (("with", 120), ("without", 300)):
+        root = tmp_path / arm
+        task = root / "case-1"
+        task.mkdir(parents=True)
+        task_file = task / "task.toml"
+        content = f"[agent]\ntimeout_sec = {timeout}.0\n"
+        task_file.write_text(content, encoding="utf-8")
+        original[task_file] = content
+        roots.append((f"claude-code/{arm}", root))
+
+    policy = runner._observe_staged_agent_timeout_policy(roots, 3.0)
+
+    assert policy["source"] == "staged_task"
+    assert policy["status"] == "complete"
+    assert policy["task_count"] == 2
+    assert policy["effective_seconds"] == {"minimum": 360.0, "maximum": 900.0}
+    assert len(policy["task_timeout_manifest_sha256"]) == 64
+    assert runner._observe_staged_agent_timeout_policy(roots, 3.0) == policy
+    assert runner._observe_staged_agent_timeout_policy(list(reversed(roots)), 3.0) == policy
+    assert runner._task_timeout_plan([root for _label, root in roots], 3.0) == 900.0
+    assert {task_file: task_file.read_text(encoding="utf-8") for task_file in original} == original
+
+
+def test_staged_agent_timeout_policy_distinguishes_empty_and_incomplete_trees(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    empty_policy = runner._observe_staged_agent_timeout_policy([("empty", empty)], 3.0)
+
+    assert empty_policy["status"] == "empty"
+    assert empty_policy["task_count"] == 0
+    assert empty_policy["effective_seconds"] == {"minimum": None, "maximum": None}
+
+    mixed = tmp_path / "mixed"
+    task_contents = {
+        "bounded": "[agent]\ntimeout_sec = 300\n",
+        "missing": "[agent]\n",
+        "nan": "[agent]\ntimeout_sec = nan\n",
+        "infinite": "[agent]\ntimeout_sec = inf\n",
+        "invalid": "[agent\n",
+    }
+    for name, content in task_contents.items():
+        task = mixed / name
+        task.mkdir(parents=True)
+        (task / "task.toml").write_text(content, encoding="utf-8")
+
+    policy = runner._observe_staged_agent_timeout_policy([("mixed", mixed)], 12.0)
+
+    assert policy["status"] == "incomplete"
+    assert policy["task_count"] == len(task_contents)
+    assert policy["effective_seconds"] == {"minimum": None, "maximum": None}
+    statuses = {
+        identity.rsplit("/", 1)[-1]: status
+        for identity, status, _base, _effective in runner._staged_timeout_observations([("mixed", mixed)], 12.0)
+    }
+    assert statuses == {
+        "bounded": "bounded",
+        "infinite": "invalid",
+        "invalid": "invalid",
+        "missing": "missing",
+        "nan": "invalid",
+    }
+    assert runner._task_timeout_plan([mixed], 12.0) is None
+    assert len(policy["task_timeout_manifest_sha256"]) == 64
+
+
 def test_model_probe_delegates_to_shared_catalog_client_without_exposing_key(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -588,6 +589,13 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
     elif config.provider == "nv_build":
         environment["NVIDIA_API_KEY"] = config.api_key or ""
     else:
+        # Keep the evaluator/verifier route under its dedicated names.  A
+        # Codex runtime may intentionally use a different OPENAI_* pair (for
+        # example, the same gateway's /v1 Responses API while the evaluator
+        # uses the gateway root).  The verifier prefers these dedicated names,
+        # so the agent route cannot silently retarget grading.
+        environment["SKILL_EVAL_LLM_API_KEY"] = config.api_key or ""
+        environment["SKILL_EVAL_LLM_BASE_URL"] = config.base_url or ""
         environment["OPENAI_API_KEY"] = config.api_key or ""
         environment["OPENAI_BASE_URL"] = config.base_url or ""
     return {name: value for name, value in environment.items() if value}
@@ -963,6 +971,27 @@ def _independent_anthropic_agent_credentials() -> dict[str, str]:
     return credentials
 
 
+def _explicit_openai_agent_credentials(provider: ProviderConfig) -> dict[str, str]:
+    """Resolve a host-owned Codex route without borrowing half a pair.
+
+    ``OPENAI_API_KEY`` alone is the documented credential for an ``openai``
+    evaluator, whose default endpoint comes from ``ProviderConfig``.  It is
+    therefore not an independent Codex override until ``OPENAI_BASE_URL`` is
+    also present.  Every other evaluator uses different credential names, so
+    either OPENAI_* value there unambiguously starts an independent pair and
+    must be complete.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if api_key and base_url:
+        return {"OPENAI_API_KEY": api_key, "OPENAI_BASE_URL": base_url.rstrip("/")}
+    if base_url or (api_key and provider.provider != "openai"):
+        raise ProviderConfigurationError(
+            "OPENAI_API_KEY and OPENAI_BASE_URL must be set together for Codex's explicit agent route."
+        )
+    return {}
+
+
 def _judge_model_config(
     provider: ProviderConfig,
     provider_env: Mapping[str, str],
@@ -1022,6 +1051,19 @@ def _job_judge_subprocess_env(provider_env: Mapping[str, str], grading_mode: str
     return dict.fromkeys(_VERIFIER_JUDGE_MODEL_ENV_VARS, value)
 
 
+def _staged_verifier_environment(verifier_env: Mapping[str, str]) -> dict[str, str]:
+    """Stage verifier values without resolving them through an agent route."""
+    staged = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
+    aliases = {
+        "OPENAI_API_KEY": "SKILL_EVAL_LLM_API_KEY",
+        "OPENAI_BASE_URL": "SKILL_EVAL_LLM_BASE_URL",
+    }
+    for legacy_name, evaluator_name in aliases.items():
+        if legacy_name in staged and evaluator_name in staged:
+            staged[legacy_name] = f"${{{evaluator_name}}}"
+    return staged
+
+
 def _agent_credentials(
     *,
     provider: ProviderConfig,
@@ -1029,6 +1071,11 @@ def _agent_credentials(
     env_mode: str,
 ) -> dict[str, str]:
     """Resolve operator-owned credentials for exactly one agent runtime."""
+    if provider.provider in {"openai", "openai-compatible"} and agent == "codex":
+        explicit_openai = _explicit_openai_agent_credentials(provider)
+        if explicit_openai:
+            return explicit_openai
+
     if provider.provider == "nv_build":
         if agent == "opencode":
             if env_mode == ENV_MODE_LOCAL:
@@ -1042,17 +1089,13 @@ def _agent_credentials(
         if agent == "claude-code":
             return _independent_anthropic_agent_credentials()
         if agent == "codex":
-            return {
-                name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
-            }
+            return _explicit_openai_agent_credentials(provider)
         return {}
 
     if provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
         return _independent_anthropic_agent_credentials()
     if provider.provider == "anthropic" and agent == "codex":
-        return {
-            name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
-        }
+        return _explicit_openai_agent_credentials(provider)
 
     if provider.provider == "anthropic" and agent in {"claude-code", "opencode"}:
         return {
@@ -1090,6 +1133,15 @@ def _agent_provider_config(
     env_mode: str,
 ) -> ProviderConfig:
     """Describe the API provider the selected agent will actually call."""
+    if evaluator_provider.provider in {"openai", "openai-compatible"} and agent == "codex":
+        resolved_model = model
+        return ProviderConfig(
+            provider=evaluator_provider.provider,
+            model=resolved_model,
+            api_key=credentials.get("OPENAI_API_KEY"),
+            base_url=credentials.get("OPENAI_BASE_URL"),
+            litellm_model=f"openai/{resolved_model}",
+        )
     if evaluator_provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
         resolved_model = model.removeprefix("anthropic/")
         return ProviderConfig(
@@ -1272,20 +1324,75 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
-def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> float | None:
-    """Return the largest staged agent timeout after applying Harbor scaling."""
-    timeouts: list[float] = []
-    for root in task_roots:
-        for task_file in root.glob("*/task.toml"):
+def _staged_timeout_observations(
+    task_roots: list[tuple[str, Path]],
+    timeout_multiplier: float,
+) -> list[tuple[str, str, float | None, float | None]]:
+    """Observe staged agent timeouts without changing task-owned policy."""
+    observations: list[tuple[str, str, float | None, float | None]] = []
+    for root_label, root in sorted(task_roots, key=lambda item: item[0]):
+        for task_file in sorted(root.glob("*/task.toml"), key=lambda path: path.as_posix()):
+            identity = f"{root_label}/{task_file.parent.name}"
             try:
                 data = tomllib.loads(task_file.read_text(encoding="utf-8"))
             except (OSError, tomllib.TOMLDecodeError):
+                observations.append((identity, "invalid", None, None))
                 continue
             agent = data.get("agent") if isinstance(data, dict) else None
-            value = agent.get("timeout_sec") if isinstance(agent, dict) else None
-            if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
-                timeouts.append(float(value))
-    return round(max(timeouts) * timeout_multiplier, 3) if timeouts else None
+            if not isinstance(agent, dict) or "timeout_sec" not in agent:
+                observations.append((identity, "missing", None, None))
+                continue
+            value = agent.get("timeout_sec")
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                observations.append((identity, "invalid", None, None))
+                continue
+            try:
+                base_seconds = float(value)
+            except (OverflowError, ValueError):
+                observations.append((identity, "invalid", None, None))
+                continue
+            effective_seconds = base_seconds * timeout_multiplier
+            if (
+                base_seconds <= 0
+                or not math.isfinite(base_seconds)
+                or effective_seconds <= 0
+                or not math.isfinite(effective_seconds)
+            ):
+                observations.append((identity, "invalid", None, None))
+                continue
+            observations.append((identity, "bounded", base_seconds, round(effective_seconds, 3)))
+    return observations
+
+
+def _observe_staged_agent_timeout_policy(
+    task_roots: list[tuple[str, Path]],
+    timeout_multiplier: float,
+) -> dict[str, Any]:
+    """Return bounded evidence for the effective staged timeout plan."""
+    observations = _staged_timeout_observations(task_roots, timeout_multiplier)
+    complete = bool(observations) and all(status == "bounded" for _identity, status, _base, _value in observations)
+    effective = [value for _identity, _status, _base, value in observations if value is not None]
+    digest_payload = json.dumps(observations, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return {
+        "source": "staged_task",
+        "status": "complete" if complete else "empty" if not observations else "incomplete",
+        "task_count": len(observations),
+        "effective_seconds": {
+            "minimum": min(effective) if complete else None,
+            "maximum": max(effective) if complete else None,
+        },
+        "task_timeout_manifest_sha256": hashlib.sha256(digest_payload).hexdigest(),
+    }
+
+
+def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> float | None:
+    """Return the largest staged agent timeout after applying Harbor scaling."""
+    policy = _observe_staged_agent_timeout_policy(
+        [(f"root-{index}", root) for index, root in enumerate(task_roots)],
+        timeout_multiplier,
+    )
+    maximum = policy["effective_seconds"]["maximum"]
+    return float(maximum) if maximum is not None else None
 
 
 def _model_for_agent(
@@ -2310,6 +2417,13 @@ def _run_harbor_eval_impl(
             "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
+            "agent_timeout_policy": {
+                "source": "staged_task",
+                "status": "empty",
+                "task_count": 0,
+                "effective_seconds": {"minimum": None, "maximum": None},
+                "task_timeout_manifest_sha256": None,
+            },
             "base_image_mode": base_image_mode,
             "jobs_retained": keep_harbor_jobs,
             "server_tool_policy": server_tool_policy,
@@ -2325,7 +2439,7 @@ def _run_harbor_eval_impl(
         "agents": model_resolution,
     }
     verifier_env = {**configured_runtime_env, **provider_env}
-    staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
+    staged_verifier_env = _staged_verifier_environment(verifier_env)
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
     job_judge_subprocess_env = _job_judge_subprocess_env(provider_env, grading_mode)
 
@@ -2539,12 +2653,18 @@ def _run_harbor_eval_impl(
     variants = 1 if skip_baseline else 2
     matrix_trials = expected_trials * len(agents) * variants
     preflight_trials = len(agents) if agent_runtime_preflight else 0
-    timeout_roots = [with_dir for with_dir, _without_dir in agent_task_dirs.values()]
-    timeout_roots.extend(without_dir for _with_dir, without_dir in agent_task_dirs.values() if without_dir is not None)
-    task_timeout_seconds = _task_timeout_plan(
+    timeout_roots = [(f"{agent}/with", with_dir) for agent, (with_dir, _without_dir) in agent_task_dirs.items()]
+    timeout_roots.extend(
+        (f"{agent}/without", without_dir)
+        for agent, (_with_dir, without_dir) in agent_task_dirs.items()
+        if without_dir is not None
+    )
+    timeout_policy = _observe_staged_agent_timeout_policy(
         timeout_roots,
         float(timeout_multiplier),
     )
+    run_config["harbor"]["agent_timeout_policy"] = timeout_policy
+    task_timeout_seconds = timeout_policy["effective_seconds"]["maximum"]
     reporter.start(
         Tier3RunPlan(
             skill_name=skill_path.name,

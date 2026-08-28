@@ -78,6 +78,15 @@ if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
 
 DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 900
+PREFLIGHT_TIMEOUT_GRACE_SECONDS = 120
+
+
+def runtime_preflight_timeout_seconds(
+    task_timeout_seconds: float | None,
+) -> int:
+    """Return a preflight deadline that cannot undercut one staged task."""
+    effective_timeout = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS if task_timeout_seconds is None else task_timeout_seconds
+    return math.ceil(effective_timeout + PREFLIGHT_TIMEOUT_GRACE_SECONDS)
 
 
 @dataclass(frozen=True)

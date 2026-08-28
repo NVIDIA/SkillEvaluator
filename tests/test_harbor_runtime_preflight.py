@@ -185,6 +185,22 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
     assert run_kwargs["env"] == {"NVIDIA_API_KEY": "secret"}
 
 
+@pytest.mark.parametrize(
+    ("task_timeout_seconds", "expected"),
+    [
+        (None, 1020),
+        (900.0, 1020),
+        (3000.0, 3120),
+        (900.1, 1021),
+    ],
+)
+def test_runtime_preflight_timeout_tracks_effective_task_timeout_with_grace(
+    task_timeout_seconds: float | None,
+    expected: int,
+) -> None:
+    assert runtime_preflight.runtime_preflight_timeout_seconds(task_timeout_seconds) == expected
+
+
 def test_runtime_preflight_hands_nvidia_build_key_only_over_stdin(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
     secret = "nvidia-real-secret-value-for-test"

@@ -2060,6 +2060,55 @@ def test_runtime_preflight_running_event_precedes_slow_preflight_call(
     )
 
 
+def test_runtime_preflight_deadline_uses_effective_staged_task_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def emit_timeout_task(_skill: Path, output: Path, **_kwargs):
+        task = output / "case-1"
+        task.mkdir(parents=True)
+        (task / "task.toml").write_text("[agent]\ntimeout_sec = 300.0\n", encoding="utf-8")
+        return [task]
+
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        task_emitter=emit_timeout_task,
+    )
+    from skillevaluator.tier3.harbor import runtime_preflight
+
+    captured: dict[str, object] = {}
+
+    def observed_preflight(**kwargs):
+        captured.update(kwargs)
+        return runtime_preflight.PreflightResult(
+            True,
+            kwargs["agent"],
+            kwargs["model"],
+            "agent started",
+            f"runtime-preflight-{kwargs['agent']}",
+        )
+
+    monkeypatch.setattr(
+        runtime_preflight,
+        "run_agent_runtime_preflight",
+        observed_preflight,
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=True,
+        timeout_multiplier=10.0,
+        agent_timeout_seconds=300.0,
+    )
+
+    assert "error" not in result
+    assert captured["timeout_multiplier"] == 10.0
+    assert captured["timeout_seconds"] == 3120
+
+
 def test_cleanup_failure_degrades_terminal_progress_after_retention_finalizes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -2707,7 +2707,10 @@ def _run_harbor_eval_impl(
             )
         )
     if agent_runtime_preflight:
-        from skillevaluator.tier3.harbor.runtime_preflight import run_agent_runtime_preflight
+        from skillevaluator.tier3.harbor.runtime_preflight import (
+            run_agent_runtime_preflight,
+            runtime_preflight_timeout_seconds,
+        )
 
         reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="running"))
         preflight_errors: list[str] = []
@@ -2720,6 +2723,7 @@ def _run_harbor_eval_impl(
                 jobs_dir=jobs_dir,
                 run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
                 timeout_multiplier=float(timeout_multiplier),
+                timeout_seconds=runtime_preflight_timeout_seconds(task_timeout_seconds),
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,

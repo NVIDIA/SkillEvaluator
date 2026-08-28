@@ -335,6 +335,44 @@ def test_validate_catalog_runs_each_skill_as_separate_job() -> None:
         assert len(summary["skills"]) == 2
 
 
+def test_validate_catalog_workers_runs_skills_in_parallel() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        for name in ("simple", "simple2"):
+            shutil.copytree(FIXTURE, catalog / name)
+        second = catalog / "simple2" / "SKILL.md"
+        second.write_text(
+            second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-o",
+                "out",
+            ],
+        )
+
+        out = _plain_text(result.output)
+        assert "parallel catalog mode" in out
+        assert "Catalog Result" in out
+        assert result.exit_code == 0, result.output
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["total"] == 2
+        assert summary["passed"] == 2
+        assert any(Path("out/simple").glob("*.html"))
+        assert any(Path("out/simple2").glob("*.html"))
+
+
 def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:
     runner = CliRunner()
     with runner.isolated_filesystem():

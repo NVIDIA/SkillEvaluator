@@ -9,8 +9,10 @@ import copy
 import json
 import logging
 import math
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -696,6 +698,164 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
 
 
+def _catalog_child_argv_from_sys(skill_dir: Path, output_dir: Path, parent_argv: list[str]) -> list[str]:
+    """Rebuild ``validate`` argv for one catalog skill from ``sys.argv``."""
+    argv = list(parent_argv)
+    try:
+        validate_idx = next(i for i, arg in enumerate(argv) if arg == "validate")
+    except StopIteration:
+        return ["validate", str(skill_dir), "-o", str(output_dir)]
+
+    tail = argv[validate_idx + 1 :]
+    if tail and not tail[0].startswith("-"):
+        tail = tail[1:]
+
+    child_tail: list[str] = []
+    skip_next = False
+    for arg in tail:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in {"--workers", "-o", "--output-dir"}:
+            skip_next = True
+            continue
+        if arg.startswith("--workers=") or arg.startswith("--output-dir=") or arg.startswith("-o="):
+            continue
+        child_tail.append(arg)
+
+    return ["validate", str(skill_dir), *child_tail, "-o", str(output_dir)]
+
+
+def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir: Path) -> list[str]:
+    """Rebuild ``validate`` argv from the active Click context (pytest-safe)."""
+    params = ctx.params
+    argv: list[str] = ["validate", str(skill_dir)]
+
+    if params.get("verbose"):
+        argv.append("--verbose")
+    if params.get("full"):
+        argv.append("--full")
+    if params.get("tiers"):
+        argv.extend(["--tiers", str(params["tiers"])])
+    if params.get("checks"):
+        argv.extend(["--checks", str(params["checks"])])
+    if params.get("previous_version"):
+        argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("fail_fast"):
+        argv.append("--fail-fast")
+    if params.get("continue_on_failure"):
+        argv.append("-c")
+    if params.get("llm"):
+        argv.append("--llm")
+    else:
+        argv.append("--no-llm")
+    if params.get("llm_verify"):
+        argv.append("--llm-verify")
+    if not params.get("dedup", True):
+        argv.append("--no-dedup")
+    block_on_dedup = params.get("block_on_dedup")
+    if block_on_dedup is True:
+        argv.append("--block-on-dedup")
+    elif block_on_dedup is False:
+        argv.append("--no-block-on-dedup")
+    min_score = params.get("min_score", 70)
+    if min_score != 70:
+        argv.extend(["--min-score", str(min_score)])
+    if params.get("external"):
+        argv.append("--external")
+    if params.get("policy_path"):
+        argv.extend(["--policy", str(params["policy_path"])])
+    if params.get("profile"):
+        argv.extend(["--profile", str(params["profile"])])
+    if params.get("agent_eval"):
+        argv.append("--tier3")
+    block_on_agent_eval = params.get("block_on_agent_eval")
+    if block_on_agent_eval is True:
+        argv.append("--block-on-agent-eval")
+    elif block_on_agent_eval is False:
+        argv.append("--no-block-on-agent-eval")
+    if params.get("autopilot"):
+        argv.append("--autopilot")
+    agents = params.get("agents", "codex")
+    if agents != "codex":
+        argv.extend(["--agents", str(agents)])
+    env_mode = params.get("env_mode", "docker")
+    if env_mode != "docker":
+        argv.extend(["--env-mode", str(env_mode)])
+    if params.get("skip_baseline"):
+        argv.append("--skip-baseline")
+    if params.get("n_concurrent") is not None:
+        argv.extend(["--n-concurrent", str(params["n_concurrent"])])
+    if params.get("max_agents") is not None:
+        argv.extend(["--max-agents", str(params["max_agents"])])
+    if params.get("n_attempts") is not None:
+        argv.extend(["--n-attempts", str(params["n_attempts"])])
+    if params.get("pass_threshold") is not None:
+        argv.extend(["--pass-threshold", str(params["pass_threshold"])])
+    stop_on_pass = params.get("stop_on_pass")
+    if stop_on_pass is True:
+        argv.append("--stop-on-pass")
+    elif stop_on_pass is False:
+        argv.append("--no-stop-on-pass")
+    if params.get("model"):
+        argv.extend(["--model", str(params["model"])])
+    for override in params.get("agent_model") or ():
+        argv.extend(["--agent-model", str(override)])
+    if params.get("grading_mode"):
+        argv.extend(["--grading-mode", str(params["grading_mode"])])
+    if params.get("results_dir"):
+        argv.extend(["--results-dir", str(params["results_dir"])])
+    for skill in params.get("include_skills") or ():
+        argv.extend(["--include-skill", str(skill)])
+    if params.get("copy_repo"):
+        argv.append("--copy-repo")
+    if params.get("timeout_multiplier") is not None:
+        argv.extend(["--timeout-multiplier", str(params["timeout_multiplier"])])
+    if params.get("harbor_keep_jobs"):
+        argv.append("--harbor-keep-jobs")
+    for fmt in params.get("report_formats") or ("cli",):
+        if fmt == "cli":
+            continue
+        argv.extend(["-r", fmt])
+    argv.extend(["-o", str(output_dir)])
+    return argv
+
+
+def _catalog_child_argv(
+    ctx: click.Context,
+    skill_dir: Path,
+    output_dir: Path,
+    parent_argv: list[str],
+) -> list[str]:
+    if "validate" in parent_argv:
+        return _catalog_child_argv_from_sys(skill_dir, output_dir, parent_argv)
+    return _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir)
+
+
+def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str]:
+    """Run one catalog skill validation in a child process."""
+    import os
+
+    from click.testing import CliRunner
+
+    workdir = job.get("cwd")
+    if workdir:
+        os.chdir(workdir)
+
+    skill_name = str(job["skill_name"])
+    result = CliRunner().invoke(cli, job["argv"])
+    if result.exit_code == 0:
+        return skill_name, True, ""
+    exc = result.exception
+    if isinstance(exc, SystemExit):
+        return skill_name, False, "validation failed"
+    if exc is not None:
+        if isinstance(exc, click.ClickException):
+            return skill_name, False, str(getattr(exc, "message", exc))
+        return skill_name, False, f"unexpected error: {exc}"
+    return skill_name, False, "validation failed"
+
+
 def _latest_skill_json_report(skill_report_dir: Path) -> Path | None:
     """Return the newest per-skill machine-readable report when present."""
     if not skill_report_dir.is_dir():
@@ -781,12 +941,14 @@ def _validate_catalog(
     *,
     resolved_target: Path,
     output_dir: Path,
+    workers: int = 1,
 ) -> None:
-    """Run the full validate pipeline once per skill in the catalog, serially.
+    """Run the full validate pipeline once per skill in the catalog.
 
     Each skill is an independent job with its own pipeline view, reports
     (under ``<output_dir>/<skill>/``), and verdict; the catalog exits nonzero
-    when any skill failed.
+    when any skill failed. With ``workers`` above 1, skills validate in
+    parallel child processes and the per-skill pipeline view is skipped.
     """
     if ctx.params.get("previous_version"):
         raise click.ClickException(
@@ -795,6 +957,10 @@ def _validate_catalog(
         )
 
     skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
+    if workers > 1:
+        _validate_catalog_parallel(ctx, skill_dirs=skill_dirs, output_dir=output_dir, workers=workers)
+        return
+
     failures: list[tuple[str, str]] = []
     for index, skill_dir in enumerate(skill_dirs, start=1):
         _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
@@ -810,6 +976,67 @@ def _validate_catalog(
             failures.append((skill_dir.name, str(getattr(exc, "message", exc))))
         except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
             failures.append((skill_dir.name, f"unexpected error: {exc}"))
+    failure_map = dict(failures)
+    skill_entries = [
+        _catalog_skill_entry(
+            skill_dir.name,
+            output_dir / skill_dir.name,
+            passed=skill_dir.name not in failure_map,
+            reason=failure_map.get(skill_dir.name, ""),
+        )
+        for skill_dir in skill_dirs
+    ]
+    _write_catalog_summary(output_dir, skill_entries)
+    _print_catalog_summary(len(skill_dirs), failures, output_dir)
+    if failures:
+        raise click.ClickException(
+            f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
+            + ", ".join(name for name, _reason in failures)
+        )
+
+
+def _validate_catalog_parallel(
+    ctx: click.Context,
+    *,
+    skill_dirs: list[Path],
+    output_dir: Path,
+    workers: int,
+) -> None:
+    """Validate catalog skills concurrently in isolated child processes."""
+    from skillevaluator.reporting.console_ui import make_view_console
+
+    if not skill_dirs:
+        _write_catalog_summary(output_dir, [])
+        _print_catalog_summary(0, [], output_dir)
+        return
+
+    import sys
+
+    parent_argv = list(sys.argv)
+    workdir = str(Path.cwd())
+    output_dir.mkdir(parents=True, exist_ok=True)
+    make_view_console().print(
+        f"[dim]Validating {len(skill_dirs)} skills with {workers} worker"
+        f"{'s' if workers != 1 else ''} (parallel catalog mode; per-skill pipeline view disabled)[/dim]"
+    )
+
+    jobs = [
+        {
+            "skill_name": skill_dir.name,
+            "argv": _catalog_child_argv(ctx, skill_dir, output_dir / skill_dir.name, parent_argv),
+            "cwd": workdir,
+        }
+        for skill_dir in skill_dirs
+    ]
+    failures: list[tuple[str, str]] = []
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
+        for future in as_completed(futures):
+            skill_name, passed, reason = future.result()
+            if not passed:
+                failures.append((skill_name, reason))
+
+    failures.sort(key=lambda item: item[0])
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
@@ -1043,6 +1270,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Custom policy YAML overlaid on top of --profile.",
 )
 @click.option(
+    "--workers",
+    type=click.IntRange(1),
+    default=1,
+    show_default=True,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Concurrent catalog skill jobs when validating a folder of skills. "
+    "Values above 1 run skills in parallel processes and disable the per-skill pipeline view.",
+)
+@click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
     "dedup",
@@ -1245,6 +1482,7 @@ def validate(
     copy_repo: bool,
     timeout_multiplier: float | None,
     harbor_keep_jobs: bool,
+    workers: int,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -1315,7 +1553,7 @@ def validate(
     from skillevaluator.constants import CONTENT_TYPE_UNKNOWN
 
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
-    # once per skill, serially, each as its own job with its own reports.
+    # once per skill, each as its own job with its own reports.
     if (
         resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
         and target_path.is_dir()
@@ -1326,6 +1564,7 @@ def validate(
             click.get_current_context(),
             resolved_target=target_path,
             output_dir=output_dir,
+            workers=workers,
         )
         return
 

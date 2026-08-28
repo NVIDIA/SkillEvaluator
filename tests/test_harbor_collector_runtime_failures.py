@@ -9,7 +9,10 @@ import json
 from pathlib import Path
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
-from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.collector import (
+    _agent_runtime_failure_reason,
+    collect_harbor_results,
+)
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
 
 
@@ -126,6 +129,30 @@ def test_agent_timeout_invalidates_reward_and_is_reported_as_trial_failure(tmp_p
     assert opencode["trial_failures"]["with_skill"] == [
         {"trial": "case-001__attempt", "reason": "AgentTimeoutError: Agent timed out after 600 seconds"}
     ]
+
+
+def test_verifier_exception_does_not_scan_plain_agent_transcript(tmp_path: Path) -> None:
+    """Correct agent prose must not turn a verifier failure into an agent failure."""
+    trial_dir = tmp_path / "case-001__attempt"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "exception_info": {
+                    "exception_type": "VerifierError",
+                    "exception_message": "verifier exited nonzero",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (agent_dir / "opencode.txt").write_text(
+        "Troubleshooting: an invalid credential can produce 401 Unauthorized.\n",
+        encoding="utf-8",
+    )
+
+    assert _agent_runtime_failure_reason(trial_dir) == ""
 
 
 def test_errored_job_stats_suppress_rewards_without_trial_exception(tmp_path: Path) -> None:

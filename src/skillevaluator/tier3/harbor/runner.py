@@ -1267,16 +1267,17 @@ def _run_harbor(
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
+        # Harbor owns its phase deadlines, and native tasks may intentionally
+        # leave the agent unbounded. An outer deadline can preempt valid jobs.
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
             input=handoff.stdin_text,
             env=handoff.subprocess_env,
-            timeout=7200,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         return False, str(exc)
     if result.returncode == 0:
         return _validate_harbor_job_result(

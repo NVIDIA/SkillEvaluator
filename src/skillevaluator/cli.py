@@ -56,6 +56,7 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 ENV_MODE_CHOICE = click.Choice(list(HARBOR_ENVIRONMENTS))
+SERVER_TOOL_POLICY_CHOICE = click.Choice(["provider_compatible_v1"])
 
 
 class _AliasChoice(click.Choice):
@@ -1774,6 +1775,12 @@ def dedup_scan(
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
 @click.option(
+    "--server-tool-policy",
+    type=SERVER_TOOL_POLICY_CHOICE,
+    default=None,
+    help="Apply an operator-selected provider capability policy to server-hosted agent tools.",
+)
+@click.option(
     "--progress",
     type=click.Choice(["auto", "rich", "plain", "off"]),
     default="auto",
@@ -1805,6 +1812,7 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    server_tool_policy: str | None,
     progress: str,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
@@ -1839,6 +1847,7 @@ def evaluate(
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
+        server_tool_policy=server_tool_policy,
     )
     try:
         if env_mode == "local":

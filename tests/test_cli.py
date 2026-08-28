@@ -556,6 +556,7 @@ def test_live_eval_help_uses_skill_evaluator_runtime_and_grading_names() -> None
     assert "local" not in evaluate.output
     assert "--autopilot" in evaluate.output
     assert "--progress [auto|rich|plain|off]" in evaluate.output
+    assert "--server-tool-policy [provider_compatible_v1]" in evaluate.output
 
     grader = runner.invoke(cli, ["init-custom-grader", "--help"])
     assert grader.exit_code == 0
@@ -582,6 +583,34 @@ def test_live_eval_progress_is_presentation_only(monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 0, result.output
     assert isinstance(captured["reporter"], PlainProgressReporter)
     assert "progress" not in captured["options"].engine_kwargs()
+    assert captured["options"].server_tool_policy is None
+
+
+def test_live_eval_forwards_versioned_server_tool_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.evaluation import EvaluationService
+
+    captured: dict[str, object] = {}
+
+    def _fake_evaluate(self, options, *, progress_reporter=None):
+        captured["options"] = options
+        return {"execution_status": "succeeded", "execution_errors": []}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "evaluate",
+            str(Path(__file__).parent / "fixtures" / "skills" / "simple"),
+            "--server-tool-policy",
+            "provider_compatible_v1",
+            "--progress",
+            "off",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["options"].server_tool_policy == "provider_compatible_v1"
 
 
 def test_harbor_view_command_uses_the_skillevaluator_wrapper() -> None:

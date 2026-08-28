@@ -619,6 +619,7 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    server_tool_policy: str | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
@@ -686,6 +687,7 @@ def evaluate(
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
+            server_tool_policy=server_tool_policy,
             progress_reporter=reporter,
         )
     except Exception as exc:

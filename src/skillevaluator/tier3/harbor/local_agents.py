@@ -31,6 +31,11 @@ from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     RunningBridge,
     start_in_process_bridge,
 )
+from skillevaluator.tier3.harbor.provider_tool_policy import (
+    CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
+    CLAUDE_SERVER_TOOL_POLICY_ENV,
+    CLAUDE_SERVER_TOOL_POLICY_RESOLUTIONS,
+)
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
@@ -48,6 +53,8 @@ _NVIDIA_BUILD_BRIDGE_API_KEY_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY"
 _NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN"
 _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+
+_CLAUDE_UNSUPPORTED_SERVER_TOOLS = "WebSearch,WebFetch"
 
 
 async def _await_task_uninterruptibly(
@@ -106,7 +113,47 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
     return f"{rewrite(launcher)}{separator}{prompt}"
 
 
-class SkillEvaluatorLocalClaudeCode(ClaudeCode):
+def _apply_claude_server_tool_policy(command: str) -> str:
+    """Apply the operator-resolved Claude server-tool capability contract."""
+    policy = os.environ.get(CLAUDE_SERVER_TOOL_POLICY_ENV, "").strip()
+    if not policy:
+        return command
+    if policy not in CLAUDE_SERVER_TOOL_POLICY_RESOLUTIONS:
+        raise RuntimeError(f"Unsupported Claude server-tool policy resolution: {policy}")
+    if policy != CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1:
+        return command
+
+    launcher, _separator, _prompt = command.partition(" -- ")
+    if "--print" not in launcher:
+        return command
+
+    return _rewrite_launcher_segment(
+        command,
+        lambda launcher: f"{launcher} --disallowedTools {_CLAUDE_UNSUPPORTED_SERVER_TOOLS}",
+    )
+
+
+class SkillEvaluatorClaudeCode(ClaudeCode):
+    """Claude Code wrapper that enforces the resolved provider tool policy."""
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        return await super().exec_as_agent(
+            environment,
+            command=_apply_claude_server_tool_policy(command),
+            env=env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
+
+class SkillEvaluatorLocalClaudeCode(SkillEvaluatorClaudeCode):
     """Claude Code wrapper that skips bootstrap install in local mode."""
 
     _REMOTE_CLAUDE_TMP = PurePosixPath(EnvironmentPaths.agent_dir / "claude-tmp")

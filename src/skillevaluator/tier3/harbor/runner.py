@@ -64,6 +64,13 @@ from skillevaluator.tier3.harbor.progress import (
     safe_progress_reporter,
     secret_values_from_environment,
 )
+from skillevaluator.tier3.harbor.provider_tool_policy import (
+    CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1,
+    CLAUDE_SERVER_TOOL_POLICY_ENV,
+    SERVER_TOOL_POLICY_PROVIDER_COMPATIBLE_V1,
+    resolve_claude_server_tool_policy,
+    validate_server_tool_policy,
+)
 from skillevaluator.tier3.harbor.report_data import (
     build_dataset_snapshot,
     load_staged_harbor_dataset,
@@ -313,6 +320,7 @@ class AgentRuntimePlan:
     provider: ProviderConfig
     staged_env: Mapping[str, str]
     subprocess_env: Mapping[str, str]
+    server_tool_policy: str | None = None
 
 
 def _harbor_bin() -> str:
@@ -1072,6 +1080,7 @@ def _resolve_agent_runtime_plan(
     configured_runtime_env: Mapping[str, str],
     env_mode: str,
     model_sources: Mapping[str, str] | None = None,
+    server_tool_policy: str | None = None,
 ) -> dict[str, AgentRuntimePlan]:
     """Resolve the single credential plan used by staging and execution.
 
@@ -1108,6 +1117,18 @@ def _resolve_agent_runtime_plan(
         if credential_errors:
             raise ValueError(credential_errors[0])
 
+        agent_provider = _agent_provider_config(
+            evaluator_provider=provider,
+            agent=agent,
+            model=models[agent],
+            credentials=credentials,
+            env_mode=env_mode,
+        )
+        resolved_server_tool_policy = (
+            resolve_claude_server_tool_policy(agent_provider, server_tool_policy)
+            if agent == "claude-code"
+            else None
+        )
         subprocess_env = _harbor_subprocess_environment(
             env_mode=env_mode,
             provider=provider,
@@ -1117,19 +1138,16 @@ def _resolve_agent_runtime_plan(
             agent_model=models[agent],
         )
         subprocess_env.update(credentials)
+        if resolved_server_tool_policy:
+            subprocess_env[CLAUDE_SERVER_TOOL_POLICY_ENV] = resolved_server_tool_policy
         staged = {name: f"${{{name}}}" for name in (*configured_runtime_env, *credentials)}
         plans[agent] = AgentRuntimePlan(
             agent=agent,
             model=models[agent],
-            provider=_agent_provider_config(
-                evaluator_provider=provider,
-                agent=agent,
-                model=models[agent],
-                credentials=credentials,
-                env_mode=env_mode,
-            ),
+            provider=agent_provider,
             staged_env=MappingProxyType(staged),
             subprocess_env=MappingProxyType(subprocess_env),
+            server_tool_policy=resolved_server_tool_policy,
         )
     return plans
 
@@ -1211,20 +1229,38 @@ def _model_for_agent(
     return selected, source
 
 
-def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
-    """Return the environment-specific NVIDIA Build compatibility wrapper."""
-    if provider.provider != "nv_build":
-        return None
+def _agent_import_path(
+    provider: ProviderConfig,
+    agent: str,
+    env_mode: str,
+    *,
+    server_tool_policy: str | None = None,
+) -> str | None:
+    """Return the environment-specific compatibility/policy wrapper."""
     from skillevaluator.tier3.harbor.local_agents import (
         NVIDIA_BUILD_AGENT_IMPORT_PATHS,
         NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS,
     )
 
-    if env_mode == "docker":
-        return NVIDIA_BUILD_AGENT_IMPORT_PATHS.get(agent)
-    if env_mode == ENV_MODE_LOCAL:
-        return NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS.get(agent)
+    if provider.provider == "nv_build":
+        if env_mode == "docker":
+            return NVIDIA_BUILD_AGENT_IMPORT_PATHS.get(agent)
+        if env_mode == ENV_MODE_LOCAL:
+            return NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS.get(agent)
+        return None
+
+    if (
+        agent == "claude-code"
+        and env_mode == "docker"
+        and server_tool_policy == SERVER_TOOL_POLICY_PROVIDER_COMPATIBLE_V1
+    ):
+        return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode"
     return None
+
+
+def _nvidia_build_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
+    """Backward-compatible helper for callers that only need NVIDIA Build."""
+    return _agent_import_path(provider, agent, env_mode)
 
 
 def _run_harbor(
@@ -1800,6 +1836,7 @@ def _run_harbor_eval_impl(
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
+    server_tool_policy: str | None = None,
     progress_reporter: ProgressReporter | None = None,
     _evaluator_skill_path: Path | None = None,
     _monotonic_start: float | None = None,
@@ -1842,7 +1879,8 @@ def _run_harbor_eval_impl(
     try:
         provider = resolve_llm_provider()
         config, config_path = load_evals_config(evaluator_skill_path)
-    except (ProviderConfigurationError, EvalsConfigError) as exc:
+        server_tool_policy = validate_server_tool_policy(server_tool_policy)
+    except (ProviderConfigurationError, EvalsConfigError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
 
@@ -1965,15 +2003,41 @@ def _run_harbor_eval_impl(
             configured_runtime_env=configured_runtime_env,
             env_mode=env_mode,
             model_sources={agent: details["source"] for agent, details in model_resolution.items()},
+            server_tool_policy=server_tool_policy,
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
-    nvidia_build_agent_import_paths = {
+    agent_import_paths = {
         agent: import_path
         for agent in agents
-        if (import_path := _nvidia_build_agent_import_path(provider, agent, env_mode)) is not None
+        if (
+            import_path := _agent_import_path(
+                provider,
+                agent,
+                env_mode,
+                server_tool_policy=server_tool_policy,
+            )
+        )
+        is not None
     }
+    unsupported_policy_agents = [
+        agent
+        for agent, plan in runtime_plans.items()
+        if agent == "claude-code"
+        and plan.server_tool_policy == CLAUDE_SERVER_TOOL_POLICY_DISABLE_WEB_V1
+        and env_mode not in {"docker", ENV_MODE_LOCAL}
+    ]
+    if unsupported_policy_agents:
+        detail = (
+            f"server_tool_policy={server_tool_policy} requires the SkillEvaluator Claude Code wrapper for "
+            f"provider-incompatible server tools; use Docker/local for: {', '.join(unsupported_policy_agents)}"
+        )
+        reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=detail))
+        return {"error": [detail]}
+    for agent, plan in runtime_plans.items():
+        if plan.server_tool_policy:
+            model_resolution[agent]["server_tool_policy"] = plan.server_tool_policy
     runtime_secret_values = set().union(
         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )
@@ -2139,6 +2203,7 @@ def _run_harbor_eval_impl(
             "timeout_multiplier": timeout_multiplier,
             "base_image_mode": base_image_mode,
             "jobs_retained": keep_harbor_jobs,
+            "server_tool_policy": server_tool_policy,
         },
         "provider": {"name": provider.provider, "model": provider.model},
         "judge": judge_config,
@@ -2419,7 +2484,7 @@ def _run_harbor_eval_impl(
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
-                agent_import_path=nvidia_build_agent_import_paths.get(agent),
+                agent_import_path=agent_import_paths.get(agent),
             )
             if not preflight.ok:
                 preflight_errors.append(f"{agent} runtime preflight failed: {preflight.detail}")
@@ -2458,7 +2523,7 @@ def _run_harbor_eval_impl(
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
-            agent_import_path=nvidia_build_agent_import_paths.get(agent),
+            agent_import_path=agent_import_paths.get(agent),
             expected_trials=expected_trials,
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),

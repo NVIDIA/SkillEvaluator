@@ -540,6 +540,16 @@
         },
         {
           "choices": [
+            "provider_compatible_v1"
+          ],
+          "name": "server_tool_policy",
+          "opts": [
+            "--server-tool-policy"
+          ],
+          "param_type": "option"
+        },
+        {
+          "choices": [
             "auto",
             "rich",
             "plain",
@@ -2423,6 +2433,16 @@
               ],
               "param_type": "option",
               "type": "integer"
+            },
+            {
+              "choices": [
+                "provider_compatible_v1"
+              ],
+              "name": "server_tool_policy",
+              "opts": [
+                "--server-tool-policy"
+              ],
+              "param_type": "option"
             },
             {
               "choices": [

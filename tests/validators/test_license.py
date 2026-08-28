@@ -488,6 +488,48 @@ print("hi")
         assert any(f.check_name == "blocked_license" for f in result.findings)
         assert not any("License: MIT (ALLOWED" in message for message in result.messages)
 
+    def test_spdx_or_expression_in_block_comment_is_blocked(self, tmp_path: Path):
+        """`*/` after MIT OR GPL-3.0 must not turn the GPL half into an unknown id."""
+        skill_dir = tmp_path / "spdx-js-block"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-js-block
+description: Skill whose SPDX header is inside a JavaScript block comment
+---
+
+# SPDX JS
+""")
+        (skill_dir / "script.js").write_text("/* SPDX-License-Identifier: MIT OR GPL-3.0 */\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert "GPL-3.0" in (result.metadata.get("license") or "")
+        assert "*/" not in (result.metadata.get("license") or "")
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    def test_spdx_or_expression_in_html_comment_is_blocked(self, tmp_path: Path):
+        """`-->` after MIT OR GPL-3.0 must not hide the GPL half."""
+        skill_dir = tmp_path / "spdx-html-comment"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-html-comment
+description: Skill whose SPDX header is inside an HTML comment
+---
+
+# SPDX HTML
+""")
+        (skill_dir / "notes.md").write_text("<!-- SPDX-License-Identifier: MIT OR GPL-3.0 -->\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert "GPL-3.0" in (result.metadata.get("license") or "")
+        assert "-->" not in (result.metadata.get("license") or "")
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
     def test_spdx_and_expression_with_gpl_is_blocked(self, tmp_path: Path):
         """Apache-2.0 AND GPL-3.0 must evaluate the copyleft half, not only Apache-2.0."""
         skill_dir = tmp_path / "spdx-and-gpl"

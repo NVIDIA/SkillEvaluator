@@ -35,6 +35,7 @@ _SPDX_PATTERN = re.compile(SPDX_LICENSE_PATTERN, re.IGNORECASE)
 _LICENSE_SUFFIX_PATTERN = re.compile(r"(-license|-licence)$")
 _THE_PREFIX_PATTERN = re.compile(r"^(the-)?")
 _SPDX_EXPRESSION_SPLIT = re.compile(r"\s+(?:OR|AND|WITH)\s+", re.IGNORECASE)
+_SPDX_COMMENT_CLOSE = re.compile(r"\s*(?:\*/|-->)\s*$")
 
 # File reference indicators in license field values
 _FILE_REFERENCE_KEYWORDS = frozenset(["see ", "refer to ", "license.txt", "license.md", "copying"])
@@ -310,7 +311,9 @@ class LicenseValidator(ValidatorBase):
             with file_path.open(encoding="utf-8", errors="ignore") as f:
                 header = "".join(islice(f, LICENSE_HEADER_SCAN_LINES))
                 if match := _SPDX_PATTERN.search(header):
-                    return match.group(1).split("#", 1)[0].strip() or None
+                    raw = match.group(1).split("#", 1)[0]
+                    raw = _SPDX_COMMENT_CLOSE.sub("", raw).strip()
+                    return raw or None
         except Exception as e:
             logger.debug("Could not scan %s: %s", file_path, e)
         return None

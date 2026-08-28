@@ -17,7 +17,14 @@ from skillevaluator.evaluation.tier3_report import (
     render_agent_eval_html_report,
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
-from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.reporting import (
+    BenchmarkReporter,
+    CLIReporter,
+    HTMLReporter,
+    JSONReporter,
+    MarkdownReporter,
+    SARIFReporter,
+)
 from skillevaluator.tier1.commands import emit_reports
 
 
@@ -420,6 +427,77 @@ class TestJSONReporter:
         """Test reporter name."""
         reporter = JSONReporter()
         assert reporter.name == "json"
+
+
+class TestSARIFReporter:
+    """Tests for SARIFReporter."""
+
+    def test_render_failure_produces_valid_sarif(self, failure_result: ValidationResult) -> None:
+        reporter = SARIFReporter(include_timestamp=False)
+        document = json.loads(reporter.render_all([failure_result]))
+
+        assert document["version"] == "2.1.0"
+        assert document["$schema"].endswith("sarif-schema-2.1.0.json")
+        run = document["runs"][0]
+        driver = run["tool"]["driver"]
+        assert driver["name"] == "SkillEvaluator"
+        assert driver["informationUri"] == "https://github.com/NVIDIA/SkillEvaluator"
+        assert len(driver["rules"]) == 2
+        assert len(run["results"]) == 2
+
+        critical = next(item for item in run["results"] if item["level"] == "error")
+        assert critical["ruleId"] == "SECRETS/aws-access-key-id"
+        assert critical["message"]["text"] == "AWS Access Key ID detected"
+        location = critical["locations"][0]["physicalLocation"]
+        assert location["artifactLocation"]["uri"] == "config/settings.py"
+        assert location["region"]["startLine"] == 15
+
+    def test_severity_mapping(self) -> None:
+        result = ValidationResult(validator_name="TEST", validator_description="test")
+        result.add_finding(
+            Finding(
+                category="TEST",
+                severity=Severity.MEDIUM,
+                check_name="medium-check",
+                message="medium issue",
+                file_path="SKILL.md",
+                line_number=3,
+            )
+        )
+        result.add_finding(
+            Finding(
+                category="TEST",
+                severity=Severity.LOW,
+                check_name="low-check",
+                message="low issue",
+                file_path="SKILL.md",
+            )
+        )
+
+        run = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))["runs"][0]
+        levels = {item["ruleId"]: item["level"] for item in run["results"]}
+        assert levels["TEST/medium-check"] == "warning"
+        assert levels["TEST/low-check"] == "note"
+
+    def test_emit_reports_writes_sarif_file(self, failure_result: ValidationResult) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            emit_reports(
+                [failure_result],
+                report_formats=("sarif",),
+                output_dir=output_dir,
+                basename="skillevaluator-security",
+                announce_paths=False,
+            )
+            sarif_path = output_dir / "skillevaluator-security.sarif.json"
+            assert sarif_path.is_file()
+            document = json.loads(sarif_path.read_text(encoding="utf-8"))
+            assert document["runs"][0]["results"]
+
+    def test_name_and_extension(self) -> None:
+        reporter = SARIFReporter()
+        assert reporter.name == "sarif"
+        assert reporter.get_file_extension() == ".sarif.json"
 
 
 def _blocking_result() -> ValidationResult:

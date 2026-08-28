@@ -19,7 +19,7 @@ from skillevaluator.constants import (
     CONTENT_TYPE_WORKFLOWS,
 )
 from skillevaluator.models.result import ValidationResult
-from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
 from skillevaluator.validators.base import continue_on_failure_scope
@@ -70,6 +70,7 @@ REPORTERS = {
     "json": JSONReporter,
     "html": HTMLReporter,
     "markdown": MarkdownReporter,
+    "sarif": SARIFReporter,
 }
 
 

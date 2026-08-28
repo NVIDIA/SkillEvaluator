@@ -314,7 +314,7 @@ def _report_options(func):
         "report_formats",
         cls=_MultiValueOption,
         multiple=True,
-        type=click.Choice(["cli", "json", "html", "markdown"]),
+        type=click.Choice(["cli", "json", "html", "markdown", "sarif"]),
         default=("cli",),
         show_default=True,
         help="Report format(s). Accepts comma- or space-separated values "
@@ -765,7 +765,7 @@ def _finish_pipeline_view(
     """Render the quiet-mode verdict panel and report footer."""
     from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
 
-    ext = {"html": ".html", "json": ".json", "markdown": ".md"}
+    ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
         ("report" if fmt == "html" else fmt, str(output_dir / f"{basename}{ext[fmt]}"))
         for fmt in report_formats

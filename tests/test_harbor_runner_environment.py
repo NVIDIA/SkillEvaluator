@@ -1071,6 +1071,20 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "SKILL_EVAL_JUDGE_MODEL": "${LLM_JUDGE_MODEL}",
     }
     assert launched["claude-code"][3] == launched["opencode"][3]
+    assert result["run_config"]["agents"]["opencode"]["provider"] == {
+        "name": "nv_build",
+        "type": "nvidia_build",
+        "model": "nvidia/nemotron-3-nano-30b-a3b",
+        "route_identity_sha256": result["run_config"]["agents"]["opencode"]["provider"]["route_identity_sha256"],
+    }
+    assert result["run_config"]["agents"]["claude-code"]["provider"] == {
+        "name": "nv_build",
+        "type": "nvidia_build",
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "route_identity_sha256": result["run_config"]["agents"]["claude-code"]["provider"]["route_identity_sha256"],
+    }
+    assert "base_url" not in str(result["run_config"]["agents"])
+    assert "provider-key" not in str(result["run_config"]["agents"])
     assert result["run_config"]["judge"] == {
         "enabled": True,
         "provider": "nv_build",

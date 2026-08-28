@@ -20,7 +20,7 @@ import time
 import tomllib
 from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
@@ -28,6 +28,7 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from skillevaluator import __version__
@@ -323,6 +324,97 @@ class AgentRuntimePlan:
     staged_env: Mapping[str, str]
     subprocess_env: Mapping[str, str]
     server_tool_policy: str | None = None
+
+
+_PROVIDER_DEFAULT_ROUTES = {
+    "anthropic": "https://api.anthropic.com",
+    "nv_build": "https://integrate.api.nvidia.com/v1",
+    "openai": "https://api.openai.com/v1",
+}
+
+
+def _provider_route_evidence(provider: ProviderConfig) -> dict[str, str]:
+    """Return bounded, secret-free evidence for one actual agent route.
+
+    The raw base URL is deliberately never persisted: it can contain internal
+    hostnames, path material, user info, or query credentials. Instead, hash a
+    canonical route identity after removing user info, query, and fragment.
+    Provider/model remain explicit so result consumers can interpret the hash,
+    while otherwise-identical custom gateways still occupy different lanes.
+    """
+
+    name = str(provider.provider or "").strip().casefold()
+    model = str(provider.model or "").strip()
+    raw_base_url = str(provider.base_url or _PROVIDER_DEFAULT_ROUTES.get(name) or "").strip()
+
+    route_material: dict[str, object] = {"provider": name}
+    if name == "bedrock":
+        route_type = "aws_bedrock"
+        route_material["region"] = str(provider.region or "").strip().casefold()
+    elif raw_base_url:
+        try:
+            parsed = urlsplit(raw_base_url)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            parsed = None
+            hostname = None
+            port = None
+        if parsed is not None and parsed.scheme and hostname:
+            scheme = parsed.scheme.casefold()
+            canonical_host = hostname.rstrip(".").casefold()
+            with suppress(UnicodeError):
+                canonical_host = canonical_host.encode("idna").decode("ascii")
+            # The provider resolver owns validation. If a future provider
+            # admits an unusual host, its lower-cased value remains inside the
+            # hash and is never exposed in the receipt.
+            if (scheme, port) in {("http", 80), ("https", 443)}:
+                port = None
+            path = parsed.path.rstrip("/") or "/"
+            route_material.update(
+                {
+                    "scheme": scheme,
+                    "hostname": canonical_host,
+                    "port": port,
+                    "path": path,
+                }
+            )
+        else:
+            # Provider resolution owns URL validation.  Do not hash a
+            # malformed opaque value: unlike a parsed URL, it has no reliable
+            # user-info boundary and could make the comparison identity depend
+            # on an embedded credential.  Such routes remain distinguishable
+            # by provider/type while the resolver rejects them upstream.
+            route_material["opaque"] = True
+
+        route_host = str(route_material.get("hostname") or "")
+        if name == "nv_build":
+            route_type = "nvidia_build"
+        elif name == "anthropic" and route_host == "api.anthropic.com":
+            route_type = "native_anthropic"
+        elif name == "openai" and route_host == "api.openai.com":
+            route_type = "native_openai"
+        else:
+            route_type = "custom_gateway"
+    else:
+        route_type = "provider_default"
+        route_material["default"] = True
+
+    route_material["type"] = route_type
+    route_identity = hashlib.sha256(
+        json.dumps(
+            route_material,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "name": name,
+        "type": route_type,
+        "model": model,
+        "route_identity_sha256": route_identity,
+    }
 
 
 def _harbor_bin() -> str:
@@ -2055,7 +2147,7 @@ def _run_harbor_eval_impl(
 
     agent_models_config = harbor_config.get("agents", {})
     agent_models = agent_models or {}
-    model_resolution: dict[str, dict[str, str]] = {}
+    model_resolution: dict[str, dict[str, Any]] = {}
     for agent in agents:
         override = agent_models.get(agent)
         if isinstance(override, list):
@@ -2156,6 +2248,7 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=detail))
         return {"error": [detail]}
     for agent, plan in runtime_plans.items():
+        model_resolution[agent]["provider"] = _provider_route_evidence(plan.provider)
         if plan.server_tool_policy:
             model_resolution[agent]["server_tool_policy"] = plan.server_tool_policy
     runtime_secret_values = set().union(

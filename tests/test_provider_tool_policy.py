@@ -93,6 +93,40 @@ def test_gateway_claude_runtime_plan_carries_operator_policy(
     assert CLAUDE_SERVER_TOOL_POLICY_ENV not in plan.staged_env
 
 
+def test_agent_provider_route_evidence_is_canonical_secret_free_and_route_specific() -> None:
+    first = _provider(
+        "openai-compatible",
+        base_url="https://user:secret@Gateway.Example:443/team/v1/?api_key=hidden#fragment",
+    )
+    equivalent = _provider(
+        "openai-compatible",
+        base_url="https://gateway.example/team/v1?different=secret",
+    )
+    other_route = _provider(
+        "openai-compatible",
+        base_url="https://gateway.example/other/v1",
+    )
+
+    first_evidence = runner._provider_route_evidence(first)
+    equivalent_evidence = runner._provider_route_evidence(equivalent)
+    other_evidence = runner._provider_route_evidence(other_route)
+
+    assert first_evidence == {
+        "name": "openai-compatible",
+        "type": "custom_gateway",
+        "model": "test-model",
+        "route_identity_sha256": first_evidence["route_identity_sha256"],
+    }
+    assert len(first_evidence["route_identity_sha256"]) == 64
+    assert first_evidence["route_identity_sha256"] == equivalent_evidence["route_identity_sha256"]
+    assert first_evidence["route_identity_sha256"] != other_evidence["route_identity_sha256"]
+    serialized = str(first_evidence)
+    assert "gateway.example" not in serialized
+    assert "user" not in serialized
+    assert "secret" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_disabled_policy_injects_web_tools_before_prompt_separator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

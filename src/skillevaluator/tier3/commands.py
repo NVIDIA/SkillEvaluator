@@ -30,7 +30,12 @@ from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, _validate_config, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_skillevaluators
-from skillevaluator.tier3.harbor import HARBOR_AGENTS, HARBOR_AGENTS_SUPPORTED, canonical_agent_name
+from skillevaluator.tier3.harbor import (
+    DEFAULT_LLM_VERIFIER_TIMEOUT_SEC,
+    HARBOR_AGENTS,
+    HARBOR_AGENTS_SUPPORTED,
+    canonical_agent_name,
+)
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
@@ -540,7 +545,7 @@ entry_id = {toml_quote(case_id)}
 timeout_sec = 300.0
 
 [verifier]
-timeout_sec = 180.0
+timeout_sec = {DEFAULT_LLM_VERIFIER_TIMEOUT_SEC}
 
 [environment]
 cpus = 2

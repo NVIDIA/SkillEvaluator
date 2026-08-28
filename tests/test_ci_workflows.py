@@ -174,6 +174,37 @@ def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() ->
     assert "vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true'" in codeql_if
 
 
+def test_gitleaks_uses_event_specific_full_history_scopes() -> None:
+    job = _load("security.yml")["jobs"]["gitleaks"]
+    checkout = next(
+        step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")
+    )
+    verify = next(step for step in job["steps"] if step.get("name") == "Verify full Git checkout")
+    scan = next(step for step in job["steps"] if step.get("name") == "Scan Git history")
+
+    assert str(checkout["with"]["fetch-depth"]) == "0"
+    assert 'test "$(git rev-parse --is-shallow-repository)" = "false"' in verify["run"]
+    assert 'git rev-parse --verify "HEAD^{commit}"' in verify["run"]
+    assert (
+        "gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9"
+        in scan["run"]
+    )
+    scan_run = scan["run"]
+    head_opts = "--full-history --diff-filter=tuxdb HEAD --"
+    audit_opts = "--full-history --all --diff-filter=tuxdb --"
+    assignments = re.findall(r'log_opts="([^"]+)"', scan_run)
+
+    assert assignments == [head_opts, audit_opts]
+    assert scan["shell"] == "bash"
+    assert "set -euo pipefail" in scan_run
+    assert 'case "$GITHUB_EVENT_NAME" in' in scan_run
+    assert re.search(
+        rf'pull_request\|push\)\s+log_opts="{re.escape(head_opts)}"\s+;;', scan_run
+    )
+    assert re.search(rf'\*\)\s+log_opts="{re.escape(audit_opts)}"\s+;;', scan_run)
+    assert '--log-opts="$log_opts"' in scan_run
+
+
 def test_dco_stays_unconditional_and_has_no_path_filter() -> None:
     dco = _load("dco.yml")
 
@@ -187,6 +218,7 @@ def test_non_pr_workflow_triggers_are_preserved() -> None:
     security = _load("security.yml")
 
     assert ci["on"]["push"] == {"branches": ["main"]}
+    assert set(security["on"]) == {"pull_request", "push", "schedule", "workflow_dispatch"}
     assert security["on"]["push"] == {"branches": ["main"]}
     assert security["on"]["schedule"] == [{"cron": "23 7 * * 1"}]
     assert "workflow_dispatch" in security["on"]

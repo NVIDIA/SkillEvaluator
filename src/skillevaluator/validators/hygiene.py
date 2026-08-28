@@ -20,6 +20,11 @@ logger = get_logger(__name__)
 _TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 
 
+def _link_display(value: str) -> str:
+    """Keep untrusted link diagnostics bounded and on one physical line."""
+    return ascii(value[:160])[1:-1] + ("..." if len(value) > 160 else "")
+
+
 class HygieneValidator(ValidatorBase):
     """Validates code integrity: dead links, dependencies, and test-file presence."""
 
@@ -86,8 +91,12 @@ class HygieneValidator(ValidatorBase):
                 seen_targets.add(local_path)
                 target = md_file.parent / local_path
 
-                if not target.exists():
-                    result.add_error(f"Dead link in {md_file.name}: {link_href}")
+                try:
+                    exists = target.exists()
+                except (OSError, ValueError):
+                    exists = False
+                if not exists:
+                    result.add_error(f"Dead link in {_link_display(md_file.name)}: {_link_display(link_href)}")
 
         if not result.errors:
             result.add_success(

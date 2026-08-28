@@ -8,10 +8,13 @@ import re
 from collections.abc import Iterable, Iterator
 from html import escape
 from html.parser import HTMLParser
+from pathlib import PureWindowsPath
 from urllib.parse import unquote, urlsplit
 
 import yaml
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline import html_inline
+from markdown_it.rules_inline.state_inline import StateInline
 from markdown_it.token import Token
 
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
@@ -29,6 +32,21 @@ _SCRIPT_DOUBLE_ESCAPED_STATES = frozenset({"double-escaped", "double-escaped-das
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 
 
+def _guarded_html_inline(state: StateInline, silent: bool) -> bool:
+    """Avoid rescanning the same suffix for each unclosed inline comment."""
+    if state.src.startswith("<!--", state.pos) and not state.src.startswith(("<!-->", "<!--->"), state.pos):
+        # Each inline source has its own offsets, even within the same document.
+        if state.env.get("_comment_source") is not state.src:
+            state.env["_comment_source"] = state.src
+            state.env["_last_comment_end"] = state.src.rfind("-->")
+        if state.pos > state.env["_last_comment_end"]:
+            return False
+    return html_inline(state, silent)
+
+
+_MARKDOWN_PARSER.inline.ruler.at("html_inline", _guarded_html_inline)
+
+
 def normalized_local_path(href: str, *, allow_directory: bool = False) -> str | None:
     """Return a once-decoded, normalized local path from a link destination."""
     href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
@@ -39,17 +57,17 @@ def normalized_local_path(href: str, *, allow_directory: bool = False) -> str | 
     if parsed.scheme or parsed.netloc:
         return None
 
-    path = unquote(parsed.path).replace("\\", "/")
+    # Preserve invalid UTF-8 bytes instead of aliasing distinct destinations to
+    # the replacement character. Scheme classification belongs to the raw URL.
+    path = unquote(parsed.path, errors="surrogateescape").replace("\\", "/")
     if path.startswith("/"):
-        return None
-    try:
-        if urlsplit(path).scheme:
-            return None
-    except ValueError:
         return None
     if not allow_directory and path.endswith(("/", "/.", "/..")):
         return None
-    return posixpath.normpath(path)
+    path = posixpath.normpath(path)
+    if PureWindowsPath(path).anchor:
+        return None
+    return path
 
 
 def _find_script_end(content: str, start: int) -> int | None:
@@ -186,7 +204,7 @@ def markdown_link_targets(content: str, *, include_images: bool = False) -> list
     if frontmatter:
         try:
             frontmatter_data = yaml.safe_load(frontmatter.group(1))
-        except yaml.YAMLError:
+        except (yaml.YAMLError, ValueError, RecursionError):
             frontmatter_data = None
         if isinstance(frontmatter_data, dict):
             markdown_content = frontmatter.group(2)

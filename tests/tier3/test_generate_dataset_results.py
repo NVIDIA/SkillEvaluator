@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import shutil
 import stat
 import sys
@@ -317,3 +318,39 @@ def test_no_llm_negative_case_does_not_name_the_skill():
     for behavior in negative["expected_behavior"]:
         assert "pdf-extractor" not in behavior
     assert "without reading or applying this skill" in negative["expected_behavior"][0]
+    domain = {"pdf", "extractor", "extracts", "tables"}
+    question_tokens = set(re.findall(r"[a-z0-9]+", negative["question"].lower()))
+    assert not domain & question_tokens
+
+
+def test_no_llm_negative_case_skips_on_skill_errand_prompt():
+    """A city/errand skill must not receive the errand-planning candidate as a negative."""
+    skill = {
+        "name": "errand-planner",
+        "description": "Organizes weekend errands efficiently in a new city",
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "errand-planner-neg-001")
+    assert negative["expected_skill"] is None
+    assert "errand" not in negative["question"].lower()
+    assert "city" not in negative["question"].lower()
+    assert "weekend" not in negative["question"].lower()
+
+
+def test_no_llm_omits_negative_when_every_candidate_overlaps():
+    """If every canned negative would be on-skill, drop the negative bucket."""
+    skill = {
+        "name": "kitchen-helper",
+        "description": (
+            "Organizes weekend errands in a new city, converts WAV files to FLAC "
+            "without losing metadata, proofs bread dough overnight, and cites "
+            "preprints in BibTeX for ACS journals"
+        ),
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    assert all(not c["id"].endswith("-neg-001") for c in cases)
+    assert len(cases) == 3

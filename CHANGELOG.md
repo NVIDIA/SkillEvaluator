@@ -9,6 +9,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Catalog validation now writes `catalog-summary.json` at the reports root with
   per-skill pass/fail status, optional severity rollups from child JSON reports,
   and paths to per-skill report directories.
+- Catalog `validate` accepts `--workers N` to validate skills in parallel child
+  processes (default 1 preserves the serial per-skill pipeline view).
 
 ### Fixed
 

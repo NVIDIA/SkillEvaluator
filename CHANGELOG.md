@@ -13,6 +13,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 accuracy and custom goal judges now retry one malformed (including
+  empty) or schema-invalid response with a 4096-token output budget before
+  failing closed, preventing a transient formatting error from making an otherwise
+  successful trial and its full comparison arm unscoreable. Generated and
+  injected Harbor verifier configs now reserve 600 seconds for six sequential
+  direct provider attempts plus fail-closed artifact writes. Explicit native
+  task timeouts remain owner-controlled and are not rewritten, and whole jobs
+  defer to Harbor's task-configured phase controls instead of a hidden two-hour
+  cap
+  ([#70](https://github.com/NVIDIA/SkillEvaluator/issues/70)).
 - PII scanning no longer treats Markdown ATX headings as code comments, so
   emails in headings such as `# Contact: ...` are flagged. Hash lines inside
   Python strings, YAML scalars, and shell heredocs are scanned too. Real

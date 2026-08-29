@@ -516,10 +516,120 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
     }
 
 
-def synthetic_trajectory_from_codex_txt(text: str) -> dict[str, Any] | None:
-    """Reconstruct ATIF from Codex tee logs when they contain structured JSONL."""
+def _iter_jsonl_dicts(text: str) -> list[dict[str, Any]]:
+    """Parse JSONL lines, skipping non-JSON noise (e.g. stderr mixed into tee logs)."""
+    events: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("{") or not line.endswith("}"):
+            continue
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(evt, dict):
+            events.append(evt)
+    return events
+
+
+def _codex_item_text(item: dict[str, Any]) -> str | None:
+    item_type = str(item.get("type") or "")
+    if item_type not in {"message", "agent_message"}:
+        return None
+    content = item.get("content")
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+    joined = "\n".join(parts).strip()
+    return joined or None
+
+
+def _codex_function_arguments(function_call: dict[str, Any]) -> dict[str, Any]:
+    args = function_call.get("arguments")
+    if isinstance(args, dict):
+        return dict(args)
+    return {}
+
+
+def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
+    """Parse Codex ``exec --json`` JSONL (``type: item`` / ``agent_message``)."""
     if not text or not text.strip():
         return None
+
+    steps: list[dict[str, Any]] = []
+    saw_content = False
+    message_index = 0
+
+    for evt in _iter_jsonl_dicts(text):
+        if str(evt.get("type") or "") != "item":
+            continue
+        item = evt.get("item")
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "") != "agent_message":
+            continue
+        if not evt.get("item.completed", True):
+            continue
+
+        message = _codex_item_text(item)
+        function_call = item.get("function_call")
+        if not message and not function_call:
+            continue
+
+        saw_content = True
+        step: dict[str, Any] = {
+            "source": "agent",
+            "message": message or "",
+            "tool_calls": [],
+            "observation": {"results": []},
+        }
+
+        if isinstance(function_call, dict):
+            call_id = str(
+                item.get("id") or evt.get("item_id") or f"codex-{message_index + 1}"
+            )
+            function_name = str(function_call.get("name") or "tool")
+            if function_name.lower() in {"bash", "shell"}:
+                function_name = "bash"
+            arguments = _codex_function_arguments(function_call)
+            step["tool_calls"] = [
+                {
+                    "tool_call_id": call_id,
+                    "function_name": function_name,
+                    "arguments": arguments,
+                }
+            ]
+            output = item.get("output")
+            if output is not None:
+                step["observation"]["results"].append(
+                    {
+                        "source_call_id": call_id,
+                        "content": str(output)[:8000],
+                    }
+                )
+        message_index += 1
+        steps.append(step)
+
+    if not saw_content or not steps:
+        return None
+    return {
+        "steps": steps,
+        "schema_version": "ATIF-v1.2-synthetic-codex-log",
+        "final_metrics": {},
+    }
+
+
+def synthetic_trajectory_from_codex_txt(text: str) -> dict[str, Any] | None:
+    """Reconstruct ATIF from Codex tee logs (``exec --json`` JSONL or OpenCode-shaped JSONL)."""
+    if not text or not text.strip():
+        return None
+
+    synth = synthetic_trajectory_from_codex_json(text)
+    if synth and synth.get("steps"):
+        return synth
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:

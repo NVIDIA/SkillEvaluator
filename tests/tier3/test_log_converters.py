@@ -127,7 +127,37 @@ def test_opencode_error_only_log_returns_none():
     assert synthetic_trajectory_from_opencode_json(log + "\n") is None
 
 
-def test_codex_structured_jsonl_reuses_opencode_parser():
+def test_codex_exec_json_agent_message_and_shell_call():
+    log = (
+        '{"type":"item","item":{"type":"agent_message","id":"msg-1",'
+        '"content":[{"type":"text","text":"Reading skill file"}],'
+        '"function_call":{"name":"shell","arguments":{"command":"ls"}},'
+        '"output":"demo"},"item.completed":true}\n'
+        '{"type":"item","item":{"type":"agent_message","id":"msg-2",'
+        '"content":[{"type":"text","text":"Done"}]},'
+        '"item.completed":true}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    assert traj["schema_version"] == "ATIF-v1.2-synthetic-codex-log"
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    assert tcs[0]["action"] == "bash"
+
+
+def test_codex_exec_json_tolerates_stderr_noise():
+    log = (
+        "ERROR responses_websocket: HTTP error: 405 Method Not Allowed\n"
+        '{"type":"item","item":{"type":"agent_message","id":"msg-1",'
+        '"content":[{"type":"text","text":"hello"}]},'
+        '"item.completed":true}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    assert len(traj["steps"]) == 1
+
+
+def test_codex_opencode_shaped_jsonl_fallback():
     log = (
         '{"type":"tool_use","part":{"type":"tool","tool":"read","callID":"c1",'
         '"state":{"status":"completed","input":{"path":"/workspace/skills/demo/SKILL.md"},'

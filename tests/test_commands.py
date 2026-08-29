@@ -373,6 +373,33 @@ def test_validate_catalog_workers_runs_skills_in_parallel() -> None:
         assert any(Path("out/simple2").glob("*.html"))
 
 
+def test_validate_catalog_workers_accepts_options_before_target_path() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                "--workers",
+                "2",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-o",
+                "out",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["total"] == 1
+        assert summary["passed"] == 1
+
+
 def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:
     runner = CliRunner()
     with runner.isolated_filesystem():

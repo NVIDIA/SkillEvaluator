@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_MODEL, LLM_VERIFY_TEMPERATURE
-from skillevaluator.inference.types import LLMClientError
+from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientError
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import (
     OPENAI_BASE_URL,
@@ -254,7 +254,7 @@ class LLMClient:
             response = client.messages.create(**call_kwargs)
             content = "".join(str(block.text) for block in response.content if getattr(block, "type", None) == "text")
             if not content:
-                raise LLMClientError("LLM returned empty response content")
+                raise EmptyLLMResponseError("LLM returned empty response content")
             return content.strip()
         if config.provider == "bedrock":
             try:
@@ -275,7 +275,7 @@ class LLMClient:
             )
             content = response.choices[0].message.content
             if not content:
-                raise LLMClientError("LLM returned empty response content")
+                raise EmptyLLMResponseError("LLM returned empty response content")
             return str(content).strip()
         call_kwargs: dict[str, Any] = {
             "model": config.model,
@@ -290,7 +290,7 @@ class LLMClient:
         response = client.chat.completions.create(**call_kwargs)
         content = response.choices[0].message.content
         if not content:
-            raise LLMClientError("LLM returned empty response content")
+            raise EmptyLLMResponseError("LLM returned empty response content")
         return content.strip()
 
     def extract_json_from_response(self, system_prompt: str, user_prompt: str) -> dict:

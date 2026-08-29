@@ -223,6 +223,7 @@ _FILE_REPORT_EXTENSIONS = {
     "json": ".json",
     "html": ".html",
     "markdown": ".md",
+    "sarif": ".sarif.json",
 }
 
 

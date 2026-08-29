@@ -88,15 +88,43 @@ jobs:
           name: skillevaluator-reports
           path: reports/
 
-      - name: Find SARIF report
+      - name: Find SARIF reports
         if: always()
         id: sarif
         run: |
-          file=$(ls -t reports/*.sarif.json 2>/dev/null | head -1)
-          echo "path=$file" >> "$GITHUB_OUTPUT"
+          mapfile -t files < <(find reports -name '*.sarif.json' -type f 2>/dev/null | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          schema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+          runs = []
+          for raw in sorted(pathlib.Path("reports").rglob("*.sarif.json")):
+              payload = json.loads(raw.read_text(encoding="utf-8"))
+              skill = raw.parent.name if raw.parent.name != "reports" else "catalog"
+              for run in payload.get("runs", []):
+                  automation = run.setdefault("automationDetails", {})
+                  automation["id"] = f"/skillevaluator/{skill}"
+                  automation["name"] = f"SkillEvaluator ({skill})"
+                  runs.append(run)
+          merged = {
+              "$schema": schema,
+              "version": "2.1.0",
+              "runs": runs,
+          }
+          out = pathlib.Path("reports/catalog-sarif.json")
+          out.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+          print(f"merged {len(runs)} run(s) into {out}")
+          PY
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+          echo "path=reports/catalog-sarif.json" >> "$GITHUB_OUTPUT"
 
       - name: Upload SARIF to GitHub Code Scanning
-        if: always() && steps.sarif.outputs.path != ''
+        if: always() && steps.sarif.outputs.count != '0'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.sarif.outputs.path }}

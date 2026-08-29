@@ -499,6 +499,50 @@ class TestSARIFReporter:
         assert reporter.name == "sarif"
         assert reporter.get_file_extension() == ".sarif.json"
 
+    def test_incomplete_scan_marks_execution_unsuccessful(self) -> None:
+        result = ValidationResult(validator_name="BANDIT", validator_description="Bandit")
+        result.add_error("Bandit did not return valid JSON; scan did not complete")
+        result.mark_scan_incomplete("bandit")
+
+        invocation = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))["runs"][0][
+            "invocations"
+        ][0]
+        assert invocation["executionSuccessful"] is False
+        assert invocation["toolExecutionNotifications"][0]["message"]["text"] == "bandit scan did not complete"
+
+    def test_physical_location_uri_encodes_spaces_and_skips_invalid_lines(self) -> None:
+        root = Path("/workspace/my skill")
+        result = ValidationResult(validator_name="QUALITY", validator_description="quality")
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.MEDIUM,
+                check_name="spacing",
+                message="issue",
+                file_path=str(root / "SKILL.md"),
+                line_number=0,
+            )
+        )
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.LOW,
+                check_name="spacing",
+                message="issue",
+                file_path=str(root / "notes/readme.md"),
+                line_number=3,
+            )
+        )
+
+        run = json.loads(
+            SARIFReporter(include_timestamp=False, workspace_root=root).render_all([result])
+        )["runs"][0]
+        locations = [item["locations"][0]["physicalLocation"] for item in run["results"]]
+        assert locations[0]["artifactLocation"]["uri"] == "SKILL.md"
+        assert "region" not in locations[0]
+        assert locations[1]["artifactLocation"]["uri"] == "notes/readme.md"
+        assert locations[1]["region"]["startLine"] == 3
+
 
 def _blocking_result() -> ValidationResult:
     """Tier 1 validator result with one critical + one high finding."""

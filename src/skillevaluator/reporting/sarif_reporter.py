@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from skillevaluator import __version__
 from skillevaluator.reporting.base import ReporterBase
@@ -69,21 +71,63 @@ def _rule_descriptor(finding: Finding, validator_name: str) -> dict[str, Any]:
     return descriptor
 
 
-def _physical_location(finding: Finding) -> dict[str, Any] | None:
+def _positive_start_line(line_number: Any) -> int | None:
+    """Return a SARIF-valid positive integer line number, else ``None``."""
+    if isinstance(line_number, bool):
+        return None
+    if isinstance(line_number, str):
+        stripped = line_number.strip()
+        if not stripped:
+            return None
+        try:
+            line_number = int(stripped)
+        except ValueError:
+            return None
+    if isinstance(line_number, int) and line_number > 0:
+        return line_number
+    return None
+
+
+def _normalize_artifact_uri(file_path: str, workspace_root: Path | None) -> str:
+    """Return a repository-relative, URI-encoded artifact path for SARIF."""
+    normalized = file_path.replace("\\", "/")
+    path = Path(normalized)
+    if workspace_root is not None:
+        try:
+            if path.is_absolute():
+                relative = path.resolve().relative_to(workspace_root.resolve())
+                normalized = relative.as_posix()
+            else:
+                normalized = path.as_posix()
+        except ValueError:
+            normalized = path.as_posix()
+    elif path.is_absolute():
+        normalized = path.as_posix()
+    return quote(normalized, safe="/:@%")
+
+def _physical_location(
+    finding: Finding,
+    workspace_root: Path | None,
+) -> dict[str, Any] | None:
     if not finding.file_path:
         return None
     location: dict[str, Any] = {
-        "artifactLocation": {"uri": finding.file_path.replace("\\", "/")},
+        "artifactLocation": {"uri": _normalize_artifact_uri(finding.file_path, workspace_root)},
     }
-    if finding.line_number is not None:
-        region: dict[str, Any] = {"startLine": finding.line_number}
+    start_line = _positive_start_line(finding.line_number)
+    if start_line is not None:
+        region: dict[str, Any] = {"startLine": start_line}
         if finding.line_content:
             region["snippet"] = {"text": finding.line_content}
         location["region"] = region
     return {"physicalLocation": location}
 
 
-def _result_from_finding(finding: Finding, validator_name: str) -> dict[str, Any]:
+def _result_from_finding(
+    finding: Finding,
+    validator_name: str,
+    workspace_root: Path | None,
+) -> dict[str, Any]:
     severity = _finding_severity_value(finding)
     result: dict[str, Any] = {
         "ruleId": _rule_id(validator_name, finding.check_name),
@@ -92,7 +136,7 @@ def _result_from_finding(finding: Finding, validator_name: str) -> dict[str, Any
     }
     if finding.suggestion:
         result["message"]["markdown"] = f"{finding.message}\n\n**Suggestion:** {finding.suggestion}"
-    location = _physical_location(finding)
+    location = _physical_location(finding, workspace_root)
     if location is not None:
         result["locations"] = [location]
     properties: dict[str, Any] = {
@@ -107,12 +151,46 @@ def _result_from_finding(finding: Finding, validator_name: str) -> dict[str, Any
     return result
 
 
+def _collect_incomplete_scans(results: list[ValidationResult]) -> list[str]:
+    scans: list[str] = []
+    for result in results:
+        for tool in result.incomplete_scans:
+            if tool not in scans:
+                scans.append(tool)
+    return scans
+
+
+def _build_invocation(results: list[ValidationResult]) -> dict[str, Any]:
+    incomplete_scans = _collect_incomplete_scans(results)
+    invocation: dict[str, Any] = {
+        "executionSuccessful": not incomplete_scans,
+        "endTimeUtc": datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+    if incomplete_scans:
+        invocation["toolExecutionNotifications"] = [
+            {
+                "descriptor": {"id": f"incomplete/{tool}"},
+                "level": "error",
+                "message": {"text": f"{tool} scan did not complete"},
+            }
+            for tool in incomplete_scans
+        ]
+    return invocation
+
+
 class SARIFReporter(ReporterBase):
     """SARIF 2.1.0 export for security scanning integrations."""
 
-    def __init__(self, *, indent: int | None = 2, include_timestamp: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        indent: int | None = 2,
+        include_timestamp: bool = True,
+        workspace_root: Path | None = None,
+    ) -> None:
         self.indent = indent
         self.include_timestamp = include_timestamp
+        self.workspace_root = workspace_root
 
     @property
     def name(self) -> str:
@@ -128,13 +206,14 @@ class SARIFReporter(ReporterBase):
     def render_all(self, results: list[ValidationResult]) -> str:
         rules: dict[str, dict[str, Any]] = {}
         sarif_results: list[dict[str, Any]] = []
+        workspace_root = self.workspace_root
 
         for result in results:
             validator_name = result.validator_name or "UNKNOWN"
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                sarif_results.append(_result_from_finding(finding, validator_name))
+                sarif_results.append(_result_from_finding(finding, validator_name, workspace_root))
 
         run: dict[str, Any] = {
             "tool": {
@@ -147,13 +226,8 @@ class SARIFReporter(ReporterBase):
             },
             "results": sarif_results,
         }
-        if self.include_timestamp:
-            run["invocations"] = [
-                {
-                    "executionSuccessful": True,
-                    "endTimeUtc": datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-                }
-            ]
+        if self.include_timestamp or _collect_incomplete_scans(results):
+            run["invocations"] = [_build_invocation(results)]
 
         document: dict[str, Any] = {
             "$schema": _SARIF_SCHEMA,

@@ -707,8 +707,6 @@ def _catalog_child_argv_from_sys(skill_dir: Path, output_dir: Path, parent_argv:
         return ["validate", str(skill_dir), "-o", str(output_dir)]
 
     tail = argv[validate_idx + 1 :]
-    if tail and not tail[0].startswith("-"):
-        tail = tail[1:]
 
     child_tail: list[str] = []
     skip_next = False
@@ -720,6 +718,8 @@ def _catalog_child_argv_from_sys(skill_dir: Path, output_dir: Path, parent_argv:
             skip_next = True
             continue
         if arg.startswith("--workers=") or arg.startswith("--output-dir=") or arg.startswith("-o="):
+            continue
+        if not arg.startswith("-"):
             continue
         child_tail.append(arg)
 
@@ -806,7 +806,7 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     if params.get("results_dir"):
         argv.extend(["--results-dir", str(params["results_dir"])])
     for skill in params.get("include_skills") or ():
-        argv.extend(["--include-skill", str(skill)])
+        argv.extend(["--include-skills", str(skill)])
     if params.get("copy_repo"):
         argv.append("--copy-repo")
     if params.get("timeout_multiplier") is not None:
@@ -832,7 +832,7 @@ def _catalog_child_argv(
     return _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir)
 
 
-def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str]:
+def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str | None]:
     """Run one catalog skill validation in a child process."""
     import os
 
@@ -843,17 +843,32 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str]:
         os.chdir(workdir)
 
     skill_name = str(job["skill_name"])
+    output_dir = Path(job["output_dir"])
+    existing_reports = (
+        set(output_dir.glob("skillevaluator-output-*.json")) if output_dir.is_dir() else set()
+    )
     result = CliRunner().invoke(cli, job["argv"])
+    json_report_name = _new_skill_json_report_name(output_dir, existing_reports)
     if result.exit_code == 0:
-        return skill_name, True, ""
+        return skill_name, True, "", json_report_name
     exc = result.exception
     if isinstance(exc, SystemExit):
-        return skill_name, False, "validation failed"
+        return skill_name, False, "validation failed", json_report_name
     if exc is not None:
         if isinstance(exc, click.ClickException):
-            return skill_name, False, str(getattr(exc, "message", exc))
-        return skill_name, False, f"unexpected error: {exc}"
-    return skill_name, False, "validation failed"
+            return skill_name, False, str(getattr(exc, "message", exc)), json_report_name
+        return skill_name, False, f"unexpected error: {exc}", json_report_name
+    return skill_name, False, "validation failed", json_report_name
+
+
+def _new_skill_json_report_name(output_dir: Path, existing_reports: set[Path]) -> str | None:
+    """Return the JSON report filename produced during this worker run."""
+    if not output_dir.is_dir():
+        return None
+    new_reports = set(output_dir.glob("skillevaluator-output-*.json")) - existing_reports
+    if not new_reports:
+        return None
+    return sorted(new_reports, reverse=True)[0].name
 
 
 def _latest_skill_json_report(skill_report_dir: Path) -> Path | None:
@@ -872,6 +887,7 @@ def _catalog_skill_entry(
     *,
     passed: bool,
     reason: str,
+    json_report_name: str | None = None,
 ) -> dict[str, object]:
     entry: dict[str, object] = {
         "name": skill_name,
@@ -881,8 +897,11 @@ def _catalog_skill_entry(
     if not passed:
         entry["reason"] = reason
 
-    json_report = _latest_skill_json_report(skill_report_dir)
-    if json_report is None:
+    if json_report_name:
+        json_report = skill_report_dir / json_report_name
+    else:
+        json_report = _latest_skill_json_report(skill_report_dir)
+    if json_report is None or not json_report.is_file():
         return entry
 
     entry["json_report"] = json_report.name
@@ -901,6 +920,8 @@ def _catalog_skill_entry(
 
 def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) -> Path:
     """Write a machine-readable fleet rollup for catalog validation."""
+    from skillevaluator.reporting.base import _write_report_atomically
+
     total = len(skills)
     passed = sum(1 for skill in skills if skill.get("passed"))
     failed = total - passed
@@ -932,7 +953,8 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / CATALOG_SUMMARY_FILENAME
-    output_path.write_text(json.dumps(summary, indent=2, default=str, allow_nan=False), encoding="utf-8")
+    payload = json.dumps(summary, indent=2, default=str, allow_nan=False).encode("utf-8")
+    _write_report_atomically(output_path, payload)
     return output_path
 
 
@@ -1025,14 +1047,17 @@ def _validate_catalog_parallel(
             "skill_name": skill_dir.name,
             "argv": _catalog_child_argv(ctx, skill_dir, output_dir / skill_dir.name, parent_argv),
             "cwd": workdir,
+            "output_dir": str(output_dir / skill_dir.name),
         }
         for skill_dir in skill_dirs
     ]
     failures: list[tuple[str, str]] = []
+    worker_reports: dict[str, str | None] = {}
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
         for future in as_completed(futures):
-            skill_name, passed, reason = future.result()
+            skill_name, passed, reason, json_report_name = future.result()
+            worker_reports[skill_name] = json_report_name
             if not passed:
                 failures.append((skill_name, reason))
 
@@ -1044,6 +1069,7 @@ def _validate_catalog_parallel(
             output_dir / skill_dir.name,
             passed=skill_dir.name not in failure_map,
             reason=failure_map.get(skill_dir.name, ""),
+            json_report_name=worker_reports.get(skill_dir.name),
         )
         for skill_dir in skill_dirs
     ]

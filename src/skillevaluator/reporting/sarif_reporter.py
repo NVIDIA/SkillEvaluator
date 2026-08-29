@@ -94,7 +94,9 @@ def _normalize_artifact_uri(file_path: str, workspace_root: Path | None) -> str:
     path = Path(normalized)
     if workspace_root is not None:
         try:
-            if path.is_absolute():
+            # Windows paths can be rooted (``\\workspace\\...``) without a
+            # drive, in which case ``is_absolute()`` is false until resolved.
+            if path.is_absolute() or path.root:
                 relative = path.resolve().relative_to(workspace_root.resolve())
                 normalized = relative.as_posix()
             else:

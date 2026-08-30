@@ -13,6 +13,8 @@ All notable changes to SkillEvaluator are documented in this file.
   not treated as absent, and a blocking conflict no longer publishes
   `license_status=allowed`
   ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
+- `--llm-verify` now refuses to send file context from paths outside the
+  skill root, including `..`, absolute paths, and outbound file symlinks.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories
   instead of any path containing those substrings, so files like `latest.py`
   are scanned.

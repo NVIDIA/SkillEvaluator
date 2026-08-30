@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Gitleaks path allowlist now skips test/example/fixture/mock directories
+  instead of any path containing those substrings, so files like `latest.py`
+  are scanned.
+- The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
+  the results directory is not visible to the Docker daemon. Previously the smoke
+  run passed -- agent output travels over the Docker exec API rather than through
+  the mounts -- and every scored trial then failed with `RewardFileNotFoundError`
+  while the rewards sat inside the daemon's own filesystem.
 - Dead-link validation now uses the shared CommonMark parser, covering
   reference-style and HTML links while preserving Markdown image checks and
   consistently normalizing local destinations. Root-absolute URLs are ignored

@@ -23,7 +23,7 @@ from skillevaluator.reporting.base import ReporterBase
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
 
-_SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+_SARIF_SCHEMA = "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json"
 _TOOL_URI = "https://github.com/NVIDIA/SkillEvaluator"
 _RULE_ID_PATTERN = re.compile(r"[^A-Za-z0-9._/-]+")
 
@@ -108,9 +108,6 @@ def _normalize_artifact_uri(
     path = _resolve_artifact_path(file_path, scan_root)
     if workspace_root is not None:
         try:
-<<<<<<< HEAD
-            normalized = path.relative_to(workspace_root.resolve()).as_posix()
-=======
             # Windows paths can be rooted (``\\workspace\\...``) without a
             # drive, in which case ``is_absolute()`` is false until resolved.
             if path.is_absolute() or path.root:
@@ -118,7 +115,6 @@ def _normalize_artifact_uri(
                 normalized = relative.as_posix()
             else:
                 normalized = path.as_posix()
->>>>>>> fork/feat/sarif-reporter
         except ValueError:
             normalized = path.as_posix()
     elif path.is_absolute():
@@ -126,6 +122,7 @@ def _normalize_artifact_uri(
     else:
         normalized = path.as_posix()
     return quote(normalized, safe="/:@%")
+
 
 def _physical_location(
     finding: Finding,
@@ -212,6 +209,7 @@ def merge_catalog_sarif_documents(documents: list[dict[str, Any]]) -> dict[str, 
     """
     rules: dict[str, dict[str, Any]] = {}
     results: list[dict[str, Any]] = []
+    invocations: list[dict[str, Any]] = []
     driver: dict[str, Any] = {
         "name": "SkillEvaluator",
         "informationUri": _TOOL_URI,
@@ -229,6 +227,7 @@ def merge_catalog_sarif_documents(documents: list[dict[str, Any]]) -> dict[str, 
             for rule in run_driver.get("rules", []):
                 rules[rule["id"]] = rule
             results.extend(run.get("results", []))
+            invocations.extend(run.get("invocations", []))
 
     merged_run: dict[str, Any] = {
         "tool": {
@@ -240,6 +239,8 @@ def merge_catalog_sarif_documents(documents: list[dict[str, Any]]) -> dict[str, 
         "results": results,
         "automationDetails": {"id": "/skillevaluator/catalog"},
     }
+    if invocations:
+        merged_run["invocations"] = invocations
     return {
         "$schema": _SARIF_SCHEMA,
         "version": "2.1.0",
@@ -285,9 +286,7 @@ class SARIFReporter(ReporterBase):
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                sarif_results.append(
-                    _result_from_finding(finding, validator_name, workspace_root, scan_root)
-                )
+                sarif_results.append(_result_from_finding(finding, validator_name, workspace_root, scan_root))
 
         run: dict[str, Any] = {
             "tool": {

@@ -437,7 +437,9 @@ class TestSARIFReporter:
         document = json.loads(reporter.render_all([failure_result]))
 
         assert document["version"] == "2.1.0"
-        assert document["$schema"].endswith("sarif-schema-2.1.0.json")
+        assert document["$schema"] == (
+            "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json"
+        )
         run = document["runs"][0]
         driver = run["tool"]["driver"]
         assert driver["name"] == "SkillEvaluator"
@@ -504,9 +506,9 @@ class TestSARIFReporter:
         result.add_error("Bandit did not return valid JSON; scan did not complete")
         result.mark_scan_incomplete("bandit")
 
-        invocation = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))["runs"][0][
-            "invocations"
-        ][0]
+        invocation = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))["runs"][0]["invocations"][
+            0
+        ]
         assert invocation["executionSuccessful"] is False
         assert invocation["toolExecutionNotifications"][0]["message"]["text"] == "bandit scan did not complete"
 
@@ -534,9 +536,7 @@ class TestSARIFReporter:
             )
         )
 
-        run = json.loads(
-            SARIFReporter(include_timestamp=False, workspace_root=root).render_all([result])
-        )["runs"][0]
+        run = json.loads(SARIFReporter(include_timestamp=False, workspace_root=root).render_all([result]))["runs"][0]
         locations = [item["locations"][0]["physicalLocation"] for item in run["results"]]
         assert locations[0]["artifactLocation"]["uri"] == "SKILL.md"
         assert "region" not in locations[0]
@@ -593,6 +593,20 @@ class TestSARIFReporter:
         automation = merged["runs"][0]["automationDetails"]
         assert automation == {"id": "/skillevaluator/catalog"}
         assert "name" not in automation
+
+    def test_merge_catalog_sarif_preserves_incomplete_invocation(self) -> None:
+        result = ValidationResult(validator_name="BANDIT", validator_description="Bandit")
+        result.add_error("Bandit scan did not complete")
+        result.mark_scan_incomplete("bandit")
+        child = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))
+
+        from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+        merged = merge_catalog_sarif_documents([child])
+        invocations = merged["runs"][0]["invocations"]
+        assert invocations == child["runs"][0]["invocations"]
+        assert invocations[0]["executionSuccessful"] is False
+        assert invocations[0]["toolExecutionNotifications"][0]["descriptor"]["id"] == "incomplete/bandit"
 
 
 def _blocking_result() -> ValidationResult:

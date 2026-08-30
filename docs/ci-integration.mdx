@@ -97,7 +97,8 @@ jobs:
             echo "count=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          python3 - <<'PY'
+          skillevaluator_python="$(dirname "$(readlink -f "$(command -v skillevaluator)")")/python"
+          "$skillevaluator_python" - <<'PY'
           import json
           import pathlib
 

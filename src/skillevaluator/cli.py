@@ -1178,7 +1178,7 @@ def validate(
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
-    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url
+    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
     if external and profile and profile != "external":
@@ -1444,9 +1444,7 @@ def validate(
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
-    from skillevaluator.tier3.results_location import git_root_for
-
-    sarif_repository_root = git_root_for(target_path)
+    sarif_repository_root = resolve_git_root(target_path)
     if sarif_repository_root is None:
         sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
 

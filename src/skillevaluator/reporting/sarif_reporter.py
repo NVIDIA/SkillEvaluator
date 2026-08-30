@@ -108,7 +108,17 @@ def _normalize_artifact_uri(
     path = _resolve_artifact_path(file_path, scan_root)
     if workspace_root is not None:
         try:
+<<<<<<< HEAD
             normalized = path.relative_to(workspace_root.resolve()).as_posix()
+=======
+            # Windows paths can be rooted (``\\workspace\\...``) without a
+            # drive, in which case ``is_absolute()`` is false until resolved.
+            if path.is_absolute() or path.root:
+                relative = path.resolve().relative_to(workspace_root.resolve())
+                normalized = relative.as_posix()
+            else:
+                normalized = path.as_posix()
+>>>>>>> fork/feat/sarif-reporter
         except ValueError:
             normalized = path.as_posix()
     elif path.is_absolute():

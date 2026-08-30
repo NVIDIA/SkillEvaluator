@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      metadata_only: ${{ steps.changes.outputs.metadata_only }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -37,6 +38,7 @@ jobs:
           if ! git show "$BASE_SHA:scripts/classify_ci_changes.py" > "$classifier"; then
             echo "::notice::Trusted classifier is not present on the base branch; running full CI."
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "metadata_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           python3 "$classifier" --base "$BASE_SHA" --head "$HEAD_SHA"
@@ -230,7 +232,7 @@ jobs:
   tier3-macos:
     name: Tier 3 macOS contract and progress
     needs: classify-changes
-    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
+    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' && needs.classify-changes.outputs.metadata_only != 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

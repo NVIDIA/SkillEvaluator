@@ -25,6 +25,10 @@ REQUIRED_CI_JOBS = {
 HEAVY_CI_JOBS = set(REQUIRED_CI_JOBS) - {"test-python-312"}
 RUN_UNLESS_CANCELLED_IF = "${{ !cancelled() }}"
 FULL_LANE_IF = "${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}"
+TIER3_LANE_IF = (
+    "${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' && "
+    "needs.classify-changes.outputs.metadata_only != 'true' }}"
+)
 DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only == 'true' }}"
 NOT_DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only != 'true' }}"
 PR_CONCURRENCY = {
@@ -64,7 +68,7 @@ def test_ci_preserves_required_contexts_as_explicit_jobs() -> None:
     _assert_no_path_filter(ci)
 
 
-def test_ci_classifier_is_pull_request_only_and_exports_docs_only() -> None:
+def test_ci_classifier_is_pull_request_only_and_exports_routing_outputs() -> None:
     ci = _load("ci.yml")
     classifier = ci["jobs"]["classify-changes"]
 
@@ -72,6 +76,7 @@ def test_ci_classifier_is_pull_request_only_and_exports_docs_only() -> None:
     assert classifier["name"] == "Classify changes"
     assert classifier["if"] == "${{ github.event_name == 'pull_request' }}"
     assert classifier["outputs"]["docs_only"] == "${{ steps.changes.outputs.docs_only }}"
+    assert classifier["outputs"]["metadata_only"] == "${{ steps.changes.outputs.metadata_only }}"
     assert classifier["steps"][0]["with"]["fetch-depth"] == "0"
     assert classifier["steps"][0]["with"]["persist-credentials"] == "false"
     assert classifier["steps"][1]["id"] == "changes"
@@ -79,6 +84,7 @@ def test_ci_classifier_is_pull_request_only_and_exports_docs_only() -> None:
     assert 'git show "$BASE_SHA:scripts/classify_ci_changes.py"' in classifier_run
     assert 'python3 "$classifier"' in classifier_run
     assert 'echo "docs_only=false" >> "$GITHUB_OUTPUT"' in classifier_run
+    assert 'echo "metadata_only=false" >> "$GITHUB_OUTPUT"' in classifier_run
     assert "python3 scripts/classify_ci_changes.py" not in classifier_run
     assert classifier["steps"][1]["env"] == {
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
@@ -122,7 +128,8 @@ def test_ci_skips_every_other_required_job_only_after_classification() -> None:
 
     for job_id in HEAVY_CI_JOBS:
         assert jobs[job_id]["needs"] == "classify-changes"
-        assert jobs[job_id]["if"] == FULL_LANE_IF
+        expected_if = TIER3_LANE_IF if job_id == "tier3-macos" else FULL_LANE_IF
+        assert jobs[job_id]["if"] == expected_if
 
 
 def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
@@ -153,11 +160,13 @@ def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() ->
     assert "needs" not in jobs["gitleaks"]
     assert jobs["classify-changes"]["if"] == "${{ github.event_name == 'pull_request' }}"
     assert jobs["classify-changes"]["outputs"]["docs_only"] == "${{ steps.changes.outputs.docs_only }}"
+    assert jobs["classify-changes"]["outputs"]["metadata_only"] == "${{ steps.changes.outputs.metadata_only }}"
     assert jobs["classify-changes"]["steps"][0]["with"]["persist-credentials"] == "false"
     classifier_run = jobs["classify-changes"]["steps"][1]["run"]
     assert 'git show "$BASE_SHA:scripts/classify_ci_changes.py"' in classifier_run
     assert 'python3 "$classifier"' in classifier_run
     assert 'echo "docs_only=false" >> "$GITHUB_OUTPUT"' in classifier_run
+    assert 'echo "metadata_only=false" >> "$GITHUB_OUTPUT"' in classifier_run
     assert "python3 scripts/classify_ci_changes.py" not in classifier_run
 
     dependency_if = " ".join(jobs["dependency-review"]["if"].split())

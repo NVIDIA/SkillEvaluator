@@ -453,6 +453,7 @@ def _run_agent_eval_or_skip(
     harbor_keep_jobs: bool = False,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
+    previous_skill: Path | None = None,
     progress_reporter=None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
@@ -462,6 +463,36 @@ def _run_agent_eval_or_skip(
     describing why Tier 3 could not run. Tier 3 remains advisory by default,
     and callers can opt into blocking behavior.
     """
+    if previous_skill is not None:
+        from skillevaluator.evaluation.tier3_report import advisory_skip_result
+        from skillevaluator.tier3.change_detection import tier3_run_decision
+
+        decision = tier3_run_decision(target_path, previous_skill)
+        if decision.should_skip:
+            change_summary = (
+                "only SKILL.md metadata changed"
+                if decision.reason_code == "metadata_only_change"
+                else "SKILL.md content is unchanged"
+            )
+            result = advisory_skip_result(
+                f"Tier 3 live evaluation skipped: {change_summary} "
+                f"since the prior evaluation ({decision.evidence_file}).",
+                skill_name=target_path.name,
+            )
+            result.metadata["tier3_change_decision"] = decision.to_dict()
+            result.metadata["tier3_applicability"] = {
+                "applicability": "not_required",
+                "reason_code": decision.reason_code,
+                "source_kind": "skill",
+            }
+            payload = result.metadata.get("agent_eval")
+            if isinstance(payload, dict):
+                payload["reason_code"] = decision.reason_code
+                summary = payload.get("summary")
+                if isinstance(summary, dict):
+                    summary["reason_code"] = decision.reason_code
+            return result
+
     if validate_source:
         from skillevaluator.evaluation.tier3_report import dataset_required_result
         from skillevaluator.tier3.evals_spec import validate_tier3_source
@@ -974,6 +1005,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Also run Tier 3 live agent evaluation (requires a valid eval dataset or native Harbor source).",
 )
 @click.option(
+    "--previous-skill",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Previous evaluated copy of this skill. Metadata-only SKILL.md changes skip a fresh Tier 3 run when it has a skill card or benchmark.",
+)
+@click.option(
     "--block-on-agent-eval/--no-block-on-agent-eval",
     default=None,
     cls=GroupedOption,
@@ -1131,6 +1170,7 @@ def validate(
     dedup: bool,
     block_on_dedup: bool | None,
     agent_eval: bool,
+    previous_skill: Path | None,
     block_on_agent_eval: bool | None,
     autopilot: bool,
     agents: str,
@@ -1232,6 +1272,16 @@ def validate(
             output_dir=output_dir,
         )
         return
+
+    tier3_change_decision = None
+    if previous_skill is not None:
+        if not agent_eval:
+            raise click.ClickException("--previous-skill requires --tier3 or --agent-eval.")
+        if not preflight_tier3_source:
+            raise click.ClickException("--previous-skill applies only to a single skill.")
+        from skillevaluator.tier3.change_detection import tier3_run_decision
+
+        tier3_change_decision = tier3_run_decision(target_path, previous_skill)
 
     # Quiet (default) drives the compact pipeline view; --verbose keeps the
     # historical full-detail stream, as does DEBUG logging via the group -v.
@@ -1351,7 +1401,7 @@ def validate(
         # Tier 3 is advisory, so a dataset-generation failure must not abort
         # validate after Tier 1/2 already ran -- Tier 3 skips with the reason.
         autopilot_error: str | None = None
-        if autopilot:
+        if autopilot and (tier3_change_decision is None or tier3_change_decision.should_run):
             try:
                 dataset_note = _ensure_autopilot_dataset(target_path, quiet=quiet)
             except (Exception, SystemExit) as exc:
@@ -1391,6 +1441,7 @@ def validate(
             harbor_keep_jobs=harbor_keep_jobs,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,
+            previous_skill=previous_skill,
             progress_reporter=reporter,
         )
         results.append(tier3_result)
@@ -1739,6 +1790,12 @@ def dedup_scan(
     show_default=True,
     help="Comma-separated Harbor agents (claude is an alias for claude-code).",
 )
+@click.option(
+    "--previous-skill",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Previous evaluated copy of this skill. Metadata-only SKILL.md changes skip the live evaluation when it has a skill card or benchmark.",
+)
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
     "--autopilot",
@@ -1783,6 +1840,7 @@ def dedup_scan(
 def evaluate(
     skill_path: Path,
     agents: str,
+    previous_skill: Path | None,
     env_mode: str,
     autopilot: bool,
     skip_baseline: bool,
@@ -1808,6 +1866,17 @@ def evaluate(
     progress: str,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
+    if previous_skill is not None:
+        from skillevaluator.tier3.change_detection import tier3_run_decision
+
+        decision = tier3_run_decision(skill_path, previous_skill)
+        if decision.should_skip:
+            click.echo(
+                "Tier 3 live evaluation skipped: "
+                f"{decision.reason_code} confirmed by prior {decision.evidence_file}."
+            )
+            return
+
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 

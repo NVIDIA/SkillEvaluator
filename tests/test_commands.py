@@ -579,6 +579,124 @@ def test_run_agent_eval_partial_run_returns_ran_with_errors(monkeypatch, tmp_pat
     assert (result.metadata or {}).get("execution_status") != "skipped"
 
 
+def test_run_agent_eval_skips_metadata_only_change_before_starting_engine(monkeypatch, tmp_path) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation.service import EvaluationService
+
+    previous = tmp_path / "previous"
+    current = tmp_path / "current"
+    previous.mkdir()
+    current.mkdir()
+    (previous / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\nmetadata:\n  owner: platform\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+    (previous / "BENCHMARK.md").write_text("# Prior result\n", encoding="utf-8")
+    (current / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\nmetadata:\n  owner: release\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda *_args, **_kwargs: pytest.fail("metadata-only changes must not start the live-eval engine"),
+    )
+
+    result = cli_module._run_agent_eval_or_skip(
+        current,
+        agents="codex",
+        env_mode="docker",
+        skip_baseline=False,
+        n_concurrent=None,
+        max_agents=None,
+        previous_skill=previous,
+    )
+
+    assert result.metadata["tier3_change_decision"] == {
+        "should_run": False,
+        "reason_code": "metadata_only_change",
+        "evidence_file": "BENCHMARK.md",
+    }
+    assert result.metadata["tier3_applicability"] == {
+        "applicability": "not_required",
+        "reason_code": "metadata_only_change",
+        "source_kind": "skill",
+    }
+
+
+def test_validate_forwards_previous_skill_to_tier3(monkeypatch, tmp_path) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+    from skillevaluator.models.result import ValidationResult
+
+    current = tmp_path / "current" / "demo"
+    previous = tmp_path / "previous" / "demo"
+    for skill, owner in ((current, "release"), (previous, "platform")):
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: Demo\nmetadata:\n"
+            f"  owner: {owner}\n---\n# Demo\n",
+            encoding="utf-8",
+        )
+    (previous / "BENCHMARK.md").write_text("# Prior result\n", encoding="utf-8")
+    tier1 = ValidationResult(validator_name="SCHEMA")
+    tier1.add_success("schema", "ok")
+    captured: dict[str, Path | None] = {}
+
+    def _tier3(*_args, **kwargs) -> ValidationResult:
+        captured["previous_skill"] = kwargs["previous_skill"]
+        return advisory_skip_result("metadata-only")
+
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [tier1])
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", _tier3)
+    monkeypatch.setattr(cli_module, "emit_reports", lambda *_args, **_kwargs: True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(current),
+            "--no-dedup",
+            "--tier3",
+            "--previous-skill",
+            str(previous),
+            "--checks",
+            "schema",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["previous_skill"] == previous
+
+
+def test_tier3_evaluate_skips_metadata_only_change_before_starting_engine(monkeypatch, tmp_path) -> None:
+    from skillevaluator.evaluation.service import EvaluationService
+
+    previous = tmp_path / "previous"
+    current = tmp_path / "current"
+    for skill, owner in ((previous, "platform"), (current, "release")):
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: Demo\nmetadata:\n"
+            f"  owner: {owner}\n---\n# Demo\n",
+            encoding="utf-8",
+        )
+    (previous / "skill-card.md").write_text("# Prior result\n", encoding="utf-8")
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda *_args, **_kwargs: pytest.fail("metadata-only changes must not start the live-eval engine"),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["tier3", "evaluate", str(current), "--previous-skill", str(previous), "--progress", "off"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "metadata_only_change" in result.output
+
+
 def test_validate_tier2_default_is_blocking_and_can_be_advisory(monkeypatch) -> None:
     from skillevaluator import cli as cli_module
     from skillevaluator.models.result import ValidationResult

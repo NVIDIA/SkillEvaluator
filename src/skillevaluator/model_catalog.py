@@ -24,6 +24,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPHandler, HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
+from skillevaluator.error_codes import EvaluatorErrorCode, provider_failure_error_code, validate_error_code
+
 if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
 
@@ -63,6 +65,7 @@ class ModelCatalogFailureKind(StrEnum):
     MODEL_NOT_FOUND = "model_not_found"
     OTHER_HTTP = "other_http"
     UNKNOWN = "unknown"
+    LOCAL_PROCESS = "local_process"
 
 
 class ModelCatalogError(RuntimeError):
@@ -74,6 +77,8 @@ class ModelCatalogError(RuntimeError):
         *,
         kind: ModelCatalogFailureKind | str = ModelCatalogFailureKind.UNKNOWN,
         http_status: int | None = None,
+        error_code: EvaluatorErrorCode | str | None = None,
+        timed_out: bool = False,
     ) -> None:
         super().__init__(message)
         try:
@@ -81,6 +86,11 @@ class ModelCatalogError(RuntimeError):
         except (TypeError, ValueError):
             self.kind = ModelCatalogFailureKind.UNKNOWN
         self.http_status = http_status
+        normalized_timed_out = bool(timed_out)
+        expected_code = provider_failure_error_code(self.kind, http_status, timed_out=normalized_timed_out).value
+        if error_code is not None and validate_error_code(error_code) != expected_code:
+            raise ValueError("catalog error code contradicts structured failure metadata")
+        self.error_code = expected_code
 
 
 def _http_failure_kind(status: int) -> ModelCatalogFailureKind:
@@ -358,6 +368,7 @@ def fetch_model_records(config: ProviderConfig, timeout_seconds: float = 15.0) -
             raise ModelCatalogError(
                 "model catalog request timed out",
                 kind=ModelCatalogFailureKind.UNAVAILABLE,
+                timed_out=True,
             )
         payload, response_bytes = _request_json(
             next_url,
@@ -634,12 +645,14 @@ def _request_json(
         raise ModelCatalogError(
             "model catalog request timed out",
             kind=ModelCatalogFailureKind.UNAVAILABLE,
+            timed_out=True,
         ) from None
     except URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise ModelCatalogError(
                 "model catalog request timed out",
                 kind=ModelCatalogFailureKind.UNAVAILABLE,
+                timed_out=True,
             ) from None
         raise ModelCatalogError(
             f"model catalog request failed: {type(exc).__name__}",
@@ -690,6 +703,7 @@ def _read_response_body(response: Any, *, max_response_bytes: int, deadline: flo
             raise ModelCatalogError(
                 "model catalog request timed out",
                 kind=ModelCatalogFailureKind.UNAVAILABLE,
+                timed_out=True,
             )
         return raw
 
@@ -701,6 +715,7 @@ def _read_response_body(response: Any, *, max_response_bytes: int, deadline: flo
             raise ModelCatalogError(
                 "model catalog request timed out",
                 kind=ModelCatalogFailureKind.UNAVAILABLE,
+                timed_out=True,
             )
         _set_response_socket_timeout(response, remaining)
         chunk = read_once(min(_RESPONSE_READ_CHUNK_BYTES, max_response_bytes + 1 - total))
@@ -708,6 +723,7 @@ def _read_response_body(response: Any, *, max_response_bytes: int, deadline: flo
             raise ModelCatalogError(
                 "model catalog request timed out",
                 kind=ModelCatalogFailureKind.UNAVAILABLE,
+                timed_out=True,
             )
         if not chunk:
             break

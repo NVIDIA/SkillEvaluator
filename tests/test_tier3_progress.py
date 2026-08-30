@@ -843,6 +843,9 @@ def test_credential_validation_401_stops_before_image_and_task_preparation(
 
     assert probe_calls and probe_calls[0].provider == "openai"
     assert result.get("error")
+    assert result["execution_status"] == "failed"
+    assert result["error_code"] == "SKILLEVALUATOR-AUTH-002"
+    assert result["execution_errors"] == result["error"]
     assert "HTTP 401" in json.dumps(result)
     assert image_calls == []
     assert task_calls == []
@@ -851,6 +854,46 @@ def test_credential_validation_401_stops_before_image_and_task_preparation(
     assert ("credential-validation", "complete") not in transitions
     rendered = json.dumps(result) + json.dumps([(event.stage, event.state, event.detail) for event in reporter.events])
     assert secret not in rendered
+
+
+def test_conflicting_terminal_probe_codes_collapse_to_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-runtime-secret")
+
+    def reject_route(selected_provider):
+        if selected_provider.provider == "anthropic":
+            return SimpleNamespace(
+                ok=False,
+                provider=selected_provider.provider,
+                model=selected_provider.model,
+                detail="model catalog configuration is invalid",
+                failure_kind="invalid_configuration",
+                http_status=None,
+            )
+        return SimpleNamespace(
+            ok=False,
+            provider=selected_provider.provider,
+            model=selected_provider.model,
+            detail="model catalog returned HTTP 401",
+            failure_kind="authentication",
+            http_status=401,
+        )
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, model_probe=reject_route)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "claude-code"],
+        agent_models={"claude-code": "anthropic/claude-test"},
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["error_code"] == "SKILLEVALUATOR-UNKNOWN-001"
+    assert len(result["execution_errors"]) == 2
 
 
 @pytest.mark.parametrize(
@@ -1066,7 +1109,12 @@ def test_missing_native_task_source_stops_before_credential_probes(
         progress_reporter=reporter,
     )
 
-    assert result == {"error": ["No native Harbor task source found at evals/harbor."]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": ["No native Harbor task source found at evals/harbor."],
+        "error": ["No native Harbor task source found at evals/harbor."],
+    }
     assert probe_calls == []
     transitions = [(event.stage, event.state) for event in reporter.events]
     assert ("environment-preflight", "complete") in transitions
@@ -1737,7 +1785,12 @@ def test_jobs_directory_creation_failure_returns_structured_error_and_removes_ow
         progress_reporter=reporter,
     )
 
-    assert result == {"error": ["[Errno 28] No space left on device"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": ["[Errno 28] No space left on device"],
+        "error": ["[Errno 28] No space left on device"],
+    }
     assert results_root.is_dir()
     assert list(results_root.iterdir()) == []
     transitions = [(event.stage, event.state) for event in reporter.events]
@@ -1765,7 +1818,12 @@ def test_jobs_directory_failure_cleans_owned_empty_run_without_descriptor_backen
 
     result = runner.run_harbor_eval(skill, ["codex"], output_dir=results_root)
 
-    assert result == {"error": ["injected jobs directory failure"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": ["injected jobs directory failure"],
+        "error": ["injected jobs directory failure"],
+    }
     assert list(results_root.iterdir()) == []
 
 
@@ -1790,7 +1848,12 @@ def test_jobs_directory_creation_failure_preserves_run_after_provenance_is_lost(
 
     result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
 
-    assert result == {"error": ["injected jobs directory failure"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": ["injected jobs directory failure"],
+        "error": ["injected jobs directory failure"],
+    }
     assert len(reserved_run) == 1
     assert (reserved_run[0] / "preserve.txt").read_text(encoding="utf-8") == "unowned\n"
 
@@ -2251,7 +2314,12 @@ def test_runner_reports_known_plan_without_claiming_failed_preflight_ready(
 
     result = runner.run_harbor_eval(skill, ["codex"], progress_reporter=reporter)
 
-    assert result == {"error": ["Docker is unavailable"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": ["Docker is unavailable"],
+        "error": ["Docker is unavailable"],
+    }
     known_plan = reporter.plans[-1]
     assert known_plan.provider == "openai"
     assert known_plan.agent_models == (("codex", "gpt-5"),)
@@ -2285,7 +2353,12 @@ def test_runner_does_not_mark_invalid_configuration_ready(
 
     result = runner.run_harbor_eval(skill, ["codex"], progress_reporter=reporter)
 
-    assert result == {"error": ["n_attempts must be >= 1"]}
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": ["n_attempts must be >= 1"],
+        "error": ["n_attempts must be >= 1"],
+    }
     transitions = [(event.stage, event.state) for event in reporter.events]
     assert transitions == [
         ("configuration", "running"),

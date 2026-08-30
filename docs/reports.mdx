@@ -311,6 +311,9 @@ For CI and tooling, two JSON entry points matter:
 - **Standalone `tier3 evaluate` runs** — parse `result.json` in the run
   directory (or follow `latest`). It carries per-agent scores, dimensions,
   lift, pass@k, trial counts, the attempt policy, and execution status.
+  Failed execution results also carry the stable `error_code`; use the
+  [Error Code Reference](error-codes.mdx) instead of matching prose in
+  `execution_errors`.
   Unscored metrics stay unscored rather than defaulting to 0.0, so
   `overall_score` can be `null`.
 - **`validate --tier3` runs** — the combined

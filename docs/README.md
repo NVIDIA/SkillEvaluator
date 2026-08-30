@@ -17,6 +17,7 @@ contributors making non-trivial edits.
 - `tier1-validation.mdx` — checks, flags, reports, CI recipe
 - `tier2-deduplication.mdx` — dedup commands and thresholds
 - `tier3-live-evaluation.mdx` — skill evaluation with live agents
+- `error-codes.mdx` — stable execution failure identifiers
 - `developer-guide.mdx` — contributor setup
 
 Navigation order and slugs are defined in [`../fern/docs.yml`](../fern/docs.yml).

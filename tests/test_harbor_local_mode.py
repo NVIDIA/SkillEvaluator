@@ -3197,12 +3197,16 @@ def test_run_harbor_eval_rejects_native_windows_before_provider_or_config(
 
     result = runner.run_harbor_eval(tmp_path, ["opencode"], env_mode="local")
 
+    expected_errors = [
+        "Native Windows local mode is unsupported, including with "
+        "SKILLEVALUATOR_LOCAL_SANDBOX=prefer or off. "
+        "Use WSL2 for Linux local mode or --env-mode docker."
+    ]
     assert result == {
-        "error": [
-            "Native Windows local mode is unsupported, including with "
-            "SKILLEVALUATOR_LOCAL_SANDBOX=prefer or off. "
-            "Use WSL2 for Linux local mode or --env-mode docker."
-        ]
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-UNKNOWN-001",
+        "execution_errors": expected_errors,
+        "error": expected_errors,
     }
 
 

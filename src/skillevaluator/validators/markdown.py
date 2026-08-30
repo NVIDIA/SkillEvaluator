@@ -3,13 +3,19 @@
 
 """Structural Markdown helpers for deterministic validators."""
 
+import posixpath
 import re
 from collections.abc import Iterable, Iterator
 from html import escape
 from html.parser import HTMLParser
+from inspect import signature
+from pathlib import PureWindowsPath
+from urllib.parse import unquote, urlsplit
 
 import yaml
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline import html_inline
+from markdown_it.rules_inline.state_inline import StateInline
 from markdown_it.token import Token
 
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
@@ -24,6 +30,65 @@ _SCRIPT_START_RE = re.compile(r"<script(?=[\t\n\r\f />])", re.IGNORECASE | re.AS
 _SCRIPT_END_RE = re.compile(r"</script(?=[\t\n\r\f />])", re.IGNORECASE | re.ASCII)
 _SCRIPT_ESCAPED_STATES = frozenset({"escaped", "escaped-dash", "escaped-dash-dash"})
 _SCRIPT_DOUBLE_ESCAPED_STATES = frozenset({"double-escaped", "double-escaped-dash", "double-escaped-dash-dash"})
+_URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
+_HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA = "escapable" in signature(HTMLParser.set_cdata_mode).parameters
+
+
+def _guarded_html_inline(state: StateInline, silent: bool) -> bool:
+    """Avoid rescanning suffixes for HTML fragments with no possible terminator."""
+    terminator = None
+    if state.src.startswith("<!--", state.pos) and not state.src.startswith(("<!-->", "<!--->"), state.pos):
+        terminator = "-->"
+    elif state.src.startswith("<?", state.pos):
+        terminator = "?>"
+    elif state.src.startswith("<![CDATA[", state.pos):
+        terminator = "]]>"
+    elif state.src.startswith("<!", state.pos) and state.pos + 2 < len(state.src):
+        letter = state.src[state.pos + 2]
+        if "A" <= letter <= "Z" or "a" <= letter <= "z":
+            terminator = ">"
+    if terminator is not None:
+        # Each inline source has its own offsets, even within the same document.
+        if state.env.get("_html_source") is not state.src:
+            state.env["_html_source"] = state.src
+            state.env["_html_ends"] = {end: state.src.rfind(end) for end in ("-->", "?>", "]]>", ">")}
+        if state.pos > state.env["_html_ends"][terminator]:
+            return False
+    return html_inline(state, silent)
+
+
+_MARKDOWN_PARSER.inline.ruler.at("html_inline", _guarded_html_inline)
+
+
+def normalized_local_path(href: str, *, allow_directory: bool = False, reject_anchors: bool = False) -> str | None:
+    """Normalize a local destination, optionally rejecting anchors acquired in normalization.
+
+    Explicit URL schemes and URLs whose raw path begins with ``/`` remain
+    outside local checks. Unparseable URLs also return ``None``.
+    With ``reject_anchors``, a relative URL that gains an absolute or
+    drive-relative path raises ``ValueError`` instead of being skipped.
+    """
+    href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
+    try:
+        parsed = urlsplit(href)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc:
+        return None
+
+    # Preserve invalid UTF-8 bytes instead of aliasing distinct destinations to
+    # the replacement character. Scheme classification belongs to the raw URL.
+    path = unquote(parsed.path, errors="surrogateescape").replace("\\", "/")
+    if parsed.path.startswith("/"):
+        return None
+    normalized = posixpath.normpath(path)
+    if PureWindowsPath(normalized).anchor:
+        if reject_anchors:
+            raise ValueError("absolute or drive-relative path")
+        return None
+    if not allow_directory and path.endswith(("/", "/.", "/..")):
+        return None
+    return normalized
 
 
 def _find_script_end(content: str, start: int) -> int | None:
@@ -97,7 +162,11 @@ class _AnchorHrefParser(HTMLParser):
         self._non_navigation_tags: list[str] = []
 
     def set_cdata_mode(self, elem: str, *, escapable: bool = False) -> None:
-        super().set_cdata_mode(elem, escapable=escapable)
+        if _HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA:
+            super().set_cdata_mode(elem, escapable=escapable)
+        else:
+            # ``escapable`` was added in CPython 3.12.12 and 3.13.6.
+            super().set_cdata_mode(elem)
         if elem == "script":
             self.interesting = _SCRIPT_END_SEARCH
 
@@ -153,14 +222,14 @@ def _walk_tokens(tokens: Iterable[Token]) -> Iterator[Token]:
             yield from _walk_tokens(token.children)
 
 
-def markdown_link_targets(content: str) -> list[str]:
-    """Return parser-normalized Markdown link destinations in document order."""
+def markdown_link_targets(content: str, *, include_images: bool = False) -> list[str]:
+    """Return parser-normalized Markdown destinations in document order."""
     frontmatter = FRONTMATTER_PATTERN.match(content)
     markdown_content = content
     if frontmatter:
         try:
             frontmatter_data = yaml.safe_load(frontmatter.group(1))
-        except yaml.YAMLError:
+        except (yaml.YAMLError, ValueError, RecursionError):
             frontmatter_data = None
         if isinstance(frontmatter_data, dict):
             markdown_content = frontmatter.group(2)
@@ -171,6 +240,10 @@ def markdown_link_targets(content: str) -> list[str]:
             href = token.attrGet("href")
             if isinstance(href, str):
                 html_parts.append(f'<a href="{escape(href, quote=True)}"></a>')
+        elif include_images and token.type == "image":
+            source = token.attrGet("src")
+            if isinstance(source, str):
+                html_parts.append(f'<a href="{escape(source, quote=True)}"></a>')
         elif token.type in {"html_inline", "html_block"}:
             html_parts.append(token.content)
 

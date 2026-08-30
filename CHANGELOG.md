@@ -9,6 +9,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Windows personal-path PII now flags `C:\Users\...` usernames that start with
   `s` (for example `steve`), matching the intended whitespace class rather than
   excluding the letter `s` ([#87](https://github.com/NVIDIA/SkillEvaluator/issues/87)).
+<<<<<<< HEAD
+=======
+
+>>>>>>> fork/fix/windows-pii-username-s
 - Gitleaks path allowlist now skips test/example/fixture/mock directories
   instead of any path containing those substrings, so files like `latest.py`
   are scanned.

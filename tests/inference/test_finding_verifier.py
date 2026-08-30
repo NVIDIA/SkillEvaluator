@@ -43,3 +43,25 @@ def test_read_file_context_rejects_symlink_pointing_outside_skill(tmp_path):
     link = skill / "notes.md"
     link.symlink_to(outside)
     assert FindingVerifier._read_file_context(skill, "notes.md") is None
+
+
+def test_build_prompt_redacts_symlink_finding_payload(tmp_path):
+    from skillevaluator.models import Finding, Severity
+
+    skill, outside = _skill_with_outside(tmp_path)
+    outside.write_text("secret-pii-data@example.com\n", encoding="utf-8")
+    link = skill / "notes.md"
+    link.symlink_to(outside)
+
+    finding = Finding(
+        category="PII",
+        severity=Severity.HIGH,
+        check_name="email",
+        message="Found email secret-pii-data@example.com",
+        file_path="notes.md",
+        line_number=1,
+        line_content="secret-pii-data@example.com",
+    )
+    prompt = FindingVerifier()._build_prompt([finding], skill)
+    assert "secret-pii-data" not in prompt
+    assert "(redacted: file outside skill boundary)" in prompt

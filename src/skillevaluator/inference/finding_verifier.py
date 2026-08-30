@@ -75,6 +75,26 @@ class FindingVerifier(LLMClient):
 
     # -- Prompt construction ----------------------------------------------
 
+    @staticmethod
+    def _can_safely_open_under_skill(skill_path: Path, file_path: str) -> bool:
+        """Return whether *file_path* resolves to a regular file inside the skill."""
+        if not file_path:
+            return True
+        skill_root = skill_path.resolve()
+        for candidate in (skill_path / file_path, Path(file_path)):
+            if FindingVerifier._resolved_inside_skill(candidate, skill_root) is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _redacted_prompt_fields() -> tuple[str, str, str]:
+        """Message, line content, and line number placeholders for unsafe files."""
+        return (
+            "(redacted: file outside skill boundary)",
+            "(redacted)",
+            "?",
+        )
+
     def _build_prompt(self, findings: list[Finding], skill_path: Path) -> str:
         """Build a user prompt grouping findings by file with surrounding code context."""
         groups: dict[str, list[tuple[int, Finding]]] = {}
@@ -90,14 +110,19 @@ class FindingVerifier(LLMClient):
 
             for idx, finding in indexed_findings:
                 sev = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity)
+                if self._can_safely_open_under_skill(skill_path, finding.file_path or ""):
+                    message = finding.message
+                    line_content = finding.line_content or "(no content)"
+                    line_number = str(finding.line_number or "?")
+                else:
+                    message, line_content, line_number = self._redacted_prompt_fields()
                 parts.append(
                     f"\nFinding #{idx}:\n"
                     f"  Category: {finding.category}\n"
                     f"  Severity: {sev}\n"
                     f"  Check: {finding.check_name}\n"
-                    f"  Message: {finding.message}\n"
-                    f"  Line {finding.line_number or '?'}: "
-                    f"{finding.line_content or '(no content)'}\n"
+                    f"  Message: {message}\n"
+                    f"  Line {line_number}: {line_content}\n"
                     f"  Suggestion: {finding.suggestion or 'N/A'}"
                 )
 

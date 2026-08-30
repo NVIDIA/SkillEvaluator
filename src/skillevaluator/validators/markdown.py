@@ -8,6 +8,7 @@ import re
 from collections.abc import Iterable, Iterator
 from html import escape
 from html.parser import HTMLParser
+from inspect import signature
 from pathlib import PureWindowsPath
 from urllib.parse import unquote, urlsplit
 
@@ -30,6 +31,7 @@ _SCRIPT_END_RE = re.compile(r"</script(?=[\t\n\r\f />])", re.IGNORECASE | re.ASC
 _SCRIPT_ESCAPED_STATES = frozenset({"escaped", "escaped-dash", "escaped-dash-dash"})
 _SCRIPT_DOUBLE_ESCAPED_STATES = frozenset({"double-escaped", "double-escaped-dash", "double-escaped-dash-dash"})
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
+_HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA = "escapable" in signature(HTMLParser.set_cdata_mode).parameters
 
 
 def _guarded_html_inline(state: StateInline, silent: bool) -> bool:
@@ -160,7 +162,11 @@ class _AnchorHrefParser(HTMLParser):
         self._non_navigation_tags: list[str] = []
 
     def set_cdata_mode(self, elem: str, *, escapable: bool = False) -> None:
-        super().set_cdata_mode(elem, escapable=escapable)
+        if _HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA:
+            super().set_cdata_mode(elem, escapable=escapable)
+        else:
+            # ``escapable`` was added in CPython 3.12.12 and 3.13.6.
+            super().set_cdata_mode(elem)
         if elem == "script":
             self.interesting = _SCRIPT_END_SEARCH
 

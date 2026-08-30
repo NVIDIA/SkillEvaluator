@@ -94,6 +94,37 @@ def test_html_anchor_links_are_extracted(content: str, target: str) -> None:
     assert markdown_link_targets(content) == [target]
 
 
+def test_cdata_mode_falls_back_to_legacy_stdlib_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def legacy_set_cdata_mode(_parser, element: str) -> None:
+        calls.append(element)
+
+    monkeypatch.setattr(markdown_validator.HTMLParser, "set_cdata_mode", legacy_set_cdata_mode)
+    monkeypatch.setattr(markdown_validator, "_HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA", False)
+    parser = markdown_validator._AnchorHrefParser()
+
+    parser.set_cdata_mode("script")
+    parser.set_cdata_mode("textarea", escapable=True)
+
+    assert calls == ["script", "textarea"]
+
+
+def test_cdata_mode_forwards_escapable_to_new_stdlib_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def modern_set_cdata_mode(_parser, element: str, *, escapable: bool = False) -> None:
+        calls.append((element, escapable))
+
+    monkeypatch.setattr(markdown_validator.HTMLParser, "set_cdata_mode", modern_set_cdata_mode)
+    monkeypatch.setattr(markdown_validator, "_HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA", True)
+    parser = markdown_validator._AnchorHrefParser()
+
+    parser.set_cdata_mode("textarea", escapable=True)
+
+    assert calls == [("textarea", True)]
+
+
 def test_markdown_and_html_links_preserve_source_order() -> None:
     content = '[first](first.md) <a href="second.md">second</a> [third](third.md)'
 

@@ -18,9 +18,11 @@ gap analysis (H1-H4, M1-M5, L1, L4), OpenAI Skill Evals.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Iterable
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -35,11 +37,12 @@ from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.validators.base import ValidatorBase
-from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
+from skillevaluator.validators.markdown import markdown_link_targets
 
 logger = get_logger(__name__)
 
 _WORD_CHAR = r"A-Za-z0-9_"
+_URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
     r"validat(?:e|es|ed|ing|ion|ions))\b",
@@ -77,10 +80,37 @@ def _has_api_documentation(content: str) -> bool:
     return any(re.search(pattern, content, re.IGNORECASE) for pattern in api_patterns)
 
 
+def _normalized_quality_local_path(href: str) -> str | None:
+    """Normalize a local path using Quality Score's legacy classification order.
+
+    This intentionally remains separate from Hygiene's stricter path policy:
+    issue #108 requires this PR to leave existing Quality scores unchanged.
+    """
+    href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
+    try:
+        parsed = urlsplit(href)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc:
+        return None
+
+    path = unquote(parsed.path).replace("\\", "/")
+    if path.startswith("/"):
+        return None
+    try:
+        if urlsplit(path).scheme:
+            return None
+    except ValueError:
+        return None
+    if path.endswith(("/", "/.", "/..")):
+        return None
+    return posixpath.normpath(path)
+
+
 def _has_nested_markdown_reference(content: str) -> bool:
     """Return whether a reference document links to another local Markdown document."""
     for target in markdown_link_targets(content):
-        path = normalized_local_path(target)
+        path = _normalized_quality_local_path(target)
         if path is None or not path.casefold().endswith(".md"):
             continue
         if path.casefold() == "../skill.md":
@@ -358,7 +388,7 @@ class QualityScoreValidator(ValidatorBase):
     def _references_readme(content: str) -> bool:
         """Return whether SKILL.md contains a parsed Markdown link to README.md."""
         for link_target in markdown_link_targets(content):
-            path = normalized_local_path(link_target)
+            path = _normalized_quality_local_path(link_target)
             if path is not None and path.casefold() == "readme.md":
                 return True
         return False

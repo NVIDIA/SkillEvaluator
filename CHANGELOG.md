@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Gitleaks path allowlist now skips test/example/fixture/mock directories
+  instead of any path containing those substrings, so files like `latest.py`
+  are scanned.
 - The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
   the results directory is not visible to the Docker daemon. Previously the smoke
   run passed -- agent output travels over the Docker exec API rather than through

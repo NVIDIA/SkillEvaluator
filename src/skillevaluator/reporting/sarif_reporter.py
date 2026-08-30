@@ -88,31 +88,46 @@ def _positive_start_line(line_number: Any) -> int | None:
     return None
 
 
-def _normalize_artifact_uri(file_path: str, workspace_root: Path | None) -> str:
-    """Return a repository-relative, URI-encoded artifact path for SARIF."""
+def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:
+    """Resolve a validator file path against the scanned skill directory."""
     normalized = file_path.replace("\\", "/")
     path = Path(normalized)
+    if scan_root is not None and not path.is_absolute():
+        return (scan_root / path).resolve()
+    if path.is_absolute():
+        return path.resolve()
+    return path
+
+
+def _normalize_artifact_uri(
+    file_path: str,
+    workspace_root: Path | None,
+    scan_root: Path | None = None,
+) -> str:
+    """Return a repository-relative, URI-encoded artifact path for SARIF."""
+    path = _resolve_artifact_path(file_path, scan_root)
     if workspace_root is not None:
         try:
-            if path.is_absolute():
-                relative = path.resolve().relative_to(workspace_root.resolve())
-                normalized = relative.as_posix()
-            else:
-                normalized = path.as_posix()
+            normalized = path.relative_to(workspace_root.resolve()).as_posix()
         except ValueError:
             normalized = path.as_posix()
     elif path.is_absolute():
+        normalized = path.as_posix()
+    else:
         normalized = path.as_posix()
     return quote(normalized, safe="/:@%")
 
 def _physical_location(
     finding: Finding,
     workspace_root: Path | None,
+    scan_root: Path | None = None,
 ) -> dict[str, Any] | None:
     if not finding.file_path:
         return None
     location: dict[str, Any] = {
-        "artifactLocation": {"uri": _normalize_artifact_uri(finding.file_path, workspace_root)},
+        "artifactLocation": {
+            "uri": _normalize_artifact_uri(finding.file_path, workspace_root, scan_root),
+        },
     }
     start_line = _positive_start_line(finding.line_number)
     if start_line is not None:
@@ -127,6 +142,7 @@ def _result_from_finding(
     finding: Finding,
     validator_name: str,
     workspace_root: Path | None,
+    scan_root: Path | None = None,
 ) -> dict[str, Any]:
     severity = _finding_severity_value(finding)
     result: dict[str, Any] = {
@@ -136,7 +152,7 @@ def _result_from_finding(
     }
     if finding.suggestion:
         result["message"]["markdown"] = f"{finding.message}\n\n**Suggestion:** {finding.suggestion}"
-    location = _physical_location(finding, workspace_root)
+    location = _physical_location(finding, workspace_root, scan_root)
     if location is not None:
         result["locations"] = [location]
     properties: dict[str, Any] = {
@@ -178,6 +194,49 @@ def _build_invocation(results: list[ValidationResult]) -> dict[str, Any]:
     return invocation
 
 
+def merge_catalog_sarif_documents(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge per-skill SARIF payloads into one upload-ready document.
+
+    GitHub Code Scanning rejects SARIF with more than 20 runs, so child reports
+    are folded into a single run with combined rules and results.
+    """
+    rules: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+    driver: dict[str, Any] = {
+        "name": "SkillEvaluator",
+        "informationUri": _TOOL_URI,
+    }
+
+    for payload in documents:
+        for run in payload.get("runs", []):
+            run_driver = run.get("tool", {}).get("driver", {})
+            if run_driver.get("name"):
+                driver["name"] = run_driver["name"]
+            if run_driver.get("informationUri"):
+                driver["informationUri"] = run_driver["informationUri"]
+            if run_driver.get("version"):
+                driver["version"] = run_driver["version"]
+            for rule in run_driver.get("rules", []):
+                rules[rule["id"]] = rule
+            results.extend(run.get("results", []))
+
+    merged_run: dict[str, Any] = {
+        "tool": {
+            "driver": {
+                **driver,
+                "rules": sorted(rules.values(), key=lambda item: item["id"]),
+            }
+        },
+        "results": results,
+        "automationDetails": {"id": "/skillevaluator/catalog"},
+    }
+    return {
+        "$schema": _SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [merged_run],
+    }
+
+
 class SARIFReporter(ReporterBase):
     """SARIF 2.1.0 export for security scanning integrations."""
 
@@ -187,10 +246,12 @@ class SARIFReporter(ReporterBase):
         indent: int | None = 2,
         include_timestamp: bool = True,
         workspace_root: Path | None = None,
+        scan_root: Path | None = None,
     ) -> None:
         self.indent = indent
         self.include_timestamp = include_timestamp
         self.workspace_root = workspace_root
+        self.scan_root = scan_root
 
     @property
     def name(self) -> str:
@@ -207,13 +268,16 @@ class SARIFReporter(ReporterBase):
         rules: dict[str, dict[str, Any]] = {}
         sarif_results: list[dict[str, Any]] = []
         workspace_root = self.workspace_root
+        scan_root = self.scan_root
 
         for result in results:
             validator_name = result.validator_name or "UNKNOWN"
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                sarif_results.append(_result_from_finding(finding, validator_name, workspace_root))
+                sarif_results.append(
+                    _result_from_finding(finding, validator_name, workspace_root, scan_root)
+                )
 
         run: dict[str, Any] = {
             "tool": {

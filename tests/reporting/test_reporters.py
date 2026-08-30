@@ -543,6 +543,57 @@ class TestSARIFReporter:
         assert locations[1]["artifactLocation"]["uri"] == "notes/readme.md"
         assert locations[1]["region"]["startLine"] == 3
 
+    def test_nested_skill_path_relativized_to_repository_root(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        skill = repo / "skills" / "demo"
+        skill.mkdir(parents=True)
+        result = ValidationResult(validator_name="QUALITY", validator_description="quality")
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.MEDIUM,
+                check_name="spacing",
+                message="issue",
+                file_path="SKILL.md",
+                line_number=2,
+            )
+        )
+
+        run = json.loads(
+            SARIFReporter(
+                include_timestamp=False,
+                workspace_root=repo,
+                scan_root=skill,
+            ).render_all([result])
+        )["runs"][0]
+        uri = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        assert uri == "skills/demo/SKILL.md"
+
+    def test_merge_catalog_sarif_combines_into_single_run(self) -> None:
+        child = SARIFReporter(include_timestamp=False)
+        documents = []
+        for index in range(21):
+            result = ValidationResult(validator_name="TEST", validator_description="test")
+            result.add_finding(
+                Finding(
+                    category="TEST",
+                    severity=Severity.LOW,
+                    check_name=f"check-{index}",
+                    message="issue",
+                    file_path=f"skills/s{index}/SKILL.md",
+                )
+            )
+            documents.append(json.loads(child.render_all([result])))
+
+        from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+        merged = merge_catalog_sarif_documents(documents)
+        assert len(merged["runs"]) == 1
+        assert len(merged["runs"][0]["results"]) == 21
+        automation = merged["runs"][0]["automationDetails"]
+        assert automation == {"id": "/skillevaluator/catalog"}
+        assert "name" not in automation
+
 
 def _blocking_result() -> ValidationResult:
     """Tier 1 validator result with one critical + one high finding."""

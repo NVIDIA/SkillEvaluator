@@ -1444,6 +1444,11 @@ def validate(
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
+    from skillevaluator.tier3.results_location import git_root_for
+
+    sarif_repository_root = git_root_for(target_path)
+    if sarif_repository_root is None:
+        sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -1463,6 +1468,8 @@ def validate(
         target_path=target_display,
         content_label=content_label,
         announce_paths=not quiet,
+        sarif_scan_root=target_path,
+        sarif_repository_root=sarif_repository_root,
     )
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on

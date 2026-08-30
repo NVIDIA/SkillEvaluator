@@ -101,24 +101,19 @@ jobs:
           import json
           import pathlib
 
-          schema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
-          runs = []
+          from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+          documents = []
           for raw in sorted(pathlib.Path("reports").rglob("*.sarif.json")):
-              payload = json.loads(raw.read_text(encoding="utf-8"))
-              skill = raw.parent.name if raw.parent.name != "reports" else "catalog"
-              for run in payload.get("runs", []):
-                  automation = run.setdefault("automationDetails", {})
-                  automation["id"] = f"/skillevaluator/{skill}"
-                  automation["name"] = f"SkillEvaluator ({skill})"
-                  runs.append(run)
-          merged = {
-              "$schema": schema,
-              "version": "2.1.0",
-              "runs": runs,
-          }
+              if raw.name == "catalog-sarif.json":
+                  continue
+              documents.append(json.loads(raw.read_text(encoding="utf-8")))
+          if not documents:
+              raise SystemExit(0)
+          merged = merge_catalog_sarif_documents(documents)
           out = pathlib.Path("reports/catalog-sarif.json")
           out.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-          print(f"merged {len(runs)} run(s) into {out}")
+          print(f"merged {len(documents)} child report(s) into one run at {out}")
           PY
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
           echo "path=reports/catalog-sarif.json" >> "$GITHUB_OUTPUT"

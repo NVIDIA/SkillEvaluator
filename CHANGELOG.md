@@ -12,6 +12,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--llm-verify` now refuses to send file context from paths outside the
+  skill root, including `..`, absolute paths, and outbound file symlinks.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories
   instead of any path containing those substrings, so files like `latest.py`
   are scanned.

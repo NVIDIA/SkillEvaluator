@@ -36,9 +36,10 @@ the terminal instead.
 | `json` | Machine-readable JSON (default) | CI needs to parse scores and findings |
 | `html` | Standalone HTML report (default) | A human needs to review or archive a run |
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
+| `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
 
-```bash title="One run, three report files"
-skillevaluator validate ./my-skill -r json,html,markdown -o reports
+```bash title="One run, four report files"
+skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 ```
 
 For gating a pipeline on the JSON output, see [Gate Your CI](ci-integration.mdx).
@@ -59,7 +60,7 @@ Report filenames follow two patterns, both under the output directory:
 | `context-optimization-check` | `skillevaluator-context` | Yes |
 | `dedup-scan` | `skillevaluator-dedup` | Yes |
 
-The extension matches the format (`.json`, `.html`, `.md`); the `cli` format
+The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`); the `cli` format
 prints to the terminal and never writes a file. A full `validate` run's
 timestamp is `YYYYMMDDHHMMSS`, so
 `-r json` produces something like `skillevaluator-output-20260709141530.json`

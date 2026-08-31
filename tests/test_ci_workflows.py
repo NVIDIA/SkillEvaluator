@@ -56,7 +56,10 @@ def _runs(job: dict[str, Any]) -> str:
 
 
 def _all_uses(workflow: dict[str, Any]) -> list[str]:
-    return [step["uses"] for job in workflow["jobs"].values() for step in job.get("steps", []) if "uses" in step]
+    """Every action reference: step-level actions and job-level reusable workflows."""
+    step_uses = [step["uses"] for job in workflow["jobs"].values() for step in job.get("steps", []) if "uses" in step]
+    job_uses = [job["uses"] for job in workflow["jobs"].values() if "uses" in job]
+    return step_uses + job_uses
 
 
 def _all_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
@@ -256,16 +259,22 @@ def test_publish_docs_installs_the_fern_version_the_repository_pins() -> None:
     second version that can drift from the one validation ran against.
     """
     job = _load("publish-docs.yml")["jobs"]["run"]
-    install_step = next(step for step in job["steps"] if "npm install" in step.get("run", ""))
+    install_step = next((step for step in job["steps"] if "npm install" in step.get("run", "")), None)
 
+    assert install_step is not None, "publish-docs.yml no longer installs the Fern CLI with npm"
     assert "fern/fern.config.json" in install_step["run"]
     assert "fern-api@$FERN_VERSION" in install_step["run"]
     assert not re.search(r"fern-api@\d", install_step["run"]), "Fern CLI version is hardcoded"
 
 
 def test_every_workflow_declares_least_privilege_permissions() -> None:
+    """A job-level permissions: block overrides the workflow-level one, so check both."""
     for workflow_name in _workflow_names():
         workflow = _load(workflow_name)
-        permissions = workflow.get("permissions")
-        assert permissions is not None, f"{workflow_name} inherits the repository default token scope"
-        assert permissions != "write-all", workflow_name
+        assert workflow.get("permissions") is not None, (
+            f"{workflow_name} inherits the repository default token scope"
+        )
+        for scope, permissions in [("workflow", workflow["permissions"])] + [
+            (f"job {job_id}", job["permissions"]) for job_id, job in workflow["jobs"].items() if "permissions" in job
+        ]:
+            assert permissions != "write-all", f"{workflow_name}: {scope}"

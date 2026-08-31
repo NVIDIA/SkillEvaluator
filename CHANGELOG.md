@@ -60,13 +60,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The docs-publishing workflow, the only one that puts a secret in a job
   environment, now pins `actions/checkout` to a commit SHA, declares
-  `permissions: contents: read`, sets `persist-credentials: false`, and pins
-  the `fern-api` install. `dco.yml` no longer persists checkout credentials
-  either.
+  `permissions: contents: read`, and sets `persist-credentials: false`.
+  `dco.yml` no longer persists checkout credentials either.
+- Docs are now published with the same Fern CLI version they are validated
+  with. `publish-docs.yml` derives it from `fern/fern.config.json`, as
+  `ci.yml` already did, instead of installing whatever `fern-api` resolved to
+  at run time.
 - Workflow hardening guards now glob `.github/workflows/` instead of a
   hardcoded two-file list, so every workflow — including any added later — must
   pin each action to a commit, avoid persisting checkout credentials, and
-  declare a least-privilege `permissions:` block.
+  declare a `permissions:` block. The guards also cover job-level
+  `permissions:` overrides and job-level reusable-workflow `uses:` references,
+  neither of which the step-level checks reached.
 
 ## 0.2.1 - 2026-08-24
 

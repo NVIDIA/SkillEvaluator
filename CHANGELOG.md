@@ -56,6 +56,18 @@ All notable changes to SkillEvaluator are documented in this file.
   directions at large case counts, and documents exact-rational omission
   markers.
 
+### Security
+
+- The docs-publishing workflow, the only one that puts a secret in a job
+  environment, now pins `actions/checkout` to a commit SHA, declares
+  `permissions: contents: read`, sets `persist-credentials: false`, and pins
+  the `fern-api` install. `dco.yml` no longer persists checkout credentials
+  either.
+- Workflow hardening guards now glob `.github/workflows/` instead of a
+  hardcoded two-file list, so every workflow — including any added later — must
+  pin each action to a commit, avoid persisting checkout credentials, and
+  declare a least-privilege `permissions:` block.
+
 ## 0.2.1 - 2026-08-24
 
 ### Added

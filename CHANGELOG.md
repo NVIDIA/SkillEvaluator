@@ -11,9 +11,32 @@ All notable changes to SkillEvaluator are documented in this file.
   and paths to per-skill report directories.
 - Catalog `validate` accepts `--workers N` to validate skills in parallel child
   processes (default 1 preserves the serial per-skill pipeline view).
+- SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
+  consumers. Findings map to rule IDs, severity levels, and file locations from
+  Tier 1 validation results.
 
 ### Fixed
 
+- `--llm-verify` now refuses to send file context from paths outside the
+  skill root, including `..`, absolute paths, and outbound file symlinks.
+- Gitleaks path allowlist now skips test/example/fixture/mock directories
+  instead of any path containing those substrings, so files like `latest.py`
+  are scanned.
+- The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
+  the results directory is not visible to the Docker daemon. Previously the smoke
+  run passed -- agent output travels over the Docker exec API rather than through
+  the mounts -- and every scored trial then failed with `RewardFileNotFoundError`
+  while the rewards sat inside the daemon's own filesystem.
+- Dead-link validation now uses the shared CommonMark parser, covering
+  reference-style and HTML links while preserving Markdown image checks and
+  consistently normalizing local destinations. Root-absolute URLs are ignored
+  instead of being treated as host paths; href-only diagnostics collapse
+  repeated links to the same normalized target. Invalid destination bytes do
+  not alias other files, relative URLs that normalize to absolute or
+  drive-relative paths are reported without lookup, lookup failures remain
+  per-link findings, and link diagnostics are bounded and escaped. Malformed
+  frontmatter and repeated unclosed HTML comments no longer abort or stall
+  supporting-document checks.
 - Tier 3 accuracy and custom goal judges now retry one malformed (including
   empty) or schema-invalid response with a 4096-token output budget before
   failing closed, preventing a transient formatting error from making an otherwise

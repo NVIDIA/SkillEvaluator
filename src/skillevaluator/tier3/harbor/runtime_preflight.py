@@ -11,6 +11,7 @@ import math
 import os
 import shlex
 import ssl
+import stat
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -841,10 +842,104 @@ def _first_trial_exception_detail(job_dir: Path) -> str:
     return ""
 
 
+_MAX_ARTIFACT_SCAN_ENTRIES = 4096
+
+
+def _is_link_or_reparse(info: os.stat_result) -> bool:
+    """Return whether an entry can redirect traversal to another host path."""
+    file_attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _has_visible_artifact(directory: Path, *, root: Path) -> bool:
+    """Return whether a directory tree contains a non-empty regular file.
+
+    The tree is written by the evaluated container, so nothing here follows
+    symlinks: a link could point anywhere on the host and make an unrelated file
+    look like proof that the mount worked. Links are skipped rather than
+    resolved, and only regular files reached without traversing one count.
+    """
+    try:
+        relative = directory.relative_to(root)
+    except ValueError:
+        return False
+
+    # ``lstat`` on only the final directory is not enough: an earlier path
+    # component can itself redirect the walk. Validate every component from the
+    # trusted job directory before entering the agent-authored tree.
+    current = root
+    for part in relative.parts:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError:
+            return False
+        if _is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            return False
+
+    pending = [current]
+    scanned = 0
+    while pending and scanned < _MAX_ARTIFACT_SCAN_ENTRIES:
+        current = pending.pop()
+        try:
+            entries = current.iterdir()
+            for entry in entries:
+                scanned += 1
+                if scanned > _MAX_ARTIFACT_SCAN_ENTRIES:
+                    return False
+                try:
+                    info = entry.lstat()
+                except OSError:
+                    continue
+                if _is_link_or_reparse(info):
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(entry)
+                elif stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _agent_artifact_dirs(trial_dir: Path, trial_result: Mapping[str, object]) -> list[Path]:
+    """Return the agent directories Harbor populates for one trial.
+
+    Single-step trials keep them at ``<trial>/agent``; multi-step trials keep one
+    per step at ``<trial>/steps/<step_name>/agent``. Harbor declares
+    ``StepConfig.name`` as a bare ``str``, so a step name may span several path
+    components -- and for the same reason it is not trusted to stay inside the
+    trial directory.
+    """
+    if isinstance(trial_result.get("agent_result"), dict):
+        return [trial_dir / "agent"]
+
+    step_results = trial_result.get("step_results")
+    if not isinstance(step_results, list):
+        return []
+
+    steps_dir = trial_dir / "steps"
+    agent_dirs: list[Path] = []
+    for step_result in step_results:
+        if not isinstance(step_result, dict):
+            continue
+        step_name = step_result.get("step_name")
+        if not isinstance(step_name, str):
+            continue
+        relative = Path(step_name)
+        if relative.anchor or not relative.parts:
+            continue
+        if any(part in ("", ".", "..") for part in relative.parts):
+            continue
+        agent_dirs.append(steps_dir.joinpath(*relative.parts) / "agent")
+    return agent_dirs
+
+
 def validate_harbor_agent_only_job_result(
     result_path: Path,
     *,
     expected_trials: int,
+    env_mode: str | None = None,
 ) -> tuple[bool, str]:
     """Validate a verification-disabled Harbor job and its agent result.
 
@@ -926,6 +1021,7 @@ def validate_harbor_agent_only_job_result(
             f"Harbor agent-only job did not produce {expected_trials} trial result(s); found {len(trial_result_paths)}"
         )
 
+    agent_artifact_dirs: list[Path] = []
     for trial_result_path in trial_result_paths:
         try:
             trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
@@ -933,6 +1029,8 @@ def validate_harbor_agent_only_job_result(
             return False, f"Harbor produced an unreadable trial result at {trial_result_path}: {exc}"
         if not isinstance(trial_result, dict):
             return False, f"Harbor trial result at {trial_result_path} is not a JSON object"
+        # Collected before the single-step branch below returns early via ``continue``.
+        agent_artifact_dirs.extend(_agent_artifact_dirs(trial_result_path.parent, trial_result))
         if "exception_info" not in trial_result:
             return False, f"Harbor trial result at {trial_result_path} is missing exception_info"
         if trial_result["exception_info"] is not None:
@@ -977,6 +1075,18 @@ def validate_harbor_agent_only_job_result(
                 return False, (
                     f"Harbor agent-only trial {trial_result_path.parent.name} step {step_name!r} has no agent result"
                 )
+
+    if env_mode == "docker" and not any(
+        _has_visible_artifact(agent_dir, root=job_dir) for agent_dir in agent_artifact_dirs
+    ):
+        return False, (
+            f"Harbor reported a completed agent run but left no agent artifacts under {job_dir}, "
+            "so the results directory is not visible to the Docker daemon. Container writes go to a "
+            "bind mount whose source the daemon resolves on its own machine, so a path outside the "
+            "daemon's shared roots becomes an empty directory there and no reward or agent file ever "
+            "reaches the host. Use a results directory the daemon shares -- colima and Lima mount only "
+            "$HOME by default -- or add this path to the daemon's file sharing configuration."
+        )
 
     return True, ""
 
@@ -1413,5 +1523,6 @@ def run_agent_runtime_preflight(
     ok, detail = validate_harbor_agent_only_job_result(
         jobs_dir / job_name / "result.json",
         expected_trials=1,
+        env_mode=env_mode,
     )
     return PreflightResult(ok, agent, model, _redact_detail(detail, run_env), job_name)

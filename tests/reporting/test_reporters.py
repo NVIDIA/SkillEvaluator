@@ -17,7 +17,14 @@ from skillevaluator.evaluation.tier3_report import (
     render_agent_eval_html_report,
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
-from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.reporting import (
+    BenchmarkReporter,
+    CLIReporter,
+    HTMLReporter,
+    JSONReporter,
+    MarkdownReporter,
+    SARIFReporter,
+)
 from skillevaluator.tier1.commands import emit_reports
 
 
@@ -420,6 +427,186 @@ class TestJSONReporter:
         """Test reporter name."""
         reporter = JSONReporter()
         assert reporter.name == "json"
+
+
+class TestSARIFReporter:
+    """Tests for SARIFReporter."""
+
+    def test_render_failure_produces_valid_sarif(self, failure_result: ValidationResult) -> None:
+        reporter = SARIFReporter(include_timestamp=False)
+        document = json.loads(reporter.render_all([failure_result]))
+
+        assert document["version"] == "2.1.0"
+        assert document["$schema"] == (
+            "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json"
+        )
+        run = document["runs"][0]
+        driver = run["tool"]["driver"]
+        assert driver["name"] == "SkillEvaluator"
+        assert driver["informationUri"] == "https://github.com/NVIDIA/SkillEvaluator"
+        assert len(driver["rules"]) == 2
+        assert len(run["results"]) == 2
+
+        critical = next(item for item in run["results"] if item["level"] == "error")
+        assert critical["ruleId"] == "SECRETS/aws-access-key-id"
+        assert critical["message"]["text"] == "AWS Access Key ID detected"
+        location = critical["locations"][0]["physicalLocation"]
+        assert location["artifactLocation"]["uri"] == "config/settings.py"
+        assert location["region"]["startLine"] == 15
+
+    def test_severity_mapping(self) -> None:
+        result = ValidationResult(validator_name="TEST", validator_description="test")
+        result.add_finding(
+            Finding(
+                category="TEST",
+                severity=Severity.MEDIUM,
+                check_name="medium-check",
+                message="medium issue",
+                file_path="SKILL.md",
+                line_number=3,
+            )
+        )
+        result.add_finding(
+            Finding(
+                category="TEST",
+                severity=Severity.LOW,
+                check_name="low-check",
+                message="low issue",
+                file_path="SKILL.md",
+            )
+        )
+
+        run = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))["runs"][0]
+        levels = {item["ruleId"]: item["level"] for item in run["results"]}
+        assert levels["TEST/medium-check"] == "warning"
+        assert levels["TEST/low-check"] == "note"
+
+    def test_emit_reports_writes_sarif_file(self, failure_result: ValidationResult) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            emit_reports(
+                [failure_result],
+                report_formats=("sarif",),
+                output_dir=output_dir,
+                basename="skillevaluator-security",
+                announce_paths=False,
+            )
+            sarif_path = output_dir / "skillevaluator-security.sarif.json"
+            assert sarif_path.is_file()
+            document = json.loads(sarif_path.read_text(encoding="utf-8"))
+            assert document["runs"][0]["results"]
+
+    def test_name_and_extension(self) -> None:
+        reporter = SARIFReporter()
+        assert reporter.name == "sarif"
+        assert reporter.get_file_extension() == ".sarif.json"
+
+    def test_incomplete_scan_marks_execution_unsuccessful(self) -> None:
+        result = ValidationResult(validator_name="BANDIT", validator_description="Bandit")
+        result.add_error("Bandit did not return valid JSON; scan did not complete")
+        result.mark_scan_incomplete("bandit")
+
+        invocation = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))["runs"][0]["invocations"][
+            0
+        ]
+        assert invocation["executionSuccessful"] is False
+        assert invocation["toolExecutionNotifications"][0]["message"]["text"] == "bandit scan did not complete"
+
+    def test_physical_location_uri_encodes_spaces_and_skips_invalid_lines(self) -> None:
+        root = Path("/workspace/my skill")
+        result = ValidationResult(validator_name="QUALITY", validator_description="quality")
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.MEDIUM,
+                check_name="spacing",
+                message="issue",
+                file_path=str(root / "SKILL.md"),
+                line_number=0,
+            )
+        )
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.LOW,
+                check_name="spacing",
+                message="issue",
+                file_path=str(root / "notes/readme.md"),
+                line_number=3,
+            )
+        )
+
+        run = json.loads(SARIFReporter(include_timestamp=False, workspace_root=root).render_all([result]))["runs"][0]
+        locations = [item["locations"][0]["physicalLocation"] for item in run["results"]]
+        assert locations[0]["artifactLocation"]["uri"] == "SKILL.md"
+        assert "region" not in locations[0]
+        assert locations[1]["artifactLocation"]["uri"] == "notes/readme.md"
+        assert locations[1]["region"]["startLine"] == 3
+
+    def test_nested_skill_path_relativized_to_repository_root(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        skill = repo / "skills" / "demo"
+        skill.mkdir(parents=True)
+        result = ValidationResult(validator_name="QUALITY", validator_description="quality")
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.MEDIUM,
+                check_name="spacing",
+                message="issue",
+                file_path="SKILL.md",
+                line_number=2,
+            )
+        )
+
+        run = json.loads(
+            SARIFReporter(
+                include_timestamp=False,
+                workspace_root=repo,
+                scan_root=skill,
+            ).render_all([result])
+        )["runs"][0]
+        uri = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        assert uri == "skills/demo/SKILL.md"
+
+    def test_merge_catalog_sarif_combines_into_single_run(self) -> None:
+        child = SARIFReporter(include_timestamp=False)
+        documents = []
+        for index in range(21):
+            result = ValidationResult(validator_name="TEST", validator_description="test")
+            result.add_finding(
+                Finding(
+                    category="TEST",
+                    severity=Severity.LOW,
+                    check_name=f"check-{index}",
+                    message="issue",
+                    file_path=f"skills/s{index}/SKILL.md",
+                )
+            )
+            documents.append(json.loads(child.render_all([result])))
+
+        from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+        merged = merge_catalog_sarif_documents(documents)
+        assert len(merged["runs"]) == 1
+        assert len(merged["runs"][0]["results"]) == 21
+        automation = merged["runs"][0]["automationDetails"]
+        assert automation == {"id": "/skillevaluator/catalog"}
+        assert "name" not in automation
+
+    def test_merge_catalog_sarif_preserves_incomplete_invocation(self) -> None:
+        result = ValidationResult(validator_name="BANDIT", validator_description="Bandit")
+        result.add_error("Bandit scan did not complete")
+        result.mark_scan_incomplete("bandit")
+        child = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))
+
+        from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+        merged = merge_catalog_sarif_documents([child])
+        invocations = merged["runs"][0]["invocations"]
+        assert invocations == child["runs"][0]["invocations"]
+        assert invocations[0]["executionSuccessful"] is False
+        assert invocations[0]["toolExecutionNotifications"][0]["descriptor"]["id"] == "incomplete/bandit"
 
 
 def _blocking_result() -> ValidationResult:

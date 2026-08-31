@@ -35,7 +35,17 @@ _SPDX_PATTERN = re.compile(SPDX_LICENSE_PATTERN, re.IGNORECASE)
 _LICENSE_SUFFIX_PATTERN = re.compile(r"(-license|-licence)$")
 _THE_PREFIX_PATTERN = re.compile(r"^(the-)?")
 _SPDX_EXPRESSION_SPLIT = re.compile(r"\s+(?:OR|AND|WITH)\s+", re.IGNORECASE)
-_SPDX_COMMENT_CLOSE = re.compile(r"\s*(?:\*/|-->)\s*$")
+
+
+def _strip_spdx_capture(raw: str) -> str:
+    """Drop inline comment terminators and trailing source after the SPDX value."""
+    raw = raw.split("#", 1)[0]
+    for marker in ("*/", "-->"):
+        idx = raw.find(marker)
+        if idx != -1:
+            raw = raw[:idx]
+    return raw.strip()
+
 
 # File reference indicators in license field values
 _FILE_REFERENCE_KEYWORDS = frozenset(["see ", "refer to ", "license.txt", "license.md", "copying"])
@@ -311,8 +321,7 @@ class LicenseValidator(ValidatorBase):
             with file_path.open(encoding="utf-8", errors="ignore") as f:
                 header = "".join(islice(f, LICENSE_HEADER_SCAN_LINES))
                 if match := _SPDX_PATTERN.search(header):
-                    raw = match.group(1).split("#", 1)[0]
-                    raw = _SPDX_COMMENT_CLOSE.sub("", raw).strip()
+                    raw = _strip_spdx_capture(match.group(1))
                     return raw or None
         except Exception as e:
             logger.debug("Could not scan %s: %s", file_path, e)

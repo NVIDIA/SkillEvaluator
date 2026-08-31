@@ -44,10 +44,10 @@ commands referenced below.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-r, --report [cli\|json\|html\|markdown]` | `cli` | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
+| `-r, --report [cli\|json\|html\|markdown\|sarif]` | `cli` | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
 | `-o, --output-dir DIRECTORY` | `reports` | Directory for generated reports. |
 
-In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The standalone commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Filename conventions and report anatomy live in [Reports & Results](reports.mdx).
+In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The standalone commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown` or `.sarif.json` with `-r sarif`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Filename conventions and report anatomy live in [Reports & Results](reports.mdx).
 
 **Exit codes.** Commands communicate through a small exit-code contract — this is what your CI gates on (see [Gate Your CI](ci-integration.mdx)):
 

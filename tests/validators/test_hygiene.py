@@ -392,6 +392,7 @@ pandas
             "requests==2.31.0",
             "requests~=2.31",
             "requests!=2.30.0",
+            "requests @ https://example.invalid/requests.whl",
             "requests @ https://example.invalid/a;v=1/requests.whl",
             'requests @ https://example.invalid/requests.whl ; python_version < "3.13"',
         ],

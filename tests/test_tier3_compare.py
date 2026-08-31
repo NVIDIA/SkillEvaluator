@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.commands import _overall_score_for_display, compare_results
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.commands import _overall_score_for_display, _summary_overall, compare_results
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, DEFAULT_SCORE_POLICY
 from skillevaluator.tier3.output_provenance import mark_generated_output_root
 
 
@@ -35,6 +35,104 @@ def test_compare_overall_uses_the_canonical_dimension_mean() -> None:
     }
 
     assert _overall_score_for_display(scores, DEFAULT_METRICS) == pytest.approx(0.49)
+
+
+def test_overall_display_preserves_pre_policy_default_v2_semantics() -> None:
+    scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    assert _overall_score_for_display(scores, DEFAULT_METRICS, score_policy=None) == pytest.approx(0.5583)
+    assert _overall_score_for_display(
+        scores,
+        DEFAULT_METRICS,
+        persisted_overall=0.5583,
+        score_policy=None,
+    ) == pytest.approx(0.5583)
+    assert _overall_score_for_display(
+        scores,
+        DEFAULT_METRICS,
+        persisted_overall=0.5583,
+        score_policy=DEFAULT_SCORE_POLICY,
+    ) == pytest.approx(0.49)
+
+
+@pytest.mark.parametrize("invalid_overall", [2.0, -0.1, float("inf"), 10**4000, True])
+def test_historical_overall_rejects_invalid_persisted_scores(invalid_overall: object) -> None:
+    scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    assert _summary_overall({"overall_score": invalid_overall}) is None
+    assert _overall_score_for_display(
+        scores,
+        DEFAULT_METRICS,
+        persisted_overall=invalid_overall,
+        score_policy=None,
+    ) == pytest.approx(0.5583)
+
+
+def test_compare_carries_persisted_historical_overall(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    summary = run_dir / "opencode" / "with-skill" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps(
+            {
+                "execution_status": "succeeded",
+                "scores": {
+                    "security": 0.3875,
+                    "skill_execution": 0.3875,
+                    "skill_efficiency": 0.3875,
+                    "accuracy": 0.3875,
+                    "goal_accuracy": 0.9,
+                    "behavior_check": 0.9,
+                },
+                "overall_score": 0.5583,
+                "metric_set": "skill-evaluator-default-v2",
+                "metrics": list(DEFAULT_METRICS),
+                "num_trials": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_summary = run_dir / "opencode" / "without-skill" / "summary.json"
+    baseline_summary.parent.mkdir(parents=True)
+    baseline_summary.write_text(
+        json.dumps(
+            {
+                "execution_status": "succeeded",
+                "scores": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "overall_score": 0.5,
+                "metric_set": "skill-evaluator-default-v2",
+                "metrics": list(DEFAULT_METRICS),
+                "num_trials": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+    output = capsys.readouterr().out
+    assert "0.56" in output
+    assert "0.49" not in output
+    assert "+0.06" in output
 
 
 def _write_authentic_pre_status_run(root: Path, run_id: str, *, score: float = 0.8) -> Path:

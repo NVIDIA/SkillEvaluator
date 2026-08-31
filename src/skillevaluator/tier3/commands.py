@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -36,7 +37,13 @@ from skillevaluator.tier3.harbor import (
     HARBOR_AGENTS_SUPPORTED,
     canonical_agent_name,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, overall_score_from_metrics
+from skillevaluator.tier3.harbor.metrics import (
+    DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
+    LEGACY_METRICS,
+    LEGACY_SCORE_POLICY,
+    overall_score_from_metrics,
+)
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
     ProgressEvent,
@@ -996,16 +1003,25 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                         "timestamp": ts_dir.name,
                         "path": str(agent_dir),
                         "num_trials": data.get("num_trials", "?"),
+                        "overall_with_skill": _summary_overall(data),
+                        "score_policy_with_skill": _summary_score_policy(data),
                     }
                     wo_summary = agent_dir / "without-skill" / "summary.json"
                     if wo_summary.exists():
                         try:
+                            wo_data = json.loads(wo_summary.read_text(encoding="utf-8"))
                             wo_scores = _summary_scores(
-                                json.loads(wo_summary.read_text(encoding="utf-8")),
+                                wo_data,
                                 allow_missing_status=allow_missing_status,
                             )
                             if wo_scores:
                                 root_without[agent_name] = wo_scores
+                                root_meta[agent_name].update(
+                                    {
+                                        "overall_without_skill": _summary_overall(wo_data),
+                                        "score_policy_without_skill": _summary_score_policy(wo_data),
+                                    }
+                                )
                         except (ValueError, OSError):
                             pass
         if root_with:
@@ -1045,10 +1061,21 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     table.add_row(*[""] * (1 + sum(2 if agent in agent_without else 1 for agent in agents)))
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
     for agent in agents:
-        with_avg = _overall_score_for_display(agent_with[agent], overall_metrics)
+        meta = agent_meta[agent]
+        with_avg = _overall_score_for_display(
+            agent_with[agent],
+            overall_metrics,
+            persisted_overall=meta.get("overall_with_skill"),
+            score_policy=meta.get("score_policy_with_skill"),
+        )
         overall_row.append(Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}"))
         if agent in agent_without:
-            without_avg = _overall_score_for_display(agent_without[agent], overall_metrics)
+            without_avg = _overall_score_for_display(
+                agent_without[agent],
+                overall_metrics,
+                persisted_overall=meta.get("overall_without_skill"),
+                score_policy=meta.get("score_policy_without_skill"),
+            )
             delta = with_avg - without_avg
             delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
             delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
@@ -1087,6 +1114,15 @@ def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False)
     return scores
 
 
+def _summary_overall(data: dict[str, Any]) -> float | None:
+    return _unit_interval_score(data.get("overall_score"))
+
+
+def _summary_score_policy(data: dict[str, Any]) -> str | None:
+    value = data.get("score_policy")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     has_default_scores = any(any(metric in scores for metric in DEFAULT_METRICS) for scores in agent_with.values())
     if has_default_scores:
@@ -1106,8 +1142,42 @@ def _safe_score(scores: dict[str, float], metric: str) -> float:
     return float(value) if isinstance(value, int | float) else 0.0
 
 
-def _overall_score_for_display(scores: dict[str, float], metrics: tuple[str, ...]) -> float:
-    """Use the canonical policy while preserving partial historical displays."""
+def _unit_interval_score(value: object) -> float | None:
+    """Return a finite score in the documented 0.0 to 1.0 range."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) and 0.0 <= numeric <= 1.0 else None
+
+
+def _overall_score_for_display(
+    scores: dict[str, float],
+    metrics: tuple[str, ...],
+    *,
+    persisted_overall: object = None,
+    score_policy: object = DEFAULT_SCORE_POLICY,
+) -> float:
+    """Honor persisted score truth before inferring a policy from metric names."""
+    recorded_overall = _unit_interval_score(persisted_overall)
+
+    if score_policy == DEFAULT_SCORE_POLICY:
+        score = overall_score_from_metrics(scores, metrics)
+        if score is not None:
+            return score
+
+    if recorded_overall is not None:
+        return recorded_overall
+
+    if score_policy == LEGACY_SCORE_POLICY or (score_policy is None and metrics == DEFAULT_METRICS):
+        values = tuple(scores.get(metric) for metric in metrics)
+        if values and all(
+            isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) for value in values
+        ):
+            return round(sum(float(value) for value in values) / len(values), 4)
+
     score = overall_score_from_metrics(scores, metrics)
     if score is not None:
         return score

@@ -30,7 +30,12 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, DEFAULT_SCORE_POLICY, PARTIAL_SCORE_POLICY
+from skillevaluator.tier3.harbor.metrics import (
+    DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
+    LEGACY_SCORE_POLICY,
+    PARTIAL_SCORE_POLICY,
+)
 from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
 
 
@@ -297,6 +302,175 @@ def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path:
     assert payload["overall_score"] is not None
     assert payload["score_policy"] == PARTIAL_SCORE_POLICY
     assert payload["agents"]["opencode"]["evaluators"]["security"]["with_skill"] == 0.8
+
+
+@pytest.mark.parametrize(
+    ("stored_overall", "recorded_policy", "expected_policy", "expected_score"),
+    [
+        pytest.param(0.5583, None, LEGACY_SCORE_POLICY, 0.5583, id="stored-historical-overall"),
+        pytest.param(None, None, LEGACY_SCORE_POLICY, 0.5583, id="recomputed-historical-overall"),
+        pytest.param(2.0, None, LEGACY_SCORE_POLICY, 0.5583, id="out-of-range-overall"),
+        pytest.param(10**4000, None, LEGACY_SCORE_POLICY, 0.5583, id="overflowing-overall"),
+        pytest.param(None, DEFAULT_SCORE_POLICY, DEFAULT_SCORE_POLICY, 0.49, id="current-policy"),
+    ],
+)
+def test_default_v2_rerender_respects_recorded_or_historical_policy(
+    tmp_path: Path,
+    stored_overall: object,
+    recorded_policy: str | None,
+    expected_policy: str,
+    expected_score: float,
+) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260709_120009"
+    summary = run_dir / "opencode" / "with-skill" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+    summary_payload = {
+        "execution_status": "succeeded",
+        "execution_errors": [],
+        "expected_attempts": 1,
+        "scored_attempts": 1,
+        "scores": scores,
+        "metric_set": "skill-evaluator-default-v2",
+        "metrics": list(DEFAULT_METRICS),
+        "num_trials": 0,
+    }
+    if stored_overall is not None:
+        summary_payload["overall_score"] = stored_overall
+    if recorded_policy is not None:
+        summary_payload["score_policy"] = recorded_policy
+    summary.write_text(json.dumps(summary_payload), encoding="utf-8")
+    if recorded_policy is None:
+        comparison_summary = run_dir / "codex" / "with-skill" / "summary.json"
+        comparison_summary.parent.mkdir(parents=True)
+        comparison_summary.write_text(
+            json.dumps(
+                {
+                    **summary_payload,
+                    "scores": dict.fromkeys(DEFAULT_METRICS, 0.55),
+                    "overall_score": 0.55,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "attempt_policy.json").write_text(
+            json.dumps(
+                {
+                    "max_attempts": 1,
+                    "pass_threshold": 0.5,
+                    "stop_on_pass": False,
+                    "score_definition": "overall = mean(security, skill_execution, skill_efficiency, accuracy, goal_accuracy, behavior_check)",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["overall_score"] == pytest.approx(expected_score)
+    assert payload["agents"]["opencode"]["with_skill"] == pytest.approx(expected_score)
+    assert payload["score_policy"] == expected_policy
+    assert payload["attempt_policy"]["score_policy"] == expected_policy
+    if expected_policy == LEGACY_SCORE_POLICY:
+        assert payload["best_agent"] == "opencode"
+    definition = payload["attempt_policy"]["score_definition"]
+    if expected_policy == LEGACY_SCORE_POLICY:
+        assert definition.startswith("overall = mean(security,")
+    else:
+        assert "mean(Security, Correctness, Discoverability, Effectiveness, Efficiency)" in definition
+
+
+def test_default_v2_rerender_preserves_historical_baseline_lift_and_pass_at_k(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260709_120010"
+    agent_dir = run_dir / "opencode"
+    with_scores = {
+        "security": 0.5,
+        "skill_execution": 0.5,
+        "skill_efficiency": 0.5,
+        "accuracy": 0.5,
+        "goal_accuracy": 1.0,
+        "behavior_check": 1.0,
+    }
+    without_scores = {
+        "security": 0.75,
+        "skill_execution": 0.75,
+        "skill_efficiency": 0.75,
+        "accuracy": 0.75,
+        "goal_accuracy": 0.25,
+        "behavior_check": 0.25,
+    }
+    with_pass = {"rate": 0.75, "passed_cases": 3, "total_cases": 4}
+    without_pass = {"rate": 0.25, "passed_cases": 1, "total_cases": 4}
+
+    for condition, scores, overall, pass_at_k in (
+        ("with-skill", with_scores, 0.6667, with_pass),
+        ("without-skill", without_scores, 0.5833, without_pass),
+    ):
+        summary = agent_dir / condition / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                    "scores": scores,
+                    "overall_score": overall,
+                    "metric_set": "skill-evaluator-default-v2",
+                    "metrics": list(DEFAULT_METRICS),
+                    "num_trials": 0,
+                    "pass_at_k": pass_at_k,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    (agent_dir / "lift.json").write_text(
+        json.dumps({"overall": {"with_skill": 0.6667, "without_skill": 0.5833, "delta": 0.0833}}),
+        encoding="utf-8",
+    )
+    pass_lift = {"with_skill": 0.75, "without_skill": 0.25, "delta": 0.5}
+    (agent_dir / "pass_at_k_lift.json").write_text(json.dumps(pass_lift), encoding="utf-8")
+    (run_dir / "attempt_policy.json").write_text(
+        json.dumps(
+            {
+                "max_attempts": 1,
+                "pass_threshold": 0.5,
+                "stop_on_pass": False,
+                "score_definition": "overall = mean(security, skill_execution, skill_efficiency, accuracy, goal_accuracy, behavior_check)",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    agent = payload["agents"]["opencode"]
+    assert payload["score_policy"] == LEGACY_SCORE_POLICY
+    assert agent["with_skill"] == pytest.approx(0.6667)
+    assert agent["baseline"] == pytest.approx(0.5833)
+    assert agent["lift"] == pytest.approx(0.0833)
+    assert agent["pass_at_k"] == {
+        "with_skill": with_pass,
+        "without_skill": without_pass,
+        "lift": pass_lift,
+    }
 
 
 def test_canonical_report_prefers_agentskills_dataset_fields() -> None:

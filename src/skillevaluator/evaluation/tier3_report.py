@@ -81,6 +81,18 @@ def _finite_float(value: object) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _unit_interval_score(value: object) -> float | None:
+    """Return a finite score in the documented 0.0 to 1.0 range."""
+    numeric = _finite_float(value)
+    return numeric if numeric is not None and 0.0 <= numeric <= 1.0 else None
+
+
+def _skill_lift_value(value: object) -> float | None:
+    """Return a finite Skill Lift value in its documented -1.0 to 1.0 range."""
+    numeric = _finite_float(value)
+    return numeric if numeric is not None and -1.0 <= numeric <= 1.0 else None
+
+
 def _sanitize_json_numbers(value: Any) -> Any:
     """Copy a canonical payload while replacing non-finite floats with JSON null."""
     if isinstance(value, float):
@@ -444,11 +456,13 @@ def agent_eval_result_from_directory(
 
     run_truth = _run_truth_metadata(run_dir, engine_result, load_dataset_snapshot(run_dir))
     dataset = run_truth.get("dataset") or load_staged_harbor_dataset(run_dir)
+    attempt_policy = _read_attempt_policy(run_dir)
     payload = build_agent_eval_payload(
         skill_path.name,
         agents,
         dataset=dataset,
-        attempt_policy=_read_attempt_policy(run_dir),
+        attempt_policy=attempt_policy,
+        historical_missing_score_policy="score_policy" not in attempt_policy,
         run_config=_read_run_config(run_dir),
         env_mode=env_mode,
         runtime_seconds=_runtime_seconds(engine_result),
@@ -552,6 +566,7 @@ def build_agent_eval_payload(
     persisted_dataset_summary: dict[str, Any] | None = None,
     dataset_digest: str | None = None,
     dataset_digest_algorithm: str | None = None,
+    historical_missing_score_policy: bool = False,
     use_llm_judge: bool = True,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
@@ -574,12 +589,40 @@ def build_agent_eval_payload(
     )
 
     metrics = metrics_for_agents(agents)
+    policy_metrics = _policy_metrics_from_agents(agents, metrics)
+
+    from skillevaluator.tier3.harbor.metrics import (
+        DEFAULT_METRICS,
+        LEGACY_SCORE_POLICY,
+        score_policy_for_metrics,
+    )
+
+    policy = dict(attempt_policy) if attempt_policy else _default_attempt_policy()
+    if not attempt_policy:
+        policy.pop("score_definition", None)
+        policy.pop("score_policy", None)
+    stored_policy = policy.get("score_policy")
+    if isinstance(stored_policy, str) and stored_policy.strip():
+        policy["score_policy"] = stored_policy.strip()
+    else:
+        recorded_policy = _recorded_score_policy(agents)
+        if recorded_policy is not None:
+            policy["score_policy"] = recorded_policy
+        elif historical_missing_score_policy and policy_metrics == DEFAULT_METRICS:
+            policy["score_policy"] = LEGACY_SCORE_POLICY
+        else:
+            policy["score_policy"] = score_policy_for_metrics(policy_metrics)
+    policy.setdefault(
+        "score_definition",
+        _score_definition_for_policy(policy_metrics, policy["score_policy"]),
+    )
+
     report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
     agent_payloads: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
         info = agents[name]
         model = _agent_model(name, info, run_config)
-        agent_payloads[name] = _build_agent(name, info, metrics, model)
+        agent_payloads[name] = _build_agent(name, info, metrics, model, policy["score_policy"])
 
     if not agent_payloads:
         return None
@@ -616,18 +659,6 @@ def build_agent_eval_payload(
 
     metric_ids = list(best.get("evaluators", {}).keys())
     metric_labels = _metric_labels(metric_ids)
-    policy_metrics = tuple(metric_ids) if metric_ids else tuple(metrics)
-
-    from skillevaluator.tier3.harbor.metrics import score_definition, score_policy_for_metrics
-
-    if attempt_policy:
-        policy = dict(attempt_policy)
-        policy.setdefault("score_definition", score_definition(policy_metrics))
-        policy.setdefault("score_policy", score_policy_for_metrics(policy_metrics))
-    else:
-        policy = _default_attempt_policy()
-        policy["score_definition"] = score_definition(policy_metrics)
-        policy["score_policy"] = score_policy_for_metrics(policy_metrics)
     canonical_trials = _flatten_trials(agent_payloads)
     public_dataset = deduplicate_dataset_entries([entry for entry in (dataset or []) if isinstance(entry, dict)])
     computed_dataset_truth = (
@@ -1169,6 +1200,58 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
 # ---------------------------------------------------------------------------
 
 
+def _policy_metrics_from_agents(
+    agents: dict[str, dict[str, Any]],
+    metrics: list[str],
+) -> tuple[str, ...]:
+    available = tuple(
+        metric
+        for metric in metrics
+        if any(
+            _finite_float(scores.get(metric)) is not None
+            for info in agents.values()
+            for scores in (info.get("with_skill"), info.get("without_skill"))
+            if isinstance(scores, dict)
+        )
+    )
+    return available or tuple(metrics)
+
+
+def _recorded_score_policy(agents: dict[str, dict[str, Any]]) -> str | None:
+    recorded: set[str] = set()
+    for info in agents.values():
+        for condition, scores_key, policy_key in (
+            ("with_skill", "with_skill", "score_policy_with_skill"),
+            ("without_skill", "without_skill", "score_policy_without_skill"),
+        ):
+            scores = info.get(scores_key)
+            policy = info.get(policy_key)
+            if (
+                _condition_quality_available(info, condition)
+                and isinstance(scores, dict)
+                and scores
+                and isinstance(policy, str)
+                and policy.strip()
+            ):
+                recorded.add(policy.strip())
+    return next(iter(recorded)) if len(recorded) == 1 else None
+
+
+def _score_definition_for_policy(metrics: tuple[str, ...], score_policy: str) -> str:
+    from skillevaluator.tier3.harbor.metrics import LEGACY_SCORE_POLICY, score_definition
+
+    if score_policy == LEGACY_SCORE_POLICY and metrics:
+        return f"overall = mean({', '.join(metrics)}) [{LEGACY_SCORE_POLICY}]"
+    return score_definition(metrics)
+
+
+def _complete_metric_mean(scores: dict[str, Any], metrics: list[str]) -> float | None:
+    values = tuple(_finite_float(scores.get(metric)) for metric in metrics)
+    if not values or any(value is None for value in values):
+        return None
+    return round(sum(value for value in values if value is not None) / len(values), 4)
+
+
 def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
     """Return whether a condition may contribute score-bearing report fields."""
     conditions = info.get("conditions")
@@ -1184,9 +1267,11 @@ def _build_agent(
     info: dict[str, Any],
     metrics: list[str],
     model: str | None,
+    score_policy: str,
 ) -> dict[str, Any]:
     from skillevaluator.tier3.harbor.metrics import (
         LEGACY_METRICS,
+        LEGACY_SCORE_POLICY,
         canonical_dimension_mean,
         overall_score_from_metrics,
     )
@@ -1210,25 +1295,44 @@ def _build_agent(
     )
     with_dimension_values = [d["with_skill"] for d in dimensions]
     baseline_dimension_values = [d["baseline"] for d in dimensions]
-    if tuple(metrics) == LEGACY_METRICS:
-        overall_ws = overall_score_from_metrics(with_scores, LEGACY_METRICS)
-        overall_bl = overall_score_from_metrics(without_scores, LEGACY_METRICS)
+    overall_ws = None
+    overall_bl = None
+    if score_policy == LEGACY_SCORE_POLICY:
+        overall_ws = _unit_interval_score(info.get("overall_with_skill")) if with_quality_available else None
+        overall_bl = _unit_interval_score(info.get("overall_without_skill")) if baseline_quality_available else None
+        if overall_ws is None:
+            overall_ws = _complete_metric_mean(with_scores, metrics)
+        if overall_bl is None:
+            overall_bl = _complete_metric_mean(without_scores, metrics)
+    elif tuple(metrics) == LEGACY_METRICS:
+        if overall_ws is None:
+            overall_ws = overall_score_from_metrics(with_scores, LEGACY_METRICS)
+        if overall_bl is None:
+            overall_bl = overall_score_from_metrics(without_scores, LEGACY_METRICS)
     else:
-        overall_ws = canonical_dimension_mean(with_dimension_values)
-        overall_bl = canonical_dimension_mean(baseline_dimension_values)
+        if overall_ws is None:
+            overall_ws = canonical_dimension_mean(with_dimension_values)
+        if overall_bl is None:
+            overall_bl = canonical_dimension_mean(baseline_dimension_values)
     if overall_ws is None:
         overall_ws = _mean(with_dimension_values)
     if overall_bl is None:
         overall_bl = _mean(baseline_dimension_values)
     if overall_ws is None and not metrics and with_quality_available:
-        overall_ws = _finite_float(info.get("overall_with_skill"))
+        overall_ws = _unit_interval_score(info.get("overall_with_skill"))
         if overall_ws is None and info.get("rewards_complete") is not False:
             overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
     if overall_bl is None and not metrics and baseline_quality_available:
-        overall_bl = _finite_float(info.get("overall_without_skill"))
+        overall_bl = _unit_interval_score(info.get("overall_without_skill"))
         if overall_bl is None and info.get("rewards_baseline_complete") is not False:
             overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
     overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
+    if score_policy == LEGACY_SCORE_POLICY:
+        recorded_overall_lift = lift_data.get("overall")
+        if isinstance(recorded_overall_lift, dict):
+            recorded_delta = _skill_lift_value(recorded_overall_lift.get("delta"))
+            if recorded_delta is not None:
+                overall_lift = recorded_delta
 
     trials = _normalize_trials(info.get("rewards") or [], metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)

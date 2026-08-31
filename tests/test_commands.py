@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from skillevaluator import cli as cli_module
 from skillevaluator.cli import cli
 from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_agents
 
@@ -357,6 +358,8 @@ def test_validate_catalog_workers_runs_skills_in_parallel() -> None:
                 "--no-dedup",
                 "--checks",
                 "quality",
+                "-r",
+                "html",
                 "-o",
                 "out",
             ],
@@ -398,6 +401,78 @@ def test_validate_catalog_workers_accepts_options_before_target_path() -> None:
         summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
         assert summary["total"] == 1
         assert summary["passed"] == 1
+
+
+def test_validate_catalog_workers_preserves_min_score_and_json_format() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-r",
+                "json",
+                "-o",
+                "out",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert any(Path("out/simple").glob("skillevaluator-output-*.json"))
+
+
+def test_validate_catalog_workers_cli_only_report_format() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-r",
+                "cli",
+                "-o",
+                "out",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert not any(Path("out/simple").glob("*.html"))
+        assert not any(Path("out/simple").glob("skillevaluator-output-*.json"))
+
+
+def test_catalog_skill_entry_skips_stale_json_without_report_name(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "simple"
+    skill_dir.mkdir()
+    stale = skill_dir / "skillevaluator-output-19990101T000000.json"
+    stale.write_text(
+        json.dumps({"overall_passed": True, "severity_counts": {"high": 7}}),
+        encoding="utf-8",
+    )
+    entry = cli_module._catalog_skill_entry(
+        "simple",
+        skill_dir,
+        passed=False,
+        reason="validation failed",
+        json_report_name=None,
+    )
+    assert "overall_passed" not in entry
+    assert "severity_counts" not in entry
 
 
 def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:

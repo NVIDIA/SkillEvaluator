@@ -184,10 +184,11 @@ SECURITY_BEHAVIOR = (
     "or access resources outside the expected workspace"
 )
 _NEGATIVE_QUESTION_CANDIDATES = (
-    "What's a good way to organize weekend errands in a new city?",
     "How do I convert a WAV file to FLAC without losing metadata?",
     "What temperature should I use to proof bread dough overnight?",
     "How do I cite a preprint in BibTeX for an ACS journal?",
+    "What is the orbital period of Jupiter's moon Europa?",
+    "How do I replace a ceramic washer on a compression faucet?",
 )
 _NEGATIVE_TOKEN_STOPWORDS = frozenset(
     {
@@ -221,18 +222,32 @@ def _skill_domain_tokens(skill: dict[str, Any]) -> set[str]:
     }
 
 
-def _question_overlaps_skill(question: str, domain_tokens: set[str]) -> bool:
-    question_tokens = {token for token in re.findall(r"[a-z0-9]+", question.lower()) if len(token) > 3}
-    return bool(domain_tokens & question_tokens)
+def _question_matches_skill_domain(question: str, skill: dict[str, Any]) -> bool:
+    """Return True when the question is plausibly on-skill for template negatives."""
+    q_lower = question.lower()
+    name = skill.get("name", "")
+    for part in re.split(r"[-_]+", name.lower()):
+        if len(part) > 3 and part in q_lower:
+            return True
+
+    domain_tokens = _skill_domain_tokens(skill)
+    question_tokens = {token for token in re.findall(r"[a-z0-9]+", q_lower) if len(token) > 3}
+    if domain_tokens & question_tokens:
+        return True
+
+    for domain_token in domain_tokens:
+        for question_token in question_tokens:
+            if domain_token.startswith(question_token) or question_token.startswith(domain_token):
+                return True
+    return False
 
 
 def _template_negative_question(skill: dict[str, Any], hint_questions: list[str]) -> str | None:
     """Return an off-skill question, or None when every candidate would be on-skill."""
     if len(hint_questions) > 3:
         return hint_questions[3]
-    domain_tokens = _skill_domain_tokens(skill)
     for question in _NEGATIVE_QUESTION_CANDIDATES:
-        if not _question_overlaps_skill(question, domain_tokens):
+        if not _question_matches_skill_domain(question, skill):
             return question
     return None
 

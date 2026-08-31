@@ -324,7 +324,7 @@ def test_no_llm_negative_case_does_not_name_the_skill():
 
 
 def test_no_llm_negative_case_skips_on_skill_errand_prompt():
-    """A city/errand skill must not receive the errand-planning candidate as a negative."""
+    """Errand-themed skills must not receive planning/errand candidates as negatives."""
     skill = {
         "name": "errand-planner",
         "description": "Organizes weekend errands efficiently in a new city",
@@ -335,7 +335,23 @@ def test_no_llm_negative_case_skips_on_skill_errand_prompt():
     negative = next(c for c in cases if c["id"] == "errand-planner-neg-001")
     assert negative["expected_skill"] is None
     assert "errand" not in negative["question"].lower()
-    assert "city" not in negative["question"].lower()
+    assert "organize" not in negative["question"].lower()
+    assert "weekend" not in negative["question"].lower()
+
+
+def test_no_llm_day_planner_gets_off_domain_negative():
+    """Planning skills without token overlap still must not get errand-style negatives."""
+    skill = {
+        "name": "day-planner",
+        "description": "Plans grocery runs and appointments across a busy week",
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "day-planner-neg-001")
+    assert negative["expected_skill"] is None
+    assert "errand" not in negative["question"].lower()
+    assert "organize" not in negative["question"].lower()
     assert "weekend" not in negative["question"].lower()
 
 
@@ -344,9 +360,9 @@ def test_no_llm_omits_negative_when_every_candidate_overlaps():
     skill = {
         "name": "kitchen-helper",
         "description": (
-            "Organizes weekend errands in a new city, converts WAV files to FLAC "
-            "without losing metadata, proofs bread dough overnight, and cites "
-            "preprints in BibTeX for ACS journals"
+            "Converts WAV files to FLAC without losing metadata, proofs bread dough overnight, "
+            "cites preprints in BibTeX for ACS journals, tracks Europa's orbital period, and "
+            "replaces ceramic washers on compression faucets"
         ),
         "scripts": [],
         "eval_prompt": "",

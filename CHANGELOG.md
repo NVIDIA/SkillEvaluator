@@ -72,6 +72,21 @@ All notable changes to SkillEvaluator are documented in this file.
   declare a `permissions:` block. The guards also cover job-level
   `permissions:` overrides and job-level reusable-workflow `uses:` references,
   neither of which the step-level checks reached.
+- The Fern CLI install in `publish-docs.yml` and `ci.yml`'s docs-validation
+  lane now passes `--ignore-scripts`, so a compromised package anywhere in
+  `fern-api`'s transitive dependency tree can no longer run lifecycle code in
+  the job that runs immediately before `FERN_TOKEN` is used. `--omit=optional`
+  also drops the tree's only optional dependency, `@boundaryml/baml`, along
+  with the native binaries it pulls in; pinning `fern-api`'s own version does
+  not pin what its dependencies resolve to on each run, since npm re-resolves
+  the whole tree from semver ranges every time. A guard now asserts every
+  workflow's `npm install` carries `--ignore-scripts`.
+- The action-pinning guard now accepts a same-repo composite action or
+  reusable workflow (`uses: ./...`) without requiring a commit SHA, since
+  GitHub always resolves a local reference from the caller's own commit and
+  nothing about it can float. A local reference that escapes the repository
+  (e.g. `./../outside`) is still rejected, and a `docker://` reference is
+  unaffected by the exemption.
 
 ## 0.2.1 - 2026-08-24
 

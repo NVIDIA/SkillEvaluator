@@ -80,8 +80,12 @@ def _has_api_documentation(content: str) -> bool:
     return any(re.search(pattern, content, re.IGNORECASE) for pattern in api_patterns)
 
 
-def _normalized_local_path(href: str) -> str | None:
-    """Return a once-decoded, normalized local file path from a link destination."""
+def _normalized_quality_local_path(href: str) -> str | None:
+    """Normalize a local path using Quality Score's legacy classification order.
+
+    This intentionally remains separate from Hygiene's stricter path policy:
+    issue #108 requires this PR to leave existing Quality scores unchanged.
+    """
     href = _URL_EDGE_C0_OR_SPACE_RE.sub("", href)
     try:
         parsed = urlsplit(href)
@@ -106,7 +110,7 @@ def _normalized_local_path(href: str) -> str | None:
 def _has_nested_markdown_reference(content: str) -> bool:
     """Return whether a reference document links to another local Markdown document."""
     for target in markdown_link_targets(content):
-        path = _normalized_local_path(target)
+        path = _normalized_quality_local_path(target)
         if path is None or not path.casefold().endswith(".md"):
             continue
         if path.casefold() == "../skill.md":
@@ -384,7 +388,7 @@ class QualityScoreValidator(ValidatorBase):
     def _references_readme(content: str) -> bool:
         """Return whether SKILL.md contains a parsed Markdown link to README.md."""
         for link_target in markdown_link_targets(content):
-            path = _normalized_local_path(link_target)
+            path = _normalized_quality_local_path(link_target)
             if path is not None and path.casefold() == "readme.md":
                 return True
         return False

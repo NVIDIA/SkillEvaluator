@@ -263,11 +263,20 @@ def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path:
     assert observed_targets == [target.resolve()]
 
 
-@pytest.mark.parametrize("extension", [".json", ".html", ".md"])
+@pytest.mark.parametrize(
+    ("extension", "report_formats"),
+    [
+        (".json", "json,html,markdown"),
+        (".html", "json,html,markdown"),
+        (".md", "json,html,markdown"),
+        (".sarif.json", "sarif"),
+    ],
+)
 def test_similarity_cli_rejects_catalog_collision_with_every_selected_report(
     tmp_path: Path,
     monkeypatch,
     extension: str,
+    report_formats: str,
 ) -> None:
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -289,7 +298,7 @@ def test_similarity_cli_rejects_catalog_collision_with_every_selected_report(
             "--save-catalog",
             str(catalog),
             "-r",
-            "json,html,markdown",
+            report_formats,
             "-o",
             str(reports),
         ],

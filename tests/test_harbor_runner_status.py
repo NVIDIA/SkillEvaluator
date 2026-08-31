@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -559,6 +560,60 @@ def test_merge_attempt_jobs_rejects_source_destination_overlap(tmp_path: Path, r
         runner._merge_attempt_jobs([job_dir], aggregate_dir)
 
     assert marker.read_text(encoding="utf-8") == "source"
+
+
+@pytest.mark.parametrize(
+    "task_toml",
+    [
+        "[agent]\ntimeout_sec = 300.0\n\n[verifier]\ntimeout_sec = 600.0\n",
+        "[agent]\ntimeout_sec = 300.0\n",
+        (
+            "[agent]\ntimeout_sec = 300.0\n\n"
+            '[[steps]]\nname = "first"\n\n'
+            '[[steps]]\nname = "second"\n[steps.agent]\ntimeout_sec = 450.0\n'
+        ),
+        "[verifier]\ntimeout_sec = 600.0\n",
+    ],
+    ids=("single-step", "native-verifier-default", "multi-step", "unbounded-agent"),
+)
+def test_run_harbor_defers_to_harbor_phase_timeouts_without_outer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task_toml: str,
+) -> None:
+    dataset = tmp_path / "dataset"
+    for index in range(5):
+        task = dataset / f"case-{index}"
+        task.mkdir(parents=True)
+        (task / "task.toml").write_text(task_toml, encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(runner, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
+
+    def completed_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="expected test stop")
+
+    monkeypatch.setattr(runner.subprocess, "run", completed_run)
+
+    ok, _detail = runner._run_harbor(
+        dataset=dataset,
+        agent="opencode",
+        job_name="demo-opencode-with",
+        env_mode="docker",
+        model="nvidia/openai/gpt-oss-120b",
+        jobs_dir=tmp_path / "jobs",
+        run_env={},
+        n_attempts=3,
+        n_concurrent=2,
+        timeout_multiplier=1.5,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+        expected_trials=15,
+    )
+
+    assert ok is False
+    assert "timeout" not in captured
 
 
 def _run(

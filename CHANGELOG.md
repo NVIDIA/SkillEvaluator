@@ -4,11 +4,56 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
+  consumers. Findings map to rule IDs, severity levels, and file locations from
+  Tier 1 validation results.
+
 ### Fixed
 
 - Unpinned-dependency warnings are no longer suppressed by comparison
   operators inside PEP 508 environment markers; requirements such as
   `pkg; python_version < "3.13"` are now correctly reported.
+- `--llm-verify` now refuses to send file context from paths outside the
+  skill root, including `..`, absolute paths, and outbound file symlinks.
+- Gitleaks path allowlist now skips test/example/fixture/mock directories
+  instead of any path containing those substrings, so files like `latest.py`
+  are scanned.
+- The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
+  the results directory is not visible to the Docker daemon. Previously the smoke
+  run passed -- agent output travels over the Docker exec API rather than through
+  the mounts -- and every scored trial then failed with `RewardFileNotFoundError`
+  while the rewards sat inside the daemon's own filesystem.
+- Dead-link validation now uses the shared CommonMark parser, covering
+  reference-style and HTML links while preserving Markdown image checks and
+  consistently normalizing local destinations. Root-absolute URLs are ignored
+  instead of being treated as host paths; href-only diagnostics collapse
+  repeated links to the same normalized target. Invalid destination bytes do
+  not alias other files, relative URLs that normalize to absolute or
+  drive-relative paths are reported without lookup, lookup failures remain
+  per-link findings, and link diagnostics are bounded and escaped. Malformed
+  frontmatter and repeated unclosed HTML comments no longer abort or stall
+  supporting-document checks.
+- Tier 3 accuracy and custom goal judges now retry one malformed (including
+  empty) or schema-invalid response with a 4096-token output budget before
+  failing closed, preventing a transient formatting error from making an otherwise
+  successful trial and its full comparison arm unscoreable. Generated and
+  injected Harbor verifier configs now reserve 600 seconds for six sequential
+  direct provider attempts plus fail-closed artifact writes. Explicit native
+  task timeouts remain owner-controlled and are not rewritten, and whole jobs
+  defer to Harbor's task-configured phase controls instead of a hidden two-hour
+  cap
+  ([#70](https://github.com/NVIDIA/SkillEvaluator/issues/70)).
+- PII scanning no longer treats Markdown ATX headings as code comments, so
+  emails in headings such as `# Contact: ...` are flagged. Hash lines inside
+  Python strings, YAML scalars, and shell heredocs are scanned too. Real
+  comments stay skipped, including YAML frontmatter, fenced code, and
+  `requirements.txt` ([#88](https://github.com/NVIDIA/SkillEvaluator/issues/88)).
+- Tier 3 Harbor collection no longer scans an agent's unstructured transcript
+  for runtime-error phrases when the recorded exception belongs to the
+  verifier, health check, or task. Correct answers that discuss errors such as
+  `401 Unauthorized` are no longer misreported as agent runtime failures.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

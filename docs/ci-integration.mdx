@@ -194,10 +194,21 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | --- | --- | --- |
 | `overall_passed` | boolean | `true` when every check passed |
 | `overall_status` | string | `passed`, `failed`, or `incomplete` (a required scanner produced no evidence) |
+| `publication_status` | string | `pass`, `neutral`, `fail`, or `incomplete`; use this field for publication eligibility |
+| `publication` | object | Publication decision, eligibility, reasons, and Tier 3 evidence status |
+| `benchmark_policy` | object | Persisted `tier2_required` and `tier3_required` evidence policy used for the publication decision |
+| `results[].publication_target` | object | Exact NFC filesystem-entry name, versioned source-tree digest, and digest algorithm used to bind split-tier evidence |
+| `results[].publication_evidence` | object | Validated built-in Tier 1 or Tier 2 producer contract: schema version, producer, tier, and canonical check ID |
+| `tier3.run_id` | string | Run-owned Tier 3 identity; duplicated in the Tier 3 summary for consistency checks |
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
 | `total_errors`, `total_warnings` | number | Aggregate counts across all validators |
 | `skills` | array | Per-skill `{ name, passed, issue_count }` |
 | `quality_summary` | array | Quality details with `overall_score` (0–100) and `grade` (A–F); a folder target reports the collection average plus a `skill_count` |
+
+`overall_status` and `overall_passed` describe the configured command gate. They
+can be green when an advisory tier did not run, so do not use them as a
+publication signal. Require `publication_status == "pass"` (or
+`publication.eligible == true`) before publishing a benchmark.
 
 A step that enforces a stricter score than the built-in gate:
 

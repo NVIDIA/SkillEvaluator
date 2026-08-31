@@ -173,7 +173,7 @@ SCAN_EXCLUDED_DIRS = frozenset(
 # Generated publishing/signing artifacts that may live in a skill root after
 # NVSkills CI runs. They are derived from the author-owned skill content, so
 # Tier 1 should not scan them as independent source files.
-SCAN_EXCLUDED_FILES = frozenset({"skill-card.md", "benchmark.md", "skill.oms.sig"})
+SCAN_EXCLUDED_FILES = frozenset({"skill-card.md", "BENCHMARK.md", "skill.oms.sig"})
 
 # Environment variables consulted (in order) to identify who is submitting a
 # skill, for the home-path PII check. A ``/home/<user>/`` path is only flagged
@@ -289,12 +289,25 @@ CONTENT_DEDUP_BINARY_EXTENSIONS = frozenset(
 # snapshots mirror the live skill and would dominate reports with self-matches.
 # Tier 1 has its own (broader) :data:`SCAN_EXCLUDED_DIRS`; keep these two in
 # sync for the artifact-dir entries.
-CONTENT_DEDUP_EXCLUDED_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+CONTENT_DEDUP_EXCLUDED_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+        "evals",
+        ".evals",
+        "results",
+        ".results",
+        "versions",
+        ".versions",
+    }
+)
 
 # Skipped by basename by Tier 2 dedup: generated reports/metadata are not
 # author-owned context, so comparing them against SKILL.md produces structural
 # self-matches.
-CONTENT_DEDUP_EXCLUDED_FILES = frozenset({"skill-card.md", "benchmark.md", "skill.oms.sig"})
+CONTENT_DEDUP_EXCLUDED_FILES = frozenset({"skill-card.md", "BENCHMARK.md", "skill.oms.sig"})
 
 
 # =============================================================================

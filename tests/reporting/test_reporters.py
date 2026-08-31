@@ -17,8 +17,33 @@ from skillevaluator.evaluation.tier3_report import (
     render_agent_eval_html_report,
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
+from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.tier1.commands import emit_reports
+
+_PUBLICATION_TARGET = {
+    "skill_name": "demo",
+    "skill_digest": "sha256:" + "c" * 64,
+    "skill_digest_algorithm": "skill-evaluator-source-tree/2",
+}
+
+
+def _bind_publication_target(result: ValidationResult, *, skill_name: str = "demo") -> None:
+    fixture_producers = {
+        "SCHEMA": (1, "schema"),
+        "Code Integrity & Hygiene": (1, "code-integrity"),
+    }
+    target = {**_PUBLICATION_TARGET, "skill_name": skill_name}
+    result.metadata["publication_target"] = dict(target)
+    if "publication_evidence" not in result.metadata and result.validator_name in fixture_producers:
+        tier, check_id = fixture_producers[result.validator_name]
+        stamp_publication_evidence([result], tier=tier, check_id=check_id)
+    payload = result.metadata.get("agent_eval")
+    if isinstance(payload, dict):
+        payload["publication_target"] = dict(target)
+        summary = payload.setdefault("summary", {})
+        if isinstance(summary, dict):
+            summary["publication_target"] = dict(target)
 
 
 def _api_key_line() -> str:
@@ -167,11 +192,13 @@ class TestCLIReporter:
         result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
         result.add_warning("A public LLM provider is required for live evaluation.")
         result.metadata["agent_eval"] = {
+            "execution_status": "skipped",
+            "verdict": "neutral",
             "provenance": {
                 "advisory": True,
                 "reason": "skipped",
                 "message": "A public LLM provider is required for live evaluation.",
-            }
+            },
         }
 
         output = CLIReporter().render_all([result])
@@ -337,7 +364,11 @@ class TestBenchmarkReporter:
             execution_performed=False,
             coverage_measured=False,
         )
-        hygiene.metadata["benchmark_policy"] = {"tier3_required": False}
+        hygiene.metadata["benchmark_policy"] = {
+            "tier2_required": False,
+            "tier3_required": False,
+        }
+        _bind_publication_target(hygiene, skill_name="skill")
         advisory = ValidationResult(validator_name="Advisory")
         advisory.add_finding(
             Finding(
@@ -348,6 +379,7 @@ class TestBenchmarkReporter:
                 file_path="SKILL.md",
             )
         )
+        _bind_publication_target(advisory, skill_name="skill")
 
         output = BenchmarkReporter(include_timestamp=False).render_all([hygiene, advisory])
 
@@ -407,6 +439,42 @@ class TestJSONReporter:
 
         assert data["rubric_eval"]["execution_status"] == "succeeded"
         assert data["results"][0]["rubric_eval"] == data["rubric_eval"]
+
+    def test_render_all_persists_resolved_and_per_result_benchmark_policy(self) -> None:
+        tier1 = ValidationResult(validator_name="SCHEMA")
+        tier1.metadata["benchmark_policy"] = {"tier2_required": False}
+        _bind_publication_target(tier1)
+        tier3 = ValidationResult(validator_name="AGENT_EVAL")
+        tier3.metadata["agent_eval"] = {
+            "skill_name": "demo",
+            "benchmark_policy": {"tier3_required": False},
+        }
+        _bind_publication_target(tier3)
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([tier1, tier3]))
+
+        assert data["benchmark_policy"] == {
+            "tier2_required": False,
+            "tier3_required": False,
+        }
+        assert data["results"][0]["benchmark_policy"] == {"tier2_required": False}
+        assert "benchmark_policy" not in data["results"][1]
+
+    def test_per_result_benchmark_policy_drops_hostile_and_non_boolean_fields(self) -> None:
+        result = ValidationResult(validator_name="SCHEMA")
+        policy: dict[str, object] = {
+            "tier2_required": False,
+            "tier3_required": float("nan"),
+            "untrusted": "x" * 1_000_000,
+        }
+        policy["self"] = policy
+        result.metadata["benchmark_policy"] = policy
+        _bind_publication_target(result)
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        assert data["results"][0]["benchmark_policy"] == {"tier2_required": False}
+        assert data["benchmark_policy"] == {"tier2_required": False, "tier3_required": True}
 
     def test_compact_output(self, success_result: ValidationResult) -> None:
         """Test compact JSON output without indentation."""
@@ -1148,6 +1216,41 @@ class TestMarkdownReporter:
         assert "Evidence: [View Step 9](" in output
         assert "log-analyzer-001?step=9" in output
         assert "javascript:alert" not in output
+
+    def test_render_canonical_tier3_without_baseline(self) -> None:
+        """A normal skill-only run uses N/A rather than crashing on absent baseline scores."""
+        payload = build_agent_eval_payload(
+            "demo-skill",
+            {
+                "codex": {
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                    "with_skill": {"security": 1.0, "accuracy": 0.9},
+                    "without_skill": {},
+                    "rewards": [
+                        {
+                            "trial_id": "case-001__attempt-1",
+                            "entry_id": "case-001",
+                            "overall": 0.9,
+                            "security": 1.0,
+                            "accuracy": 0.9,
+                        }
+                    ],
+                }
+            },
+            use_llm_judge=False,
+        )
+        assert payload is not None
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = payload
+        result.add_success("agent_eval", "Tier 3 evaluation complete")
+
+        output = MarkdownReporter(include_timestamp=False).render_all([result])
+
+        assert "### Evaluator Scores" in output
+        assert "| Accuracy | 0.90 | N/A | +0.00 |" in output
 
     def test_details_section(self, failure_result: ValidationResult) -> None:
         """Test expandable details section."""

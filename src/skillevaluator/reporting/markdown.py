@@ -15,10 +15,20 @@ The output is optimized for readability in code review contexts.
 from __future__ import annotations
 
 import html
+import math
+import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    assess_publication,
+    get_skip_reason,
+    is_advisory_agent_eval_skip,
+    is_cleanly_skipped,
+    passes_required_gate,
+    select_agent_eval_payload,
+)
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -34,6 +44,78 @@ def _markdown_table_cell(value: object) -> str:
     normalized = str(value).replace("\r\n", "\n").replace("\r", "\n")
     escaped = html.escape(normalized, quote=False)
     return escaped.replace("|", "&#124;").replace("`", "&#96;").replace("\n", "<br>")
+
+
+def _finite_report_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _format_report_number(value: object, *, signed: bool = False) -> str:
+    number = _finite_report_number(value)
+    if number is None:
+        return "N/A"
+    return f"{number:+.2f}" if signed else f"{number:.2f}"
+
+
+def _markdown_inline_text(value: object, *, limit: int | None = None) -> str:
+    """Flatten untrusted metadata into one inert Markdown text fragment."""
+    if isinstance(value, str):
+        text = value
+    elif (
+        isinstance(value, bool)
+        or (isinstance(value, int) and value.bit_length() <= 256)
+        or (isinstance(value, float) and math.isfinite(value))
+    ):
+        text = str(value)
+    else:
+        return ""
+    flattened = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
+    if limit is not None:
+        flattened = flattened[:limit]
+    escaped = html.escape(flattened, quote=False)
+    for character, entity in (
+        ("#", "&#35;"),
+        ("\\", "&#92;"),
+        ("`", "&#96;"),
+        ("*", "&#42;"),
+        ("_", "&#95;"),
+        ("[", "&#91;"),
+        ("]", "&#93;"),
+        ("@", "&#64;"),
+    ):
+        escaped = escaped.replace(character, entity)
+    return escaped
+
+
+def _mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _dict_items(value: object) -> list[dict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _markdown_untrusted_table_cell(value: object, *, limit: int | None = None) -> str:
+    """Return one inert table cell without double-escaping HTML entities."""
+    return _markdown_inline_text(value, limit=limit).replace("|", "&#124;")
+
+
+def _markdown_safe_url(value: object) -> str | None:
+    """Return an HTTP(S) URL that cannot terminate a Markdown destination."""
+    url = safe_url(value)
+    if url is None:
+        return None
+    if any(character.isspace() or unicodedata.category(character).startswith("C") for character in url):
+        return None
+    if any(character in "()<>" for character in url):
+        return None
+    return url
 
 
 def _related_paths(finding: Finding) -> list[str]:
@@ -62,6 +144,7 @@ class MarkdownReporter(ReporterBase):
         include_timestamp: bool = True,
         include_details: bool = True,
         max_findings_shown: int = 10,
+        expected_skill_name: str | None = None,
     ) -> None:
         """Initialize Markdown reporter.
 
@@ -73,6 +156,7 @@ class MarkdownReporter(ReporterBase):
         self.include_timestamp = include_timestamp
         self.include_details = include_details
         self.max_findings_shown = max_findings_shown
+        self.expected_skill_name = expected_skill_name
 
     @property
     def name(self) -> str:
@@ -99,16 +183,23 @@ class MarkdownReporter(ReporterBase):
         # Overall status
         all_passed = all(passes_required_gate(r) for r in results)
         has_incomplete = any(r.is_incomplete for r in results)
+        skip_count = sum(1 for r in results if is_cleanly_skipped(r))
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
+        executed_count = len(results) - skip_count
+        passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
         status = "⚠️ INCOMPLETE" if has_incomplete else "✅ PASSED" if all_passed else "❌ FAILED"
         lines.append(f"**Status:** {status}")
+        publication = assess_publication(results, expected_skill_name=self.expected_skill_name)
+        publication_label = {
+            "pass": "✅ PASS",
+            "fail": "❌ FAIL",
+            "neutral": "⚠️ NEUTRAL",
+            "incomplete": "⚠️ INCOMPLETE",
+        }.get(publication.status, publication.status.upper())
+        lines.append(f"**Publication status:** {publication_label}")
 
         policy = next(
-            (
-                result.metadata.get("policy")
-                for result in results
-                if isinstance(result.metadata.get("policy"), dict)
-            ),
+            (result.metadata.get("policy") for result in results if isinstance(result.metadata.get("policy"), dict)),
             None,
         )
         if policy is not None:
@@ -127,11 +218,14 @@ class MarkdownReporter(ReporterBase):
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
         lines.append(f"| Validator Results | {len(results)} |")
-        lines.append(f"| ✅ Passed | {sum(1 for r in results if r.status == 'passed')} |")
+        lines.append(f"| Validators Run | {executed_count} |")
+        lines.append(f"| ✅ Passed | {passed_count} |")
         lines.append(
             f"| ❌ Failed | {sum(1 for r in results if r.status == 'failed' and not is_advisory_agent_eval_skip(r))} |"
         )
         lines.append(f"| ⚠️ Incomplete | {sum(1 for r in results if r.is_incomplete)} |")
+        if skip_count:
+            lines.append(f"| ⏭️ Skipped | {skip_count} |")
         if advisory_skip_count:
             lines.append(f"| ⏭️ Advisory skips | {advisory_skip_count} |")
 
@@ -178,89 +272,103 @@ class MarkdownReporter(ReporterBase):
             lines.append("")
 
         # Tier 3: Agent Evaluation summary (if present)
-        tier3_results = [r for r in results if r.metadata.get("agent_eval")]
-        if tier3_results:
-            ae = tier3_results[0].metadata["agent_eval"]
-            verdict = ae.get("verdict", "unknown").upper()
+        ae = publication.tier3.payload or select_agent_eval_payload(results)
+        if ae:
+            verdict = publication.tier3.status.upper()
             composite = ae.get("composite_lift")
             runtime = ae.get("runtime_seconds", 0.0)
 
             lines.append("## Tier 3: Agent Evaluation")
             lines.append("")
-            composite_text = f"{composite:+.2f}" if isinstance(composite, int | float) else "N/A"
+            composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
-            lines.append(f"**Runtime:** {runtime:.1f}s")
+            runtime_number = _finite_report_number(runtime)
+            runtime_text = f"{runtime_number:.1f}s" if runtime_number is not None else "N/A"
+            lines.append(f"**Runtime:** {runtime_text}")
             harbor_viewer = normalize_harbor_viewer_for_display(ae)
-            if harbor_viewer.get("job_url"):
-                lines.append(f"**Harbor logs:** [Open Harbor logs]({harbor_viewer['job_url']})")
-            if harbor_viewer.get("analysis_url"):
-                lines.append(f"**Harbor analysis:** [Open Harbor analysis]({harbor_viewer['analysis_url']})")
+            if job_url := _markdown_safe_url(harbor_viewer.get("job_url")):
+                lines.append(f"**Harbor logs:** [Open Harbor logs]({job_url})")
+            if analysis_url := _markdown_safe_url(harbor_viewer.get("analysis_url")):
+                lines.append(f"**Harbor analysis:** [Open Harbor analysis]({analysis_url})")
             lines.append("")
 
             evaluators = ae.get("evaluators", {})
-            if evaluators:
+            if isinstance(evaluators, dict) and evaluators:
                 lines.append("### Evaluator Scores")
                 lines.append("")
                 lines.append("| Evaluator | With Skill | Baseline | Lift |")
                 lines.append("|-----------|-----------|----------|------|")
                 for name, scores in evaluators.items():
+                    if not isinstance(name, str) or not isinstance(scores, dict):
+                        continue
                     ws = scores.get("with_skill", 0.0)
                     bl = scores.get("baseline", 0.0)
                     lift = scores.get("lift", 0.0)
-                    lines.append(f"| {name.replace('_', ' ').title()} | {ws:.2f} | {bl:.2f} | {lift:+.2f} |")
+                    lines.append(
+                        f"| {_markdown_untrusted_table_cell(name.replace('_', ' ').title())} "
+                        f"| {_format_report_number(ws)} | "
+                        f"{_format_report_number(bl)} | {_format_report_number(lift, signed=True)} |"
+                    )
                 lines.append("")
 
-            insights = ae.get("insights", {})
-            if any(v.get("score") is not None for v in insights.values()):
+            insights = _mapping(ae.get("insights"))
+            insight_rows = [
+                (dimension, info)
+                for dimension, info in insights.items()
+                if isinstance(dimension, str) and isinstance(info, dict) and info.get("score") is not None
+            ]
+            if insight_rows:
                 lines.append("### LLM-as-Judge Insights")
                 lines.append("")
                 lines.append("| Dimension | Score | Explanation |")
                 lines.append("|-----------|-------|-------------|")
-                for dim, info in insights.items():
+                for dim, info in insight_rows:
                     score = info.get("score")
-                    if score is None:
-                        continue
-                    score_str = str(score).upper() if isinstance(score, str) else f"{score:.2f}"
-                    explanation = info.get("explanation", "")[:60]
-                    lines.append(f"| {dim.title()} | {score_str} | {explanation} |")
+                    score_number = _finite_report_number(score)
+                    score_str = (
+                        f"{score_number:.2f}"
+                        if score_number is not None
+                        else _markdown_inline_text(score, limit=32).upper() or "N/A"
+                    )
+                    explanation = _markdown_untrusted_table_cell(info.get("explanation"), limit=60)
+                    lines.append(f"| {_markdown_untrusted_table_cell(dim.title())} | {score_str} | {explanation} |")
                 lines.append("")
 
-            suggestions_v2 = ae.get("suggestions_v2") or []
+            suggestions_v2 = _dict_items(ae.get("suggestions_v2"))
             if suggestions_v2:
                 lines.append("### Evidence-Backed Suggestions")
                 lines.append("")
                 for idx, suggestion in enumerate(suggestions_v2, start=1):
-                    recommendation = str(suggestion.get("recommendation") or "").strip()
+                    recommendation = _markdown_inline_text(suggestion.get("recommendation"))
                     if not recommendation:
                         continue
-                    metric = suggestion.get("metric", "unknown")
+                    metric = _markdown_inline_text(suggestion.get("metric")) or "unknown"
                     lines.append(f"{idx}. **{metric}**: {recommendation}")
                     harbor_evidence = suggestion.get("harbor_evidence") or suggestion.get("evidence")
                     if isinstance(harbor_evidence, dict):
-                        url = safe_url(harbor_evidence.get("url"))
+                        url = _markdown_safe_url(harbor_evidence.get("url"))
                         if url:
-                            label = harbor_evidence_link_text(harbor_evidence)
+                            label = _markdown_inline_text(harbor_evidence_link_text(harbor_evidence)) or "Evidence"
                             lines.append(f"   - Evidence: [{label}]({url})")
-                    for ref in (suggestion.get("evidence_refs") or [])[:3]:
-                        pointer = ref.get("json_pointer") or ref.get("path") or ""
-                        excerpt = str(ref.get("excerpt") or ref.get("label") or "")[:120]
-                        lines.append(f"   - Evidence: `{ref.get('kind', 'evidence')}` `{pointer}` {excerpt}")
+                    for ref in _dict_items(suggestion.get("evidence_refs"))[:3]:
+                        pointer = _markdown_inline_text(ref.get("json_pointer") or ref.get("path"))
+                        excerpt = _markdown_inline_text(ref.get("excerpt") or ref.get("label"), limit=120)
+                        kind = _markdown_inline_text(ref.get("kind")) or "evidence"
+                        lines.append(f"   - Evidence: `{kind}` `{pointer}` {excerpt}")
                 lines.append("")
-            elif ae.get("recommendations"):
+            elif recommendations := _dict_items(ae.get("recommendations")):
                 lines.append("### Recommendations")
                 lines.append("")
-                for idx, recommendation in enumerate(ae.get("recommendations") or [], start=1):
-                    if not isinstance(recommendation, dict):
-                        continue
-                    message = str(recommendation.get("message") or recommendation.get("title") or "").strip()
+                for idx, recommendation in enumerate(recommendations, start=1):
+                    message = _markdown_inline_text(recommendation.get("message") or recommendation.get("title"))
                     if not message:
                         continue
                     lines.append(f"{idx}. {message}")
                     evidence = recommendation.get("evidence")
                     if isinstance(evidence, dict):
-                        url = safe_url(evidence.get("url"))
+                        url = _markdown_safe_url(evidence.get("url"))
                         if url:
-                            label = harbor_evidence_link_text(evidence)
+                            label = _markdown_inline_text(harbor_evidence_link_text(evidence)) or "Evidence"
                             lines.append(f"   - Evidence: [{label}]({url})")
                 lines.append("")
 
@@ -281,11 +389,11 @@ class MarkdownReporter(ReporterBase):
         """Render a single validation result."""
         qs = result.metadata.get("quality_scores")
 
-        advisory_skip = is_advisory_agent_eval_skip(result)
+        clean_skip = is_cleanly_skipped(result)
         if result.is_incomplete:
             status_emoji = "⚠️ INCOMPLETE"
             lines.append(f"### {status_emoji} {result.validator_name}")
-        elif advisory_skip:
+        elif clean_skip:
             lines.append(f"### ⏭️ SKIPPED {result.validator_name}")
         elif qs and qs.get("grade"):
             grade = qs["grade"]
@@ -314,11 +422,8 @@ class MarkdownReporter(ReporterBase):
 
         if result.is_incomplete:
             self._render_incomplete(result, lines)
-        elif advisory_skip:
-            payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
-            provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
-            message = provenance.get("message") if isinstance(provenance, dict) else None
-            lines.append(f"- {message or 'Live evaluation did not run.'}")
+        elif clean_skip:
+            lines.append(f"- Skip reason: {get_skip_reason(result)}")
         elif result.passed:
             self._render_success(result, lines)
             if result.findings:

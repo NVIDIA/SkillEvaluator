@@ -100,7 +100,7 @@ execution environments are covered in
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SKILLEVALUATOR_RESULTS_DIR` | `<skill>/evals/results` | External root for run results. Precedence for writes: the `--results-dir` flag, then this variable, then the legacy in-skill location. Read commands (`view`, `compare`) honor the same order and also fall back to the legacy location so older runs stay visible. |
+| `SKILLEVALUATOR_RESULTS_DIR` | `<skill>/evals/results` | External root for run results. Precedence for writes: the `--results-dir` flag, then this variable, then the canonical in-skill location. Configured roots must remain outside the skill; `evals/results` is the only supported in-skill results root so generated output cannot change the skill's publication identity. Read commands (`view`, `compare`) honor the same order and also fall back to the legacy location so older runs stay visible. |
 | `SKILLEVALUATOR_LOCAL_SANDBOX` | `require` | Local-mode sandbox policy. `require` fails closed when no OS sandbox backend (Bubblewrap on Linux, Seatbelt on macOS) is usable; `prefer` degrades to advisory-only guardrails with a loud warning; `off` skips sandbox probing entirely — for skills you fully trust. No value enables native Windows: local mode fails closed there before anything runs — use WSL2 or `--env-mode docker`. |
 | `SKILLEVALUATOR_LOCAL_ALLOW_NET` | `true` | Network egress for local-mode trials. Set to `0` to airgap a skill that must not reach the network. Incompatible with the `nv_build` provider — NVIDIA Build local agents require network access, so airgapped runs are rejected up front. |
 | `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |

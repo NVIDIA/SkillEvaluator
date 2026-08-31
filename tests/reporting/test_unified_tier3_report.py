@@ -282,6 +282,34 @@ def test_standalone_tier3_uses_generic_tier3_only_report(tmp_path: Path) -> None
     assert "SkillEvaluator" in html
 
 
+def test_standalone_tier3_binds_report_to_requested_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator import reporting as reporting_module
+
+    captured: dict[str, object] = {}
+
+    class CapturingHTMLReporter:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def save(self, results: list[ValidationResult], target: Path) -> None:
+            captured["results"] = results
+            target.write_text("<html>captured</html>", encoding="utf-8")
+
+    skill = tmp_path / "requested-skill"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260709_120000"
+    _write_summary(run_dir)
+    monkeypatch.setattr(reporting_module, "HTMLReporter", CapturingHTMLReporter)
+
+    report = render_agent_eval_html_report(skill, run_dir, use_llm_judge=False)
+
+    assert report.read_text(encoding="utf-8") == "<html>captured</html>"
+    assert captured["expected_skill_name"] == "requested-skill"
+
+
 def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path: Path) -> None:
     skill = tmp_path / "demo"
     skill.mkdir()
@@ -876,14 +904,17 @@ def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None
     assert _embedded_tier3_payload(html)["dataset"][0]["score"] is None
 
 
-def test_canonical_html_serializer_rejects_non_finite_numbers() -> None:
+def test_canonical_report_serializers_disclose_non_finite_numbers() -> None:
     with pytest.raises(ValueError, match="Out of range float values"):
         _compact_json({"score": float("nan")})
 
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
     result.metadata["agent_eval"] = {"score": float("inf")}
-    with pytest.raises(ValueError, match="Out of range float values"):
-        JSONReporter(include_timestamp=False).render_all([result])
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["tier3"]["score"] is None
+    assert payload["tier3"]["_serialization_truncated"] is True
+    assert payload["publication_status"] == "incomplete"
 
 
 def test_sampled_evidence_carries_lower_bound_metadata_and_honest_wording() -> None:
@@ -1122,6 +1153,149 @@ def test_rerender_uses_run_owned_dataset_and_evaluator_version(tmp_path: Path) -
     assert payload["evaluator_version"] == "evaluated-version-1.2.3"
 
 
+def test_rerender_uses_persisted_publication_identity_after_live_source_changes(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    manifest = skill / "SKILL.md"
+    manifest.write_text("# evaluated source\n", encoding="utf-8")
+    persisted_target = publication_target_from_path(skill)
+    assert persisted_target is not None
+
+    run_dir = tmp_path / "results" / "20260709_120009"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": persisted_target,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest.write_text("# changed after evaluation\n", encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["publication_target"] == persisted_target
+    assert payload["summary"]["publication_target"] == persisted_target
+    assert payload["run_id"] == run_dir.name
+    assert payload["summary"]["run_id"] == run_dir.name
+    assert tier3.metadata["publication_target"] == persisted_target
+    assert tier3.metadata["run_id"] == run_dir.name
+
+
+def test_rerender_preserves_persisted_skill_name_when_live_path_is_renamed(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    original_skill = tmp_path / "demo"
+    original_skill.mkdir()
+    (original_skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    persisted_target = publication_target_from_path(original_skill)
+    assert persisted_target is not None
+
+    renamed_skill = original_skill.rename(tmp_path / "renamed")
+    run_dir = tmp_path / "results" / "20260709_120012"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": persisted_target,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(renamed_skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["skill_name"] == persisted_target["skill_name"] == "demo"
+    assert payload["summary"]["skill_name"] == "demo"
+
+
+def test_rerender_rejects_canonical_target_when_run_marks_identity_conflict(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.reporting.base import assess_tier3_evidence
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+    run_end_target = {**run_start_target, "skill_digest": "sha256:" + "f" * 64}
+
+    run_dir = tmp_path / "results" / "20260709_120010"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": run_start_target,
+                "publication_target_conflict": {
+                    "run_start": run_start_target,
+                    "run_end": run_end_target,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["publication_target"] is None
+    assert payload["summary"]["publication_target"] is None
+    assert payload["publication_target_conflict"] == "source changed during evaluation"
+    assert payload["summary"]["publication_target_conflict"] == "source changed during evaluation"
+    assert "publication_target" not in tier3.metadata
+    assert tier3.metadata["publication_target_conflict"] == "source changed during evaluation"
+    assert tier3.metadata["run_id"] == run_dir.name
+    assessment = assess_tier3_evidence([tier3], payload, expected_skill_name="demo")
+    assert assessment.evidence_complete is False
+    assert assessment.reason == "Tier 3 source identity changed during evaluation."
+    report = json.loads(JSONReporter(include_timestamp=False).render_all([tier3]))
+    assert report["results"][0]["publication_target_conflict"] == "source changed during evaluation"
+
+
+def test_rerender_does_not_replace_malformed_persisted_identity_with_engine_claim(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    engine_target = publication_target_from_path(skill)
+    assert engine_target is not None
+
+    run_dir = tmp_path / "results" / "20260709_120011"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text("{not-json", encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(
+        skill,
+        run_dir,
+        engine_result={
+            "run_id": run_dir.name,
+            "publication_target": engine_target,
+        },
+        use_llm_judge=False,
+    )
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["publication_target"] is None
+    assert payload["summary"]["publication_target"] is None
+    assert payload["run_id"] is None
+    assert payload["summary"]["run_id"] is None
+    assert "publication_target" not in tier3.metadata
+    assert "run_id" not in tier3.metadata
+
+
 def test_legacy_rerender_does_not_claim_current_dataset_or_reader_version(tmp_path: Path) -> None:
     skill = tmp_path / "demo"
     (skill / "evals").mkdir(parents=True)
@@ -1318,6 +1492,312 @@ def test_pass_at_k_uncertainty_and_paired_evidence_render() -> None:
     assert "Exact McNemar p=1" in html
     assert "Minimum attainable p with 1 observed discordant pair:" in html
     assert "resolution-limited at \N{GREEK SMALL LETTER ALPHA}=0.05" in html
+
+
+def _render_paired_comparison(paired_comparison: object) -> str:
+    payload = build_agent_eval_payload(
+        "paired-sanitization-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "overall_with_skill": 1.0,
+                "overall_without_skill": 0.0,
+                "pass_with_skill": {"rate": 1.0, "passed_cases": 1, "total_cases": 1},
+                "pass_without_skill": {"rate": 0.0, "passed_cases": 0, "total_cases": 1},
+                "pass_lift": {"delta": 1.0, "paired_comparison": paired_comparison},
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    return _render_agent_payload(payload)
+
+
+@pytest.mark.parametrize("paired_comparison", [[1], "bad"], ids=["list", "string"])
+def test_pass_at_k_render_drops_nonmapping_paired_comparison(paired_comparison: object) -> None:
+    html = _render_paired_comparison(paired_comparison)
+    sanitized = _embedded_tier3_payload(html)
+
+    assert "Paired cases:" not in html
+    assert "Exact McNemar p=" not in html
+    assert "paired_comparison" not in sanitized["agents"]["codex"]["pass_at_k"]["lift"]
+
+
+@pytest.mark.parametrize(
+    "mcnemar_exact",
+    [
+        [1],
+        "bad",
+        {},
+        {"p_value": None},
+        {"p_value": "bad"},
+        {"p_value": []},
+        {"p_value": {}},
+    ],
+    ids=["list", "string", "missing", "none", "numeric-string", "nested-list", "nested-mapping"],
+)
+def test_pass_at_k_render_drops_malformed_mcnemar_exact(mcnemar_exact: object) -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "paired_rate_delta": 1.0,
+            "mcnemar_exact": mcnemar_exact,
+        }
+    )
+
+    assert "Paired cases: 1" in html
+    assert "Exact McNemar p=" not in html
+
+
+@pytest.mark.parametrize(
+    "minimum_attainable_p_value",
+    [None, "bad", [], {}],
+    ids=["none", "string", "list", "mapping"],
+)
+def test_pass_at_k_render_drops_malformed_minimum_attainable_probability(
+    minimum_attainable_p_value: object,
+) -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "paired_rate_delta": 1.0,
+            "mcnemar_exact": {
+                "p_value": 1.0,
+                "p_value_text": "1",
+                "minimum_attainable_p_value": minimum_attainable_p_value,
+            },
+        }
+    )
+
+    assert "Exact McNemar p=1." in html
+    assert "Minimum attainable p" not in html
+
+
+def test_pass_at_k_render_preserves_valid_underflow_and_omission_contract() -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 15_000,
+            "with_skill_only_pass": 15_000,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 15_000,
+            "paired_rate_delta": 1.0,
+            "mcnemar_exact": {
+                "p_value": None,
+                "p_value_text": "1.395e-4515",
+                "p_value_exact": None,
+                "p_value_exact_omitted": True,
+                "p_value_exact_omitted_reason": "decimal_digit_limit",
+                "p_value_numeric_underflow": True,
+                "minimum_attainable_p_value": None,
+                "minimum_attainable_p_value_text": "1.395e-4515",
+                "minimum_attainable_p_value_exact": None,
+                "minimum_attainable_p_value_exact_omitted": True,
+                "minimum_attainable_p_value_exact_omitted_reason": "decimal_digit_limit",
+                "minimum_attainable_p_value_numeric_underflow": True,
+                "resolution_limited_at_alpha_0_05": False,
+            },
+        }
+    )
+    embedded = _embedded_tier3_payload(html)
+    exact = embedded["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"]["mcnemar_exact"]
+
+    assert "Exact McNemar p=1.395e-4515." in html
+    assert exact["p_value"] is None
+    assert exact["minimum_attainable_p_value"] is None
+    assert exact["p_value_exact"] is None
+    assert exact["minimum_attainable_p_value_exact"] is None
+    assert exact["p_value_exact_omitted"] is True
+    assert exact["minimum_attainable_p_value_exact_omitted"] is True
+
+
+@pytest.mark.parametrize(
+    ("p_value_text", "underflow_flag"),
+    [("0.5", True), ("0", True), ("1e-5000", False), ("1e-5000", None)],
+    ids=["representable", "zero", "false-flag", "missing-flag"],
+)
+def test_pass_at_k_render_rejects_false_mcnemar_underflow(
+    p_value_text: str,
+    underflow_flag: bool | None,
+) -> None:
+    mcnemar_exact: dict[str, object] = {
+        "p_value": None,
+        "p_value_text": p_value_text,
+    }
+    if underflow_flag is not None:
+        mcnemar_exact["p_value_numeric_underflow"] = underflow_flag
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "mcnemar_exact": mcnemar_exact,
+        }
+    )
+
+    assert "Exact McNemar p=" not in html
+
+
+@pytest.mark.parametrize(
+    ("minimum_text", "underflow_flag"),
+    [("0.5", True), ("0", True), ("1e-5000", False), ("1e-5000", None)],
+    ids=["representable", "zero", "false-flag", "missing-flag"],
+)
+def test_pass_at_k_render_rejects_false_minimum_attainable_underflow(
+    minimum_text: str,
+    underflow_flag: bool | None,
+) -> None:
+    mcnemar_exact: dict[str, object] = {
+        "p_value": 1.0,
+        "p_value_text": "1",
+        "minimum_attainable_p_value": None,
+        "minimum_attainable_p_value_text": minimum_text,
+    }
+    if underflow_flag is not None:
+        mcnemar_exact["minimum_attainable_p_value_numeric_underflow"] = underflow_flag
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "mcnemar_exact": mcnemar_exact,
+        }
+    )
+
+    assert "Exact McNemar p=1." in html
+    assert "Minimum attainable p" not in html
+
+
+@pytest.mark.parametrize(
+    "paired_comparison",
+    [
+        {
+            "pairing_status": "partial",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 1,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        },
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 10,
+            "without_skill_only_pass": 5,
+            "both_pass": 10,
+            "neither_pass": 5,
+            "discordant_cases": 15,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        },
+        {
+            "pairing_status": "complete",
+            "paired_cases": 1,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 0,
+            "neither_pass": 0,
+            "discordant_cases": 99,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        },
+    ],
+    ids=["partial", "outcome-sum", "discordant-sum"],
+)
+def test_pass_at_k_render_drops_exact_test_for_inconsistent_pairing(
+    paired_comparison: dict[str, object],
+) -> None:
+    html = _render_paired_comparison(paired_comparison)
+
+    assert "Exact McNemar p=" not in html
+
+
+def test_pass_at_k_render_derives_paired_delta_from_validated_outcomes() -> None:
+    html = _render_paired_comparison(
+        {
+            "pairing_status": "complete",
+            "paired_cases": 4,
+            "with_skill_only_pass": 1,
+            "without_skill_only_pass": 0,
+            "both_pass": 2,
+            "neither_pass": 1,
+            "discordant_cases": 1,
+            "paired_rate_delta": -1.0,
+            "mcnemar_exact": {"p_value": 1.0, "p_value_text": "1"},
+        }
+    )
+    embedded = _embedded_tier3_payload(html)
+    paired = embedded["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"]
+
+    assert "Paired pass-rate delta: +25.0%." in html
+    assert paired["paired_rate_delta"] == 0.25
+
+
+def test_pass_at_k_render_preserves_rounded_subnormal_mcnemar_probability() -> None:
+    pair_count = 1_024
+    case_ids = [f"case-{index}" for index in range(pair_count)]
+    paired = _paired_pass_comparison(
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": True} for case_id in case_ids},
+        },
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": False} for case_id in case_ids},
+        },
+    )
+
+    html = _render_paired_comparison(paired)
+
+    assert paired["mcnemar_exact"]["p_value_text"] == "1.112536929e-308"
+    assert "Exact McNemar p=1.112536929e-308." in html
+    assert "Minimum attainable p with 1024 observed discordant pairs: 1.112536929e-308." in html
+
+
+def test_pass_at_k_render_preserves_adjacent_subnormal_mcnemar_probability() -> None:
+    pair_count = 1_079
+    case_ids = [f"case-{index}" for index in range(pair_count)]
+    paired = _paired_pass_comparison(
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": index < pair_count - 1} for index, case_id in enumerate(case_ids)},
+        },
+        {
+            "total_cases": pair_count,
+            "cases": {case_id: {"passed": index == pair_count - 1} for index, case_id in enumerate(case_ids)},
+        },
+    )
+    expected_text = paired["mcnemar_exact"]["p_value_text"]
+
+    html = _render_paired_comparison(paired)
+
+    assert f"Exact McNemar p={expected_text}." in html
 
 
 def test_pass_at_k_render_preserves_exact_subnormal_mcnemar_probability() -> None:

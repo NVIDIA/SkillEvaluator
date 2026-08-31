@@ -27,7 +27,7 @@ from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
 )
-from skillevaluator.reporting.base import ReporterBase, passes_required_gate
+from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -584,10 +584,4 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
         """Return whether an AGENT_EVAL result records a skipped live run."""
-        if result.validator_name != "AGENT_EVAL":
-            return False
-        payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
-        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
-        return bool(
-            isinstance(provenance, dict) and provenance.get("advisory") and provenance.get("reason") == "skipped"
-        )
+        return is_advisory_agent_eval_skip(result)

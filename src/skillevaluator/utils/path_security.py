@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Collection
 from pathlib import Path
 
 
@@ -43,4 +44,38 @@ def canonicalize_trusted_root_alias(path: Path) -> Path:
     return normalized.joinpath(*path.parts[2:])
 
 
-__all__ = ["canonicalize_trusted_root_alias"]
+def matches_filesystem_name(path: Path, canonical_names: Collection[str]) -> bool:
+    """Match an entry name according to the host filesystem's case semantics.
+
+    Exact spellings retain the caller's historical behavior. Differently
+    cased spellings match only when the directory entry is the same physical
+    node as the canonical spelling, preserving authored aliases on
+    case-sensitive filesystems.
+    """
+    if path.name in canonical_names:
+        return True
+    possible_aliases = [name for name in canonical_names if name.casefold() == path.name.casefold()]
+    if not possible_aliases:
+        return False
+    try:
+        observed = path.lstat()
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(observed.st_mode) or getattr(observed, "st_file_attributes", 0) & reparse_flag:
+        return False
+    for name in possible_aliases:
+        try:
+            canonical = path.with_name(name).lstat()
+        except OSError:
+            continue
+        if (
+            not stat.S_ISLNK(canonical.st_mode)
+            and not (getattr(canonical, "st_file_attributes", 0) & reparse_flag)
+            and os.path.samestat(observed, canonical)
+        ):
+            return True
+    return False
+
+
+__all__ = ["canonicalize_trusted_root_alias", "matches_filesystem_name"]

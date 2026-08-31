@@ -5,16 +5,21 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/heads/main') && github.run_number > 1 }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Install Fern
-        run: npm install -g fern-api
+        run: npm install -g fern-api@5.109.0
 
       - name: Publish Docs
         env:

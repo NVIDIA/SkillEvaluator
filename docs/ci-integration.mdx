@@ -28,7 +28,7 @@ Each flag earns its place:
 
 - **`--external`** pins the public-publication profile explicitly instead of relying on the environment, so the gate behaves identically on every runner. The active profile name is stamped into the HTML report and `BENCHMARK.md` (and printed in the run banner with `--verbose`), so a run always records which gate was applied.
 - **`--no-dedup`** skips Tier 2, which needs an embedding-capable provider key (`--no-tier2` is an equivalent alias). Without it the run is fully keyless and hermetic. Drop this flag once you add a provider secret.
-- **`-r json,markdown`** writes a machine-readable report for your pipeline and a Markdown report you can post as a PR comment.
+- **`-r json,markdown,sarif`** writes machine-readable JSON, a Markdown PR comment, and a SARIF file for GitHub Code Scanning.
 - **`-o reports`** collects everything in one directory for artifact upload.
 - **`--min-score 70`** is the default quality bar, written out explicitly so raising it later is a visible one-line diff.
 
@@ -52,6 +52,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      security-events: write
     steps:
       - uses: actions/checkout@v7
 
@@ -78,7 +79,7 @@ jobs:
       - name: Validate skills
         run: |
           skillevaluator validate ./skills --external --no-dedup \
-            -r json,markdown -o reports --min-score 70
+            -r json,markdown,sarif -o reports --min-score 70
 
       - name: Upload reports
         if: always()
@@ -86,6 +87,44 @@ jobs:
         with:
           name: skillevaluator-reports
           path: reports/
+
+      - name: Find SARIF reports
+        if: always()
+        id: sarif
+        run: |
+          mapfile -t files < <(find reports -name '*.sarif.json' -type f 2>/dev/null | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          skillevaluator_python="$(dirname "$(readlink -f "$(command -v skillevaluator)")")/python"
+          "$skillevaluator_python" - <<'PY'
+          import json
+          import pathlib
+
+          from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+          documents = []
+          for raw in sorted(pathlib.Path("reports").rglob("*.sarif.json")):
+              if raw.name == "catalog-sarif.json":
+                  continue
+              documents.append(json.loads(raw.read_text(encoding="utf-8")))
+          if not documents:
+              raise SystemExit(0)
+          merged = merge_catalog_sarif_documents(documents)
+          out = pathlib.Path("reports/catalog-sarif.json")
+          out.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+          print(f"merged {len(documents)} child report(s) into one run at {out}")
+          PY
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+          echo "path=reports/catalog-sarif.json" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always() && steps.sarif.outputs.count != '0'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.sarif.outputs.path }}
+          category: skillevaluator
 
       - name: Post the Markdown report as a PR comment
         if: always() && github.event_name == 'pull_request'

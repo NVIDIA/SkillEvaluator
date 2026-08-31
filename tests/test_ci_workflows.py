@@ -238,9 +238,11 @@ def _is_local_reference(uses: str) -> bool:
     """A same-repo composite action or reusable workflow, e.g. ``./.github/actions/x``.
 
     GitHub always resolves these from the caller's own commit, so nothing about
-    them can float and there is no ``@ref`` to pin.
+    them can float and there is no ``@ref`` syntax for one. A reference that is
+    both ``./``-prefixed and carries an ``@`` is therefore not this syntax --
+    treat it as a normal reference so it still has to satisfy the SHA-pin check.
     """
-    return uses.startswith("./")
+    return uses.startswith("./") and "@" not in uses
 
 
 def _local_reference_escapes_repo(uses: str) -> bool:

@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.commands import compare_results
+from skillevaluator.tier3.commands import _overall_score_for_display, compare_results
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.output_provenance import mark_generated_output_root
 
 
@@ -21,6 +22,19 @@ def _complete_current_run(run_dir: Path) -> None:
         json.dumps({"run_id": run_dir.name, "agents": {}}),
         encoding="utf-8",
     )
+
+
+def test_compare_overall_uses_the_canonical_dimension_mean() -> None:
+    scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    assert _overall_score_for_display(scores, DEFAULT_METRICS) == pytest.approx(0.49)
 
 
 def _write_authentic_pre_status_run(root: Path, run_id: str, *, score: float = 0.8) -> Path:

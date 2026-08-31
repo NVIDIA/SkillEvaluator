@@ -422,6 +422,22 @@ a bare exception.
 | Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 |
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 |
 
+For standard grading, the overall score is the equal-weight mean of these five
+dimensions:
+
+```text
+overall = (Security + Correctness + Discoverability + Effectiveness + Efficiency) / 5
+Effectiveness = (goal_accuracy + behavior_check) / 2
+```
+
+Effectiveness therefore enters the overall score once; its two source
+evaluators do not receive an extra combined vote. The same aggregate drives
+per-attempt pass@k, Skill Lift, comparison output, and best-agent selection.
+Artifacts record this contract as
+`score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
+historical partial reports retain their recorded scoring semantics instead of
+being silently reinterpreted.
+
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.
 
@@ -455,7 +471,7 @@ The canonical Tier 3 payload embedded by both standalone `evaluate` and
 `validate --agent-eval` reports uses schema version 2.0. A completed
 standard-grading payload includes the summary, five dimensions, per-agent
 results, trials, pass@k, attempt policy, run-owned dataset summary and digest,
-evaluation timestamp, evaluator version, and verdict policy; advisory or
+evaluation timestamp, evaluator version, score policy, and verdict policy; advisory or
 skipped payloads may leave live-evidence sections empty.
 
 Generated `BENCHMARK.md` cards put the verdict first, label each result column

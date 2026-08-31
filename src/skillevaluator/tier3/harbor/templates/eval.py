@@ -3904,8 +3904,14 @@ def main():
         logger.error("Required LLM judging failed for: %s", ", ".join(sorted(judge_errors)))
         raise SystemExit(1)
 
-    scores = [float(result[metric]) for metric in DISPLAY_METRICS]
-    overall = round(sum(scores) / len(scores), 4)
+    dimensions = (
+        security_score,
+        acc_score,
+        se_score,
+        round((ga_score + bc_score) / 2, 4),
+        sef_score,
+    )
+    overall = round(sum(dimensions) / len(dimensions), 4)
 
     write_reward_outputs(result, overall)
 

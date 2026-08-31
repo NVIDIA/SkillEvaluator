@@ -30,6 +30,7 @@ from skillevaluator import __version__
 from skillevaluator.constants import (
     AGENT_EVAL_EVALUATORS,
     AGENT_EVAL_SCORE_DEFINITION,
+    DEFAULT_SCORE_POLICY,
     DIMENSION_HINTS,
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
@@ -218,6 +219,7 @@ def _advisory_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": None,
         "dataset_digest_algorithm": None,
+        "score_policy": attempt_policy["score_policy"],
         "verdict_policy": verdict_policy,
         "execution_status": "skipped",
         "execution_errors": [message],
@@ -257,6 +259,7 @@ def _advisory_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": None,
         "dataset_digest_algorithm": None,
+        "score_policy": attempt_policy["score_policy"],
         "verdict_policy": verdict_policy,
         "provenance": {
             "source": "advisory",
@@ -613,8 +616,18 @@ def build_agent_eval_payload(
 
     metric_ids = list(best.get("evaluators", {}).keys())
     metric_labels = _metric_labels(metric_ids)
+    policy_metrics = tuple(metric_ids) if metric_ids else tuple(metrics)
 
-    policy = attempt_policy or _default_attempt_policy()
+    from skillevaluator.tier3.harbor.metrics import score_definition, score_policy_for_metrics
+
+    if attempt_policy:
+        policy = dict(attempt_policy)
+        policy.setdefault("score_definition", score_definition(policy_metrics))
+        policy.setdefault("score_policy", score_policy_for_metrics(policy_metrics))
+    else:
+        policy = _default_attempt_policy()
+        policy["score_definition"] = score_definition(policy_metrics)
+        policy["score_policy"] = score_policy_for_metrics(policy_metrics)
     canonical_trials = _flatten_trials(agent_payloads)
     public_dataset = deduplicate_dataset_entries([entry for entry in (dataset or []) if isinstance(entry, dict)])
     computed_dataset_truth = (
@@ -654,6 +667,7 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "score_policy": policy["score_policy"],
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
@@ -713,6 +727,7 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "score_policy": policy["score_policy"],
         "verdict_policy": verdict_policy,
         "agents": agent_payloads,
         "dimensions": best_dimensions,
@@ -1071,6 +1086,14 @@ def _serialized_payload_size(payload: dict[str, Any]) -> int:
 def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
     """Last-resort bounded shape for pathological single-field payloads."""
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    attempt_policy = payload.get("attempt_policy") if isinstance(payload.get("attempt_policy"), dict) else {}
+    compact_attempt_policy = {
+        key: attempt_policy[key] for key in ("max_attempts", "pass_threshold", "stop_on_pass") if key in attempt_policy
+    }
+    for key, limit in (("score_definition", 1024), ("score_policy", 256)):
+        value = attempt_policy.get(key)
+        if isinstance(value, str):
+            compact_attempt_policy[key] = value[:limit]
     compact_summary = {
         key: value
         for key, value in summary.items()
@@ -1082,6 +1105,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "overall_lift",
             "environment",
             "runtime_seconds",
+            "score_policy",
             "execution_status",
             "expected_attempts",
             "scored_attempts",
@@ -1089,6 +1113,8 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
     }
     compact_summary["skill_name"] = str(summary.get("skill_name") or payload.get("skill_name") or "")[:256]
     compact_summary["best_agent"] = str(summary.get("best_agent") or payload.get("best_agent") or "")[:256]
+    raw_score_policy = payload.get("score_policy", summary.get("score_policy"))
+    compact_summary["score_policy"] = raw_score_policy[:256] if isinstance(raw_score_policy, str) else None
     compact_summary["agents_run"] = [str(name)[:256] for name in (summary.get("agents_run") or [])[:64]]
     compact_summary["execution_errors"] = [str(error)[:1024] for error in (summary.get("execution_errors") or [])[:16]]
 
@@ -1109,6 +1135,8 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "expected_attempts": payload.get("expected_attempts", 0),
         "scored_attempts": payload.get("scored_attempts", 0),
         "runtime_seconds": payload.get("runtime_seconds", 0.0),
+        "score_policy": compact_summary["score_policy"],
+        "attempt_policy": compact_attempt_policy,
         "agents": {},
         "dimensions": [],
         "evaluators": {},
@@ -1157,6 +1185,12 @@ def _build_agent(
     metrics: list[str],
     model: str | None,
 ) -> dict[str, Any]:
+    from skillevaluator.tier3.harbor.metrics import (
+        LEGACY_METRICS,
+        canonical_dimension_mean,
+        overall_score_from_metrics,
+    )
+
     with_scores = info.get("with_skill") or {}
     without_scores = info.get("without_skill") or {}
     lift_data = info.get("lift") or {}
@@ -1174,8 +1208,18 @@ def _build_agent(
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
     )
-    overall_ws = _mean([d["with_skill"] for d in dimensions])
-    overall_bl = _mean([d["baseline"] for d in dimensions])
+    with_dimension_values = [d["with_skill"] for d in dimensions]
+    baseline_dimension_values = [d["baseline"] for d in dimensions]
+    if tuple(metrics) == LEGACY_METRICS:
+        overall_ws = overall_score_from_metrics(with_scores, LEGACY_METRICS)
+        overall_bl = overall_score_from_metrics(without_scores, LEGACY_METRICS)
+    else:
+        overall_ws = canonical_dimension_mean(with_dimension_values)
+        overall_bl = canonical_dimension_mean(baseline_dimension_values)
+    if overall_ws is None:
+        overall_ws = _mean(with_dimension_values)
+    if overall_bl is None:
+        overall_bl = _mean(baseline_dimension_values)
     if overall_ws is None and not metrics and with_quality_available:
         overall_ws = _finite_float(info.get("overall_with_skill"))
         if overall_ws is None and info.get("rewards_complete") is not False:
@@ -2544,6 +2588,11 @@ def _read_attempt_policy(run_dir: Path) -> dict[str, Any]:
             loaded = json.loads(policy_file.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 policy.update(loaded)
+                if "score_policy" not in loaded:
+                    policy.pop("score_policy", None)
+                return policy
+    policy.pop("score_definition", None)
+    policy.pop("score_policy", None)
     return policy
 
 
@@ -2668,6 +2717,7 @@ def _default_attempt_policy() -> dict[str, Any]:
         "pass_threshold": 0.50,
         "stop_on_pass": False,
         "score_definition": AGENT_EVAL_SCORE_DEFINITION,
+        "score_policy": DEFAULT_SCORE_POLICY,
     }
 
 

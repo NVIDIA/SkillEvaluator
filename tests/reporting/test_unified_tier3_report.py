@@ -19,6 +19,7 @@ from skillevaluator.evaluation.tier3_report import (
     _metric_evidence,
     _normalize_trials,
     _raw_trial_rewards,
+    _replace_with_minimal_payload,
     _ReportBudget,
     agent_eval_result_from_directory,
     build_agent_eval_payload,
@@ -29,7 +30,7 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, DEFAULT_SCORE_POLICY, PARTIAL_SCORE_POLICY
 from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
 
 
@@ -294,6 +295,7 @@ def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path:
     payload = tier3.metadata["agent_eval"]
     assert payload["execution_status"] == "succeeded"
     assert payload["overall_score"] is not None
+    assert payload["score_policy"] == PARTIAL_SCORE_POLICY
     assert payload["agents"]["opencode"]["evaluators"]["security"]["with_skill"] == 0.8
 
 
@@ -984,6 +986,24 @@ def test_canonical_payload_enforces_total_serialized_budget() -> None:
     assert truncation["truncated"] is True
     assert truncation["omitted"]["comparison_payloads"] == 1
     assert len(encoded) <= truncation["payload_budget_bytes"]
+
+
+def test_minimal_payload_preserves_score_policy() -> None:
+    payload = {
+        "summary": {"score_policy": DEFAULT_SCORE_POLICY},
+        "score_policy": DEFAULT_SCORE_POLICY,
+        "attempt_policy": {
+            "score_definition": "x" * (3 * 1024 * 1024),
+            "score_policy": DEFAULT_SCORE_POLICY,
+        },
+    }
+
+    _replace_with_minimal_payload(payload, _ReportBudget())
+
+    assert payload["summary"]["score_policy"] == DEFAULT_SCORE_POLICY
+    assert payload["score_policy"] == DEFAULT_SCORE_POLICY
+    assert payload["attempt_policy"]["score_policy"] == DEFAULT_SCORE_POLICY
+    assert len(payload["attempt_policy"]["score_definition"]) == 1024
 
 
 def test_unpaired_id_artifact_survives_loader_report_budget_and_html(tmp_path: Path) -> None:

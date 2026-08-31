@@ -206,6 +206,19 @@ verdict bands are fixed: a dimension **passes** at 0.50 or above, is
 the configured provider model; override it per run as described in
 [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
 
+The standard overall score gives each dimension one equal vote:
+
+```text
+overall = (Security + Correctness + Discoverability + Effectiveness + Efficiency) / 5
+Effectiveness = (goal_accuracy + behavior_check) / 2
+```
+
+This formula is shared by the report, per-attempt pass@k thresholding, Skill
+Lift, comparisons, and best-agent selection. Standard artifacts identify it as
+`skill-evaluator-dimension-mean-v1` in `score_policy` and in the persisted
+attempt policy. Older metric sets and partial historical artifacts keep their
+legacy policy rather than being rescored as current data.
+
 ### Skill Lift
 
 Skill Lift is the with-skill score minus the without-skill baseline — the
@@ -236,7 +249,8 @@ see [Custom Graders & Tasks](custom-graders.mdx).
 pass@k is the reliability signal, reported separately from the dimension
 scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
 counts as passed when at least one attempt clears the `--pass-threshold`
-score. Comparing pass@k across arms (in `pass_at_k_lift.json`) tells you
+score using the same overall formula above. Comparing pass@k across arms (in
+`pass_at_k_lift.json`) tells you
 whether the skill makes success more *repeatable*, not just whether the average
 score moved. Each arm also records a case-level 95% Wilson score interval for
 its pass rate. When both arms contain the same identified cases,

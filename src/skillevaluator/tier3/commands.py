@@ -36,7 +36,7 @@ from skillevaluator.tier3.harbor import (
     HARBOR_AGENTS_SUPPORTED,
     canonical_agent_name,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, overall_score_from_metrics
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
     ProgressEvent,
@@ -1045,12 +1045,10 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     table.add_row(*[""] * (1 + sum(2 if agent in agent_without else 1 for agent in agents)))
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
     for agent in agents:
-        with_avg = sum(_safe_score(agent_with[agent], metric) for metric in overall_metrics) / len(overall_metrics)
+        with_avg = _overall_score_for_display(agent_with[agent], overall_metrics)
         overall_row.append(Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}"))
         if agent in agent_without:
-            without_avg = sum(_safe_score(agent_without[agent], metric) for metric in overall_metrics) / len(
-                overall_metrics
-            )
+            without_avg = _overall_score_for_display(agent_without[agent], overall_metrics)
             delta = with_avg - without_avg
             delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
             delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
@@ -1106,6 +1104,14 @@ def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str
 def _safe_score(scores: dict[str, float], metric: str) -> float:
     value = scores.get(metric, 0.0)
     return float(value) if isinstance(value, int | float) else 0.0
+
+
+def _overall_score_for_display(scores: dict[str, float], metrics: tuple[str, ...]) -> float:
+    """Use the canonical policy while preserving partial historical displays."""
+    score = overall_score_from_metrics(scores, metrics)
+    if score is not None:
+        return score
+    return sum(_safe_score(scores, metric) for metric in metrics) / len(metrics)
 
 
 def _score_style(score: float) -> str:

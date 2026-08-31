@@ -481,6 +481,7 @@ AGENT_EVAL_SCORE_DEFINITION = (
     "overall = mean(Security, Correctness, Discoverability, Effectiveness, Efficiency) "
     "dimensions; Security maps to security evaluator (fallback: behavior_check)"
 )
+DEFAULT_SCORE_POLICY = "skill-evaluator-dimension-mean-v1"
 
 AGENT_EVAL_VERDICT_PASS = "pass"
 AGENT_EVAL_VERDICT_NEUTRAL = "neutral"

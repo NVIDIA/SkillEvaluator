@@ -24,6 +24,7 @@ from skillevaluator.tier3.harbor.metrics import (
     METRIC_DISPLAY,
     METRIC_QUESTIONS,
     extract_custom_metrics,
+    overall_score_from_metrics,
 )
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -92,8 +93,10 @@ def _pick_best_agent(
         with_scores = data.get("with_skill", {})
         if not with_scores:
             continue
-        metrics = [m for m in DISPLAY_METRICS if m in with_scores] or list(DISPLAY_METRICS)
-        overall = sum(with_scores.get(m, 0.0) for m in metrics) / len(metrics)
+        metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores) or DISPLAY_METRICS
+        overall = overall_score_from_metrics(with_scores, metrics)
+        if overall is None:
+            continue
         if overall > best_score:
             best_score = overall
             best_agent = agent

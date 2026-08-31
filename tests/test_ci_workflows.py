@@ -249,6 +249,20 @@ def test_every_workflow_does_not_persist_checkout_credentials() -> None:
         assert step.get("with", {}).get("persist-credentials") == "false", workflow_name
 
 
+def test_publish_docs_installs_the_fern_version_the_repository_pins() -> None:
+    """Docs are checked and published by the same CLI version.
+
+    ci.yml derives it from fern/fern.config.json; publishing must not hardcode a
+    second version that can drift from the one validation ran against.
+    """
+    job = _load("publish-docs.yml")["jobs"]["run"]
+    install_step = next(step for step in job["steps"] if "npm install" in step.get("run", ""))
+
+    assert "fern/fern.config.json" in install_step["run"]
+    assert "fern-api@$FERN_VERSION" in install_step["run"]
+    assert not re.search(r"fern-api@\d", install_step["run"]), "Fern CLI version is hardcoded"
+
+
 def test_every_workflow_declares_least_privilege_permissions() -> None:
     for workflow_name in _workflow_names():
         workflow = _load(workflow_name)

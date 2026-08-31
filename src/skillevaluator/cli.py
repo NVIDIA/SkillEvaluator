@@ -814,8 +814,6 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     if params.get("harbor_keep_jobs"):
         argv.append("--harbor-keep-jobs")
     for fmt in params.get("report_formats") or ("cli",):
-        if fmt == "cli":
-            continue
         argv.extend(["-r", fmt])
     argv.extend(["-o", str(output_dir)])
     return argv
@@ -871,16 +869,6 @@ def _new_skill_json_report_name(output_dir: Path, existing_reports: set[Path]) -
     return sorted(new_reports, reverse=True)[0].name
 
 
-def _latest_skill_json_report(skill_report_dir: Path) -> Path | None:
-    """Return the newest per-skill machine-readable report when present."""
-    if not skill_report_dir.is_dir():
-        return None
-    candidates = sorted(skill_report_dir.glob("skillevaluator-output-*.json"), reverse=True)
-    if candidates:
-        return candidates[0]
-    return None
-
-
 def _catalog_skill_entry(
     skill_name: str,
     skill_report_dir: Path,
@@ -900,8 +888,9 @@ def _catalog_skill_entry(
     if json_report_name:
         json_report = skill_report_dir / json_report_name
     else:
-        json_report = _latest_skill_json_report(skill_report_dir)
-    if json_report is None or not json_report.is_file():
+        return entry
+
+    if not json_report.is_file():
         return entry
 
     entry["json_report"] = json_report.name
@@ -984,20 +973,32 @@ def _validate_catalog(
         return
 
     failures: list[tuple[str, str]] = []
+    skill_reports: dict[str, str | None] = {}
     for index, skill_dir in enumerate(skill_dirs, start=1):
         _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
+        skill_output = output_dir / skill_dir.name
+        existing_reports = (
+            set(skill_output.glob("skillevaluator-output-*.json")) if skill_output.is_dir() else set()
+        )
         overrides = {
             **ctx.params,
             "target_path": skill_dir,
             "content_type": "skill",
-            "output_dir": output_dir / skill_dir.name,
+            "output_dir": skill_output,
         }
+        passed = True
+        reason = ""
         try:
             ctx.invoke(validate, **overrides)
         except click.ClickException as exc:
-            failures.append((skill_dir.name, str(getattr(exc, "message", exc))))
+            passed = False
+            reason = str(getattr(exc, "message", exc))
+            failures.append((skill_dir.name, reason))
         except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
-            failures.append((skill_dir.name, f"unexpected error: {exc}"))
+            passed = False
+            reason = f"unexpected error: {exc}"
+            failures.append((skill_dir.name, reason))
+        skill_reports[skill_dir.name] = _new_skill_json_report_name(skill_output, existing_reports)
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
@@ -1005,6 +1006,7 @@ def _validate_catalog(
             output_dir / skill_dir.name,
             passed=skill_dir.name not in failure_map,
             reason=failure_map.get(skill_dir.name, ""),
+            json_report_name=skill_reports.get(skill_dir.name),
         )
         for skill_dir in skill_dirs
     ]
@@ -1032,9 +1034,6 @@ def _validate_catalog_parallel(
         _print_catalog_summary(0, [], output_dir)
         return
 
-    import sys
-
-    parent_argv = list(sys.argv)
     workdir = str(Path.cwd())
     output_dir.mkdir(parents=True, exist_ok=True)
     make_view_console().print(
@@ -1045,7 +1044,7 @@ def _validate_catalog_parallel(
     jobs = [
         {
             "skill_name": skill_dir.name,
-            "argv": _catalog_child_argv(ctx, skill_dir, output_dir / skill_dir.name, parent_argv),
+            "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_dir.name),
             "cwd": workdir,
             "output_dir": str(output_dir / skill_dir.name),
         }

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from skillevaluator import cli as cli_module
 from skillevaluator.cli import cli
 from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_agents
 
@@ -333,6 +334,25 @@ def test_validate_catalog_runs_each_skill_as_separate_job() -> None:
         assert summary["passed"] == 2
         assert summary["overall_passed"] is True
         assert len(summary["skills"]) == 2
+
+
+def test_catalog_skill_entry_skips_stale_json_without_report_name(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "simple"
+    skill_dir.mkdir()
+    stale = skill_dir / "skillevaluator-output-19990101T000000.json"
+    stale.write_text(
+        json.dumps({"overall_passed": True, "severity_counts": {"high": 7}}),
+        encoding="utf-8",
+    )
+    entry = cli_module._catalog_skill_entry(
+        "simple",
+        skill_dir,
+        passed=False,
+        reason="validation failed",
+        json_report_name=None,
+    )
+    assert "overall_passed" not in entry
+    assert "severity_counts" not in entry
 
 
 def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:

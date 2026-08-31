@@ -696,14 +696,14 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
 
 
-def _latest_skill_json_report(skill_report_dir: Path) -> Path | None:
-    """Return the newest per-skill machine-readable report when present."""
-    if not skill_report_dir.is_dir():
+def _new_skill_json_report_name(output_dir: Path, existing_reports: set[Path]) -> str | None:
+    """Return the JSON report filename produced during this catalog skill run."""
+    if not output_dir.is_dir():
         return None
-    candidates = sorted(skill_report_dir.glob("skillevaluator-output-*.json"), reverse=True)
-    if candidates:
-        return candidates[0]
-    return None
+    new_reports = set(output_dir.glob("skillevaluator-output-*.json")) - existing_reports
+    if not new_reports:
+        return None
+    return sorted(new_reports, reverse=True)[0].name
 
 
 def _catalog_skill_entry(
@@ -712,6 +712,7 @@ def _catalog_skill_entry(
     *,
     passed: bool,
     reason: str,
+    json_report_name: str | None = None,
 ) -> dict[str, object]:
     entry: dict[str, object] = {
         "name": skill_name,
@@ -721,8 +722,12 @@ def _catalog_skill_entry(
     if not passed:
         entry["reason"] = reason
 
-    json_report = _latest_skill_json_report(skill_report_dir)
-    if json_report is None:
+    if json_report_name:
+        json_report = skill_report_dir / json_report_name
+    else:
+        return entry
+
+    if not json_report.is_file():
         return entry
 
     entry["json_report"] = json_report.name
@@ -741,6 +746,8 @@ def _catalog_skill_entry(
 
 def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) -> Path:
     """Write a machine-readable fleet rollup for catalog validation."""
+    from skillevaluator.reporting.base import _write_report_atomically
+
     total = len(skills)
     passed = sum(1 for skill in skills if skill.get("passed"))
     failed = total - passed
@@ -772,7 +779,7 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / CATALOG_SUMMARY_FILENAME
-    output_path.write_text(json.dumps(summary, indent=2, default=str, allow_nan=False), encoding="utf-8")
+    _write_report_atomically(output_path, json.dumps(summary, indent=2, default=str, allow_nan=False))
     return output_path
 
 
@@ -796,13 +803,18 @@ def _validate_catalog(
 
     skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
     failures: list[tuple[str, str]] = []
+    skill_reports: dict[str, str | None] = {}
     for index, skill_dir in enumerate(skill_dirs, start=1):
         _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
+        skill_output = output_dir / skill_dir.name
+        existing_reports = (
+            set(skill_output.glob("skillevaluator-output-*.json")) if skill_output.is_dir() else set()
+        )
         overrides = {
             **ctx.params,
             "target_path": skill_dir,
             "content_type": "skill",
-            "output_dir": output_dir / skill_dir.name,
+            "output_dir": skill_output,
         }
         try:
             ctx.invoke(validate, **overrides)
@@ -810,6 +822,7 @@ def _validate_catalog(
             failures.append((skill_dir.name, str(getattr(exc, "message", exc))))
         except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
             failures.append((skill_dir.name, f"unexpected error: {exc}"))
+        skill_reports[skill_dir.name] = _new_skill_json_report_name(skill_output, existing_reports)
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
@@ -817,6 +830,7 @@ def _validate_catalog(
             output_dir / skill_dir.name,
             passed=skill_dir.name not in failure_map,
             reason=failure_map.get(skill_dir.name, ""),
+            json_report_name=skill_reports.get(skill_dir.name),
         )
         for skill_dir in skill_dirs
     ]

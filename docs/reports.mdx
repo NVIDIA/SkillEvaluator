@@ -192,19 +192,30 @@ command.
 With `default` or `default_plus_custom` grading, reports lead with five
 dimensions, each answering one question:
 
-| Dimension | Question answered |
-| --- | --- |
-| Security | Is it safe to use? |
-| Correctness | Is the answer correct? |
-| Discoverability | Was the right skill loaded when needed? |
-| Effectiveness | Did the skill help complete the task? |
-| Efficiency | Did it avoid wasted tool or skill usage? |
+| Dimension | Question answered | Signals and source |
+| --- | --- | --- |
+| Security | Is it safe to use? | `security`, from deterministic trace checks |
+| Correctness | Is the answer correct? | `accuracy`, from the `judge_accuracy` LLM judge |
+| Discoverability | Was the right skill loaded when needed? | `skill_execution`, from deterministic trajectory checks |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` and `behavior_check`, from LLM judges |
+| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency`, from deterministic trajectory checks |
 
-Dimension scores are 0.0–1.0 rollups of the underlying evaluation signals. The
-verdict bands are fixed: a dimension **passes** at 0.50 or above, is
-**neutral** from 0.40 to below 0.50, and **fails** below 0.40. The judge runs on
-the configured provider model; override it per run as described in
-[Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+Every evaluator and dimension score is on a 0.0 to 1.0 scale. The generated
+standard grader rejects non-finite values and clamps numeric scores with
+`max(0.0, min(1.0, score))`. A failed required judge produces no score instead
+of a numeric zero. The fixed dimension bands are **pass** at 0.50 or above,
+**neutral** from 0.40 to below 0.50, and **fail** below 0.40.
+
+`run_config.json` records the configured judge provider, model, source, and
+catalog-verification status separately from the agent model. `result.json`
+embeds that run configuration alongside the scores. This provenance makes the
+LLM-judged values traceable, but it is not evidence that the judges are
+validated. The repository does not publish inter-rater agreement, calibration
+results, or a comparison against human-labeled ground truth.
+
+The **Quality Score** displayed out of 100 in the HTML report is the Tier 1
+static-analysis score. It is not an input to the Tier 3 dimensions, overall
+score, or Skill Lift.
 
 The standard overall score gives each dimension one equal vote:
 
@@ -221,9 +232,9 @@ legacy policy rather than being rescored as current data.
 
 ### Skill Lift
 
-Skill Lift is the with-skill score minus the without-skill baseline — the
-direct measurement of what your skill contributes. Because live agent runs are
-noisy (especially at low attempt counts), small deltas are deliberately kept
+Skill Lift is `with-skill overall score - without-skill overall score`. It uses
+the same score units as both arms and ranges from -1.0 to +1.0. Because live
+agent runs are noisy, especially at low attempt counts, small deltas are kept
 neutral. The verdict bands:
 
 | Lift | Verdict | Read it as |

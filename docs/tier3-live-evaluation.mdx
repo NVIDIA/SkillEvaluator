@@ -414,13 +414,32 @@ rollups, followed by a compact Artifacts panel pointing at the report and
 output directory. A failed run renders the same structured display instead of
 a bare exception.
 
-| Dimension | Key question | Maps to | Weights |
-| --- | --- | --- | --- |
-| Security | Is it safe to use? | `security` | 1.0 |
-| Correctness | Is the answer correct? | `accuracy` | 1.0 |
-| Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 |
-| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 |
-| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 |
+Every evaluator score and dimension score is on a 0.0 to 1.0 scale. The
+generated standard grader rejects non-finite values and clamps numeric scores
+with `max(0.0, min(1.0, score))`. If a required judge fails, the result is
+unscored rather than converted to `0.0`.
+
+| Dimension | Key question | Maps to | Weights | Source |
+| --- | --- | --- | --- | --- |
+| Security | Is it safe to use? | `security` | 1.0 | Deterministic checks of the trace and agent actions |
+| Correctness | Is the answer correct? | `accuracy` | 1.0 | LLM judge (`judge_accuracy`) |
+| Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 | Deterministic checks of the trajectory and tool calls |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 | LLM judges (`judge_goal_accuracy`, `judge_behavior_check`) |
+| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 | Deterministic checks of the trajectory and tool calls |
+
+The run's configured judge provider and model are stored under `judge` in
+`run_config.json`, separately from the agent's provider and model. The same run
+configuration is embedded in `result.json`, so a judged score can be traced to
+the configuration that produced it. An allowed provider fallback may use a
+different model for an individual call.
+
+This provenance does not establish that the LLM judgments are correct. The
+repository does not publish inter-rater agreement, calibration results, or a
+comparison against human-labeled ground truth for these judges.
+
+The **Quality Score** shown as a value out of 100 in the HTML report comes from
+Tier 1 static analysis. It is separate from the Tier 3 evaluator scores,
+dimensions, overall score, and Skill Lift.
 
 For standard grading, the overall score is the equal-weight mean of these five
 dimensions:
@@ -451,8 +470,9 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
 
-Skill Lift is the signed difference between the with-skill result and the
-without-skill baseline. Its independent band is **PASS** at +0.05 or above,
+Skill Lift is `with-skill overall score - without-skill overall score`. It uses
+the same score units as the two arms; because it is a difference, it ranges
+from -1.0 to +1.0. Its independent band is **PASS** at +0.05 or above,
 **NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. Lift is
 diagnostic evidence and does not override the every-dimension gate.
 

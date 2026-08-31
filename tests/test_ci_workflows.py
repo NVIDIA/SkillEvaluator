@@ -122,7 +122,7 @@ def test_ci_docs_lane_uses_the_required_python_312_context() -> None:
     assert len(node_step["uses"].split("@", 1)[1]) == 40
     assert docs_step["if"] == DOCS_ONLY_IF
     assert "fern/fern.config.json" in docs_step["run"]
-    assert 'npm install --global "fern-api@$FERN_VERSION"' in docs_step["run"]
+    assert 'npm install --global --ignore-scripts --omit=optional "fern-api@$FERN_VERSION"' in docs_step["run"]
     assert "fern check" in docs_step["run"]
     assert "GITHUB_STEP_SUMMARY" in docs_step["run"]
 
@@ -234,9 +234,25 @@ def test_non_pr_workflow_triggers_are_preserved() -> None:
     assert "workflow_dispatch" in security["on"]
 
 
+def _is_local_reference(uses: str) -> bool:
+    """A same-repo composite action or reusable workflow, e.g. ``./.github/actions/x``.
+
+    GitHub always resolves these from the caller's own commit, so nothing about
+    them can float and there is no ``@ref`` to pin.
+    """
+    return uses.startswith("./")
+
+
+def _local_reference_escapes_repo(uses: str) -> bool:
+    return ".." in Path(uses).parts
+
+
 def test_every_workflow_pins_every_action_to_a_commit() -> None:
     for workflow_name in _workflow_names():
         for uses in _all_uses(_load(workflow_name)):
+            if _is_local_reference(uses):
+                assert not _local_reference_escapes_repo(uses), f"{workflow_name}: {uses}"
+                continue
             assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), f"{workflow_name}: {uses}"
 
 
@@ -278,3 +294,18 @@ def test_every_workflow_declares_least_privilege_permissions() -> None:
             (f"job {job_id}", job["permissions"]) for job_id, job in workflow["jobs"].items() if "permissions" in job
         ]:
             assert permissions != "write-all", f"{workflow_name}: {scope}"
+
+
+NPM_INSTALL_LINE = re.compile(r"^.*\bnpm install\b.*$", re.MULTILINE)
+
+
+def test_every_workflow_npm_install_ignores_lifecycle_scripts() -> None:
+    """A floating transitive dependency must not get to run install-time code.
+
+    npm re-resolves the whole tree on every install, so pinning the top-level
+    package does not pin what its dependencies can execute at install time.
+    """
+    for workflow_name in _workflow_names():
+        for step in _all_steps(_load(workflow_name)):
+            for line in NPM_INSTALL_LINE.findall(step.get("run", "")):
+                assert "--ignore-scripts" in line, f"{workflow_name}: {line.strip()}"

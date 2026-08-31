@@ -37,6 +37,13 @@ def _load(name: str) -> dict[str, Any]:
     return yaml.load((WORKFLOWS / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+def _workflow_names() -> list[str]:
+    """Every workflow on disk, so a new one is covered the day it lands."""
+    names = sorted(path.name for pattern in ("*.yml", "*.yaml") for path in WORKFLOWS.glob(pattern))
+    assert names, "no workflows found"
+    return names
+
+
 def _assert_no_path_filter(workflow: dict[str, Any], event: str = "pull_request") -> None:
     trigger = workflow["on"][event]
     if isinstance(trigger, dict):
@@ -224,14 +231,27 @@ def test_non_pr_workflow_triggers_are_preserved() -> None:
     assert "workflow_dispatch" in security["on"]
 
 
-def test_changed_workflows_pin_every_action_to_a_commit() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
+def test_every_workflow_pins_every_action_to_a_commit() -> None:
+    for workflow_name in _workflow_names():
         for uses in _all_uses(_load(workflow_name)):
-            assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), uses
+            assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), f"{workflow_name}: {uses}"
 
 
-def test_changed_workflows_do_not_persist_checkout_credentials() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
-        checkout_steps = [step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")]
-        assert checkout_steps
-        assert all(step.get("with", {}).get("persist-credentials") == "false" for step in checkout_steps)
+def test_every_workflow_does_not_persist_checkout_credentials() -> None:
+    checkout_steps = [
+        (workflow_name, step)
+        for workflow_name in _workflow_names()
+        for step in _all_steps(_load(workflow_name))
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert checkout_steps
+    for workflow_name, step in checkout_steps:
+        assert step.get("with", {}).get("persist-credentials") == "false", workflow_name
+
+
+def test_every_workflow_declares_least_privilege_permissions() -> None:
+    for workflow_name in _workflow_names():
+        workflow = _load(workflow_name)
+        permissions = workflow.get("permissions")
+        assert permissions is not None, f"{workflow_name} inherits the repository default token scope"
+        assert permissions != "write-all", workflow_name

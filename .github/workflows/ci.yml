@@ -94,7 +94,7 @@ jobs:
             echo "::error file=fern/fern.config.json::Invalid Fern CLI version: $FERN_VERSION"
             exit 1
           fi
-          npm install --global "fern-api@$FERN_VERSION"
+          npm install --global --ignore-scripts --omit=optional "fern-api@$FERN_VERSION"
           fern check
           {
             echo "### Documentation-only CI"

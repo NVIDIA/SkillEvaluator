@@ -533,6 +533,9 @@ def _iter_jsonl_dicts(text: str) -> list[dict[str, Any]]:
 
 
 def _codex_item_text(item: dict[str, Any]) -> str | None:
+    text = item.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
     item_type = str(item.get("type") or "")
     if item_type not in {"message", "agent_message"}:
         return None
@@ -554,55 +557,90 @@ def _codex_function_arguments(function_call: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _codex_thread_item(evt: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the Codex thread item payload from a completed event."""
+    if str(evt.get("type") or "") == "item.completed":
+        item = evt.get("item")
+        return item if isinstance(item, dict) else None
+    if str(evt.get("type") or "") == "item" and evt.get("item.completed", True):
+        item = evt.get("item")
+        return item if isinstance(item, dict) else None
+    return None
+
+
 def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
-    """Parse Codex ``exec --json`` JSONL (``type: item`` / ``agent_message``)."""
+    """Parse Codex ``exec --json`` ThreadEvent JSONL."""
     if not text or not text.strip():
         return None
 
     steps: list[dict[str, Any]] = []
     saw_content = False
-    message_index = 0
+    tool_index = 0
 
     for evt in _iter_jsonl_dicts(text):
-        if str(evt.get("type") or "") != "item":
-            continue
-        item = evt.get("item")
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("type") or "") != "agent_message":
-            continue
-        if not evt.get("item.completed", True):
+        item = _codex_thread_item(evt)
+        if item is None:
             continue
 
-        message = _codex_item_text(item)
-        function_call = item.get("function_call")
-        if not message and not function_call:
+        item_type = str(item.get("type") or "")
+
+        if item_type in {"agent_message", "message"}:
+            message = _codex_item_text(item)
+            function_call = item.get("function_call")
+            if not message and not isinstance(function_call, dict):
+                continue
+            saw_content = True
+            step: dict[str, Any] = {
+                "source": "agent",
+                "message": message or "",
+                "tool_calls": [],
+                "observation": {"results": []},
+            }
+            if isinstance(function_call, dict):
+                call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+                function_name = str(function_call.get("name") or "tool")
+                if function_name.lower() in {"bash", "shell"}:
+                    function_name = "bash"
+                arguments = _codex_function_arguments(function_call)
+                step["tool_calls"] = [
+                    {
+                        "tool_call_id": call_id,
+                        "function_name": function_name,
+                        "arguments": arguments,
+                    }
+                ]
+                output = item.get("output")
+                if output is not None:
+                    step["observation"]["results"].append(
+                        {
+                            "source_call_id": call_id,
+                            "content": str(output)[:8000],
+                        }
+                    )
+                tool_index += 1
+            steps.append(step)
             continue
 
-        saw_content = True
-        step: dict[str, Any] = {
-            "source": "agent",
-            "message": message or "",
-            "tool_calls": [],
-            "observation": {"results": []},
-        }
-
-        if isinstance(function_call, dict):
-            call_id = str(
-                item.get("id") or evt.get("item_id") or f"codex-{message_index + 1}"
-            )
-            function_name = str(function_call.get("name") or "tool")
-            if function_name.lower() in {"bash", "shell"}:
-                function_name = "bash"
-            arguments = _codex_function_arguments(function_call)
-            step["tool_calls"] = [
-                {
-                    "tool_call_id": call_id,
-                    "function_name": function_name,
-                    "arguments": arguments,
-                }
-            ]
-            output = item.get("output")
+        if item_type == "command_execution":
+            command = str(item.get("command") or "").strip()
+            if not command:
+                continue
+            saw_content = True
+            call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+            tool_index += 1
+            step = {
+                "source": "agent",
+                "message": "",
+                "tool_calls": [
+                    {
+                        "tool_call_id": call_id,
+                        "function_name": "bash",
+                        "arguments": {"command": command},
+                    }
+                ],
+                "observation": {"results": []},
+            }
+            output = item.get("aggregated_output")
             if output is not None:
                 step["observation"]["results"].append(
                     {
@@ -610,8 +648,7 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
                         "content": str(output)[:8000],
                     }
                 )
-        message_index += 1
-        steps.append(step)
+            steps.append(step)
 
     if not saw_content or not steps:
         return None

@@ -13,10 +13,17 @@ from pathlib import Path
 from skillevaluator.constants import BANNED_PACKAGES
 from skillevaluator.logging_config import get_logger
 from skillevaluator.validators.base import ValidationResult, ValidatorBase, iter_scannable_files
+from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
 logger = get_logger(__name__)
 
 _TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
+
+
+def _link_display(value: str) -> str:
+    """Keep untrusted link diagnostics bounded and on one physical line."""
+    escaped = ascii(value[:160])[1:-1]
+    return escaped[:160] + ("..." if len(value) > 160 or len(escaped) > 160 else "")
 
 
 class HygieneValidator(ValidatorBase):
@@ -70,10 +77,6 @@ class HygieneValidator(ValidatorBase):
             message=f"Checking {len(md_files)} markdown files for dead links",
             file_count=len(md_files),
         )
-        link_pattern = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-        # Pattern to match fenced code blocks (``` or ~~~)
-        code_block_pattern = re.compile(r"(```|~~~).*?\1", re.DOTALL)
-
         for md_file in md_files:
             try:
                 content = md_file.read_text(encoding="utf-8")
@@ -81,27 +84,31 @@ class HygieneValidator(ValidatorBase):
                 result.add_warning(f"Could not read {md_file}: {e}")
                 continue
 
-            # Remove fenced code blocks before checking links
-            # This prevents false positives from example links in documentation
-            content_without_code = code_block_pattern.sub("", content)
-
-            for link_text, link_href in link_pattern.findall(content_without_code):
-                # Skip external URLs and anchors
-                if link_href.startswith(("http://", "https://", "mailto:", "#")):
+            seen_targets: set[str] = set()
+            seen_invalid: set[str] = set()
+            for link_href in markdown_link_targets(content, include_images=True):
+                try:
+                    local_path = normalized_local_path(link_href, allow_directory=True, reject_anchors=True)
+                except ValueError:
+                    if link_href in seen_invalid:
+                        continue
+                    seen_invalid.add(link_href)
+                    result.add_error(
+                        f"Invalid local link in {_link_display(md_file.name)}: {_link_display(link_href)} "
+                        "(absolute or drive-relative path)"
+                    )
                     continue
-
-                # Skip links inside inline code (backticks)
-                # Check if this link appears in the original content within backticks
-                inline_code_check = f"`[{link_text}]({link_href})`"
-                if inline_code_check in content:
+                if local_path is None or local_path in seen_targets:
                     continue
+                seen_targets.add(local_path)
+                target = md_file.parent / local_path
 
-                # Resolve and validate relative path
-                clean_path = link_href.removeprefix("./").split("#")[0]
-                target = md_file.parent / clean_path
-
-                if not target.exists():
-                    result.add_error(f"Dead link in {md_file.name}: [{link_text}]({link_href})")
+                try:
+                    exists = target.exists()
+                except (OSError, ValueError):
+                    exists = False
+                if not exists:
+                    result.add_error(f"Dead link in {_link_display(md_file.name)}: {_link_display(link_href)}")
 
         if not result.errors:
             result.add_success(

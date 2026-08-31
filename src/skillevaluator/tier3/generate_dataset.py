@@ -523,7 +523,16 @@ def _discover_trajectories(
     if not results_dir.exists():
         return {}
 
-    agent_priority = ["claude-code", "cursor-cli", "codex", "openhands", "mini-swe-agent", "aider", "gemini-cli"]
+    agent_priority = [
+        "claude-code",
+        "cursor-cli",
+        "opencode",
+        "codex",
+        "openhands",
+        "mini-swe-agent",
+        "aider",
+        "gemini-cli",
+    ]
     for agent_name in agent_priority:
         trials_dir = results_dir / agent_name / "with-skill" / "trials"
         if not trials_dir.exists():

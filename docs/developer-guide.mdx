@@ -83,10 +83,11 @@ The documentation site is built with [Fern](https://buildwithfern.com/) from the
 <Steps>
   ### Install the Fern CLI
 
-  Requires Node.js 22+ and npm 10+.
+  Requires Node.js 22+ and npm 10+. `--ignore-scripts --omit=optional` keeps npm from running any
+  package's install-time scripts, the same hardening CI applies to this install.
 
   ```bash title="Install fern-api"
-  npm install -g fern-api
+  npm install -g --ignore-scripts --omit=optional fern-api
   ```
 
   ### Preview with live reload

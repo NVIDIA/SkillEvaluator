@@ -80,13 +80,17 @@ All notable changes to SkillEvaluator are documented in this file.
   with the native binaries it pulls in; pinning `fern-api`'s own version does
   not pin what its dependencies resolve to on each run, since npm re-resolves
   the whole tree from semver ranges every time. A guard now asserts every
-  workflow's `npm install` carries `--ignore-scripts`.
+  workflow's `npm install` carries `--ignore-scripts`. The developer-facing
+  install instructions (`docs/README.md`, `docs/AGENTS.md`,
+  `docs/developer-guide.mdx`) carry the same two flags now, so a contributor
+  or agent following them locally gets the same hardening CI does.
 - The action-pinning guard now accepts a same-repo composite action or
   reusable workflow (`uses: ./...`) without requiring a commit SHA, since
   GitHub always resolves a local reference from the caller's own commit and
   nothing about it can float. A local reference that escapes the repository
-  (e.g. `./../outside`) is still rejected, and a `docker://` reference is
-  unaffected by the exemption.
+  (e.g. `./../outside`) or carries an `@ref` (a syntax local references don't
+  have) is still rejected, and a `docker://` reference is unaffected by the
+  exemption.
 
 ## 0.2.1 - 2026-08-24
 

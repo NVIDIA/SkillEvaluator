@@ -64,7 +64,7 @@ Navigation order, page titles, and slugs are defined in
 
 ## Verify before committing
 
-Requires **Node.js 22+** and the Fern CLI (`npm install -g fern-api`).
+Requires **Node.js 22+** and the Fern CLI (`npm install -g --ignore-scripts --omit=optional fern-api`).
 
 ```bash
 fern check       # validate docs.yml config and all links — must pass

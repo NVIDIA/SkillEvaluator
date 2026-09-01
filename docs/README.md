@@ -30,7 +30,7 @@ Prerequisites: Node.js 22+ and npm 10+ (the versions the Fern CLI requires).
 
 ```bash
 # Install the Fern CLI
-npm install -g fern-api
+npm install -g --ignore-scripts --omit=optional fern-api
 
 # From the repo root, preview the site with live reload
 fern docs dev

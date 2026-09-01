@@ -612,6 +612,45 @@ Run the documented workflow.
         assert len(email_findings) == 1
         assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
 
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_bom_prefixed_frontmatter_author_email_not_flagged_in_security_scan(
+        self, tmp_path: Path, newline: str
+    ):
+        """UTF-8 BOM must not turn a valid frontmatter author email into a PII finding."""
+        skill_dir = tmp_path / "bom-public-author-skill"
+        skill_dir.mkdir()
+        skill_md = skill_dir / "SKILL.md"
+        body = newline.join(
+            [
+                "---",
+                "name: bom-public-author-skill",
+                "description: A public skill with contributor metadata and a body contact leak",
+                "metadata:",
+                "  author: Example Contributor <contributor@contributors.invalid>",
+                "---",
+                "",
+                "# Public Author Skill",
+                "",
+                "## Instructions",
+                "",
+                "Contact contributor@contributors.invalid for private support.",
+                "",
+                "## Examples",
+                "",
+                "Run the documented workflow.",
+                "",
+            ]
+        )
+        skill_md.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+        schema_result = SchemaValidator().validate(skill_dir)
+        pii_result = SecurityValidator(submitter_usernames=[]).validate_pii_only(skill_dir)
+
+        assert not [finding for finding in schema_result.findings if finding.check_name == "author_format"]
+        email_findings = [finding for finding in pii_result.findings if finding.check_name == "emails"]
+        assert len(email_findings) == 1
+        assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
+
     def test_unrelated_home_roots_not_flagged(self, tmp_path: Path):
         """Unrelated /home roots stay unflagged without an organization allowlist."""
         skill_dir = tmp_path / "shared-home-skill"

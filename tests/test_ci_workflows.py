@@ -285,8 +285,13 @@ def test_publish_docs_installs_the_fern_version_the_repository_pins() -> None:
     assert not re.search(r"fern-api@\d", install_step["run"]), "Fern CLI version is hardcoded"
 
 
-def test_every_workflow_declares_least_privilege_permissions() -> None:
-    """A job-level permissions: block overrides the workflow-level one, so check both."""
+def test_every_workflow_declares_explicit_permissions() -> None:
+    """A job-level permissions: block overrides the workflow-level one, so check both.
+
+    This rejects the write-all shorthand and the inherited-default token scope, not
+    every broad grant -- a granular write like `contents: write` is a legitimate
+    choice for a release workflow and is not this test's concern.
+    """
     for workflow_name in _workflow_names():
         workflow = _load(workflow_name)
         assert workflow.get("permissions") is not None, (

@@ -16,6 +16,11 @@ All notable changes to SkillEvaluator are documented in this file.
   no longer truncated to MIT and allowed. Closing comment markers such as
   `*/` and `-->` are not treated as part of the expression
   ([#86](https://github.com/NVIDIA/SkillEvaluator/issues/86)).
+- Windows personal-path PII now flags `C:\Users\...` usernames that start with
+  `s` (for example `steve`), matching the intended whitespace class rather than
+  excluding the letter `s` ([#87](https://github.com/NVIDIA/SkillEvaluator/issues/87)).
+- Quality scoring, script lint, and `create-eval-dataset` now treat `tools/`
+  the same as `scripts/` for executable helpers.
 - License detection no longer treats a frontmatter `license` identifier as
   authoritative when a LICENSE file declares a different license. Claiming
   MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is

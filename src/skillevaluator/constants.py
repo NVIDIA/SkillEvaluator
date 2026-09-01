@@ -46,6 +46,10 @@ DEFAULT_ALLOWED_SKILL_DIRS = frozenset(
     {"agents", "references", "scripts", "assets", "evals", "tests", "tools", "config"}
 )
 
+# Directories that hold skill executables. ``scripts/`` is the historical
+# SkillEvaluator name; ``tools/`` is the agentskills.io name.
+EXECUTABLE_SKILL_DIRS = ("scripts", "tools")
+
 # Env var that lets consumers EXTEND the allowed skill-root directory set per
 # repo (comma- or whitespace-separated) without editing bundled config — e.g.
 # ``SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS="data,fixtures"``. Names are added to,
@@ -347,6 +351,7 @@ QUALITY_RESERVED_NAMES = ["anthropic", "claude"]
 QUALITY_EXCLUDED_DIRS = frozenset(
     {
         "scripts",
+        "tools",
         "references",
         "assets",
         "eval",

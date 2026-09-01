@@ -59,6 +59,52 @@ def test_custom_policy_wraps_malformed_yaml(tmp_path: Path) -> None:
     assert isinstance(exc_info.value.__cause__, yaml.YAMLError)
 
 
+def test_custom_policy_wraps_invalid_encoding(tmp_path: Path) -> None:
+    custom = tmp_path / "utf16-policy.yaml"
+    custom.write_bytes("profile: encoded\n".encode("utf-16"))
+
+    with pytest.raises(ValueError) as exc_info:
+        load_policy_file(custom)
+
+    assert f"Invalid policy YAML in {custom}" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, UnicodeDecodeError)
+
+
+def test_custom_policy_wraps_read_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    custom = tmp_path / "unreadable-policy.yaml"
+    custom.write_text("profile: unreadable\n", encoding="utf-8")
+    original_open = Path.open
+
+    def deny_custom_policy(path: Path, *args: object, **kwargs: object):
+        if path == custom:
+            raise PermissionError("access denied")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_custom_policy)
+
+    with pytest.raises(ValueError) as exc_info:
+        load_policy_file(custom)
+
+    assert f"Could not read policy file {custom}" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+
+
+def test_policy_yaml_wraps_recursion_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = tmp_path / "deeply-nested-policy.yaml"
+    policy.write_text("severity_overrides: []\n", encoding="utf-8")
+
+    def exhaust_parser(_stream: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(policy_module.yaml, "safe_load", exhaust_parser)
+
+    with pytest.raises(ValueError) as exc_info:
+        policy_module._load_policy_yaml(policy)
+
+    assert f"Invalid policy YAML in {policy}" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, RecursionError)
+
+
 def test_bundled_profile_wraps_malformed_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     profile = tmp_path / "broken.yaml"
     profile.write_text("identity: [", encoding="utf-8")

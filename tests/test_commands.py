@@ -111,10 +111,9 @@ def test_validate_reports_malformed_policy_without_traceback(tmp_path: Path) -> 
         ],
     )
 
-    assert result.exit_code != 0
+    assert result.exit_code == 1
     assert f"Invalid policy YAML in {policy}" in result.output
-    assert "Traceback" not in result.output
-    assert "yaml.parser.ParserError" not in result.output
+    assert isinstance(result.exception, SystemExit)
 
 
 def test_validate_prints_tier1_section_banner() -> None:

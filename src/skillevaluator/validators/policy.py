@@ -166,8 +166,12 @@ def _load_policy_yaml(path: Path) -> Any:
     try:
         with path.open(encoding="utf-8") as fh:
             return yaml.safe_load(fh) or {}
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, UnicodeError, RecursionError) as exc:
         raise ValueError(f"Invalid policy YAML in {path}: {exc}") from exc
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"Could not read policy file {path}: {exc}") from exc
 
 
 def _warn_unknown_keys(data: dict[str, Any], known: set[str], context: str, source: str) -> None:

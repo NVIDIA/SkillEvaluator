@@ -1305,25 +1305,18 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "max_issue_severity": "NONE",
             }
         )
-        payload["metadata"]["skillspector_version"] = "2.10.0"
-        payload["execution_successful"] = True
-        payload["analysis_completeness"] = {
-            "total_components": 4,
-            "scanned_components": 4,
-            "coverage_percent": 100.0,
-            "is_complete": False,
-            "status": "partial",
-            "execution_successful": True,
-            "fully_inspected_files": 4,
-            "partially_inspected_files": 0,
-            "entirely_uninspected_files": 0,
-            "ledger_exceptions": [
-                {"reason_code": "reference_unresolved", "fatal": False} for _ in range(12)
-            ],
-            "scope_exclusions": [],
-            "analyzer_statuses": [],
-            "limitations": [],
-        }
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 4,
+                "scanned_components": 4,
+                "is_complete": False,
+                "status": "partial",
+                "fully_inspected_files": 4,
+                "ledger_exceptions": [
+                    {"reason_code": "reference_unresolved", "fatal": False} for _ in range(12)
+                ],
+            }
+        )
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
@@ -1646,31 +1639,18 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.status == "incomplete"
         assert any("--no-llm" in error for error in result.errors)
 
+    @pytest.mark.parametrize("legacy", [False, True], ids=["current", "legacy"])
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_accepts_valid_clean_report(self, mock_tools, sample_skill_dir: Path) -> None:
-        mock_tools.skillspector.is_available = True
-        mock_tools.skillspector.run.return_value = ToolResult(
-            success=True,
-            stdout=json.dumps(_skillspector_json_report()),
-            stderr="",
-            exit_code=0,
-        )
-
-        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
-
-        assert result.passed
-        assert not result.errors
-        assert any(detail.check_name == "skillspector" for detail in result.success_details)
-
-    @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_accepts_legacy_clean_report_without_completeness(
+    def test_skillspector_accepts_valid_clean_report(
         self,
         mock_tools,
         sample_skill_dir: Path,
+        legacy: bool,
     ) -> None:
         payload = _skillspector_json_report()
-        payload.pop("execution_successful")
-        payload.pop("analysis_completeness")
+        if legacy:
+            payload.pop("execution_successful")
+            payload.pop("analysis_completeness")
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,

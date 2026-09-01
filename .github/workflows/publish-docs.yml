@@ -23,18 +23,13 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install Fern
-        shell: bash
-        run: |
-          set -euo pipefail
-          FERN_VERSION="$(node -p "require('./fern/fern.config.json').version")"
-          if [[ ! "$FERN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error file=fern/fern.config.json::Invalid Fern CLI version: $FERN_VERSION"
-            exit 1
-          fi
-          npm install --global --ignore-scripts --omit=optional "fern-api@$FERN_VERSION"
+      # npm ci reproduces fern/package-lock.json exactly -- every version and
+      # integrity hash -- so nothing resolved at run time reaches the step below,
+      # which holds FERN_TOKEN.
+      - name: Install the pinned Fern CLI
+        run: npm ci --prefix fern --ignore-scripts --omit=optional
 
       - name: Publish Docs
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
-        run: fern generate --docs
+        run: ./fern/node_modules/.bin/fern generate --docs

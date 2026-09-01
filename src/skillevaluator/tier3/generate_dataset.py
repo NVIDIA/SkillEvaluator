@@ -53,6 +53,7 @@ from typing import Any
 
 import yaml
 
+from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
@@ -122,10 +123,16 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
             if frontmatter.get("description"):
                 description = str(frontmatter["description"]).strip()
 
-    # Find scripts
-    scripts_dir = skill_path / "scripts"
-    if scripts_dir.is_dir():
-        scripts = [f.name for f in scripts_dir.glob("*.py")]
+    # Find scripts in scripts/ (historical) and tools/ (agentskills.io)
+    seen_scripts: set[str] = set()
+    for dirname in EXECUTABLE_SKILL_DIRS:
+        directory = skill_path / dirname
+        if not directory.is_dir():
+            continue
+        for script_file in directory.glob("*.py"):
+            if script_file.name not in seen_scripts:
+                seen_scripts.add(script_file.name)
+                scripts.append(script_file.name)
 
     # Detect interactive scripts from SKILL.md content
     interactive_scripts: set[str] = set()
@@ -496,9 +503,43 @@ def _ensure_project_imports():
         sys.path.insert(0, src_dir)
 
 
-def _case_id_from_trial_dir(trial_dir_name: str) -> str:
-    """Map Harbor trial folders like ``case-001__Lmi47iy`` back to the eval case id."""
-    return trial_dir_name.split("__", 1)[0]
+def _looks_like_harbor_suffix(suffix: str) -> bool:
+    """True when a ``__`` tail looks like Harbor's random or attempt suffix."""
+    if not suffix:
+        return False
+    lowered = suffix.lower()
+    if lowered.startswith("attempt"):
+        return True
+    return len(suffix) <= 12 and suffix.isalnum() and any(ch.isdigit() for ch in suffix)
+
+
+def _read_reward_entry_id(trial_dir: Path) -> str:
+    for reward_path in (trial_dir / "reward.json", trial_dir / "verifier" / "reward.json"):
+        if not reward_path.is_file():
+            continue
+        try:
+            payload = json.loads(reward_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            entry_id = str(payload.get("entry_id") or "").strip()
+            if entry_id:
+                return entry_id
+    return ""
+
+
+def _case_id_from_trial_dir(trial_dir: Path) -> str:
+    """Resolve eval case id from reward metadata, with conservative folder fallback."""
+    if entry_id := _read_reward_entry_id(trial_dir):
+        return entry_id
+
+    name = trial_dir.name
+    if "__" not in name:
+        return name
+    prefix, suffix = name.split("__", 1)
+    if prefix and _looks_like_harbor_suffix(suffix):
+        return prefix
+    return name
 
 
 def _discover_trajectories(
@@ -539,7 +580,7 @@ def _discover_trajectories(
         for trial_dir in sorted(trials_dir.iterdir()):
             if not trial_dir.is_dir():
                 continue
-            case_id = _case_id_from_trial_dir(trial_dir.name)
+            case_id = _case_id_from_trial_dir(trial_dir)
             if not case_id:
                 continue
             traj_path = trial_dir / "trajectory.json"

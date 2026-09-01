@@ -12,8 +12,21 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `create-eval-dataset --refine` now maps Harbor trial folders
-  (`case-id__suffix`) back to eval case ids so trajectories attach.
+- `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
+  `reward.json` `entry_id` metadata, using folder-name parsing only as an
+  unambiguous legacy fallback.
+- Windows personal-path PII now flags `C:\Users\...` usernames that start with
+  `s` (for example `steve`), matching the intended whitespace class rather than
+  excluding the letter `s` ([#87](https://github.com/NVIDIA/SkillEvaluator/issues/87)).
+- Quality scoring, script lint, and `create-eval-dataset` now treat `tools/`
+  the same as `scripts/` for executable helpers.
+- License detection no longer treats a frontmatter `license` identifier as
+  authoritative when a LICENSE file declares a different license. Claiming
+  MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is
+  reconciled, NOTICE files stay informational, an unidentified license file is
+  not treated as absent, and a blocking conflict no longer publishes
+  `license_status=allowed`
+  ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
 - `--llm-verify` now refuses to send file context from paths outside the
   skill root, including `..`, absolute paths, and outbound file symlinks.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories

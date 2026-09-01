@@ -6,6 +6,7 @@ import shutil
 import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,91 @@ def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, mon
     assert "demo-001" in found
     assert "demo-001__Lmi47iy" not in found
     assert found["demo-001"] == trajectory
+
+
+def _write_results_trial(
+    tmp_path: Path,
+    *,
+    skill_name: str,
+    trial_folder: str,
+    trajectory: dict[str, object],
+    reward: dict[str, object] | None = None,
+) -> Path:
+    skill = tmp_path / skill_name
+    skill.mkdir(exist_ok=True)
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / skill_name / run_id
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / trial_folder
+    trial.mkdir(parents=True)
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    if reward is not None:
+        trial.joinpath("reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / skill_name / "latest").symlink_to(run_id)
+    return skill
+
+
+def test_discover_trajectories_prefers_reward_entry_id_over_folder_prefix(tmp_path, monkeypatch):
+    """Stop-on-pass folders must not collapse to the job prefix when entry_id is present."""
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    skill = _write_results_trial(
+        tmp_path,
+        skill_name="demo",
+        trial_folder="harbor-job__demo-001__Lmi47iy",
+        trajectory=trajectory,
+        reward={"entry_id": "demo-001", "overall": 1.0},
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["demo-001"]
+    assert found["demo-001"] == trajectory
+
+
+def test_discover_trajectories_keeps_distinct_case_ids_with_double_underscore(tmp_path, monkeypatch):
+    """Case ids containing ``__`` must not collapse to a shared prefix without metadata."""
+    trajectory_a = {"steps": [{"message": "a"}]}
+    trajectory_b = {"steps": [{"message": "b"}]}
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trials_dir = run_dir / "claude-code" / "with-skill" / "trials"
+    for folder, traj, entry_id in (
+        ("case__one", trajectory_a, "case__one"),
+        ("case__two", trajectory_b, "case__two"),
+    ):
+        trial = trials_dir / folder
+        trial.mkdir(parents=True)
+        trial.joinpath("trajectory.json").write_text(json.dumps(traj), encoding="utf-8")
+        trial.joinpath("reward.json").write_text(json.dumps({"entry_id": entry_id}), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
+
+    found = _discover_trajectories(skill)
+    assert set(found) == {"case__one", "case__two"}
+    assert found["case__one"] == trajectory_a
+    assert found["case__two"] == trajectory_b
+
+
+def test_discover_trajectories_ambiguous_folder_without_reward_uses_full_name(tmp_path, monkeypatch):
+    """Without reward metadata, ambiguous ``__`` folders keep the full directory name."""
+    trajectory = {"steps": [{"tool_calls": []}]}
+    skill = _write_results_trial(
+        tmp_path,
+        skill_name="demo",
+        trial_folder="case__one",
+        trajectory=trajectory,
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["case__one"]
 
 
 def test_discover_trajectories_results_dir_overrides_env(tmp_path, monkeypatch):
@@ -321,3 +407,17 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
+
+
+def test_parse_skill_includes_tools_dir_scripts(tmp_path):
+    skill = tmp_path / "tools-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: tools-skill\ndescription: Spec-compliant executables live in tools/.\n---\n# x\n",
+        encoding="utf-8",
+    )
+    tools = skill / "tools"
+    tools.mkdir()
+    (tools / "run.py").write_text("print('hello')\n", encoding="utf-8")
+    parsed = generate_dataset._parse_skill(skill)
+    assert parsed["scripts"] == ["run.py"]

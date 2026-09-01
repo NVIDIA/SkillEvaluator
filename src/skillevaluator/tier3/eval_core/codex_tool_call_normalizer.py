@@ -80,6 +80,8 @@ _CODEX_RENDER_RE = re.compile(
     rf"text\s*\(\s*(?:JSON\.stringify\(\s*({_JS_IDENTIFIER})\s*\)|"
     rf"({_JS_IDENTIFIER})(?:\.({_JS_IDENTIFIER}))?)\s*\)\s*;"
 )
+_CODEX_PRAGMA_RE = re.compile(r"[ \t]*// @exec:[^\r\n]*\r?\n")
+_CODEX_TOOL_REF_RE = re.compile(r"\btools\s*(?:\.|\[)")
 
 
 def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any]]], int | None] | None:
@@ -87,7 +89,7 @@ def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any
     calls: list[tuple[str, dict[str, Any]]] = []
     variables: list[str] = []
     rendered_variables: list[str] = []
-    pragma = re.match(r"[ \t]*// @exec:[^\r\n]*\r?\n", source)
+    pragma = _CODEX_PRAGMA_RE.match(source)
     index = pragma.end() if pragma else 0
     while index < len(source):
         while index < len(source) and source[index].isspace():
@@ -139,6 +141,8 @@ def normalize_tool_call(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
         return [tool_call]
     parsed = _static_codex_tool_calls(arguments["input"])
     if parsed is None:
+        if not (_CODEX_PRAGMA_RE.match(arguments["input"]) or _CODEX_TOOL_REF_RE.search(arguments["input"])):
+            return [tool_call]
         return [{**tool_call, "_atif_normalization_status": UNSUPPORTED_NATIVE_CODEX_EXEC}]
 
     calls, observation_owner = parsed

@@ -116,7 +116,7 @@ def test_native_codex_exec_accepts_one_first_line_pragma(extractor):
             "const plan = await tools.update_plan({plan:[]}); "
             "const result = await tools.exec_command(argumentsFromRuntime);"
         ),
-        'const input = "rm -rf /workspace/project";',
+        '// @exec: {}\nconst input = "rm -rf /workspace/project";',
         '// @exec: {"yield_time_ms": 10000} const r = await tools.exec_command({"cmd":"pwd"});',
         (
             '// @exec: {"yield_time_ms": 10000}\n'
@@ -173,6 +173,19 @@ def test_non_codex_exec_call_without_wrapper_input_is_unchanged(extractor):
         {
             "action": "exec",
             "action_input": {"cmd": "echo ok"},
+            "observation": "outer observation",
+        }
+    ]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_generic_atif_exec_call_with_input_is_unchanged(extractor):
+    source = "list repository files"
+
+    assert extractor(_trajectory(source)) == [
+        {
+            "action": "exec",
+            "action_input": {"input": source},
             "observation": "outer observation",
         }
     ]

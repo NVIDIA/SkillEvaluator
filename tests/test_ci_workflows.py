@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -121,9 +122,8 @@ def test_ci_docs_lane_uses_the_required_python_312_context() -> None:
     assert node_step["if"] == DOCS_ONLY_IF
     assert len(node_step["uses"].split("@", 1)[1]) == 40
     assert docs_step["if"] == DOCS_ONLY_IF
-    assert "fern/fern.config.json" in docs_step["run"]
-    assert 'npm install --global --ignore-scripts --omit=optional "fern-api@$FERN_VERSION"' in docs_step["run"]
-    assert "fern check" in docs_step["run"]
+    assert "npm ci --prefix fern --ignore-scripts --omit=optional" in docs_step["run"]
+    assert "./fern/node_modules/.bin/fern check" in docs_step["run"]
     assert "GITHUB_STEP_SUMMARY" in docs_step["run"]
 
 
@@ -270,19 +270,22 @@ def test_every_workflow_does_not_persist_checkout_credentials() -> None:
         assert step.get("with", {}).get("persist-credentials") == "false", workflow_name
 
 
-def test_publish_docs_installs_the_fern_version_the_repository_pins() -> None:
-    """Docs are checked and published by the same CLI version.
+def test_publish_docs_installs_the_fern_cli_from_the_committed_lockfile() -> None:
+    """The secret-bearing job runs a CLI whose whole tree was reviewed, not resolved.
 
-    ci.yml derives it from fern/fern.config.json; publishing must not hardcode a
-    second version that can drift from the one validation ran against.
+    ``npm ci`` reproduces ``fern/package-lock.json`` exactly -- every version and
+    integrity hash -- so nothing between the commit and the run can change what
+    executes next to ``FERN_TOKEN``.
     """
     job = _load("publish-docs.yml")["jobs"]["run"]
-    install_step = next((step for step in job["steps"] if "npm install" in step.get("run", "")), None)
+    install_step = next((step for step in job["steps"] if "npm ci" in step.get("run", "")), None)
 
-    assert install_step is not None, "publish-docs.yml no longer installs the Fern CLI with npm"
-    assert "fern/fern.config.json" in install_step["run"]
-    assert "fern-api@$FERN_VERSION" in install_step["run"]
-    assert not re.search(r"fern-api@\d", install_step["run"]), "Fern CLI version is hardcoded"
+    assert install_step is not None, "publish-docs.yml no longer installs the Fern CLI from the lockfile"
+    assert "--ignore-scripts" in install_step["run"]
+    assert not re.search(r"fern-api@", install_step["run"]), "the version belongs in fern/package.json"
+
+    publish_step = next(step for step in job["steps"] if "fern generate" in step.get("run", ""))
+    assert "fern/node_modules/.bin/fern" in publish_step["run"], "run the installed CLI, not one from PATH"
 
 
 def test_every_workflow_declares_explicit_permissions() -> None:
@@ -303,16 +306,47 @@ def test_every_workflow_declares_explicit_permissions() -> None:
             assert permissions != "write-all", f"{workflow_name}: {scope}"
 
 
-NPM_INSTALL_LINE = re.compile(r"^.*\bnpm install\b.*$", re.MULTILINE)
+# Anchored at the start of a line so a comment mentioning npm is not a command.
+NPM_COMMAND_LINE = re.compile(r"^[ \t]*npm (?:install|ci|i|add)\b.*$", re.MULTILINE)
+NPM_REGISTRY_INSTALL = re.compile(r"^[ \t]*npm (?:install|i|add)\b(?!.*--package-lock-only).*$", re.MULTILINE)
 
 
-def test_every_workflow_npm_install_ignores_lifecycle_scripts() -> None:
-    """A floating transitive dependency must not get to run install-time code.
+def test_every_workflow_npm_command_ignores_lifecycle_scripts() -> None:
+    """A dependency must not get to run install-time code in a CI job.
 
-    npm re-resolves the whole tree on every install, so pinning the top-level
-    package does not pin what its dependencies can execute at install time.
+    ``--ignore-scripts`` is the only half of this that a global install honours,
+    so it is asserted on every npm command regardless of how the tree is resolved.
     """
     for workflow_name in _workflow_names():
         for step in _all_steps(_load(workflow_name)):
-            for line in NPM_INSTALL_LINE.findall(step.get("run", "")):
+            for line in NPM_COMMAND_LINE.findall(step.get("run", "")):
                 assert "--ignore-scripts" in line, f"{workflow_name}: {line.strip()}"
+
+
+def test_no_workflow_resolves_a_node_dependency_tree_from_the_registry() -> None:
+    """Only ``npm ci`` against the committed lockfile may install into a job.
+
+    ``npm install`` re-resolves every transitive dependency from semver ranges on
+    each run, so pinning the top-level version pins nothing beneath it. ``npm ci``
+    installs exactly the versions and integrity hashes in ``fern/package-lock.json``.
+    """
+    for workflow_name in _workflow_names():
+        for step in _all_steps(_load(workflow_name)):
+            for line in NPM_REGISTRY_INSTALL.findall(step.get("run", "")):
+                raise AssertionError(f"{workflow_name}: use `npm ci` against the lockfile, not `{line.strip()}`")
+
+
+def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
+    """``fern/package.json`` and ``fern/fern.config.json`` both name a CLI version.
+
+    They are two declarations of one fact. If they drift, docs are validated and
+    published by a different CLI than the one Fern itself is configured for.
+    """
+    manifest = json.loads((ROOT / "fern" / "package.json").read_text(encoding="utf-8"))
+    fern_config = json.loads((ROOT / "fern" / "fern.config.json").read_text(encoding="utf-8"))
+    lockfile = json.loads((ROOT / "fern" / "package-lock.json").read_text(encoding="utf-8"))
+
+    declared = manifest["dependencies"]["fern-api"]
+    assert declared == fern_config["version"], "fern/package.json and fern/fern.config.json disagree"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", declared), f"pin an exact version, not {declared!r}"
+    assert lockfile["packages"]["node_modules/fern-api"]["version"] == declared, "lockfile is stale"

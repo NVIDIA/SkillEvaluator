@@ -1339,57 +1339,34 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not any("recommendation" in error for error in result.errors)
 
     @pytest.mark.parametrize(
-        "completeness_detail",
+        ("completeness_detail", "missing_detail"),
         (
-            pytest.param({"coverage_percent": 0}, id="zero-coverage"),
-            pytest.param({"partially_inspected_files": 1}, id="partially-inspected-file"),
-            pytest.param({"entirely_uninspected_files": 1}, id="uninspected-file"),
-            pytest.param({"ledger_exceptions": [{"fatal": True}]}, id="fatal-ledger-exception"),
-            pytest.param({"limitations": ["Analyzer failed."]}, id="limitation"),
+            pytest.param({"coverage_percent": 0}, None, id="zero-coverage"),
+            pytest.param({"partially_inspected_files": 1}, None, id="partially-inspected-file"),
+            pytest.param({"entirely_uninspected_files": 1}, None, id="uninspected-file"),
+            pytest.param({"ledger_exceptions": [{"fatal": True}]}, None, id="fatal-ledger-exception"),
+            pytest.param({"limitations": ["Analyzer failed."]}, None, id="limitation"),
+            pytest.param(None, "coverage_percent", id="coverage_percent"),
+            pytest.param(None, "partially_inspected_files", id="partially_inspected_files"),
+            pytest.param(None, "entirely_uninspected_files", id="entirely_uninspected_files"),
+            pytest.param(None, "ledger_exceptions", id="ledger_exceptions"),
+            pytest.param(None, "limitations", id="limitations"),
         ),
     )
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_complete_summary_rejects_contradictory_details(
+    def test_skillspector_complete_summary_rejects_invalid_details(
         self,
         mock_tools,
         sample_skill_dir: Path,
-        completeness_detail: dict,
+        completeness_detail: dict | None,
+        missing_detail: str | None,
     ) -> None:
         payload = _skillspector_json_report()
-        payload["analysis_completeness"].update(completeness_detail)
-        mock_tools.skillspector.is_available = True
-        mock_tools.skillspector.run.return_value = ToolResult(
-            success=True,
-            stdout=json.dumps(payload),
-            stderr="",
-            exit_code=0,
-        )
-
-        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
-
-        assert result.status == "incomplete"
-        assert any("analysis_completeness" in error for error in result.errors)
-        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
-
-    @pytest.mark.parametrize(
-        "missing_detail",
-        (
-            "coverage_percent",
-            "partially_inspected_files",
-            "entirely_uninspected_files",
-            "ledger_exceptions",
-            "limitations",
-        ),
-    )
-    @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_completeness_rejects_missing_authoritative_details(
-        self,
-        mock_tools,
-        sample_skill_dir: Path,
-        missing_detail: str,
-    ) -> None:
-        payload = _skillspector_json_report()
-        payload["analysis_completeness"].pop(missing_detail)
+        if missing_detail is None:
+            assert completeness_detail is not None
+            payload["analysis_completeness"].update(completeness_detail)
+        else:
+            payload["analysis_completeness"].pop(missing_detail)
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,

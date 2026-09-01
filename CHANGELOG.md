@@ -12,8 +12,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Schema, frontmatter, and quality parsing accept a leading UTF-8 BOM,
-  matching the unicode scanner's "benign BOM" note
+- Schema, frontmatter, quality parsing, and security PII scanning accept a leading
+  UTF-8 BOM, matching the unicode scanner's "benign BOM" note
   ([#91](https://github.com/NVIDIA/SkillEvaluator/issues/91)).
 - Windows personal-path PII now flags `C:\Users\...` usernames that start with
   `s` (for example `steve`), matching the intended whitespace class rather than

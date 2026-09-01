@@ -72,18 +72,23 @@ All notable changes to SkillEvaluator are documented in this file.
   declare a `permissions:` block. The guards also cover job-level
   `permissions:` overrides and job-level reusable-workflow `uses:` references,
   neither of which the step-level checks reached.
-- The Fern CLI install in `publish-docs.yml` and `ci.yml`'s docs-validation
-  lane now passes `--ignore-scripts`, so a compromised package anywhere in
-  `fern-api`'s transitive dependency tree can no longer run lifecycle code in
-  the job that runs immediately before `FERN_TOKEN` is used. `--omit=optional`
-  also drops the tree's only optional dependency, `@boundaryml/baml`, along
-  with the native binaries it pulls in; pinning `fern-api`'s own version does
-  not pin what its dependencies resolve to on each run, since npm re-resolves
-  the whole tree from semver ranges every time. A guard now asserts every
-  workflow's `npm install` carries `--ignore-scripts`. The developer-facing
-  install instructions (`docs/README.md`, `docs/AGENTS.md`,
-  `docs/developer-guide.mdx`) carry the same two flags now, so a contributor
-  or agent following them locally gets the same hardening CI does.
+- The Fern CLI is now installed from a committed lockfile, `fern/package-lock.json`,
+  with `npm ci --prefix fern --ignore-scripts --omit=optional`, and both workflows
+  invoke `./fern/node_modules/.bin/fern` rather than a binary on `PATH`. Previously
+  `publish-docs.yml` ran `npm install`, which re-resolves every transitive
+  dependency from semver ranges on each run: pinning `fern-api`'s own version
+  pinned nothing beneath it, and `@scarf/scarf` — reached through `fern-api`'s
+  optional dependency on `@boundaryml/baml` — declares a `postinstall` script that
+  executed in the job holding `FERN_TOKEN`. The lockfile pins every package to an
+  exact version and integrity hash, `--ignore-scripts` stops lifecycle code
+  running, and `--omit=optional` (which npm honours for this local install, but
+  silently ignores for a `--global` one) leaves `fern-api` alone in the tree.
+  Guards now assert that no workflow resolves a Node dependency tree from the
+  registry, that every npm command carries `--ignore-scripts`, and that
+  `fern/package.json`, `fern/package-lock.json` and `fern/fern.config.json` all
+  name the same CLI version. The developer-facing install instructions
+  (`docs/README.md`, `docs/AGENTS.md`, `docs/developer-guide.mdx`) use the same
+  lockfile install, so a contributor or agent following them gets the tree CI runs.
 - The action-pinning guard now accepts a same-repo composite action or
   reusable workflow (`uses: ./...`) without requiring a commit SHA, since
   GitHub always resolves a local reference from the caller's own commit and

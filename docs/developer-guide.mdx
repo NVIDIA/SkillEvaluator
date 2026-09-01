@@ -83,17 +83,18 @@ The documentation site is built with [Fern](https://buildwithfern.com/) from the
 <Steps>
   ### Install the Fern CLI
 
-  Requires Node.js 22+ and npm 10+. `--ignore-scripts --omit=optional` keeps npm from running any
-  package's install-time scripts, the same hardening CI applies to this install.
+  Requires Node.js 22+ and npm 10+. `fern/package-lock.json` pins the CLI and every package
+  below it; `npm ci` reproduces that tree exactly, and the flags keep npm from running any
+  install-time scripts. This is the same install CI performs.
 
-  ```bash title="Install fern-api"
-  npm install -g --ignore-scripts --omit=optional fern-api
+  ```bash title="Install the pinned fern-api"
+  npm ci --prefix fern --ignore-scripts --omit=optional
   ```
 
   ### Preview with live reload
 
   ```bash title="Local docs preview"
-  fern docs dev
+  ./fern/node_modules/.bin/fern docs dev
   ```
 
   The site serves at `http://localhost:3000` and reloads on changes to `.mdx` files or `fern/docs.yml`.
@@ -101,7 +102,7 @@ The documentation site is built with [Fern](https://buildwithfern.com/) from the
   ### Validate before pushing
 
   ```bash title="Check config and links"
-  fern check
+  ./fern/node_modules/.bin/fern check
   ```
 
   `fern check` must pass — it is the same gate the site build relies on.

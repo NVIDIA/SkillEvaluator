@@ -29,14 +29,14 @@ published automatically from `main` via the Fern GitHub integration.
 Prerequisites: Node.js 22+ and npm 10+ (the versions the Fern CLI requires).
 
 ```bash
-# Install the Fern CLI
-npm install -g --ignore-scripts --omit=optional fern-api
+# Install the pinned Fern CLI from the committed lockfile
+npm ci --prefix fern --ignore-scripts --omit=optional
 
 # From the repo root, preview the site with live reload
-fern docs dev
+./fern/node_modules/.bin/fern docs dev
 
 # Validate the docs configuration and links
-fern check
+./fern/node_modules/.bin/fern check
 ```
 
 `fern docs dev` serves the site at <http://localhost:3000> and reloads on changes

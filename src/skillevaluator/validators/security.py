@@ -827,6 +827,31 @@ class SecurityValidator(ValidatorBase):
                     f"(status '{completeness_status}'); security scan did not complete"
                 )
                 return False
+            coverage_percent = analysis_completeness.get("coverage_percent")
+            incomplete_file_counts = (
+                analysis_completeness.get("partially_inspected_files"),
+                analysis_completeness.get("entirely_uninspected_files"),
+            )
+            ledger_exceptions = analysis_completeness.get("ledger_exceptions")
+            limitations = analysis_completeness.get("limitations")
+            if (
+                isinstance(coverage_percent, bool)
+                or not isinstance(coverage_percent, (int, float))
+                or coverage_percent != 100
+                or any(
+                    isinstance(count, bool) or not isinstance(count, int) or count != 0
+                    for count in incomplete_file_counts
+                )
+                or not isinstance(ledger_exceptions, list)
+                or bool(ledger_exceptions)
+                or not isinstance(limitations, list)
+                or bool(limitations)
+            ):
+                result.add_error(
+                    "skillspector JSON field 'analysis_completeness' details contradict complete analysis; "
+                    "security scan did not complete"
+                )
+                return False
 
         status = data.get("status")
         if status is not None and not isinstance(status, str):

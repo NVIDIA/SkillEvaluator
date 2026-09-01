@@ -302,6 +302,7 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     assert parsed["description"] == ""
 
 
+
 def test_no_llm_negative_case_does_not_name_the_skill():
     """Default --no-llm negative prompt must stay off-skill, not ask what the skill does."""
     skill = {
@@ -370,3 +371,17 @@ def test_no_llm_omits_negative_when_every_candidate_overlaps():
     cases = _generate_full(skill)
     assert all(not c["id"].endswith("-neg-001") for c in cases)
     assert len(cases) == 3
+
+
+def test_parse_skill_includes_tools_dir_scripts(tmp_path):
+    skill = tmp_path / "tools-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: tools-skill\ndescription: Spec-compliant executables live in tools/.\n---\n# x\n",
+        encoding="utf-8",
+    )
+    tools = skill / "tools"
+    tools.mkdir()
+    (tools / "run.py").write_text("print('hello')\n", encoding="utf-8")
+    parsed = generate_dataset._parse_skill(skill)
+    assert parsed["scripts"] == ["run.py"]

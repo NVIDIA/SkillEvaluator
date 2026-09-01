@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Malformed, non-UTF-8, or unreadable bundled and custom policy files now
+  produce path-specific CLI errors instead of leaking raw parser or I/O errors
+  ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).
 - License detection no longer treats a frontmatter `license` identifier as
   authoritative when a LICENSE file declares a different license. Claiming
   MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is

@@ -81,7 +81,10 @@ _CODEX_RENDER_RE = re.compile(
     rf"({_JS_IDENTIFIER})(?:\.({_JS_IDENTIFIER}))?)\s*\)\s*;"
 )
 _CODEX_PRAGMA_RE = re.compile(r"[ \t]*// @exec:[^\r\n]*\r?\n")
-_CODEX_TOOL_REF_RE = re.compile(r"\btools\s*(?:\.|\[)")
+_CODEX_TOOL_REF_RE = re.compile(
+    rf"\btools\s*(?:\.\s*{_JS_IDENTIFIER}|"
+    rf"\[\s*(?P<quote>['\"]){_JS_IDENTIFIER}(?P=quote)\s*\])\s*(?:\\)?\("
+)
 
 
 def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any]]], int | None] | None:

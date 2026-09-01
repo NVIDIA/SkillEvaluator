@@ -178,10 +178,16 @@ def test_non_codex_exec_call_without_wrapper_input_is_unchanged(extractor):
     ]
 
 
+@pytest.mark.parametrize(
+    "source",
+    (
+        pytest.param("list repository files", id="plain-input"),
+        pytest.param("list repository files with the available tools.", id="sentence-ending-tools"),
+        pytest.param("describe tools.exec_command before using it", id="tool-property-prose"),
+    ),
+)
 @pytest.mark.parametrize("extractor", _EXTRACTORS)
-def test_generic_atif_exec_call_with_input_is_unchanged(extractor):
-    source = "list repository files"
-
+def test_generic_atif_exec_call_with_input_is_unchanged(source, extractor):
     assert extractor(_trajectory(source)) == [
         {
             "action": "exec",

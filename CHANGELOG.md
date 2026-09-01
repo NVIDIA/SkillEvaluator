@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Malformed bundled or custom policy YAML now produces a path-specific CLI
+  error instead of leaking a raw PyYAML parser exception
+  ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).
 - License detection no longer treats a frontmatter `license` identifier as
   authoritative when a LICENSE file declares a different license. Claiming
   MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is

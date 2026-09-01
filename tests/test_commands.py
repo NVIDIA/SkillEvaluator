@@ -93,6 +93,30 @@ def test_validate_fixture_no_llm() -> None:
     assert "All validations passed" in result.output
 
 
+def test_validate_reports_malformed_policy_without_traceback(tmp_path: Path) -> None:
+    policy = tmp_path / "broken-policy.yaml"
+    policy.write_text("severity_overrides: [", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(FIXTURE),
+            "--no-llm",
+            "--no-dedup",
+            "--checks",
+            "schema",
+            "--policy",
+            str(policy),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert f"Invalid policy YAML in {policy}" in result.output
+    assert "Traceback" not in result.output
+    assert "yaml.parser.ParserError" not in result.output
+
+
 def test_validate_prints_tier1_section_banner() -> None:
     # The Tier 1 section is announced as it runs so it is visibly reported in
     # CI logs (SkillEvaluator parity), not only inside the final combined report.

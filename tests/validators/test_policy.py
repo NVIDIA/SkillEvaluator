@@ -8,8 +8,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from skillevaluator.models.result import Severity
+from skillevaluator.validators import policy as policy_module
 from skillevaluator.validators.policy import (
     DEFAULT_PROFILE_NAME,
     ValidationPolicy,
@@ -44,6 +46,29 @@ def test_custom_policy_overlays_the_public_profile(tmp_path: Path) -> None:
     assert policy.author_email_regex is None
     assert policy.severity_for("SCHEMA", "author_format", Severity.LOW) == Severity.CRITICAL
     assert policy.severity_for("SCHEMA", "author_missing", Severity.LOW) == Severity.HIGH
+
+
+def test_custom_policy_wraps_malformed_yaml(tmp_path: Path) -> None:
+    custom = tmp_path / "broken-policy.yaml"
+    custom.write_text("severity_overrides: [", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_policy_file(custom)
+
+    assert f"Invalid policy YAML in {custom}" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, yaml.YAMLError)
+
+
+def test_bundled_profile_wraps_malformed_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile = tmp_path / "broken.yaml"
+    profile.write_text("identity: [", encoding="utf-8")
+    monkeypatch.setattr(policy_module, "PROFILES_DIR", tmp_path)
+
+    with pytest.raises(ValueError) as exc_info:
+        load_profile("broken")
+
+    assert f"Invalid policy YAML in {profile}" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, yaml.YAMLError)
 
 
 def test_policy_validation_and_resolution() -> None:

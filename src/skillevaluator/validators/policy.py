@@ -161,6 +161,15 @@ _KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides"}
 _KNOWN_IDENTITY_KEYS = {"author_email_regex"}
 
 
+def _load_policy_yaml(path: Path) -> Any:
+    """Load policy YAML and normalize parser failures to the public contract."""
+    try:
+        with path.open(encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid policy YAML in {path}: {exc}") from exc
+
+
 def _warn_unknown_keys(data: dict[str, Any], known: set[str], context: str, source: str) -> None:
     unknown = set(data) - known
     if unknown:
@@ -227,8 +236,7 @@ def load_profile(name: str = DEFAULT_PROFILE_NAME) -> ValidationPolicy:
     if not path.exists():
         available = sorted(p.stem for p in PROFILES_DIR.glob("*.yaml")) if PROFILES_DIR.exists() else []
         raise FileNotFoundError(f"Unknown profile {name!r}. Available bundled profiles: {available or '(none)'}")
-    with path.open(encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
+    data = _load_policy_yaml(path)
     return _policy_from_data(data, fallback_profile=name, source=path)
 
 
@@ -248,8 +256,7 @@ def load_policy_file(
         raise FileNotFoundError(f"Custom policy file not found: {path}")
 
     base = load_profile(base_profile)
-    with path.open(encoding="utf-8") as fh:
-        custom_data = yaml.safe_load(fh) or {}
+    custom_data = _load_policy_yaml(path)
     custom = _policy_from_data(custom_data, fallback_profile=base.profile, source=path)
 
     merged_overrides = dict(base.severity_overrides)

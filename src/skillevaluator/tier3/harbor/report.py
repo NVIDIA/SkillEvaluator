@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
@@ -231,7 +232,7 @@ def _extract_findings(
         _seen: set[tuple[Any, ...]] = set()
         _refs: list[dict[str, Any]] = []
         for r in metric_refs:
-            k = (r.get("source"), r.get("evidence_id") or r.get("json_pointer"), r.get("kind"), r.get("path"))
+            k = (r.get("source"), evidence_ref_identity(r), r.get("kind"))
             if k not in _seen:
                 _seen.add(k)
                 _refs.append(r)
@@ -452,7 +453,7 @@ def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
 
 def _compact_evidence_ref(ref: dict[str, Any]) -> str:
     """Return the stable compact key for one evidence reference."""
-    return f"{ref.get('source') or ''}#{ref.get('evidence_id') or ref.get('json_pointer') or ''}"
+    return f"{ref.get('source') or ''}#{evidence_ref_identity(ref)}"
 
 
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -476,7 +477,7 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
             for ref in metric_detail.get("evidence_refs") or []:
                 if not isinstance(ref, dict):
                     continue
-                if ref.get("source") or ref.get("json_pointer"):
+                if ref.get("source") or evidence_ref_identity(ref):
                     key = _compact_evidence_ref(ref)
                     if key not in lookup:
                         lookup[key] = ref

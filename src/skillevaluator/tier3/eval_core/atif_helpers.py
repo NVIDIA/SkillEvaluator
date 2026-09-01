@@ -16,26 +16,14 @@ import os
 import re
 from typing import Any
 
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import normalize_tool_call
+from skillevaluator.evidence import evidence_ref_identity
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    iter_normalized_tool_calls as iter_tool_calls,
+)
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    normalized_tool_call_observation as _tool_call_observation,
+)
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
-
-
-def iter_tool_calls(traj: dict[str, Any]):
-    """Yield ``(step_dict, tool_call_dict)`` for every tool call in the trajectory."""
-    for step in traj.get("steps", []):
-        for raw_index, tc in enumerate(step.get("tool_calls") or []):
-            for normalized in normalize_tool_call(tc):
-                yield step, {**normalized, "_atif_raw_tool_index": raw_index}
-
-
-def _tool_call_observation(step: dict[str, Any], tc: dict[str, Any]) -> str:
-    if tc.get("_atif_observation_status") not in (None, "mapped_outer_exec_result"):
-        return ""
-    return "".join(
-        str(result.get("content", ""))
-        for result in (step.get("observation") or {}).get("results") or []
-        if result.get("source_call_id") == tc.get("tool_call_id") or not result.get("source_call_id")
-    )
 
 
 def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -399,14 +387,13 @@ def _evidence_ref(
 
 
 def _dedupe_evidence_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     deduped: list[dict[str, Any]] = []
     for ref in refs:
         key = (
             str(ref.get("source") or ""),
-            str(ref.get("evidence_id") or ref.get("json_pointer") or ""),
+            evidence_ref_identity(ref),
             str(ref.get("kind") or ""),
-            str(ref.get("path") or ""),
         )
         if key in seen:
             continue

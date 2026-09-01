@@ -14,6 +14,30 @@ AMBIGUOUS_OUTER_EXEC_OBSERVATION = "ambiguous_outer_exec_result"
 MAPPED_OUTER_EXEC_OBSERVATION = "mapped_outer_exec_result"
 UNOBSERVED_INNER_CALL = "unobserved_inner_call"
 
+_MAX_SOURCE_CHARS = 64 * 1024
+_MAX_OBJECT_NESTING = 64
+_MAX_STATEMENTS = 256
+_MAX_TOOL_CALLS = 128
+
+
+def iter_normalized_tool_calls(traj: dict[str, Any]):
+    """Yield each trajectory tool call after safe native-Codex normalization."""
+    for step in traj.get("steps", []):
+        for raw_index, tool_call in enumerate(step.get("tool_calls") or []):
+            for normalized in normalize_tool_call(tool_call):
+                yield step, {**normalized, "_atif_raw_tool_index": raw_index}
+
+
+def normalized_tool_call_observation(step: dict[str, Any], tool_call: dict[str, Any]) -> str:
+    """Return an outer observation only when its normalized owner is known."""
+    if tool_call.get("_atif_observation_status") not in (None, MAPPED_OUTER_EXEC_OBSERVATION):
+        return ""
+    return "".join(
+        str(result.get("content", ""))
+        for result in (step.get("observation") or {}).get("results") or []
+        if result.get("source_call_id") == tool_call.get("tool_call_id") or not result.get("source_call_id")
+    )
+
 
 def _skip_js_quoted(source: str, start: int, quote: str) -> int:
     index = start + 1
@@ -30,7 +54,7 @@ def _skip_js_quoted(source: str, start: int, quote: str) -> int:
 def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], int] | None:
     """Decode a JSON-compatible object literal, including unquoted property names."""
     rendered: list[str] = []
-    depth = 0
+    stack: list[str] = []
     index = start
     previous_significant = ""
     while index < len(source):
@@ -45,10 +69,13 @@ def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], i
             continue
         if char in "'`" or source.startswith(("//", "/*"), index):
             return None
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
+        if char in "{[":
+            if len(stack) >= _MAX_OBJECT_NESTING:
+                return None
+            stack.append(char)
+        elif char in "}]":
+            if not stack or stack.pop() != ("{" if char == "}" else "["):
+                return None
         if (char.isalpha() or char in "_$") and previous_significant in {"{", ","}:
             end = index + 1
             while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
@@ -65,10 +92,10 @@ def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], i
         if not char.isspace():
             previous_significant = char
         index += 1
-        if depth == 0:
+        if not stack:
             try:
                 arguments = json.loads("".join(rendered))
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
                 return None
             return (arguments, index) if isinstance(arguments, dict) else None
     return None
@@ -89,9 +116,12 @@ _CODEX_TOOL_REF_RE = re.compile(
 
 def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any]]], int | None] | None:
     """Decode the complete, bounded statement grammar emitted by native Codex."""
+    if len(source) > _MAX_SOURCE_CHARS:
+        return None
     calls: list[tuple[str, dict[str, Any]]] = []
     variables: list[str] = []
     rendered_variables: list[str] = []
+    statements = 0
     pragma = _CODEX_PRAGMA_RE.match(source)
     index = pragma.end() if pragma else 0
     while index < len(source):
@@ -102,6 +132,9 @@ def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any
 
         call = _CODEX_CALL_RE.match(source, index)
         if call:
+            statements += 1
+            if statements > _MAX_STATEMENTS or len(calls) >= _MAX_TOOL_CALLS:
+                return None
             variable, function_name = call.groups()
             if variable in variables:
                 return None
@@ -120,6 +153,9 @@ def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any
         render = _CODEX_RENDER_RE.match(source, index)
         rendered_variable = next((name for name in render.groups() if name), None) if render else None
         if rendered_variable in variables:
+            statements += 1
+            if statements > _MAX_STATEMENTS:
+                return None
             rendered_variables.append(rendered_variable)
             index = render.end()
             continue
@@ -137,14 +173,18 @@ def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any
 
 def normalize_tool_call(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
     """Unwrap proven native Codex calls without interpreting arbitrary JavaScript."""
+    tool_call = {key: value for key, value in tool_call.items() if not key.startswith("_atif_")}
     if tool_call.get("function_name") != "exec":
         return [tool_call]
     arguments = tool_call.get("arguments") or {}
     if not isinstance(arguments, dict) or not isinstance(arguments.get("input"), str):
         return [tool_call]
-    parsed = _static_codex_tool_calls(arguments["input"])
+    source = arguments["input"]
+    if len(source) > _MAX_SOURCE_CHARS:
+        return [{**tool_call, "_atif_normalization_status": UNSUPPORTED_NATIVE_CODEX_EXEC}]
+    parsed = _static_codex_tool_calls(source)
     if parsed is None:
-        if not (_CODEX_PRAGMA_RE.match(arguments["input"]) or _CODEX_TOOL_REF_RE.search(arguments["input"])):
+        if not (_CODEX_PRAGMA_RE.match(source) or _CODEX_TOOL_REF_RE.search(source)):
             return [tool_call]
         return [{**tool_call, "_atif_normalization_status": UNSUPPORTED_NATIVE_CODEX_EXEC}]
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.tier3.eval_core import codex_tool_call_normalizer
 from skillevaluator.tier3.eval_core.atif_helpers import (
     build_behavior_evidence,
     build_metric_evidence_refs,
@@ -208,6 +209,155 @@ def test_template_unsupported_codex_wrapper_is_not_a_clean_security_result():
     assert [finding["type"] for finding in result["findings"]] == ["unsupported_tool_wrapper"]
 
 
+@pytest.mark.parametrize("template", [False, True], ids=["shared", "standalone-template"])
+def test_unsupported_codex_wrapper_still_scans_its_outer_observation_for_secrets(template):
+    trajectory = _trajectory(
+        'if (false) tools.exec_command({"cmd":"pwd"});',
+        observation="Authorization: Bearer sk-abcdefgh12345678",
+    )
+    if template:
+        calls = _TEMPLATE_MODULE.extract_tool_calls_as_dicts(trajectory)
+        result = _TEMPLATE_MODULE.check_security(trajectory, calls)
+    else:
+        calls = extract_tool_calls_as_dicts(trajectory)
+        result = check_security(calls)
+
+    assert result["passed"] is False
+    assert result["score"] == 0.0
+    assert [finding["type"] for finding in result["findings"]] == [
+        "unsupported_tool_wrapper",
+        "secret_exposure",
+    ]
+
+
+@pytest.mark.parametrize("template", [False, True], ids=["shared", "standalone-template"])
+def test_untrusted_normalizer_metadata_cannot_suppress_outer_secret_scanning(template):
+    trajectory = _trajectory(
+        'if (false) tools.exec_command({"cmd":"pwd"});',
+        observation="Authorization: Bearer sk-abcdefgh12345678",
+    )
+    trajectory["steps"][0]["tool_calls"][0].update(
+        {
+            "_atif_normalization_status": "caller-owned",
+            "_atif_observation_status": "unobserved_inner_call",
+            "_atif_inner_tool_index": 99,
+            "_atif_raw_tool_index": 99,
+        }
+    )
+    if template:
+        calls = _TEMPLATE_MODULE.extract_tool_calls_as_dicts(trajectory)
+        result = _TEMPLATE_MODULE.check_security(trajectory, calls)
+    else:
+        calls = extract_tool_calls_as_dicts(trajectory)
+        result = check_security(calls)
+
+    assert result["score"] == 0.0
+    assert [finding["type"] for finding in result["findings"]] == [
+        "unsupported_tool_wrapper",
+        "secret_exposure",
+    ]
+
+
+@pytest.mark.parametrize("template", [False, True], ids=["shared", "standalone-template"])
+def test_untrusted_normalizer_metadata_cannot_bypass_command_security_checks(template):
+    trajectory = _trajectory("unused")
+    trajectory["steps"][0]["tool_calls"][0].update(
+        {
+            "function_name": "exec_command",
+            "arguments": {"cmd": "rm -rf /workspace/project"},
+            "_atif_normalization_status": "unsupported_native_codex_exec_wrapper",
+            "_atif_observation_status": "unobserved_inner_call",
+            "_atif_inner_tool_index": 99,
+            "_atif_raw_tool_index": 99,
+        }
+    )
+    if template:
+        calls = _TEMPLATE_MODULE.extract_tool_calls_as_dicts(trajectory)
+        result = _TEMPLATE_MODULE.check_security(trajectory, calls)
+    else:
+        calls = extract_tool_calls_as_dicts(trajectory)
+        result = check_security(calls)
+
+    assert "destructive_command" in {finding["type"] for finding in result["findings"]}
+
+
+def test_normalizer_reserves_private_metadata_namespace():
+    tool_call = {
+        "function_name": "read",
+        "arguments": {"path": "SKILL.md"},
+        "_atif_normalization_status": "caller-owned",
+        "_atif_observation_status": "caller-owned",
+        "_atif_inner_tool_index": 99,
+        "_atif_raw_tool_index": 99,
+    }
+
+    assert codex_tool_call_normalizer.normalize_tool_call(tool_call) == [
+        {"function_name": "read", "arguments": {"path": "SKILL.md"}}
+    ]
+
+
+def test_oversized_exec_source_skips_signature_scans(monkeypatch):
+    class UnexpectedScan:
+        def match(self, _source):
+            pytest.fail("oversized source reached pragma detection")
+
+        def search(self, _source):
+            pytest.fail("oversized source reached tool-reference detection")
+
+    monkeypatch.setattr(codex_tool_call_normalizer, "_CODEX_PRAGMA_RE", UnexpectedScan())
+    monkeypatch.setattr(codex_tool_call_normalizer, "_CODEX_TOOL_REF_RE", UnexpectedScan())
+    source = " " * 65537 + 'tools.exec_command({"cmd":"pwd"});'
+
+    assert codex_tool_call_normalizer.normalize_tool_call(
+        {"function_name": "exec", "arguments": {"input": source}}
+    ) == [
+        {
+            "function_name": "exec",
+            "arguments": {"input": source},
+            "_atif_normalization_status": "unsupported_native_codex_exec_wrapper",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "const r = await tools.exec_command(" + '{"nested":' * 65 + "0" + "}" * 65 + ");",
+            id="excessive-nesting",
+        ),
+        pytest.param(
+            'const r = await tools.exec_command({"value":' + "1" * 5000 + "});",
+            id="oversized-integer",
+        ),
+        pytest.param(
+            "".join(f'const r{i} = await tools.exec_command({{"cmd":"pwd {i}"}});' for i in range(129)),
+            id="excessive-calls",
+        ),
+        pytest.param(
+            'const r = await tools.exec_command({"cmd":"pwd"});' + "text(r.output);" * 256,
+            id="excessive-statements",
+        ),
+        pytest.param(
+            'const r = await tools.exec_command({"cmd":"pwd"});' + " " * 65536,
+            id="oversized-source",
+        ),
+    ],
+)
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_native_codex_exec_parser_limits_fail_closed(source, extractor):
+    calls = extractor(_trajectory(source))
+
+    assert calls == [
+        {
+            "action": "exec",
+            "action_input": {"input": source},
+            "observation": "outer observation",
+            "normalization_status": "unsupported_native_codex_exec_wrapper",
+        }
+    ]
+
+
 @pytest.mark.parametrize("extractor", _EXTRACTORS)
 def test_native_codex_exec_maps_a_rendered_retry_observation_only_to_its_owner(extractor):
     source = """
@@ -383,14 +533,18 @@ def test_copied_verifier_imports_its_sibling_codex_normalizer(tmp_path):
 
     tests_dir = tmp_path / "tests"
     normalizer = tests_dir / "codex_tool_call_normalizer.py"
+    evidence = tests_dir / "evidence.py"
     assert normalizer.is_file()
+    assert evidence.is_file()
 
     sys.modules.pop("codex_tool_call_normalizer", None)
+    sys.modules.pop("evidence", None)
     spec = importlib.util.spec_from_file_location("copied_harbor_eval_codex_tools", tests_dir / "eval.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
     assert Path(sys.modules["codex_tool_call_normalizer"].__file__).resolve() == normalizer.resolve()
+    assert Path(sys.modules["evidence"].__file__).resolve() == evidence.resolve()
     assert (
         module.extract_tool_calls_as_dicts(_trajectory('const r = await tools.exec_command({"cmd":"pwd"});'))[0][
             "action"

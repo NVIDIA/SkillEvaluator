@@ -103,6 +103,32 @@ def _reward_with_normalized_tool_refs():
     }
 
 
+def _reward_with_path_only_refs():
+    return {
+        "entry_id": "evaluator-plugin-005",
+        "goal_accuracy": 0.1,
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "behavior_check": 1.0,
+        "details": {
+            "goal_accuracy": {
+                "reason": "two artifacts need distinct remediation",
+                "evidence_refs": [
+                    {
+                        "source": "artifact.txt",
+                        "path": f"results/{name}.json",
+                        "kind": "artifact",
+                        "excerpt": f"{name} artifact",
+                    }
+                    for name in ("first", "second")
+                ],
+            },
+        },
+    }
+
+
 def test_findings_carry_evidence_refs():
     findings = report._extract_findings([_reward(0.1)])
     goal = next(f for f in findings if f["metric"] == "goal_accuracy")
@@ -263,6 +289,54 @@ def test_normalized_tool_evidence_refs_remain_distinct_and_resolve_by_compact_id
             "evidence_id": "/steps/0/tool_calls/0/normalized/1",
             "kind": "tool_call",
             "excerpt": "second command",
+        }
+    ]
+
+
+def test_whitespace_evidence_ids_fall_back_before_deduplication():
+    reward = _reward(0.1)
+    reward["details"]["goal_accuracy"]["evidence_refs"] = [
+        {
+            "source": "trajectory.json",
+            "evidence_id": whitespace,
+            "json_pointer": pointer,
+            "kind": "tool_call",
+        }
+        for whitespace, pointer in (("   ", "/steps/1"), ("\t", "/steps/2"))
+    ]
+
+    findings = report._extract_findings([reward])
+
+    assert [ref["json_pointer"] for ref in findings[0]["evidence_refs"]] == ["/steps/1", "/steps/2"]
+
+
+def test_path_only_evidence_refs_remain_distinct_in_prompt_and_lookup(monkeypatch):
+    compact_ref = "artifact.txt#results/second.json"
+    captured = {}
+
+    def fake_hub(prompt, **_kw):
+        captured["prompt"] = prompt
+        return (
+            f'[{{"suggestion": "Fix the second artifact", "dimension": "goal_accuracy", '
+            f'"evidence_refs": ["{compact_ref}"]}}]',
+            None,
+        )
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
+    reward = _reward_with_path_only_refs()
+    findings = report._extract_findings([reward])
+
+    assert len(findings[0]["evidence_refs"]) == 2
+    result = report._generate_suggestions_structured("demo", findings, [reward])
+
+    assert "artifact.txt#results/first.json" in captured["prompt"]
+    assert compact_ref in captured["prompt"]
+    assert result[0]["evidence_refs"] == [
+        {
+            "source": "artifact.txt",
+            "path": "results/second.json",
+            "kind": "artifact",
+            "excerpt": "second artifact",
         }
     ]
 

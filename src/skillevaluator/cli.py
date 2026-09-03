@@ -987,16 +987,13 @@ def _validate_catalog(
             "content_type": "skill",
             "output_dir": skill_output,
         }
-        passed = True
         reason = ""
         try:
             ctx.invoke(validate, **overrides)
         except click.ClickException as exc:
-            passed = False
             reason = str(getattr(exc, "message", exc))
             failures.append((skill_dir.name, reason))
         except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
-            passed = False
             reason = f"unexpected error: {exc}"
             failures.append((skill_dir.name, reason))
         skill_reports[skill_dir.name] = _new_skill_json_report_name(skill_output, existing_reports)

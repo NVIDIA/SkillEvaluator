@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
+  `reward.json` `entry_id` metadata, using folder-name parsing only as an
+  unambiguous legacy fallback.
 - SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
   no longer truncated to MIT and allowed. Closing comment markers such as
   `*/` and `-->` are not treated as part of the expression

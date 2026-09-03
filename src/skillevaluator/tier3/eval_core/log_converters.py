@@ -411,16 +411,32 @@ def _normalize_opencode_tool(tool_name: str, raw_input: Any) -> tuple[str, dict[
 
 def _opencode_output_text(state: dict[str, Any]) -> str:
     output = state.get("output")
-    if output is None:
+    if output is not None:
+        if isinstance(output, str):
+            return output
+        if isinstance(output, dict):
+            message = output.get("message") or output.get("text")
+            if message is not None:
+                return str(message)
+            return json.dumps(output, ensure_ascii=False)
+        return str(output)
+
+    error = state.get("error")
+    if error is None:
         return ""
-    if isinstance(output, str):
-        return output
-    if isinstance(output, dict):
-        message = output.get("message") or output.get("text")
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict):
+        data = error.get("data")
+        if isinstance(data, dict):
+            message = data.get("message")
+            if message is not None:
+                return str(message)
+        message = error.get("message")
         if message is not None:
             return str(message)
-        return json.dumps(output, ensure_ascii=False)
-    return str(output)
+        return json.dumps(error, ensure_ascii=False)
+    return str(error)
 
 
 def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
@@ -568,6 +584,64 @@ def _codex_thread_item(evt: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _codex_mcp_observation(item: dict[str, Any]) -> str:
+    result = item.get("result")
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text")
+                    parts.append(str(text) if text is not None else json.dumps(block, ensure_ascii=False))
+                else:
+                    parts.append(str(block))
+            joined = "\n".join(part for part in parts if part).strip()
+            if joined:
+                return joined[:8000]
+        structured = result.get("structured_content")
+        if structured is not None:
+            return json.dumps(structured, ensure_ascii=False)[:8000]
+        return json.dumps(result, ensure_ascii=False)[:8000]
+
+    error = item.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if message is not None:
+            return str(message)[:8000]
+        return json.dumps(error, ensure_ascii=False)[:8000]
+    return ""
+
+
+def _codex_file_change_step(item: dict[str, Any], evt: dict[str, Any], tool_index: int) -> dict[str, Any] | None:
+    changes = item.get("changes")
+    if not isinstance(changes, list):
+        return None
+    tool_calls: list[dict[str, Any]] = []
+    base_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+    for idx, change in enumerate(changes):
+        if not isinstance(change, dict):
+            continue
+        path = str(change.get("path") or "").strip()
+        if not path:
+            continue
+        tool_calls.append(
+            {
+                "tool_call_id": f"{base_id}-{idx}",
+                "function_name": "write",
+                "arguments": {"path": path, "kind": str(change.get("kind") or "update")},
+            }
+        )
+    if not tool_calls:
+        return None
+    return {
+        "source": "agent",
+        "message": "",
+        "tool_calls": tool_calls,
+        "observation": {"results": []},
+    }
+
+
 def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
     """Parse Codex ``exec --json`` ThreadEvent JSONL."""
     if not text or not text.strip():
@@ -646,6 +720,46 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
                     {
                         "source_call_id": call_id,
                         "content": str(output)[:8000],
+                    }
+                )
+            steps.append(step)
+            continue
+
+        if item_type == "file_change":
+            step = _codex_file_change_step(item, evt, tool_index)
+            if step is None:
+                continue
+            saw_content = True
+            tool_index += 1
+            steps.append(step)
+            continue
+
+        if item_type == "mcp_tool_call":
+            tool = str(item.get("tool") or "mcp_tool")
+            arguments = item.get("arguments")
+            if not isinstance(arguments, dict):
+                arguments = {}
+            call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+            saw_content = True
+            tool_index += 1
+            step = {
+                "source": "agent",
+                "message": "",
+                "tool_calls": [
+                    {
+                        "tool_call_id": call_id,
+                        "function_name": tool,
+                        "arguments": dict(arguments),
+                    }
+                ],
+                "observation": {"results": []},
+            }
+            observation = _codex_mcp_observation(item)
+            if observation:
+                step["observation"]["results"].append(
+                    {
+                        "source_call_id": call_id,
+                        "content": observation,
                     }
                 )
             steps.append(step)

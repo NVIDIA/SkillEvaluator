@@ -127,25 +127,20 @@ def test_opencode_error_only_log_returns_none():
     assert synthetic_trajectory_from_opencode_json(log + "\n") is None
 
 
-def test_codex_thread_event_agent_message_and_command_execution():
+def test_opencode_tool_error_uses_state_error_observation():
     log = (
-        '{"type":"item.completed","item":{"type":"agent_message","id":"msg-1",'
-        '"text":"Reading skill file"}}\n'
-        '{"type":"item.completed","item":{"type":"command_execution","id":"cmd-1",'
-        '"command":"ls","aggregated_output":"demo"}}\n'
-        '{"type":"item.completed","item":{"type":"agent_message","id":"msg-2",'
-        '"text":"Done"}}\n'
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"call-err",'
+        '"state":{"status":"error","input":{"command":"missing-cmd"},'
+        '"error":"command not found: missing-cmd"}}}\n'
     )
-    traj = synthetic_trajectory_from_codex_txt(log)
+    traj = synthetic_trajectory_from_opencode_json(log)
     assert traj is not None
-    assert traj["schema_version"] == "ATIF-v1.2-synthetic-codex-log"
     tcs = extract_tool_calls_as_dicts(traj)
     assert len(tcs) == 1
-    assert tcs[0]["action"] == "bash"
-    assert tcs[0]["action_input"]["command"] == "ls"
+    assert "missing-cmd" in tcs[0]["observation"]
 
 
-def test_codex_exec_json_agent_message_and_shell_call():
+def test_codex_thread_event_agent_message_and_command_execution():
     log = (
         '{"type":"item","item":{"type":"agent_message","id":"msg-1",'
         '"content":[{"type":"text","text":"Reading skill file"}],'
@@ -187,6 +182,35 @@ def test_codex_opencode_shaped_jsonl_fallback():
     tcs = extract_tool_calls_as_dicts(traj)
     assert len(tcs) == 1
     assert tcs[0]["action"] == "read"
+
+
+def test_codex_file_change_emits_write_calls():
+    log = (
+        '{"type":"item.completed","item":{"type":"file_change","id":"fc-1",'
+        '"changes":[{"path":"/workspace/output/real.py","kind":"add"}],'
+        '"status":"completed"}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    assert tcs[0]["action"] == "write"
+    assert tcs[0]["action_input"]["path"] == "/workspace/output/real.py"
+
+
+def test_codex_mcp_tool_call_preserves_result():
+    log = (
+        '{"type":"item.completed","item":{"type":"mcp_tool_call","id":"mcp-1",'
+        '"server":"demo","tool":"lookup","arguments":{"query":"skill"},'
+        '"result":{"content":[{"type":"text","text":"found skill"}]},'
+        '"status":"completed"}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    assert tcs[0]["action"] == "lookup"
+    assert "found skill" in tcs[0]["observation"]
 
 
 def test_codex_plain_text_errors_return_none():

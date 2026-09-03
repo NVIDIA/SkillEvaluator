@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--no-llm` full datasets pick a negative prompt that does not overlap the
+  skill name or description, and omit the negative when every candidate would
+  be on-skill. They no longer ask the agent to describe the skill by name.
 - SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
   no longer truncated to MIT and allowed. Closing comment markers such as
   `*/` and `-->` are not treated as part of the expression

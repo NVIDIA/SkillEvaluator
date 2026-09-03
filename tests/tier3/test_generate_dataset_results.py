@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import shutil
 import stat
 import sys
@@ -12,6 +13,7 @@ import pytest
 from skillevaluator.tier3 import generate_dataset
 from skillevaluator.tier3.generate_dataset import (
     _discover_trajectories,
+    _generate_full,
     _run_agent_collect_trajectories,
     _to_agentskills_dataset,
 )
@@ -298,6 +300,77 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
+
+
+
+def test_no_llm_negative_case_does_not_name_the_skill():
+    """Default --no-llm negative prompt must stay off-skill, not ask what the skill does."""
+    skill = {
+        "name": "pdf-extractor",
+        "description": "Extracts tables from PDF files",
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "pdf-extractor-neg-001")
+    assert negative["expected_skill"] is None
+    assert "pdf-extractor" not in negative["question"]
+    assert "pdf-extractor" not in negative["ground_truth"]
+    for behavior in negative["expected_behavior"]:
+        assert "pdf-extractor" not in behavior
+    assert "without reading or applying this skill" in negative["expected_behavior"][0]
+    domain = {"pdf", "extractor", "extracts", "tables"}
+    question_tokens = set(re.findall(r"[a-z0-9]+", negative["question"].lower()))
+    assert not domain & question_tokens
+
+
+def test_no_llm_negative_case_skips_on_skill_errand_prompt():
+    """Errand-themed skills must not receive planning/errand candidates as negatives."""
+    skill = {
+        "name": "errand-planner",
+        "description": "Organizes weekend errands efficiently in a new city",
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "errand-planner-neg-001")
+    assert negative["expected_skill"] is None
+    assert "errand" not in negative["question"].lower()
+    assert "organize" not in negative["question"].lower()
+    assert "weekend" not in negative["question"].lower()
+
+
+def test_no_llm_day_planner_gets_off_domain_negative():
+    """Planning skills without token overlap still must not get errand-style negatives."""
+    skill = {
+        "name": "day-planner",
+        "description": "Plans grocery runs and appointments across a busy week",
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "day-planner-neg-001")
+    assert negative["expected_skill"] is None
+    assert "errand" not in negative["question"].lower()
+    assert "organize" not in negative["question"].lower()
+    assert "weekend" not in negative["question"].lower()
+
+
+def test_no_llm_omits_negative_when_every_candidate_overlaps():
+    """If every canned negative would be on-skill, drop the negative bucket."""
+    skill = {
+        "name": "kitchen-helper",
+        "description": (
+            "Converts WAV files to FLAC without losing metadata, proofs bread dough overnight, "
+            "cites preprints in BibTeX for ACS journals, tracks Europa's orbital period, and "
+            "replaces ceramic washers on compression faucets"
+        ),
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    assert all(not c["id"].endswith("-neg-001") for c in cases)
+    assert len(cases) == 3
 
 
 def test_parse_skill_includes_tools_dir_scripts(tmp_path):

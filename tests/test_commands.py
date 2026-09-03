@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from skillevaluator import cli as cli_module
 from skillevaluator.cli import cli
 from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_agents
 
@@ -326,6 +327,193 @@ def test_validate_catalog_runs_each_skill_as_separate_job() -> None:
         assert result.exit_code == 0, result.output
         assert any(Path("out/simple").glob("*.html"))
         assert any(Path("out/simple2").glob("*.html"))
+        summary_path = Path("out/catalog-summary.json")
+        assert summary_path.is_file()
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary["total"] == 2
+        assert summary["passed"] == 2
+        assert summary["overall_passed"] is True
+        assert len(summary["skills"]) == 2
+
+
+def test_validate_catalog_workers_runs_skills_in_parallel() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        for name in ("simple", "simple2"):
+            shutil.copytree(FIXTURE, catalog / name)
+        second = catalog / "simple2" / "SKILL.md"
+        second.write_text(
+            second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-r",
+                "html",
+                "-o",
+                "out",
+            ],
+        )
+
+        out = _plain_text(result.output)
+        assert "parallel catalog mode" in out
+        assert "Catalog Result" in out
+        assert result.exit_code == 0, result.output
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["total"] == 2
+        assert summary["passed"] == 2
+        assert any(Path("out/simple").glob("*.html"))
+        assert any(Path("out/simple2").glob("*.html"))
+
+
+def test_validate_catalog_workers_accepts_options_before_target_path() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                "--workers",
+                "2",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-o",
+                "out",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["total"] == 1
+        assert summary["passed"] == 1
+
+
+def test_validate_catalog_workers_preserves_min_score_and_json_format() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-r",
+                "json",
+                "-o",
+                "out",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert any(Path("out/simple").glob("skillevaluator-output-*.json"))
+
+
+def test_validate_catalog_workers_cli_only_report_format() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-r",
+                "cli",
+                "-o",
+                "out",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert not any(Path("out/simple").glob("*.html"))
+        assert not any(Path("out/simple").glob("skillevaluator-output-*.json"))
+
+
+def test_validate_catalog_workers_implicit_default_reports() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-o",
+                "out",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert any(Path("out/simple").glob("*.html"))
+        assert any(Path("out/simple").glob("skillevaluator-output-*.json"))
+
+
+def test_new_skill_json_report_name_ignores_sarif_sidecar(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "simple"
+    skill_dir.mkdir()
+    existing = {
+        skill_dir / "skillevaluator-output-20260101T000000.sarif.json",
+    }
+    for path in existing:
+        path.write_text("{}", encoding="utf-8")
+    standard = skill_dir / "skillevaluator-output-20260101T000001.json"
+    standard.write_text(
+        json.dumps({"overall_passed": True, "severity_counts": {"high": 1}}),
+        encoding="utf-8",
+    )
+    assert cli_module._new_skill_json_report_name(skill_dir, existing) == standard.name
+
+
+def test_catalog_skill_entry_skips_stale_json_without_report_name(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "simple"
+    skill_dir.mkdir()
+    stale = skill_dir / "skillevaluator-output-19990101T000000.json"
+    stale.write_text(
+        json.dumps({"overall_passed": True, "severity_counts": {"high": 7}}),
+        encoding="utf-8",
+    )
+    entry = cli_module._catalog_skill_entry(
+        "simple",
+        skill_dir,
+        passed=False,
+        reason="validation failed",
+        json_report_name=None,
+    )
+    assert "overall_passed" not in entry
+    assert "severity_counts" not in entry
 
 
 def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:
@@ -726,11 +914,15 @@ def test_validate_catalog_survives_failing_skills(monkeypatch) -> None:
             cli, ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-o", "out"]
         )
 
-    out = _plain_text(result.output)
-    assert "skill 1/2" in out and "skill 2/2" in out
-    assert "Catalog Result" in out
-    assert "0/2 skills passed" in out
-    assert result.exit_code != 0
+        out = _plain_text(result.output)
+        assert "skill 1/2" in out and "skill 2/2" in out
+        assert "Catalog Result" in out
+        assert "0/2 skills passed" in out
+        assert result.exit_code != 0
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["failed"] == 2
+        assert summary["overall_passed"] is False
+        assert all(not skill["passed"] for skill in summary["skills"])
 
 
 def test_render_evaluation_result_invokes_findings_report(monkeypatch) -> None:
@@ -870,10 +1062,13 @@ def test_validate_catalog_reports_unexpected_errors(monkeypatch) -> None:
             cli, ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-o", "out"]
         )
 
-    out = _plain_text(result.output)
-    assert "Catalog Result" in out
-    assert "unexpected error: validator exploded" in out
-    assert result.exit_code != 0
+        out = _plain_text(result.output)
+        assert "Catalog Result" in out
+        assert "unexpected error: validator exploded" in out
+        assert result.exit_code != 0
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["failed"] == 2
+        assert summary["skills"][0]["reason"] == "unexpected error: validator exploded"
 
 
 def test_summarize_tier2_empty_results_name_a_reason() -> None:

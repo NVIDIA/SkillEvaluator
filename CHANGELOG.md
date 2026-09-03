@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Catalog validation now writes `catalog-summary.json` at the reports root with
+  per-skill pass/fail status, optional severity rollups from child JSON reports,
+  and paths to per-skill report directories.
+- Catalog `validate` accepts `--workers N` to validate skills in parallel child
+  processes (default 1 preserves the serial per-skill pipeline view).
 - SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
   consumers. Findings map to rule IDs, severity levels, and file locations from
   Tier 1 validation results.

@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
@@ -234,7 +235,7 @@ def _extract_findings(
         _seen: set[tuple[Any, ...]] = set()
         _refs: list[dict[str, Any]] = []
         for r in metric_refs:
-            k = (r.get("source"), r.get("json_pointer"), r.get("kind"), r.get("path"))
+            k = (r.get("source"), evidence_ref_identity(r), r.get("kind"))
             if k not in _seen:
                 _seen.add(k)
                 _refs.append(r)
@@ -299,8 +300,7 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
             if isinstance(ref, str):
                 body.append(f"      evidence: {ref}\n", style="dim")
             else:
-                loc = ref.get("json_pointer") or ref.get("path") or ""
-                body.append(f"      evidence: {ref.get('source', '')}{loc}\n", style="dim")
+                body.append(f"      evidence: {_compact_evidence_ref(ref)}\n", style="dim")
 
         body.append("\n")
     return body
@@ -454,8 +454,13 @@ def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
     return _dedupe_report_reasons(reasons)
 
 
+def _compact_evidence_ref(ref: dict[str, Any]) -> str:
+    """Return the stable compact key for one evidence reference."""
+    return f"{ref.get('source') or ''}#{evidence_ref_identity(ref)}"
+
+
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Build a lookup from compact string key ``source#json_pointer`` to full dict ref.
+    """Build a lookup from each stable compact evidence key to its full dict ref.
 
     Iterates over all metrics in every reward's ``details`` dict, collecting
     ``evidence_refs`` entries.  The resulting mapping lets
@@ -475,10 +480,8 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
             for ref in metric_detail.get("evidence_refs") or []:
                 if not isinstance(ref, dict):
                     continue
-                source = ref.get("source") or ""
-                pointer = ref.get("json_pointer") or ""
-                if source or pointer:
-                    key = f"{source}#{pointer}"
+                if ref.get("source") or evidence_ref_identity(ref):
+                    key = _compact_evidence_ref(ref)
                     if key not in lookup:
                         lookup[key] = ref
     return lookup
@@ -488,7 +491,7 @@ def _resolve_evidence_ref(ref: Any, lookup: dict[str, dict[str, Any]]) -> dict[s
     """Resolve a single evidence ref to a dict.
 
     If ``ref`` is already a dict, return it unchanged.  If ``ref`` is a string
-    of the form ``"source#json_pointer"``, look it up in *lookup* and return the
+    of the form ``"source#json_pointer"`` (or a normalized evidence identity), look it up in *lookup* and return the
     full dict.  If the lookup misses, fall back to a minimal dict parsed from
     the string, with ``kind`` set to ``"evidence"``.
     """
@@ -550,9 +553,8 @@ def _generate_suggestions_structured(
     for f in failed_findings:
         for ref in (f.get("evidence_refs") or [])[:3]:
             if isinstance(ref, dict):
-                loc = ref.get("json_pointer") or ref.get("path") or ""
                 evidence_lines.append(
-                    f"  - [{f['metric']}] {ref.get('kind', '')} {ref.get('source', '')}{loc}: "
+                    f"  - [{f['metric']}] {ref.get('kind', '')} {_compact_evidence_ref(ref)}: "
                     f"{str(ref.get('label') or ref.get('excerpt') or '')[:120]}"
                 )
     evidence_block = "\n".join(evidence_lines) or "(no evidence refs)"
@@ -568,7 +570,7 @@ FAILED BEHAVIORS:
 ERROR RECOVERY ISSUES:
 {chr(10).join(f"- {e}" for e in error_recovery_info[:4]) or "(none)"}
 
-EVIDENCE REFERENCES (cite the relevant ones as trajectory.json#/pointer in your suggestions):
+EVIDENCE REFERENCES (cite the relevant compact reference exactly in your suggestions):
 {evidence_block}
 
 Based on these results, provide exactly 3-4 specific, actionable suggestions for the skill developer to improve their skill. Focus on:

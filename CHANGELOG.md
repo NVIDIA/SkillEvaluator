@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
+  no longer truncated to MIT and allowed. Closing comment markers such as
+  `*/` and `-->` are not treated as part of the expression
+  ([#86](https://github.com/NVIDIA/SkillEvaluator/issues/86)).
 - Windows personal-path PII now flags `C:\Users\...` usernames that start with
   `s` (for example `steve`), matching the intended whitespace class rather than
   excluding the letter `s` ([#87](https://github.com/NVIDIA/SkillEvaluator/issues/87)).
@@ -75,6 +79,11 @@ All notable changes to SkillEvaluator are documented in this file.
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission
   markers.
+- Tier 3 now decodes bounded native Codex `exec` wrappers into their static
+  tool calls. It preserves call order and outer-call provenance, maps an outer
+  observation only when its rendered inner call is known, keeps ambiguous
+  observations explicit, and reports unsupported or malformed JavaScript as
+  untrusted instead of a clean security result.
 
 ## 0.2.1 - 2026-08-24
 

@@ -608,6 +608,50 @@ def test_canonical_html_renders_evaluator_evidence_and_custom_metric_details() -
     assert "custom_reward.json/details/domain_quality" in agents_html
 
 
+def test_canonical_html_keeps_normalized_evidence_with_one_outer_pointer_distinct() -> None:
+    evidence_refs = [
+        {
+            "source": "trajectory.json",
+            "json_pointer": "/steps/0/tool_calls/0",
+            "evidence_id": f"/steps/0/tool_calls/0/normalized/{index}",
+            "kind": "tool_call",
+        }
+        for index in range(2)
+    ]
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0, "goal_accuracy": 0.2},
+                "rewards": [
+                    {
+                        "entry_id": "case-1",
+                        "security": 1.0,
+                        "goal_accuracy": 0.2,
+                        "details": {
+                            "goal_accuracy": {
+                                "reason": "second command failed",
+                                "evidence_refs": evidence_refs,
+                            }
+                        },
+                    }
+                ],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
+
+    assert "trajectory.json/steps/0/tool_calls/0/normalized/0" in agents_html
+    assert "trajectory.json/steps/0/tool_calls/0/normalized/1" in agents_html
+
+
 def test_canonical_html_tolerates_legacy_string_evidence_refs() -> None:
     payload = build_agent_eval_payload(
         "demo",

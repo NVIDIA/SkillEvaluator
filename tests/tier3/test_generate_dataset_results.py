@@ -37,6 +37,58 @@ def test_discover_trajectories_uses_env_results_root(tmp_path, monkeypatch):
     assert _discover_trajectories(skill) == {"case-001": trajectory}
 
 
+def test_discover_trajectories_opencode_txt_fallback(tmp_path):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    skill_results = results_root / "my-skill"
+    run_id = "20260709_120000"
+    run_dir = skill_results / run_id
+    trial = run_dir / "opencode" / "with-skill" / "trials" / "case-001"
+    trial.mkdir(parents=True)
+    (trial / "opencode.txt").write_text(
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+        '"state":{"status":"completed","input":{"command":"echo hi"},"output":"hi"}}}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (skill_results / "latest").symlink_to(run_id)
+
+    trajectories = _discover_trajectories(skill, results_dir=results_root)
+    assert "case-001" in trajectories
+    assert trajectories["case-001"].get("steps")
+
+
+def test_discover_trajectories_maps_harbor_folder_via_result_metadata(tmp_path):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trial_folder = "case-001__LRZctSP"
+    trial = run_dir / "opencode" / "with-skill" / "trials" / trial_folder
+    trial.mkdir(parents=True)
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    trial.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_folder,
+                "config": {"task": {"path": "tasks/case-001"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+
+    found = _discover_trajectories(skill, results_dir=results_root)
+    assert list(found) == ["case-001"]
+    assert found["case-001"] == trajectory
+
+
 def test_discover_trajectories_results_dir_overrides_env(tmp_path, monkeypatch):
     skill = tmp_path / "my-skill"
     skill.mkdir()

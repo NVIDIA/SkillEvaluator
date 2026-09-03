@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
+  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
+  `trajectory.json` is missing or empty.
 - SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
   consumers. Findings map to rule IDs, severity levels, and file locations from
   Tier 1 validation results.

@@ -503,6 +503,46 @@ def _ensure_project_imports():
         sys.path.insert(0, src_dir)
 
 
+def _read_reward_entry_id(trial_dir: Path) -> str:
+    for reward_path in (trial_dir / "reward.json", trial_dir / "verifier" / "reward.json"):
+        if not reward_path.is_file():
+            continue
+        try:
+            payload = json.loads(reward_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            entry_id = str(payload.get("entry_id") or "").strip()
+            if entry_id:
+                return entry_id
+    return ""
+
+
+def _read_result_entry_id(trial_dir: Path) -> str:
+    """Resolve case id from Harbor ``result.json`` when reward metadata is absent."""
+    result_path = trial_dir / "result.json"
+    if not result_path.is_file():
+        return ""
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    from skillevaluator.tier3.harbor.collector import _entry_id_from_harbor_result
+
+    return _entry_id_from_harbor_result(payload)
+
+
+def _case_id_from_trial_dir(trial_dir: Path) -> str:
+    """Resolve eval case id from persisted Harbor metadata, else the folder name."""
+    if entry_id := _read_reward_entry_id(trial_dir):
+        return entry_id
+    if entry_id := _read_result_entry_id(trial_dir):
+        return entry_id
+    return trial_dir.name
+
+
 def _discover_trajectories(
     skill_path: Path,
     from_results: str | None = None,
@@ -530,7 +570,16 @@ def _discover_trajectories(
     if not results_dir.exists():
         return {}
 
-    agent_priority = ["claude-code", "cursor-cli", "codex", "openhands", "mini-swe-agent", "aider", "gemini-cli"]
+    agent_priority = [
+        "claude-code",
+        "cursor-cli",
+        "opencode",
+        "codex",
+        "openhands",
+        "mini-swe-agent",
+        "aider",
+        "gemini-cli",
+    ]
     for agent_name in agent_priority:
         trials_dir = results_dir / agent_name / "with-skill" / "trials"
         if not trials_dir.exists():
@@ -541,7 +590,9 @@ def _discover_trajectories(
         for trial_dir in sorted(trials_dir.iterdir()):
             if not trial_dir.is_dir():
                 continue
-            case_id = trial_dir.name
+            case_id = _case_id_from_trial_dir(trial_dir)
+            if not case_id:
+                continue
             traj_path = trial_dir / "trajectory.json"
             traj, meta = load_trajectory_with_fallback(traj_path, logs_dir=trial_dir)
             if traj and traj.get("steps"):

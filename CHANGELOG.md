@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Schema, frontmatter, quality parsing, and security PII scanning accept a leading
+  UTF-8 BOM, matching the unicode scanner's "benign BOM" note
+  ([#91](https://github.com/NVIDIA/SkillEvaluator/issues/91)).
 - SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
   no longer truncated to MIT and allowed. Closing comment markers such as
   `*/` and `-->` are not treated as part of the expression

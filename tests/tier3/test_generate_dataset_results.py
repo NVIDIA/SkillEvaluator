@@ -49,6 +49,15 @@ def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, mon
     trial.mkdir(parents=True)
     trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
     trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    trial.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": "demo-001__Lmi47iy",
+                "config": {"task": {"path": "tasks/demo-001"}},
+            }
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
     (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
     (results_root / "demo" / "latest").symlink_to(run_id)
@@ -144,6 +153,51 @@ def test_discover_trajectories_ambiguous_folder_without_reward_uses_full_name(tm
 
     found = _discover_trajectories(skill)
     assert list(found) == ["case__one"]
+
+
+def test_discover_trajectories_preserves_versioned_case_id_without_reward(tmp_path, monkeypatch):
+    """IDs like ``case__v2`` must not be truncated when only the folder name is present."""
+    trajectory = {"steps": [{"tool_calls": []}]}
+    skill = _write_results_trial(
+        tmp_path,
+        skill_name="demo",
+        trial_folder="case__v2",
+        trajectory=trajectory,
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["case__v2"]
+
+
+def test_discover_trajectories_resolves_shortuuid_folder_from_result_json(tmp_path, monkeypatch):
+    """All-letter Harbor tails resolve via result.json task metadata, not suffix guessing."""
+    trajectory = {"steps": [{"tool_calls": []}]}
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trial_folder = "case-001__LRZctSP"
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / trial_folder
+    trial.mkdir(parents=True)
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    trial.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_folder,
+                "config": {"task": {"path": "tasks/case-001"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["case-001"]
 
 
 def test_discover_trajectories_results_dir_overrides_env(tmp_path, monkeypatch):

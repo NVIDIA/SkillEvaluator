@@ -503,16 +503,6 @@ def _ensure_project_imports():
         sys.path.insert(0, src_dir)
 
 
-def _looks_like_harbor_suffix(suffix: str) -> bool:
-    """True when a ``__`` tail looks like Harbor's random or attempt suffix."""
-    if not suffix:
-        return False
-    lowered = suffix.lower()
-    if lowered.startswith("attempt"):
-        return True
-    return len(suffix) <= 12 and suffix.isalnum() and any(ch.isdigit() for ch in suffix)
-
-
 def _read_reward_entry_id(trial_dir: Path) -> str:
     for reward_path in (trial_dir / "reward.json", trial_dir / "verifier" / "reward.json"):
         if not reward_path.is_file():
@@ -528,18 +518,29 @@ def _read_reward_entry_id(trial_dir: Path) -> str:
     return ""
 
 
+def _read_result_entry_id(trial_dir: Path) -> str:
+    """Resolve case id from Harbor ``result.json`` when reward metadata is absent."""
+    result_path = trial_dir / "result.json"
+    if not result_path.is_file():
+        return ""
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    from skillevaluator.tier3.harbor.collector import _entry_id_from_harbor_result
+
+    return _entry_id_from_harbor_result(payload)
+
+
 def _case_id_from_trial_dir(trial_dir: Path) -> str:
-    """Resolve eval case id from reward metadata, with conservative folder fallback."""
+    """Resolve eval case id from persisted Harbor metadata, else the folder name."""
     if entry_id := _read_reward_entry_id(trial_dir):
         return entry_id
-
-    name = trial_dir.name
-    if "__" not in name:
-        return name
-    prefix, suffix = name.split("__", 1)
-    if prefix and _looks_like_harbor_suffix(suffix):
-        return prefix
-    return name
+    if entry_id := _read_result_entry_id(trial_dir):
+        return entry_id
+    return trial_dir.name
 
 
 def _discover_trajectories(

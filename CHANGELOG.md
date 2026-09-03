@@ -14,7 +14,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Unpinned-dependency warnings are no longer suppressed by comparison
   operators inside PEP 508 environment markers; requirements such as
-  `pkg; python_version < "3.13"` are now correctly reported.
+  `pkg; python_version < "3.13"` are now correctly reported, while direct
+  references are treated as pinned independently of marker contents.
 - SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
   no longer truncated to MIT and allowed. Closing comment markers such as
   `*/` and `-->` are not treated as part of the expression

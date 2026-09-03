@@ -372,9 +372,7 @@ pandas
             'requests[security]; python_version >= "3.9"',
         ],
     )
-    def test_environment_marker_comparisons_do_not_hide_unpinned_requirements(
-        self, tmp_path: Path, requirement: str
-    ):
+    def test_environment_marker_comparisons_do_not_hide_unpinned_requirements(self, tmp_path: Path, requirement: str):
         """Marker operators must not count as package version constraints."""
         requirements = tmp_path / "requirements.txt"
         requirements.write_text(f"{requirement}\n", encoding="utf-8")
@@ -397,10 +395,8 @@ pandas
             'requests @ https://example.invalid/requests.whl ; python_version < "3.13"',
         ],
     )
-    def test_marker_handling_preserves_constrained_and_direct_requirements(
-        self, tmp_path: Path, requirement: str
-    ):
-        """Existing version constraints and direct-reference behavior remain accepted."""
+    def test_marker_handling_preserves_constrained_and_direct_requirements(self, tmp_path: Path, requirement: str):
+        """Version constraints remain accepted, and direct references are treated as pinned."""
         requirements = tmp_path / "requirements.txt"
         requirements.write_text(f"{requirement}\n", encoding="utf-8")
 

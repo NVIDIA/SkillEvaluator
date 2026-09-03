@@ -780,7 +780,10 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / CATALOG_SUMMARY_FILENAME
-    _write_report_atomically(output_path, json.dumps(summary, indent=2, default=str, allow_nan=False))
+    _write_report_atomically(
+        output_path,
+        json.dumps(summary, indent=2, default=str, allow_nan=False).encode("utf-8"),
+    )
     return output_path
 
 

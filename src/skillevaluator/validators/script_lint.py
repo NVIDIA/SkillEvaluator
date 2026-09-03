@@ -7,7 +7,7 @@ Ported from SkillEvaluator lint_skill_scripts.py. These are ADVISORY checks
 for code style and maintainability — they produce warnings but never
 fail validation.
 
-Checks performed per .py file in scripts/:
+Checks performed per .py file in scripts/ or tools/:
   - Flat script (no function definitions)
   - Deep nesting (> 6 levels of control flow)
   - Magic numbers (raw numeric constants)
@@ -20,7 +20,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from skillevaluator.constants import SCRIPT_LINT_MAX_NESTING, SCRIPT_LINT_SAFE_CONSTANTS
+from skillevaluator.constants import EXECUTABLE_SKILL_DIRS, SCRIPT_LINT_MAX_NESTING, SCRIPT_LINT_SAFE_CONSTANTS
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase
@@ -123,19 +123,21 @@ class ScriptLintValidator(ValidatorBase):
         return result
 
     def _lint_skill(self, skill_path: Path) -> ValidationResult:
-        """Lint all Python scripts in a skill's scripts/ directory."""
+        """Lint all Python scripts in a skill's scripts/ or tools/ directory."""
         result = ValidationResult(
             validator_name="SCRIPT_LINT",
             validator_description=self.description,
         )
-        scripts_dir = skill_path / "scripts"
-        if not scripts_dir.is_dir():
-            result.add_success(check_name="lint", message="No scripts/ directory found")
-            return result
-
-        py_files = sorted(scripts_dir.glob("*.py"))
+        py_files: list[Path] = []
+        for dirname in EXECUTABLE_SKILL_DIRS:
+            directory = skill_path / dirname
+            if directory.is_dir():
+                py_files.extend(sorted(directory.glob("*.py")))
         if not py_files:
-            result.add_success(check_name="lint", message="No Python scripts found in scripts/")
+            if not any((skill_path / dirname).is_dir() for dirname in EXECUTABLE_SKILL_DIRS):
+                result.add_success(check_name="lint", message="No scripts/ or tools/ directory found")
+            else:
+                result.add_success(check_name="lint", message="No Python scripts found in scripts/ or tools/")
             return result
 
         for script in py_files:

@@ -68,6 +68,7 @@ try:
         UNSUPPORTED_NATIVE_CODEX_EXEC,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
+        normalized_tool_call_wrapper_observation,
     )
 except ImportError:  # pragma: no cover -- source-tree import only
     from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
@@ -76,6 +77,7 @@ except ImportError:  # pragma: no cover -- source-tree import only
         UNSUPPORTED_NATIVE_CODEX_EXEC,
         iter_normalized_tool_calls,
         normalized_tool_call_observation,
+        normalized_tool_call_wrapper_observation,
     )
 
 try:
@@ -250,6 +252,7 @@ ACCEPTABLE_ALTERNATE_SCORE = 0.75
 
 iter_tool_calls = iter_normalized_tool_calls
 _tool_call_observation = normalized_tool_call_observation
+_tool_call_wrapper_observation = normalized_tool_call_wrapper_observation
 
 
 def get_all_tool_calls(traj):
@@ -329,6 +332,8 @@ def extract_tool_calls_as_dicts(traj):
                 call["normalization_status"] = status
             if status := tc.get("_atif_observation_status"):
                 call["observation_status"] = status
+            if wrapper_observation := _tool_call_wrapper_observation(step, tc):
+                call["wrapper_observation"] = wrapper_observation
             result.append(call)
     return result
 
@@ -2651,6 +2656,7 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
     for tc in tool_calls:
         action = str(tc.get("action", ""))
         observation = str(tc.get("observation", ""))
+        wrapper_observation = str(tc.get("wrapper_observation", ""))
         if tc.get("normalization_status") == UNSUPPORTED_NATIVE_CODEX_EXEC:
             findings.append(
                 _security_finding(
@@ -2780,6 +2786,12 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
             observation,
             tool=action,
             target_skill_used_before=target_skill_seen,
+        ):
+            findings.append(finding)
+        if finding := _secret_exposure_finding(
+            wrapper_observation,
+            tool=None,
+            target_skill_used_before=None,
         ):
             findings.append(finding)
 

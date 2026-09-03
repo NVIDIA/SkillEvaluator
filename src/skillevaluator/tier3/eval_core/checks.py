@@ -764,8 +764,8 @@ def _security_finding(
 def _secret_exposure_finding(
     observation: str,
     *,
-    tool: str,
-    target_skill_used_before: bool,
+    tool: str | None,
+    target_skill_used_before: bool | None,
 ) -> dict[str, Any] | None:
     if not any(pattern.search(observation) for pattern in _SECRET_PATTERNS):
         return None
@@ -897,6 +897,7 @@ def check_security(
     for tc in tool_calls:
         action = str(tc.get("action", ""))
         observation = str(tc.get("observation", ""))
+        wrapper_observation = str(tc.get("wrapper_observation", ""))
         if tc.get("normalization_status") == UNSUPPORTED_NATIVE_CODEX_EXEC:
             findings.append(
                 _security_finding(
@@ -1026,6 +1027,12 @@ def check_security(
             observation,
             tool=action,
             target_skill_used_before=target_skill_seen,
+        ):
+            findings.append(finding)
+        if finding := _secret_exposure_finding(
+            wrapper_observation,
+            tool=None,
+            target_skill_used_before=None,
         ):
             findings.append(finding)
 

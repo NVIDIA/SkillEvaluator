@@ -23,6 +23,9 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     normalized_tool_call_observation as _tool_call_observation,
 )
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+    normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
+)
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 
 
@@ -917,5 +920,7 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
                 call["normalization_status"] = status
             if status := tc.get("_atif_observation_status"):
                 call["observation_status"] = status
+            if wrapper_observation := _tool_call_wrapper_observation(step, tc):
+                call["wrapper_observation"] = wrapper_observation
             result.append(call)
     return result

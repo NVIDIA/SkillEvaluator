@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
 import sys
 import time
 from fractions import Fraction
+from itertools import product
+from pathlib import Path
 
 import pytest
 
@@ -30,11 +33,19 @@ from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
+    LEGACY_METRIC_SET,
+    LEGACY_METRICS,
     average_metrics,
+    canonical_dimension_mean,
     extract_custom_metrics,
     metric_value,
     overall_score,
+    overall_score_from_metrics,
+    score_definition,
+    score_policy_for_metrics,
 )
+from skillevaluator.tier3.harbor.report import _pick_best_agent
 
 
 @pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
@@ -71,6 +82,173 @@ def test_overall_score_requires_a_complete_finite_metric_set() -> None:
     assert overall_score(incomplete) is None
     assert overall_score(invalid) is None
     assert overall_score({"metric_set": CUSTOM_ONLY_METRIC_SET, "overall": float("nan")}) is None
+
+
+def test_default_overall_score_uses_the_canonical_dimension_mean() -> None:
+    reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    # Effectiveness owns goal_accuracy + behavior_check as one of five
+    # dimensions. Averaging all six evaluators would incorrectly return 0.5583.
+    assert overall_score(reward) == pytest.approx(0.49)
+    assert score_policy_for_metrics(DEFAULT_METRICS) == DEFAULT_SCORE_POLICY
+    assert "mean(Security, Correctness, Discoverability, Effectiveness, Efficiency)" in score_definition(
+        DEFAULT_METRICS
+    )
+
+
+def test_best_agent_selection_uses_the_canonical_dimension_mean() -> None:
+    direction_reversing = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+    agents = {
+        "metric-mean-winner": {"execution_status": "succeeded", "with_skill": direction_reversing},
+        "dimension-mean-winner": {
+            "execution_status": "succeeded",
+            "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.5),
+        },
+    }
+
+    assert sum(direction_reversing.values()) / len(direction_reversing) > 0.5
+    assert _pick_best_agent(agents) == "dimension-mean-winner"
+
+
+def test_standalone_harbor_metric_aggregation_uses_the_canonical_dimension_mean(tmp_path: Path) -> None:
+    reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+    input_path = tmp_path / "rewards.jsonl"
+    output_path = tmp_path / "metrics.json"
+    input_path.write_text(json.dumps(reward) + "\n", encoding="utf-8")
+    metric_script = Path(__file__).parents[1] / "src/skillevaluator/tier3/harbor/templates/metric.py"
+
+    completed = subprocess.run(
+        [sys.executable, str(metric_script), "-i", str(input_path), "-o", str(output_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(output_path.read_text(encoding="utf-8"))["overall"] == 0.49
+
+    precision_reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "security": 0.0001,
+        "skill_execution": 0.0001,
+        "skill_efficiency": 0.0001,
+        "accuracy": 0.0001,
+        "goal_accuracy": 0.0,
+        "behavior_check": 0.0007,
+    }
+    input_path.write_text(json.dumps(precision_reward) + "\n", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(metric_script), "-i", str(input_path), "-o", str(output_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(output_path.read_text(encoding="utf-8"))["overall"] == 0.0001
+
+
+def test_legacy_overall_score_preserves_the_historical_metric_mean() -> None:
+    reward = {
+        "metric_set": LEGACY_METRIC_SET,
+        "skill_execution": 0.2,
+        "skill_efficiency": 0.4,
+        "accuracy": 0.6,
+        "goal_accuracy": 0.8,
+        "behavior_check": 1.0,
+    }
+
+    assert overall_score(reward) == pytest.approx(0.6)
+    assert "mean(skill_execution, skill_efficiency, accuracy, goal_accuracy, behavior_check)" in score_definition(
+        LEGACY_METRICS
+    )
+
+
+def test_partial_score_averages_available_dimensions_instead_of_evaluators() -> None:
+    scores = {"accuracy": 0.0, "goal_accuracy": 1.0, "behavior_check": 1.0}
+    metrics = ("accuracy", "goal_accuracy", "behavior_check")
+
+    assert overall_score_from_metrics(scores, metrics) == pytest.approx(0.5)
+
+
+def test_lift_and_pass_at_k_share_the_canonical_default_score() -> None:
+    baseline = dict.fromkeys(DEFAULT_METRICS, 0.5)
+    with_skill = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    lift = _compute_lift(with_skill, baseline)
+    summary = _pass_summary(
+        [{"entry_id": "case-001", "_trial_name": "case-001__attempt1", **with_skill}],
+        n_attempts=1,
+        pass_threshold=0.5,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+    )
+
+    assert lift["overall"] == {
+        "with_skill": 0.49,
+        "without_skill": 0.5,
+        "delta": -0.01,
+    }
+    assert summary["cases"]["case-001"]["attempts"] == [
+        {
+            "attempt": 1,
+            "trial": "case-001__attempt1",
+            "score": 0.49,
+            "passed": False,
+        }
+    ]
+
+
+def test_default_score_policy_matches_the_five_dimension_contract_exhaustively() -> None:
+    for values in product((0.0, 0.5, 1.0), repeat=len(DEFAULT_METRICS)):
+        scores = dict(zip(DEFAULT_METRICS, values, strict=True))
+        expected = (
+            scores["security"]
+            + scores["accuracy"]
+            + scores["skill_execution"]
+            + (scores["goal_accuracy"] + scores["behavior_check"]) / 2
+            + scores["skill_efficiency"]
+        ) / 5
+
+        assert overall_score_from_metrics(scores) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [[], [0.5] * 4, [0.5] * 6, [0.5, 0.5, 0.5, 0.5, float("nan")]],
+)
+def test_canonical_dimension_mean_rejects_partial_or_invalid_dimension_sets(values: list[float]) -> None:
+    assert canonical_dimension_mean(values) is None
 
 
 def test_lift_omits_unpaired_metrics_and_incomplete_overall() -> None:

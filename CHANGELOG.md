@@ -28,6 +28,14 @@ All notable changes to SkillEvaluator are documented in this file.
   not treated as absent, and a blocking conflict no longer publishes
   `license_status=allowed`
   ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
+- Tier 3 now uses one versioned, equal-weight five-dimension overall-score
+  policy across Harbor rewards, pass@k, Skill Lift, reports, comparisons, and
+  best-agent selection. Previously, some paths averaged all six evaluators
+  directly while reports averaged five dimensions, which gave Effectiveness
+  two votes and could reverse the reported lift direction. Current artifacts
+  persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
+  retain their historical semantics
+  (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
 - `--llm-verify` now refuses to send file context from paths outside the
   skill root, including `..`, absolute paths, and outbound file symlinks.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories

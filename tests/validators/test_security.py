@@ -18,6 +18,46 @@ from skillevaluator.validators.base import Finding, Severity, ValidationResult
 from skillevaluator.validators.schema import SchemaValidator
 from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env
 
+_SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
+    Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
+)
+_SKILLSPECTOR_2_10_REQUIRED_ANALYZERS = (
+    "artifact_integrity",
+    "behavioral_ast",
+    "behavioral_taint_tracking",
+    "mcp_least_privilege",
+    "mcp_rug_pull",
+    "mcp_tool_poisoning",
+    "meta_analyzer",
+    "static_patterns_agent_snooping",
+    "static_patterns_anti_refusal",
+    "static_patterns_data_exfiltration",
+    "static_patterns_deserialization",
+    "static_patterns_excessive_agency",
+    "static_patterns_harmful_content",
+    "static_patterns_memory_poisoning",
+    "static_patterns_output_handling",
+    "static_patterns_privilege_escalation",
+    "static_patterns_prompt_injection",
+    "static_patterns_rogue_agent",
+    "static_patterns_ssrf",
+    "static_patterns_supply_chain",
+    "static_patterns_system_prompt_leakage",
+    "static_patterns_tool_misuse",
+    "static_yara",
+)
+_SKILLSPECTOR_SEMANTIC_ANALYZERS = (
+    "semantic_developer_intent",
+    "semantic_quality_policy",
+    "semantic_security_discovery",
+)
+_SKILLSPECTOR_UNIVERSAL_ANALYZERS = {
+    analyzer_id
+    for analyzer_id in _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS
+    if analyzer_id in {"artifact_integrity", "static_yara"}
+    or analyzer_id.startswith("static_patterns_")
+}
+
 
 def _api_key_assignment(*fragments: str, separator: str = " = ") -> str:
     """Build a representative hardcoded-key assignment without embedding it in source."""
@@ -53,7 +93,26 @@ def _skillspector_json_report(
     llm_available: bool = False,
 ) -> dict:
     """Return the pinned SkillSpector JSON report shape used by contract tests."""
-    normalized_issues = [{"confidence": 1.0, **issue} for issue in (issues or [])]
+    normalized_issues = [
+        {"confidence": 1.0, "finding_id": f"finding-{index}", **issue}
+        for index, issue in enumerate(issues or [])
+    ]
+    components_by_key: dict[tuple, dict] = {}
+    for issue in normalized_issues:
+        location = issue.get("location")
+        path = location.get("file") if isinstance(location, dict) else None
+        path = path if isinstance(path, str) and path else "SKILL.md"
+        source = {
+            key: issue[key]
+            for key in ("source_identity", "source_url", "source_digest")
+            if isinstance(issue.get(key), str) and issue[key]
+        }
+        source_key = next(((key, source[key]) for key in source), ("", ""))
+        components_by_key.setdefault((source_key, path), {"path": path, "executable": False, **source})
+    components = list(components_by_key.values())
+    analyzer_ids = _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS + (
+        _SKILLSPECTOR_SEMANTIC_ANALYZERS if llm_requested else ()
+    )
     return {
         "skill": {
             "name": "test-skill",
@@ -65,25 +124,39 @@ def _skillspector_json_report(
             "severity": "LOW" if not issues else "HIGH",
             "recommendation": "SAFE" if not issues else "DO_NOT_INSTALL",
         },
-        "components": [],
+        "components": components,
         "issues": normalized_issues,
         "suppressed_count": 0,
         "suppressed": [],
         "execution_successful": True,
         "analysis_completeness": {
-            "total_components": 0,
-            "scanned_components": 0,
+            "total_components": len(components),
+            "scanned_components": len(components),
             "coverage_percent": 100.0,
             "is_complete": True,
             "status": "complete",
             "execution_successful": True,
-            "fully_inspected_files": 0,
+            "fully_inspected_files": len(components),
             "partially_inspected_files": 0,
             "entirely_uninspected_files": 0,
             "ledger_exceptions": [],
             "scope_exclusions": [],
-            "analyzer_statuses": [],
+            "analyzer_statuses": [
+                {
+                    "analyzer_id": analyzer_id,
+                    "status": "completed",
+                    "planned_work": len(components) if analyzer_id in _SKILLSPECTOR_UNIVERSAL_ANALYZERS else 0,
+                    "completed": len(components) if analyzer_id in _SKILLSPECTOR_UNIVERSAL_ANALYZERS else 0,
+                    "partial": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                    "unaccounted": 0,
+                }
+                for analyzer_id in analyzer_ids
+            ],
             "limitations": [],
+            "findings_before_filtering": len(normalized_issues),
+            "findings_after_filtering": len(normalized_issues),
         },
         "metadata": {
             "has_executable_scripts": False,
@@ -94,6 +167,43 @@ def _skillspector_json_report(
             "filtering_mode": "heuristic",
         },
     }
+
+
+def _validate_skillspector_payload(
+    mock_tools,
+    sample_skill_dir: Path,
+    payload: dict,
+    *,
+    exit_code: int = 0,
+) -> ValidationResult:
+    """Run one deterministic SkillSpector payload through the public validation seam."""
+    mock_tools.skillspector.is_available = True
+    mock_tools.skillspector.run.return_value = ToolResult(
+        success=True,
+        stdout=json.dumps(payload),
+        stderr="",
+        exit_code=exit_code,
+    )
+    return SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+
+def _set_universal_analyzer_work(payload: dict) -> None:
+    """Keep synthetic complete reports aligned with producer work accounting."""
+    component_count = len(payload["components"])
+    for status in payload["analysis_completeness"]["analyzer_statuses"]:
+        if status["analyzer_id"] in _SKILLSPECTOR_UNIVERSAL_ANALYZERS:
+            status.update(
+                {
+                    "status": "completed",
+                    "planned_work": component_count,
+                    "completed": component_count,
+                    "skipped": 0,
+                    "failed": 0,
+                    "unaccounted": 0,
+                }
+            )
+            if "partial" in status:
+                status["partial"] = 0
 
 
 def _user_facing_reports(result: ValidationResult) -> list[str]:
@@ -1204,6 +1314,42 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.incomplete_scans == ["skillspector-llm"]
         assert any(finding.check_name == "Static instruction override (PI-STATIC)" for finding in result.findings)
 
+    @pytest.mark.parametrize("missing_analyzer", _SKILLSPECTOR_SEMANTIC_ANALYZERS)
+    @patch("skillevaluator.validators.security.Tools")
+    def test_llm_enrichment_requires_semantic_analyzer_evidence(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        missing_analyzer: str,
+    ) -> None:
+        enrichment_report = _skillspector_json_report(llm_requested=True, llm_available=True)
+        enrichment_report["analysis_completeness"]["analyzer_statuses"] = [
+            status
+            for status in enrichment_report["analysis_completeness"]["analyzer_statuses"]
+            if status["analyzer_id"] != missing_analyzer
+        ]
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(
+                success=True,
+                stdout=json.dumps(_skillspector_json_report()),
+                stderr="",
+                exit_code=0,
+            ),
+            ToolResult(
+                success=True,
+                stdout=json.dumps(enrichment_report),
+                stderr="",
+                exit_code=0,
+            ),
+        ]
+
+        result = SecurityValidator(use_llm=True).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert any("missing required analyzer evidence" in error for error in result.errors)
+
     @patch("skillevaluator.validators.security.Tools")
     def test_successful_llm_enrichment_cannot_erase_deterministic_findings(
         self,
@@ -1260,6 +1406,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                             "location": {"file": "SKILL.md", "start_line": 8},
                         }
                     ],
+                    "metadata": {"skillspector_version": "1.0.0"},
                 }
             ),
             stderr="",
@@ -1279,6 +1426,9 @@ Call us at 555-123-4567 or +1-555-987-6543
         payload = _skillspector_json_report()
         payload["suppressed_count"] = 2
         payload["suppressed"] = [{"id": "one"}, {"id": "two"}]
+        payload["analysis_completeness"].update(
+            {"findings_before_filtering": 2, "findings_after_filtering": 2}
+        )
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
             stdout=json.dumps(payload),
@@ -1317,33 +1467,380 @@ Call us at 555-123-4567 or +1-555-987-6543
                 ],
             }
         )
-        mock_tools.skillspector.is_available = True
-        mock_tools.skillspector.run.return_value = ToolResult(
-            success=True,
-            stdout=json.dumps(payload),
-            stderr="",
-            exit_code=0,
-        )
-
-        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
 
         assert result.status == "incomplete"
         assert any("analysis_completeness" in error and "partial" in error for error in result.errors)
         assert not any("recommendation" in error for error in result.errors)
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_scan_preserves_valid_high_findings(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        payload = _skillspector_json_report([issue])
+        payload["analysis_completeness"].update(
+            {
+                "is_complete": False,
+                "status": "complete",
+                "limitations": ["Transitive traversal truncated: target budget 1 reached"],
+            }
+        )
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "incomplete"
+        assert any(finding.check_name == "Instruction override (PI-1)" for finding in result.findings)
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize("analyzer_state", ["degraded", "unavailable"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_analyzer_partial_scan_preserves_valid_high_findings(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        analyzer_state: str,
+    ) -> None:
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        limitations = [
+            "Zeta analyzer skipped one target.",
+            "Alpha analyzer skipped one target.",
+            "Transitive traversal truncated: target budget 1 reached",
+        ]
+        payload = _skillspector_json_report([issue])
+        analyzer_status = next(
+            status
+            for status in payload["analysis_completeness"]["analyzer_statuses"]
+            if status["analyzer_id"] == "static_patterns_prompt_injection"
+        )
+        analyzer_status.update(
+            {
+                "status": analyzer_state,
+                "message": limitations[1],
+                "planned_work": 1 if analyzer_state == "degraded" else 0,
+                "completed": 0,
+                "partial": 1 if analyzer_state == "degraded" else 0,
+            }
+        )
+        payload["analysis_completeness"]["analyzer_statuses"].append(
+            {**analyzer_status, "message": limitations[0]}
+        )
+        payload["analysis_completeness"].update(
+            {
+                "is_complete": False,
+                "status": "partial",
+                "limitations": limitations,
+            }
+        )
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "incomplete"
+        assert any(finding.check_name == "Instruction override (PI-1)" for finding in result.findings)
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_low_scan_requires_caution_recommendation(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["analysis_completeness"].update(
+            {
+                "is_complete": False,
+                "status": "partial",
+                "ledger_exceptions": [{"reason_code": "reference_unresolved", "fatal": False}],
+            }
+        )
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("risk_assessment.recommendation" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("failure_mode", "expected_error"),
+        (
+            pytest.param("top-level", "execution_successful=false", id="top-level-execution-failed"),
+            pytest.param("nested", "execution_successful fields contradict", id="nested-execution-failed"),
+            pytest.param("status", "reports failed analysis", id="nested-status-failed"),
+        ),
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_failed_report_does_not_process_findings(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        failure_mode: str,
+        expected_error: str,
+    ) -> None:
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        payload = _skillspector_json_report([issue])
+        payload["analysis_completeness"].update(
+            {
+                "is_complete": False,
+                "status": "failed",
+                "ledger_exceptions": [{"reason_code": "scan_failed", "fatal": True}],
+            }
+        )
+        if failure_mode == "top-level":
+            payload["execution_successful"] = False
+            payload["analysis_completeness"]["execution_successful"] = False
+        elif failure_mode == "nested":
+            payload["analysis_completeness"]["execution_successful"] = False
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "incomplete"
+        assert not result.findings
+        assert any(expected_error in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        "completeness_detail",
+        (
+            pytest.param({"scanned_components": 1}, id="scanned-does-not-equal-fully-inspected"),
+            pytest.param({"entirely_uninspected_files": 1}, id="partitions-do-not-equal-total"),
+            pytest.param({"coverage_percent": 50}, id="coverage-does-not-match-fully-inspected"),
+        ),
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_scan_rejects_inconsistent_completeness_counters(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        completeness_detail: dict,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["risk_assessment"]["recommendation"] = "CAUTION"
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 1,
+                "scanned_components": 0,
+                "coverage_percent": 0,
+                "is_complete": False,
+                "status": "partial",
+                "fully_inspected_files": 0,
+                "partially_inspected_files": 1,
+                **completeness_detail,
+            }
+        )
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("inconsistent counters or coverage" in error for error in result.errors)
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        ("completeness_detail", "expected_error"),
+        (
+            pytest.param({}, "contradict partial analysis", id="partial-without-incomplete-detail"),
+            pytest.param(
+                {"ledger_exceptions": [{"fatal": True}]},
+                "fatal exception despite successful execution",
+                id="fatal-ledger-exception",
+            ),
+            pytest.param({"limitations": [1]}, "invalid detail lists", id="non-string-limitation"),
+        ),
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_scan_rejects_contradictory_details(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        completeness_detail: dict,
+        expected_error: str,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["risk_assessment"]["recommendation"] = "CAUTION"
+        payload["analysis_completeness"].update(
+            {
+                "is_complete": False,
+                "status": "partial",
+                **completeness_detail,
+            }
+        )
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any(expected_error in error for error in result.errors)
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_invalid_partial_scan_does_not_process_findings(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        payload = _skillspector_json_report([issue])
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 1,
+                "scanned_components": 0,
+                "coverage_percent": 0,
+                "is_complete": False,
+                "status": "partial",
+                "fully_inspected_files": 0,
+                "partially_inspected_files": 1,
+                "analyzer_statuses": [
+                    {
+                        "analyzer_id": "static_patterns",
+                        "status": "completed",
+                        "planned_work": 1,
+                        "completed": 0,
+                        "partial": 0,
+                        "skipped": 0,
+                        "failed": 1,
+                        "unaccounted": 0,
+                    }
+                ],
+            }
+        )
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "incomplete"
+        assert not result.findings
+        assert any("status that contradicts its work accounting" in error for error in result.errors)
+
     @pytest.mark.parametrize(
         ("completeness_detail", "missing_detail"),
         (
             pytest.param({"coverage_percent": 0}, None, id="zero-coverage"),
+            pytest.param({"coverage_percent": 10**399}, None, id="unbounded-integer-coverage"),
             pytest.param({"partially_inspected_files": 1}, None, id="partially-inspected-file"),
             pytest.param({"entirely_uninspected_files": 1}, None, id="uninspected-file"),
             pytest.param({"ledger_exceptions": [{"fatal": True}]}, None, id="fatal-ledger-exception"),
             pytest.param({"limitations": ["Analyzer failed."]}, None, id="limitation"),
+            pytest.param({"total_components": -1}, None, id="negative-total-components"),
+            pytest.param({"scanned_components": True}, None, id="boolean-scanned-components"),
+            pytest.param({"fully_inspected_files": "0"}, None, id="string-fully-inspected-files"),
+            pytest.param(
+                {
+                    "total_components": 1,
+                    "scanned_components": 10**399,
+                    "fully_inspected_files": 10**399,
+                },
+                None,
+                id="unbounded-mismatched-component-counts",
+            ),
+            pytest.param(
+                {"total_components": 2, "scanned_components": 1, "fully_inspected_files": 1},
+                None,
+                id="component-count-mismatch",
+            ),
+            pytest.param({"fully_inspected_files": 1}, None, id="fully-inspected-count-mismatch"),
+            pytest.param(
+                {
+                    "analyzer_statuses": [
+                        {
+                            "analyzer_id": "static_patterns",
+                            "status": "failed",
+                            "planned_work": 0,
+                            "completed": 0,
+                            "partial": 0,
+                            "skipped": 0,
+                            "failed": 0,
+                            "unaccounted": 0,
+                        }
+                    ]
+                },
+                None,
+                id="failed-analyzer-status",
+            ),
+            pytest.param(
+                {
+                    "analyzer_statuses": [
+                        {
+                            "analyzer_id": "static_patterns",
+                            "status": "completed",
+                            "planned_work": 1,
+                            "completed": 0,
+                            "partial": 0,
+                            "skipped": 0,
+                            "failed": 1,
+                            "unaccounted": 0,
+                        }
+                    ]
+                },
+                None,
+                id="completed-analyzer-with-failed-work",
+            ),
+            pytest.param(
+                {
+                    "analyzer_statuses": [
+                        {
+                            "analyzer_id": "static_patterns",
+                            "status": "completed",
+                            "planned_work": 0,
+                            "completed": 0,
+                            "partial": 0,
+                            "skipped": 0,
+                            "failed": 0,
+                            "unaccounted": 0,
+                            "message": 7,
+                        }
+                    ]
+                },
+                None,
+                id="non-string-analyzer-message",
+            ),
+            pytest.param({"analyzer_statuses": []}, None, id="empty-analyzer-statuses"),
             pytest.param(None, "coverage_percent", id="coverage_percent"),
+            pytest.param(None, "total_components", id="total_components"),
+            pytest.param(None, "scanned_components", id="scanned_components"),
+            pytest.param(None, "fully_inspected_files", id="fully_inspected_files"),
             pytest.param(None, "partially_inspected_files", id="partially_inspected_files"),
             pytest.param(None, "entirely_uninspected_files", id="entirely_uninspected_files"),
             pytest.param(None, "ledger_exceptions", id="ledger_exceptions"),
             pytest.param(None, "limitations", id="limitations"),
+            pytest.param(None, "analyzer_statuses", id="analyzer_statuses"),
         ),
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -1360,15 +1857,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             payload["analysis_completeness"].update(completeness_detail)
         else:
             payload["analysis_completeness"].pop(missing_detail)
-        mock_tools.skillspector.is_available = True
-        mock_tools.skillspector.run.return_value = ToolResult(
-            success=True,
-            stdout=json.dumps(payload),
-            stderr="",
-            exit_code=0,
-        )
-
-        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
 
         assert result.status == "incomplete"
         assert any("analysis_completeness" in error for error in result.errors)
@@ -1402,9 +1891,10 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "issues": [],
                     "suppressed_count": "unknown",
+                    "metadata": {"skillspector_version": "1.0.0"},
                 },
                 "suppressed_count",
                 id="invalid-suppressed-count",
@@ -1425,13 +1915,16 @@ Call us at 555-123-4567 or +1-555-987-6543
                 id="unbounded-integer-risk-score",
             ),
             pytest.param(
-                {"risk_assessment": {"score": 0, "severity": "LOW"}, "issues": [{}]},
+                {
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
+                    "issues": [{}],
+                },
                 "issues[0].id",
                 id="empty-issue",
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 80, "severity": "HIGH"},
+                    "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
                     "issues": [
                         {
                             "id": "P1",
@@ -1447,7 +1940,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 80, "severity": "HIGH"},
+                    "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
                     "issues": [
                         {
                             "id": "P1",
@@ -1462,7 +1955,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "issues": [
                         {
                             "id": "P1",
@@ -1477,9 +1970,10 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "issues": [],
                     "suppressed_count": 1,
+                    "metadata": {"skillspector_version": "1.0.0"},
                 },
                 "suppressed_count",
                 id="suppression-count-without-list",
@@ -1495,7 +1989,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 0, "severity": "LOW"},
+                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "issues": [],
                     "metadata": {"has_executable_scripts": "false"},
                 },
@@ -1508,7 +2002,14 @@ Call us at 555-123-4567 or +1-555-987-6543
                 id="unknown-risk-severity",
             ),
             pytest.param(
-                {"risk_assessment": {"score": 100, "severity": "CRITICAL"}, "issues": []},
+                {
+                    "risk_assessment": {
+                        "score": 100,
+                        "severity": "CRITICAL",
+                        "recommendation": "DO_NOT_INSTALL",
+                    },
+                    "issues": [],
+                },
                 "nonzero risk score without any issues",
                 id="risk-without-issues",
             ),
@@ -1519,6 +2020,11 @@ Call us at 555-123-4567 or +1-555-987-6543
                 },
                 "risk_assessment.recommendation",
                 id="complete-low-caution-recommendation",
+            ),
+            pytest.param(
+                {"risk_assessment": {"score": 0, "severity": "LOW"}, "issues": []},
+                "risk_assessment.recommendation",
+                id="missing-recommendation",
             ),
             pytest.param(
                 {
@@ -1545,7 +2051,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             ),
             pytest.param(
                 {
-                    "risk_assessment": {"score": 80, "severity": "HIGH"},
+                    "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
                     "issues": [{"id": "P1", "severity": " HIGH", "finding": "unsafe"}],
                 },
                 "issues[0].severity",
@@ -1581,6 +2087,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                         }
                         for index in range(6)
                     ],
+                    "metadata": {"skillspector_version": "1.0.0"},
                 },
                 "understates the reported issues",
                 id="understated-aggregate-risk",
@@ -1639,18 +2146,13 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.status == "incomplete"
         assert any("--no-llm" in error for error in result.errors)
 
-    @pytest.mark.parametrize("legacy", [False, True], ids=["current", "legacy"])
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_accepts_valid_clean_report(
         self,
         mock_tools,
         sample_skill_dir: Path,
-        legacy: bool,
     ) -> None:
         payload = _skillspector_json_report()
-        if legacy:
-            payload.pop("execution_successful")
-            payload.pop("analysis_completeness")
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
@@ -1664,6 +2166,345 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.passed
         assert not result.errors
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_accepts_captured_2_9_6_no_llm_report(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.passed
+        assert not result.errors
+        assert any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize("skillspector_version", ["2.9.6", "2.10.0"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rejects_missing_required_analyzer_evidence(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        skillspector_version: str,
+    ) -> None:
+        payload = (
+            json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+            if skillspector_version == "2.9.6"
+            else _skillspector_json_report()
+        )
+        payload["analysis_completeness"]["analyzer_statuses"] = [
+            status
+            for status in payload["analysis_completeness"]["analyzer_statuses"]
+            if status["analyzer_id"] != "static_patterns_prompt_injection"
+        ]
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("missing required analyzer evidence" in error for error in result.errors)
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rejects_2_9_6_report_with_failed_analyzer(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+        disabled_status = next(
+            status
+            for status in payload["analysis_completeness"]["analyzer_statuses"]
+            if status["status"] == "disabled"
+        )
+        disabled_status.update({"status": "failed", "reason_code": "analyzer_failed"})
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("incomplete analyzer" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("contradiction", "expected_error"),
+        [
+            pytest.param(
+                {"scanned_components": 10**399, "fully_inspected_files": 10**399},
+                "inconsistent counters or coverage",
+                id="component-coverage",
+            ),
+            pytest.param(
+                {"findings_after_filtering": 1},
+                "finding counts",
+                id="serialized-findings",
+            ),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rejects_2_9_6_report_with_contradictory_counts(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        contradiction: dict[str, int],
+        expected_error: str,
+    ) -> None:
+        payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+        payload["analysis_completeness"].update(contradiction)
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any(expected_error in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rejects_2_9_6_report_without_llm_requested(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+        payload["metadata"].pop("llm_requested")
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("metadata.llm_requested" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_accepts_legacy_report_without_completeness(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["metadata"]["skillspector_version"] = "1.0.0"
+        payload.pop("execution_successful")
+        payload.pop("analysis_completeness")
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert not result.errors
+
+    @pytest.mark.parametrize("version", ["2.9.6", "2.10.0", "2.11.0"])
+    @pytest.mark.parametrize("missing_field", ["execution_successful", "analysis_completeness"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_contract_requires_completeness_fields(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        missing_field: str,
+        version: str,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["metadata"]["skillspector_version"] = version
+        payload.pop(missing_field)
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any(missing_field in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        ["findings_before_filtering", "findings_after_filtering"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_contract_requires_finding_counts(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        missing_field: str,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["analysis_completeness"].pop(missing_field)
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any(missing_field in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param(field, value, id=f"{field}-{type(value).__name__}")
+            for field in ("findings_before_filtering", "findings_after_filtering")
+            for value in (True, -1, "1")
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_contract_rejects_invalid_finding_counts(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        field: str,
+        value: object,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["analysis_completeness"][field] = value
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any(field in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("section", "field"),
+        [
+            pytest.param("issue", "finding_id", id="issue-finding-id"),
+            pytest.param("issue", "match_fingerprint", id="issue-match-fingerprint"),
+            pytest.param("issue", "source_identity", id="issue-source-identity"),
+            pytest.param("component", "source_identity", id="component-source-identity"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_contract_rejects_invalid_score_identity_fields(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        section: str,
+        field: str,
+    ) -> None:
+        issues = (
+            [{"id": "M1", "severity": "MEDIUM", "finding": "advisory", field: []}]
+            if section == "issue"
+            else []
+        )
+        payload = _skillspector_json_report(issues)
+        if issues:
+            payload["risk_assessment"] = {
+                "score": 10,
+                "severity": "LOW",
+                "recommendation": "SAFE",
+            }
+        else:
+            payload["components"] = [{"path": "SKILL.md", "executable": False, field: []}]
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any(field in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_contract_requires_finding_id(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [{"id": "M1", "severity": "MEDIUM", "finding": "advisory"}]
+        )
+        payload["issues"][0].pop("finding_id")
+        payload["risk_assessment"] = {
+            "score": 10,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("finding_id" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("before", "after", "issues"),
+        [
+            pytest.param(0, 1, [], id="before-less-than-after"),
+            pytest.param(7, 7, [], id="missing-serialized-findings"),
+            pytest.param(7, 0, [], id="all-findings-filtered"),
+            pytest.param(
+                7,
+                1,
+                [
+                    {
+                        "id": "PI-1",
+                        "severity": "HIGH",
+                        "finding": "Ignore prior instructions",
+                    }
+                ],
+                id="complete-report-filtered-findings",
+            ),
+            pytest.param(
+                1,
+                0,
+                [
+                    {
+                        "id": "PI-1",
+                        "severity": "HIGH",
+                        "finding": "Ignore prior instructions",
+                    }
+                ],
+                id="unexpected-serialized-finding",
+            ),
+            pytest.param(
+                1,
+                1,
+                [
+                    {
+                        "id": f"M{index}",
+                        "match_fingerprint": f"fingerprint-{index}",
+                        "severity": "MEDIUM",
+                        "finding": "advisory",
+                        "location": {"file": f"finding-{index}.md", "start_line": 1},
+                    }
+                    for index in range(6)
+                ],
+                id="fewer-raw-findings-than-serialized-identities",
+            ),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_contract_reconciles_finding_counts(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        before: int,
+        after: int,
+        issues: list[dict],
+    ) -> None:
+        payload = _skillspector_json_report(issues)
+        payload["analysis_completeness"].update(
+            {
+                "findings_before_filtering": before,
+                "findings_after_filtering": after,
+            }
+        )
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1 if issues else 0,
+        )
+
+        assert result.status == "incomplete"
+        assert any("finding counts" in error for error in result.errors)
+
+    @pytest.mark.parametrize("version", [None, "2.10", "release-2.10.0"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rejects_missing_or_invalid_version(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        version: str | None,
+    ) -> None:
+        payload = _skillspector_json_report()
+        if version is None:
+            payload["metadata"].pop("skillspector_version")
+        else:
+            payload["metadata"]["skillspector_version"] = version
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("metadata.skillspector_version" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rejects_missing_metadata(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload.pop("metadata")
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("metadata.skillspector_version" in error for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_accepts_valid_findings_report(self, mock_tools, sample_skill_dir: Path) -> None:
@@ -1689,6 +2530,71 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert any(finding.check_name == "Instruction override (PI-1)" for finding in result.findings)
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_accepts_post_filter_count_before_report_deduplication(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": "E1",
+                    "finding_id": "finding-b",
+                    "severity": "MEDIUM",
+                    "finding": "same advisory",
+                    "confidence": 0.5,
+                    "location": {"file": "SKILL.md", "start_line": 1},
+                }
+            ]
+        )
+        payload["analysis_completeness"].update(
+            {"findings_before_filtering": 2, "findings_after_filtering": 2}
+        )
+        payload["risk_assessment"] = {
+            "score": 7,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert not result.is_incomplete
+        assert not any("scan did not complete" in error for error in result.errors)
+        assert len(result.findings) == 1
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_accepts_occurrence_expanded_finding_count(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": "PI-1",
+                "finding_id": "finding-1",
+                "severity": "HIGH",
+                "finding": "Ignore prior instructions",
+                "location": {"file": path, "start_line": line},
+            }
+            for path, line in (("SKILL.md", 8), ("reference.md", 3))
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["analysis_completeness"].update(
+            {"findings_before_filtering": 1, "findings_after_filtering": 1}
+        )
+        payload["risk_assessment"] = {
+            "score": 25,
+            "severity": "MEDIUM",
+            "recommendation": "CAUTION",
+        }
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "failed"
+        assert not result.is_incomplete
+        assert not any("scan did not complete" in error for error in result.errors)
+        assert len(result.findings) == 2
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_aggregate_policy_risk_fails_without_high_issue(
         self,
         mock_tools,
@@ -1701,6 +2607,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                     "severity": "MEDIUM",
                     "finding": "advisory",
                     "confidence": 1.0,
+                    "location": {"file": "SKILL.md", "start_line": index + 1},
                 }
                 for index in range(6)
             ]
@@ -1731,8 +2638,10 @@ Call us at 555-123-4567 or +1-555-987-6543
     ) -> None:
         duplicate = {
             "id": "TM1",
+            "finding_id": "finding-1",
             "severity": "MEDIUM",
             "finding": "same advisory",
+            "match_fingerprint": "fingerprint-1",
             "confidence": 1.0,
             "location": {"file": "SKILL.md", "start_line": 4},
         }
@@ -1752,6 +2661,41 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.passed
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_risk_reconciliation_accepts_pre_compaction_score(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": "E1",
+                "finding_id": "finding-a",
+                "severity": "MEDIUM",
+                "finding": "https://a.example/",
+                "confidence": 0.5,
+                "location": {"file": "SKILL.md", "start_line": line},
+            }
+            for line in (1, 2, 3)
+        ]
+        issues.extend(
+            {
+                "id": "E1",
+                "finding_id": f"finding-{suffix}",
+                "severity": "MEDIUM",
+                "finding": f"https://{suffix}.example/",
+                "confidence": 0.6,
+                "location": {"file": "SKILL.md", "start_line": index + 4},
+            }
+            for index, suffix in enumerate(("b", "c"))
+        )
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {"score": 8, "severity": "LOW", "recommendation": "SAFE"}
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status != "incomplete"
+        assert not result.errors
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_risk_reconciliation_allows_private_cross_file_identity(
         self,
         mock_tools,
@@ -1760,14 +2704,30 @@ Call us at 555-123-4567 or +1-555-987-6543
         issues = [
             {
                 "id": "RP1",
+                "finding_id": "finding-1",
                 "severity": "MEDIUM",
                 "pattern": "Rogue behavior",
+                "finding": "same advisory",
                 "confidence": 0.7,
                 "location": {"file": file_name, "start_line": 1},
             }
             for file_name in ("a.md", "b.md")
         ]
-        payload = _skillspector_json_report(issues)
+        payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+        payload["issues"] = issues
+        payload["components"] = [
+            {"path": file_name, "executable": False} for file_name in ("a.md", "b.md")
+        ]
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 2,
+                "scanned_components": 2,
+                "fully_inspected_files": 2,
+                "findings_before_filtering": 2,
+                "findings_after_filtering": 2,
+            }
+        )
+        _set_universal_analyzer_work(payload)
         payload["risk_assessment"] = {"score": 7, "severity": "LOW", "recommendation": "SAFE"}
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
@@ -1781,6 +2741,169 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         assert result.status != "incomplete"
         assert result.passed
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_legacy_risk_reconciliation_keeps_findings_without_match_text(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{rule_index}",
+                "finding_id": f"finding-{rule_index}-{occurrence_index}",
+                "severity": "MEDIUM",
+                "pattern": "same advisory",
+                "finding": None,
+                "confidence": 1.0,
+                "location": {"file": f"file-{occurrence_index}.md", "start_line": 1},
+            }
+            for rule_index in range(4)
+            for occurrence_index in range(3)
+        ]
+        payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+        payload["issues"] = issues
+        payload["components"] = [
+            {"path": f"file-{occurrence_index}.md", "executable": False}
+            for occurrence_index in range(3)
+        ]
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 3,
+                "scanned_components": 3,
+                "fully_inspected_files": 3,
+                "findings_before_filtering": 12,
+                "findings_after_filtering": 12,
+            }
+        )
+        _set_universal_analyzer_work(payload)
+        payload["risk_assessment"] = {
+            "score": 40,
+            "severity": "MEDIUM",
+            "recommendation": "CAUTION",
+        }
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("understates the reported issues" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_risk_reconciliation_scopes_executable_paths(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{index}",
+                "severity": "MEDIUM",
+                "finding": "advisory",
+                "confidence": 1.0,
+                "source_identity": "source-b",
+                "location": {"file": "scripts/check.py", "start_line": index + 1},
+            }
+            for index in range(4)
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {
+            "score": 40,
+            "severity": "MEDIUM",
+            "recommendation": "CAUTION",
+        }
+        payload["components"] = [
+            {"path": "scripts/check.py", "source_identity": "source-a", "executable": True},
+            {"path": "scripts/check.py", "source_identity": "source-b", "executable": False},
+        ]
+        payload["analysis_completeness"].update(
+            {"total_components": 2, "scanned_components": 2, "fully_inspected_files": 2}
+        )
+        _set_universal_analyzer_work(payload)
+        payload["metadata"]["has_executable_scripts"] = True
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert not result.is_incomplete
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_risk_reconciliation_uses_producer_source_scope_priority(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": "M1",
+                "finding_id": "finding-1",
+                "match_fingerprint": "fingerprint-1",
+                "severity": "MEDIUM",
+                "finding": "same advisory",
+                "confidence": 1.0,
+                "source_url": "https://example.com/skill",
+                "source_digest": source_digest,
+                "location": {"file": "SKILL.md", "start_line": index + 1},
+            }
+            for index, source_digest in enumerate(("digest-a", "digest-b"))
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["components"] = [
+            {
+                "path": "SKILL.md",
+                "executable": False,
+                "source_url": "https://example.com/skill",
+                "source_digest": "digest-a",
+            }
+        ]
+        payload["analysis_completeness"].update(
+            {"total_components": 1, "scanned_components": 1, "fully_inspected_files": 1}
+        )
+        payload["risk_assessment"] = {
+            "score": 10,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert not result.is_incomplete
+
+    @pytest.mark.parametrize("identity_dimension", ["source", "match", "null-match"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_risk_reconciliation_keeps_distinct_report_identities(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        identity_dimension: str,
+    ) -> None:
+        issues = []
+        for rule_index in range(4):
+            for occurrence_index in range(3):
+                issue = {
+                    "id": f"M{rule_index}",
+                    "severity": "MEDIUM",
+                    "finding": "same advisory",
+                    "confidence": 1.0,
+                    "location": {"file": "SKILL.md", "start_line": 1},
+                }
+                if identity_dimension == "source":
+                    issue["source_identity"] = f"source-{occurrence_index}"
+                elif identity_dimension == "match":
+                    issue["match_fingerprint"] = f"fingerprint-{rule_index}-{occurrence_index}"
+                else:
+                    issue["finding_id"] = f"finding-{rule_index}-{occurrence_index}"
+                    issue["match_fingerprint"] = None
+                issues.append(issue)
+
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {
+            "score": 40,
+            "severity": "MEDIUM",
+            "recommendation": "CAUTION",
+        }
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("understates the reported issues" in error for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_risk_reconciliation_applies_executable_multiplier(
@@ -1814,6 +2937,548 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         assert result.status == "incomplete"
         assert any("understates the reported issues" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_filtered_score_uses_executable_component_evidence(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{index}",
+                "severity": "MEDIUM",
+                "finding": "advisory",
+                "confidence": 1.0,
+                "location": {"file": f"scripts/check_{index}.py", "start_line": 1},
+            }
+            for index in range(5)
+        ]
+        issues.append(
+            {
+                "id": "SQP-2",
+                "severity": "HIGH",
+                "finding": "generated benchmark output",
+                "confidence": 0.0,
+                "location": {"file": "BENCHMARK.md", "start_line": 1},
+            }
+        )
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {
+            "score": 65,
+            "severity": "HIGH",
+            "recommendation": "DO_NOT_INSTALL",
+        }
+        payload["components"] = [
+            *[
+                {"path": f"scripts/check_{index}.py", "executable": True}
+                for index in range(5)
+            ],
+            {"path": "BENCHMARK.md", "executable": False},
+        ]
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 6,
+                "scanned_components": 6,
+                "fully_inspected_files": 6,
+            }
+        )
+        payload["metadata"].pop("has_executable_scripts")
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "failed"
+        assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_report_requires_component_inventory(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{index}",
+                "severity": "MEDIUM",
+                "finding": "advisory",
+                "confidence": 1.0,
+                "location": {"file": f"scripts/check_{index}.py", "start_line": 1},
+            }
+            for index in range(5)
+        ]
+        payload = _skillspector_json_report(issues)
+        payload.pop("components")
+        payload["metadata"]["has_executable_scripts"] = True
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 5,
+                "scanned_components": 5,
+                "fully_inspected_files": 5,
+            }
+        )
+        payload["risk_assessment"] = {
+            "score": 50,
+            "severity": "MEDIUM",
+            "recommendation": "CAUTION",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("components" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("components", "has_executable_scripts"),
+        [
+            pytest.param([{"path": "", "executable": False}], False, id="empty-path"),
+            pytest.param([{"path": "SKILL.md"}], False, id="missing-executable"),
+            pytest.param([{"path": "SKILL.md", "executable": None}], False, id="null-executable"),
+            pytest.param([{"path": "SKILL.md", "executable": False}], True, id="contradictory-metadata"),
+            pytest.param([{"path": "other.md", "executable": False}], False, id="unresolved-issue"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_report_rejects_incomplete_component_evidence(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        components: list[dict],
+        has_executable_scripts: bool,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": "M1",
+                    "severity": "MEDIUM",
+                    "finding": "advisory",
+                    "location": {"file": "SKILL.md", "start_line": 1},
+                }
+            ]
+        )
+        payload["components"] = components
+        payload["metadata"]["has_executable_scripts"] = has_executable_scripts
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 1,
+                "scanned_components": 1,
+                "fully_inspected_files": 1,
+            }
+        )
+        payload["risk_assessment"] = {
+            "score": 10,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("component" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_report_rejects_duplicate_component_identities(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": "M1",
+                    "severity": "MEDIUM",
+                    "finding": "advisory",
+                    "location": {"file": "scripts/check.py", "start_line": 1},
+                }
+            ]
+        )
+        payload["components"] = [
+            {"path": "scripts/check.py", "executable": True},
+            {"path": "scripts/check.py", "executable": False},
+        ]
+        payload["metadata"]["has_executable_scripts"] = True
+        payload["analysis_completeness"].update(
+            {"total_components": 2, "scanned_components": 2, "fully_inspected_files": 2}
+        )
+        payload["risk_assessment"] = {
+            "score": 10,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("duplicate identities" in error for error in result.errors)
+
+    @pytest.mark.parametrize("location", [None, {}, {"file": ""}])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_versioned_report_requires_issue_path(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        location: dict | None,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [{"id": "M1", "severity": "MEDIUM", "finding": "advisory", "location": location}]
+        )
+        payload["risk_assessment"] = {
+            "score": 10,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("location.file" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("skillspector_version", "case"),
+        [
+            pytest.param("2.9.6", "not-applicable", id="2.9.6-not-applicable"),
+            pytest.param("2.10.0", "not-applicable", id="2.10-not-applicable"),
+            pytest.param("2.10.0", "undercounted", id="2.10-undercounted"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_complete_report_requires_universal_analyzer_work(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        skillspector_version: str,
+        case: str,
+    ) -> None:
+        payload = (
+            json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+            if skillspector_version == "2.9.6"
+            else _skillspector_json_report()
+        )
+        payload["components"] = [
+            {"path": "SKILL.md", "executable": False},
+            *([{"path": "guide.md", "executable": False}] if case == "undercounted" else []),
+        ]
+        component_count = len(payload["components"])
+        payload["analysis_completeness"].update(
+            {
+                "total_components": component_count,
+                "scanned_components": component_count,
+                "fully_inspected_files": component_count,
+            }
+        )
+        universal_statuses = [
+            status
+            for status in payload["analysis_completeness"]["analyzer_statuses"]
+            if status["analyzer_id"] in _SKILLSPECTOR_UNIVERSAL_ANALYZERS
+        ]
+        for status in universal_statuses:
+            status.update(
+                {
+                    "status": "not_applicable" if case == "not-applicable" else "completed",
+                    "planned_work": 0 if case == "not-applicable" else 1,
+                    "completed": 0 if case == "not-applicable" else 1,
+                }
+            )
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("universal analyzer" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_complete_report_accepts_future_not_applicable_analyzer(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["components"] = [{"path": "SKILL.md", "executable": False}]
+        payload["analysis_completeness"].update(
+            {"total_components": 1, "scanned_components": 1, "fully_inspected_files": 1}
+        )
+        _set_universal_analyzer_work(payload)
+        payload["analysis_completeness"]["analyzer_statuses"].append(
+            {
+                "analyzer_id": "future_optional_analyzer",
+                "status": "not_applicable",
+                "planned_work": 0,
+                "completed": 0,
+                "partial": 0,
+                "skipped": 0,
+                "failed": 0,
+                "unaccounted": 0,
+            }
+        )
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert not result.is_incomplete
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_compacted_score_does_not_overstate_executable_evidence(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": "M1",
+                "finding_id": "finding-1",
+                "match_fingerprint": "fingerprint-1",
+                "severity": "MEDIUM",
+                "finding": "same advisory",
+                "confidence": 0.99,
+                "location": {"file": file_name, "start_line": 1},
+            }
+            for file_name in ("a.py", "z.md")
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["components"] = [
+            {"path": "a.py", "executable": True},
+            {"path": "z.md", "executable": False},
+        ]
+        payload["metadata"]["has_executable_scripts"] = True
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 2,
+                "scanned_components": 2,
+                "fully_inspected_files": 2,
+            }
+        )
+        payload["risk_assessment"] = {
+            "score": 9,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "passed"
+        assert len(result.findings) == 2
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_compacted_score_does_not_trust_representative_confidence(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": "M1",
+                    "finding_id": "finding-1",
+                    "match_fingerprint": "fingerprint-1",
+                    "severity": "MEDIUM",
+                    "finding": "same advisory",
+                    "confidence": 1.0,
+                    "location": {"file": path, "start_line": 1},
+                }
+                for path in ("a.md", "z.md")
+            ]
+        )
+        payload["risk_assessment"] = {
+            "score": 6,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "passed"
+        assert len(result.findings) == 2
+
+    @pytest.mark.parametrize(
+        "conflicting_fields",
+        [
+            pytest.param({"severity": "LOW", "confidence": 1.0}, id="severity-confidence"),
+            pytest.param({"finding_id": "conflicting-finding"}, id="finding-id"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_compacted_identity_rejects_conflicting_score_fields(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        conflicting_fields: dict,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{rule_index}",
+                "finding_id": f"finding-{rule_index}",
+                "match_fingerprint": f"fingerprint-{rule_index}",
+                "severity": "MEDIUM",
+                "finding": "same advisory",
+                "confidence": 0.9,
+                "location": {"file": f"rule-{rule_index}-{occurrence}.md", "start_line": 1},
+                **(conflicting_fields if occurrence else {}),
+            }
+            for rule_index in range(6)
+            for occurrence in range(2)
+        ]
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {
+            "score": 15,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("compacted identity" in error for error in result.errors)
+
+    @pytest.mark.parametrize("case", ["hidden", "expanded"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_unknown_occurrences_preserve_visible_score_floor(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        case: str,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{rule_index}",
+                "finding_id": f"finding-{rule_index}",
+                "match_fingerprint": f"fingerprint-{rule_index}",
+                "severity": "MEDIUM",
+                "finding": "advisory",
+                "confidence": 1.0,
+                "location": {
+                    "file": f"rule-{rule_index}-{occurrence_index}.md",
+                    "start_line": 1,
+                },
+            }
+            for rule_index in range(6)
+            for occurrence_index in range(2 if case == "expanded" else 1)
+        ]
+        payload = _skillspector_json_report(issues)
+        if case == "hidden":
+            payload["analysis_completeness"].update(
+                {"findings_before_filtering": 7, "findings_after_filtering": 7}
+            )
+        payload["risk_assessment"] = {
+            "score": 0,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("understates the reported issues" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        ("filtered_confidence", "reported_score"),
+        [
+            pytest.param(0.0, 70, id="zero-loss"),
+            pytest.param(1.0, 75, id="bounded-loss"),
+            pytest.param(0.0, 50.9, id="fractional-zero-loss"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_filtered_score_retains_reported_risk_floor(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        filtered_confidence: float,
+        reported_score: int | float,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{rule_index}",
+                "finding_id": f"finding-{rule_index}",
+                "severity": "MEDIUM",
+                "finding": "same advisory",
+                "match_fingerprint": f"fingerprint-{rule_index}",
+                "confidence": 1.0,
+                "location": {"file": "SKILL.md", "start_line": occurrence_index + 1},
+            }
+            for rule_index in range(4)
+            for occurrence_index in range(3)
+        ]
+        issues.append(
+            {
+                "id": "G1",
+                "severity": "LOW",
+                "finding": "generated benchmark output",
+                "confidence": filtered_confidence,
+                "location": {"file": "BENCHMARK.md", "start_line": 1},
+            }
+        )
+        payload = _skillspector_json_report(issues)
+        severity = "HIGH" if reported_score >= 51 else "MEDIUM"
+        payload["risk_assessment"] = {
+            "score": reported_score,
+            "severity": severity,
+            "recommendation": "DO_NOT_INSTALL" if severity == "HIGH" else "CAUTION",
+        }
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "failed"
+        assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_filtered_score_does_not_use_incomplete_serialized_bound(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        issues = [
+            {
+                "id": f"M{index}",
+                "severity": "MEDIUM",
+                "finding": "retained advisory",
+                "confidence": 1.0,
+                "location": {"file": f"retained-{index}.md", "start_line": 1},
+            }
+            for index in range(4)
+        ]
+        issues.extend(
+            [
+                {
+                    "id": "L1",
+                    "severity": "LOW",
+                    "finding": "retained low advisory",
+                    "confidence": 1.0,
+                    "location": {"file": "retained-low.md", "start_line": 1},
+                },
+                {
+                    "id": "SQP-2",
+                    "severity": "HIGH",
+                    "finding": "generated benchmark output",
+                    "confidence": 1.0,
+                    "location": {"file": "BENCHMARK.md", "start_line": 1},
+                },
+            ]
+        )
+        payload = _skillspector_json_report(issues)
+        payload["analysis_completeness"].update(
+            {"findings_before_filtering": 8, "findings_after_filtering": 8}
+        )
+        payload["risk_assessment"] = {
+            "score": 88,
+            "severity": "CRITICAL",
+            "recommendation": "DO_NOT_INSTALL",
+        }
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "passed"
+        assert not any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_risk_reconciliation_applies_diminishing_occurrence_weights(
@@ -2222,6 +3887,81 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert "Remove references" in (finding.suggestion or "")
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_sc8_shipped_bytecode_finding_is_preserved(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": "SC8",
+                    "pattern": "Shipped Python bytecode",
+                    "severity": "HIGH",
+                    "confidence": 0.95,
+                    "finding": "Compiled Python artifact",
+                    "location": {"file": "__pycache__/payload.pyc", "start_line": 1},
+                }
+            ]
+        )
+        payload["risk_assessment"] = {
+            "score": 51,
+            "severity": "HIGH",
+            "recommendation": "DO_NOT_INSTALL",
+        }
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "failed"
+        assert not result.is_incomplete
+        assert any(finding.check_name.endswith("(SC8)") for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_sc8_score_floor_survives_generated_artifact_filter(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": "SC8",
+                    "pattern": "Shipped Python bytecode",
+                    "severity": "LOW",
+                    "confidence": 0.95,
+                    "finding": "Compiled Python artifact",
+                    "location": {"file": "__pycache__/payload.pyc", "start_line": 1},
+                },
+                {
+                    "id": "SQP-2",
+                    "pattern": "Generated card warning",
+                    "severity": "HIGH",
+                    "confidence": 0.9,
+                    "finding": "Generated card includes outputs",
+                    "location": {"file": "skill-card.md", "start_line": 1},
+                },
+            ]
+        )
+        payload["risk_assessment"] = {
+            "score": 51,
+            "severity": "HIGH",
+            "recommendation": "DO_NOT_INSTALL",
+        }
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+        )
+
+        assert result.status == "failed"
+        assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_findings_for_generated_artifacts_are_ignored(self, mock_tools, sample_skill_dir: Path):
         """Generated publishing artifacts should not fail Tier 1 security scanning."""
         mock_tools.skillspector.is_available = True
@@ -2231,7 +3971,7 @@ Call us at 555-123-4567 or +1-555-987-6543
                 "source": "/tmp/sample",
                 "scanned_at": "2026-01-01T00:00:00Z",
             },
-            "risk_assessment": {"score": 90, "severity": "CRITICAL", "recommendation": "DO_NOT_INSTALL"},
+            "risk_assessment": {"score": 22, "severity": "MEDIUM", "recommendation": "CAUTION"},
             "components": [
                 {
                     "path": "skill-card.md",
@@ -2267,7 +4007,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             success=True,
             stdout=json.dumps(cli_json),
             stderr="",
-            exit_code=1,
+            exit_code=0,
         )
 
         validator = SecurityValidator(use_llm=False)

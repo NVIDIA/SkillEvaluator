@@ -456,6 +456,47 @@ def test_validate_catalog_workers_cli_only_report_format() -> None:
         assert not any(Path("out/simple").glob("skillevaluator-output-*.json"))
 
 
+def test_validate_catalog_workers_implicit_default_reports() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-o",
+                "out",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert any(Path("out/simple").glob("*.html"))
+        assert any(Path("out/simple").glob("skillevaluator-output-*.json"))
+
+
+def test_new_skill_json_report_name_ignores_sarif_sidecar(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "simple"
+    skill_dir.mkdir()
+    existing = {
+        skill_dir / "skillevaluator-output-20260101T000000.sarif.json",
+    }
+    for path in existing:
+        path.write_text("{}", encoding="utf-8")
+    standard = skill_dir / "skillevaluator-output-20260101T000001.json"
+    standard.write_text(
+        json.dumps({"overall_passed": True, "severity_counts": {"high": 1}}),
+        encoding="utf-8",
+    )
+    assert cli_module._new_skill_json_report_name(skill_dir, existing) == standard.name
+
+
 def test_catalog_skill_entry_skips_stale_json_without_report_name(tmp_path: Path) -> None:
     skill_dir = tmp_path / "simple"
     skill_dir.mkdir()

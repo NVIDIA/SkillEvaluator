@@ -699,6 +699,17 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
 
 
+def _standard_json_report_paths(output_dir: Path) -> set[Path]:
+    """Return standard JSON reports, excluding SARIF sidecars that share the glob."""
+    if not output_dir.is_dir():
+        return set()
+    return {
+        path
+        for path in output_dir.glob("skillevaluator-output-*.json")
+        if path.is_file() and not path.name.endswith(".sarif.json")
+    }
+
+
 def _catalog_child_argv_from_sys(skill_dir: Path, output_dir: Path, parent_argv: list[str]) -> list[str]:
     """Rebuild ``validate`` argv for one catalog skill from ``sys.argv``."""
     argv = list(parent_argv)
@@ -814,8 +825,9 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--timeout-multiplier", str(params["timeout_multiplier"])])
     if params.get("harbor_keep_jobs"):
         argv.append("--harbor-keep-jobs")
-    for fmt in params.get("report_formats") or ("cli",):
-        argv.extend(["-r", fmt])
+    if _report_formats_explicit():
+        for fmt in params.get("report_formats") or ():
+            argv.extend(["-r", fmt])
     argv.extend(["-o", str(output_dir)])
     return argv
 
@@ -843,9 +855,7 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
 
     skill_name = str(job["skill_name"])
     output_dir = Path(job["output_dir"])
-    existing_reports = (
-        set(output_dir.glob("skillevaluator-output-*.json")) if output_dir.is_dir() else set()
-    )
+    existing_reports = _standard_json_report_paths(output_dir)
     result = CliRunner().invoke(cli, job["argv"])
     json_report_name = _new_skill_json_report_name(output_dir, existing_reports)
     if result.exit_code == 0:
@@ -862,9 +872,7 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
 
 def _new_skill_json_report_name(output_dir: Path, existing_reports: set[Path]) -> str | None:
     """Return the JSON report filename produced during this worker run."""
-    if not output_dir.is_dir():
-        return None
-    new_reports = set(output_dir.glob("skillevaluator-output-*.json")) - existing_reports
+    new_reports = _standard_json_report_paths(output_dir) - existing_reports
     if not new_reports:
         return None
     return sorted(new_reports, reverse=True)[0].name
@@ -978,9 +986,7 @@ def _validate_catalog(
     for index, skill_dir in enumerate(skill_dirs, start=1):
         _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
         skill_output = output_dir / skill_dir.name
-        existing_reports = (
-            set(skill_output.glob("skillevaluator-output-*.json")) if skill_output.is_dir() else set()
-        )
+        existing_reports = _standard_json_report_paths(skill_output)
         overrides = {
             **ctx.params,
             "target_path": skill_dir,

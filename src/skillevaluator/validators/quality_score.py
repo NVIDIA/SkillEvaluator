@@ -27,6 +27,7 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from skillevaluator.constants import (
+    EXECUTABLE_SKILL_DIRS,
     QUALITY_EXCLUDED_DIRS,
     QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_RESERVED_NAMES,
@@ -146,13 +147,26 @@ class QualityScoreValidator(ValidatorBase):
     # -----------------------------------------------------------------
 
     @staticmethod
+    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = ("*.py", "*.sh")) -> list[Path]:
+        files: list[Path] = []
+        for dirname in EXECUTABLE_SKILL_DIRS:
+            directory = skill_path / dirname
+            if directory.is_dir():
+                for pattern in patterns:
+                    files.extend(sorted(directory.glob(pattern)))
+        return files
+
+    @staticmethod
+    def _has_executable_directory(skill_path: Path) -> bool:
+        return any((skill_path / dirname).is_dir() for dirname in EXECUTABLE_SKILL_DIRS)
+
+    @staticmethod
     def detect_skill_type(skill_path: Path) -> str:
         """Auto-detect skill type from directory structure.
 
         Returns one of: script-based, lib-based, resource-based, guide-only, hybrid.
         """
-        scripts_dir = skill_path / "scripts"
-        has_scripts = scripts_dir.is_dir() and bool(list(scripts_dir.glob("*.py")) + list(scripts_dir.glob("*.sh")))
+        has_scripts = bool(QualityScoreValidator._executable_files(skill_path))
 
         has_lib = False
         for d in skill_path.iterdir():
@@ -448,19 +462,18 @@ class QualityScoreValidator(ValidatorBase):
         skill_type = qs.skill_type
 
         if skill_type in ("script-based", "hybrid"):
-            scripts_dir = skill_path / "scripts"
-            if scripts_dir.exists():
+            script_files = self._executable_files(skill_path)
+            if self._has_executable_directory(skill_path):
                 qs.has_scripts = True
-                py_sh = list(scripts_dir.glob("*.py")) + list(scripts_dir.glob("*.sh"))
-                qs.script_count = len(py_sh)
+                qs.script_count = len(script_files)
                 if qs.script_count == 0:
-                    dim.deduct(10, "warning", "scripts/ directory exists but contains no .py or .sh files")
+                    dim.deduct(10, "warning", "scripts/ or tools/ exists but contains no .py or .sh files")
             else:
                 dim.deduct(
                     25,
                     "error",
-                    "No scripts/ directory found (detected as script-based skill)",
-                    "Create scripts/ directory with at least one executable script",
+                    "No scripts/ or tools/ directory found (detected as script-based skill)",
+                    "Create scripts/ or tools/ with at least one executable script",
                 )
 
             if "## Available Scripts" not in content and "| Script |" not in content:
@@ -676,11 +689,8 @@ class QualityScoreValidator(ValidatorBase):
             )
 
     def _check_script_reliability(self, dim, skill_path: Path) -> None:
-        scripts_dir = skill_path / "scripts"
-        if not scripts_dir.exists():
-            return
         no_error_handling = []
-        for script in scripts_dir.glob("*.py"):
+        for script in self._executable_files(skill_path, patterns=("*.py",)):
             try:
                 sc = script.read_text(encoding="utf-8")
             except Exception:

@@ -6,6 +6,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Published benchmark cards record the evaluated source identity. `BENCHMARK.md`
+  now carries `Evaluated source`, `Evaluated source revision` and
+  `Evaluator container revision` as separate fields, so a reader can tell which
+  source tree was evaluated apart from the evaluator build that evaluated it.
+  Previously two skills evaluated from different repositories by the same
+  evaluator container produced cards whose only recorded revision was the shared
+  container tag. The identity is supplied by the orchestration
+  input — the `evaluated_source` argument to `build_agent_eval_payload`, an
+  `evaluated_source` object in the run's `run_config.json`, or
+  `metadata["evaluated_source"]` on any validation result — and is never
+  inferred from repository state while rendering. Conflicting inputs fail
+  rather than being resolved by silent precedence.
+  `check_public_benchmarks.py --require-source-provenance` requires the fields
+  and fails any card publishing a `PASS` without them; it is opt-in, so the
+  default scan is unchanged for cards generated before the contract existed
+  ([#72](https://github.com/NVIDIA/SkillEvaluator/issues/72)).
 - SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
   consumers. Findings map to rule IDs, severity levels, and file locations from
   Tier 1 validation results.

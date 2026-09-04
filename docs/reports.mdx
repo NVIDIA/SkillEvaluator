@@ -88,6 +88,43 @@ by default, so a missing, skipped, or incomplete live evaluation produces
 explicitly persist `benchmark_policy.tier3_required = false`; the card
 discloses that exception instead of implying that Tier 3 ran.
 
+### Evaluated source provenance
+
+The Evaluation Metadata section distinguishes the source tree that was evaluated
+from the evaluator build that evaluated it:
+
+```text
+- Evaluator version: `0.8.2`
+- Evaluated source: `NVIDIA/NVFlare`
+- Evaluated source revision: `2263a2ebdab903e87f7e7c0a001d22c3a926a9cf`
+- Evaluator container revision: `ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...`
+```
+
+Without that separation, two skills evaluated from different repositories by the
+same evaluator container publish cards whose only recorded revision is the shared
+container tag, and a reader cannot tell which version of a skill was evaluated or
+whether the card has gone stale.
+
+The identity is supplied by the orchestration input and carried through the
+evaluation-result contract unchanged. It is never inferred from repository state
+while rendering, because the tree that renders a card is the evaluator checkout
+rather than the evaluated skill's source. The supported seams are:
+
+- the `evaluated_source` argument to `build_agent_eval_payload` or
+  `agent_eval_result_from_directory`;
+- an `evaluated_source` object in the run's `run_config.json` — note that
+  SkillEvaluator writes that file itself, so a publication pipeline using this
+  route has to add the key to the generated run artifact before the card is
+  rendered;
+- `metadata["evaluated_source"]` on any validation result, which is how a card
+  that publishes without a completed Tier 3 run records its identity.
+
+Where two channels both supply a field and disagree, rendering fails rather than
+silently choosing one. `Evaluated source revision` records a commit SHA, or a
+canonical `sha256`/`sha384`/`sha512` digest of the evaluated skill content when a
+run has no upstream commit. Fields the orchestration did not supply render as
+`not recorded (not supplied by the orchestration input)`.
+
 Keep the file with the skill and refresh it whenever the skill, eval dataset,
 agent/model, evaluator version, scoring policy, attempt policy, or execution
 environment materially changes. Follow the

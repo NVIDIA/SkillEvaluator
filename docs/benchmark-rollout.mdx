@@ -110,6 +110,15 @@ python scripts/ci/check_public_benchmarks.py \
   ./benchmark-backfill
 ```
 
+Add `--require-source-provenance` once the orchestration input supplies the
+evaluated-source identity. The flag requires every scanned card to carry
+`Evaluated source`, `Evaluated source revision` and `Evaluator container
+revision`, and fails any card publishing a `PASS` that does not record the
+repository and revision it evaluated — including one whose Tier 3 row is skipped
+under an `optional by policy` contract. It is opt-in because cards generated
+before the identity contract existed cannot satisfy it; without the flag the scan
+behaves exactly as it did before.
+
 The linter rejects configured known leak patterns such as retired product
 identities, any validation-profile metadata line, common absolute home paths,
 ambiguous legacy uplift cells, the old `Num` column, missing metadata/decision

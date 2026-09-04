@@ -22,11 +22,16 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.source_identity import evaluated_source_revision, normalized_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
 
+
+# These fields are empty because the orchestration input did not supply them,
+# which is a different cause from the legacy/non-live wording used elsewhere.
+_SOURCE_UNRECORDED = "not recorded (not supplied by the orchestration input)"
 
 _SIGNAL_DESCRIPTIONS = {
     "security": "unsafe operations, secret leakage, and unauthorized access",
@@ -195,6 +200,29 @@ class BenchmarkReporter(ReporterBase):
             f"- Evaluator version: `{_publication_safe_inline(version, private_labels)}`"
             if version
             else "- Evaluator version: not recorded (legacy or non-live result)"
+        )
+
+        # Validated by ``normalized_evaluated_source``, so the identity is
+        # published verbatim: escaping would rewrite `_` and `@` and corrupt the
+        # very value the card exists to record.
+        source = _evaluated_source(results, ae)
+        repository = source.get("repository", "")
+        lines.append(
+            f"- Evaluated source: `{repository}`" if repository else "- Evaluated source: " + _SOURCE_UNRECORDED
+        )
+
+        revision = evaluated_source_revision(source)
+        lines.append(
+            f"- Evaluated source revision: `{revision}`"
+            if revision
+            else "- Evaluated source revision: " + _SOURCE_UNRECORDED
+        )
+
+        container_revision = source.get("evaluator_container_revision", "")
+        lines.append(
+            f"- Evaluator container revision: `{container_revision}`"
+            if container_revision
+            else "- Evaluator container revision: " + _SOURCE_UNRECORDED
         )
 
         agents = _agents(ae)
@@ -801,6 +829,36 @@ def _evaluation_date(value: str) -> str:
         return datetime.fromisoformat(candidate).date().isoformat()
     except ValueError:
         return value[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", value) else value
+
+
+def _evaluated_source(
+    results: list[ValidationResult],
+    ae: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Return the validated evaluated-source identity recorded for this run.
+
+    Every card shape needs a carrier for the identity, not just a completed
+    Tier 3 run: a Tier 1-only card and an advisory Tier 3 skip can both publish
+    a PASS. The identity is therefore read from the Tier 3 payload when there is
+    one and from any result's metadata otherwise, mirroring how the persisted
+    publication policy is resolved.
+
+    The value is re-validated here rather than trusted, because a card can be
+    rendered from a hand-built or legacy metadata dict that never passed the
+    producer. Kept separate from the evaluator/container provenance so a reader
+    can tell which source tree was evaluated from the build that evaluated it.
+    """
+    candidates: list[object] = [
+        (ae or {}).get("evaluated_source"),
+        _mapping((ae or {}).get("summary")).get("evaluated_source"),
+    ]
+    candidates.extend(
+        result.metadata.get("evaluated_source") for result in results if isinstance(result.metadata, dict)
+    )
+    for candidate in candidates:
+        if source := normalized_evaluated_source(candidate):
+            return source
+    return {}
 
 
 def _environment(ae: dict[str, Any] | None) -> str | None:

@@ -39,6 +39,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.source_identity import resolve_evaluated_source
 
 # Verdict labels mirror SkillEvaluator's AGENT_EVAL_VERDICT_* values so the ported
 # reporters classify the overall outcome identically.
@@ -219,6 +220,7 @@ def _advisory_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": None,
         "dataset_digest_algorithm": None,
+        "evaluated_source": None,
         "verdict_policy": verdict_policy,
         "execution_status": "skipped",
         "execution_errors": [message],
@@ -258,6 +260,7 @@ def _advisory_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": None,
         "dataset_digest_algorithm": None,
+        "evaluated_source": None,
         "verdict_policy": verdict_policy,
         "provenance": {
             "source": "advisory",
@@ -420,6 +423,7 @@ def agent_eval_result_from_directory(
     engine_result: dict[str, Any] | None = None,
     evaluated_at: str | None = None,
     evaluator_version: str | None = None,
+    evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> ValidationResult | None:
     """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run."""
@@ -459,6 +463,7 @@ def agent_eval_result_from_directory(
         persisted_dataset_summary=run_truth.get("dataset_summary"),
         dataset_digest=run_truth.get("dataset_digest"),
         dataset_digest_algorithm=run_truth.get("dataset_digest_algorithm"),
+        evaluated_source=evaluated_source,
         use_llm_judge=use_llm_judge,
     )
     return _validation_result_from_payload(payload)
@@ -550,6 +555,7 @@ def build_agent_eval_payload(
     persisted_dataset_summary: dict[str, Any] | None = None,
     dataset_digest: str | None = None,
     dataset_digest_algorithm: str | None = None,
+    evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
@@ -632,6 +638,7 @@ def build_agent_eval_payload(
     effective_dataset_digest_algorithm = dataset_digest_algorithm or (
         str(computed_dataset_truth["dataset_digest_algorithm"]) if computed_dataset_truth else None
     )
+    effective_evaluated_source = resolve_evaluated_source(evaluated_source, (run_config or {}).get("evaluated_source"))
     verdict_policy = _verdict_policy(policy)
     harbor_summary = _merge_harbor_viewer_summaries(
         _harbor_viewer_summary(canonical_trials),
@@ -655,6 +662,7 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "evaluated_source": effective_evaluated_source,
         "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
@@ -714,6 +722,7 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "evaluated_source": effective_evaluated_source,
         "verdict_policy": verdict_policy,
         "agents": agent_payloads,
         "dimensions": best_dimensions,

@@ -1950,16 +1950,17 @@ def _copy_verifier(task_dir: Path) -> None:
     """Copy the standalone eval.py verifier into the task's tests/ directory."""
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
-    src = TEMPLATES_DIR / "eval.py"
-    if src.exists():
-        shutil.copy2(src, tests_dir / "eval.py")
-    else:
-        logger.warning("Verifier template not found at %s", src)
-    lc = _EVAL_CORE_DIR / "log_converters.py"
-    if lc.exists():
-        shutil.copy2(lc, tests_dir / "log_converters.py")
-    else:
-        logger.warning("log_converters helper not found at %s", lc)
+    sources = (
+        (TEMPLATES_DIR / "eval.py", "Verifier template"),
+        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
+        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
+        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
+    )
+    for src, label in sources:
+        if src.exists():
+            shutil.copy2(src, tests_dir / src.name)
+        else:
+            logger.warning("%s not found at %s", label, src)
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:

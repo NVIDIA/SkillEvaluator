@@ -1336,6 +1336,23 @@ class TestMarkdownReporter:
         assert "log-analyzer-001?step=9" in output
         assert "javascript:alert" not in output
 
+    def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
+        result = _tier3_harbor_result()
+        result.metadata["agent_eval"]["suggestions_v2"][0]["evidence_refs"] = [
+            {
+                "source": "trajectory.json",
+                "json_pointer": "/steps/0/tool_calls/0",
+                "evidence_id": f"/steps/0/tool_calls/0/normalized/{index}",
+                "kind": "tool_call",
+            }
+            for index in range(2)
+        ]
+
+        output = MarkdownReporter(include_timestamp=False).render_all([result])
+
+        assert "`/steps/0/tool_calls/0/normalized/0`" in output
+        assert "`/steps/0/tool_calls/0/normalized/1`" in output
+
     def test_details_section(self, failure_result: ValidationResult) -> None:
         """Test expandable details section."""
         reporter = MarkdownReporter(include_details=True)

@@ -2206,16 +2206,20 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not result.errors
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
 
+    @pytest.mark.parametrize("version", ["2.9.5-safe", "2.9.6", "2.11.1-safe"])
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_accepts_captured_2_9_6_no_llm_report(
+    def test_skillspector_accepts_captured_no_llm_report(
         self,
         mock_tools,
         sample_skill_dir: Path,
+        version: str,
     ) -> None:
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"),
+            stdout=(
+                Path(__file__).parents[1] / "fixtures" / f"skillspector-{version}-no-llm.json"
+            ).read_text(encoding="utf-8"),
             stderr="",
             exit_code=0,
         )
@@ -2225,6 +2229,74 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.passed
         assert not result.errors
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize("version", ["2.10.0", "2.11.0", "2.11.1"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_requires_bundled_execution_surface_since_2_11(
+        self, mock_tools, sample_skill_dir: Path, version: str,
+    ) -> None:
+        payload = json.loads((
+            Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-safe-no-llm.json"
+        ).read_text(encoding="utf-8"))
+        payload["metadata"]["skillspector_version"] = version
+        payload["analysis_completeness"]["analyzer_statuses"] = [
+            item for item in payload["analysis_completeness"]["analyzer_statuses"]
+            if item["analyzer_id"] != "bundled_execution_surface"
+        ]
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+        if version == "2.10.0":
+            assert result.passed
+        else:
+            assert result.is_incomplete
+            assert any("missing required analyzer evidence" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
+        "mutation", [None, "finding_id", "score", "count", "old-version", "expanded", "evidence-types"]
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_captured_classification_distinct_pe3(
+        self, mock_tools, sample_skill_dir: Path, mutation: str | None,
+    ) -> None:
+        # Captured from NVIDIA/SkillSpector v2.11.1 with --no-llm. build.sh:
+        # docker run -v /etc/passwd:/etc/passwd:ro image
+        # cat /etc/passwd
+        payload = json.loads((
+            Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-pe3-no-llm.json"
+        ).read_text(encoding="utf-8"))
+        first, second = [issue for issue in payload["issues"] if issue["id"] == "PE3"]
+        assert first["match_fingerprint"] == second["match_fingerprint"]
+        assert first["finding_id"] != second["finding_id"]
+        assert first["tags"] != second["tags"]
+        if mutation == "finding_id":
+            second["finding_id"] = first["finding_id"]
+        elif mutation == "score":
+            payload["risk_assessment"]["score"] = 30
+        elif mutation == "count":
+            payload["analysis_completeness"]["findings_after_filtering"] = 2
+        elif mutation == "old-version":
+            payload["metadata"]["skillspector_version"] = "2.11.0"
+        elif mutation == "expanded":
+            payload["issues"].append({**first, "location": {"file": "build.sh", "start_line": 4}})
+        elif mutation == "evidence-types":
+            second.update(first)
+            first["evidence"] = {"classification": True}
+            second["evidence"] = {"classification": 1}
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+        if mutation in {None, "expanded"}:
+            assert not result.is_incomplete
+            assert len([finding for finding in result.findings if finding.check_name.endswith("(PE3)")]) == (
+                3 if mutation == "expanded" else 2
+            )
+        else:
+            assert result.is_incomplete
+            expected = {
+                "finding_id": "compacted identity",
+                "score": "understates",
+                "count": "finding counts",
+                "old-version": "compacted identity",
+                "evidence-types": "compacted identity",
+            }[mutation]
+            assert any(expected in error for error in result.errors)
 
     @pytest.mark.parametrize("skillspector_version", ["2.9.6", "2.10.0"])
     @patch("skillevaluator.validators.security.Tools")

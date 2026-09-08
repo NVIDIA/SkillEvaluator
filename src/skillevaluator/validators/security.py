@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import getpass
 import io
+import json
 import math
 import os
 import re
@@ -53,7 +54,8 @@ logger = get_logger(__name__)
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
-_SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSION = (2, 9, 6)
+_SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
+_SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
 _SKILLSPECTOR_SEMANTIC_ANALYZERS = frozenset(
     {
@@ -457,8 +459,11 @@ def _skillspector_scoring_match_identity(
     index: int,
     *,
     uses_report_identities: bool,
+    uses_finding_identity: bool,
 ) -> tuple[str, str | int]:
     """Return the producer's finding identity used for report compaction."""
+    if uses_finding_identity:
+        return "finding_id", str(issue["finding_id"])
     fingerprint = issue.get("match_fingerprint")
     if isinstance(fingerprint, str) and fingerprint:
         return "match_fingerprint", fingerprint
@@ -880,10 +885,14 @@ class SecurityValidator(ValidatorBase):
             and skillspector_version >= _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION
         )
         uses_statusless_completeness_schema = (
-            skillspector_version == _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSION
+            skillspector_version in _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS
+        )
+        uses_finding_identity = (
+            skillspector_version is not None
+            and skillspector_version >= _SKILLSPECTOR_FINDING_IDENTITY_VERSION
         )
         uses_versioned_completeness = uses_completeness_schema or uses_statusless_completeness_schema
-        completeness_contract = "2.10+" if uses_completeness_schema else "2.9.6"
+        completeness_contract = "2.10+" if uses_completeness_schema else "2.9.5/2.9.6"
 
         execution_successful = data.get("execution_successful")
         if uses_versioned_completeness and "execution_successful" not in data:
@@ -986,7 +995,7 @@ class SecurityValidator(ValidatorBase):
                         return False
                 elif "status" in analysis_completeness:
                     result.add_error(
-                        "skillspector 2.9.6 JSON field 'analysis_completeness.status' must be absent; "
+                        "skillspector 2.9.5/2.9.6 JSON field 'analysis_completeness.status' must be absent; "
                         "security scan did not complete"
                     )
                     return False
@@ -1191,6 +1200,8 @@ class SecurityValidator(ValidatorBase):
                     if uses_statusless_completeness_schema
                     else _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS
                 )
+                if skillspector_version >= (2, 11, 0):
+                    required_analyzer_ids |= {"bundled_execution_surface"}
                 if (
                     uses_completeness_schema
                     and use_llm
@@ -1280,7 +1291,7 @@ class SecurityValidator(ValidatorBase):
                         or is_complete is not (not limitations)
                     ):
                         result.add_error(
-                            "skillspector 2.9.6 JSON field 'analysis_completeness' does not describe "
+                            "skillspector 2.9.5/2.9.6 JSON field 'analysis_completeness' does not describe "
                             "a fully covered scan; security scan did not complete"
                         )
                         return False
@@ -1404,6 +1415,7 @@ class SecurityValidator(ValidatorBase):
                     issue,
                     index,
                     uses_report_identities=True,
+                    uses_finding_identity=uses_finding_identity,
                 )
                 identity = (
                     _skillspector_scoring_source_scope(issue),
@@ -1415,6 +1427,20 @@ class SecurityValidator(ValidatorBase):
                     issue["confidence"],
                     issue["finding_id"] if match_identity[0] == "match_fingerprint" else None,
                 )
+                if uses_finding_identity:
+                    # Occurrence rows may vary in location, not classification.
+                    identity = match_identity
+                    scoring_fields += (
+                        _skillspector_scoring_source_scope(issue),
+                        issue["id"],
+                        issue.get("match_fingerprint"),
+                        *(issue.get(field) for field in (
+                            "finding", "category", "pattern", "explanation",
+                            "remediation", "intent", "tags",
+                        )),
+                        # JSON classification evidence distinguishes true from 1.
+                        json.dumps(issue.get("evidence"), sort_keys=True),
+                    )
                 previous = scoring_fields_by_identity.setdefault(identity, scoring_fields)
                 if previous != scoring_fields:
                     result.add_error(
@@ -1606,6 +1632,7 @@ class SecurityValidator(ValidatorBase):
                 SecurityValidator._deduplicate_skillspector_issues_for_scoring(
                     issues,
                     uses_report_identities=uses_completeness_schema,
+                    uses_finding_identity=uses_finding_identity,
                 )[0]
             )
             finding_counts_match = (
@@ -1633,6 +1660,7 @@ class SecurityValidator(ValidatorBase):
             issues,
             normalized_components,
             uses_report_identities=uses_completeness_schema,
+            uses_finding_identity=uses_finding_identity,
             findings_after_filtering=findings_after_filtering,
             all_findings_serialized=(
                 findings_after_filtering is None
@@ -1653,6 +1681,7 @@ class SecurityValidator(ValidatorBase):
         components: list[dict],
         *,
         uses_report_identities: bool,
+        uses_finding_identity: bool,
         findings_after_filtering: int | None = None,
         reported_score: int | float | None = None,
         removed_issues: list[dict] | None = None,
@@ -1721,6 +1750,7 @@ class SecurityValidator(ValidatorBase):
                         issue,
                         index,
                         uses_report_identities=True,
+                        uses_finding_identity=uses_finding_identity,
                     ),
                 )
                 by_rule.setdefault(issue["id"], []).append(
@@ -1768,6 +1798,7 @@ class SecurityValidator(ValidatorBase):
         deduplicated, _ambiguous_identities = SecurityValidator._deduplicate_skillspector_issues_for_scoring(
             issues,
             uses_report_identities=uses_report_identities,
+            uses_finding_identity=uses_finding_identity,
         )
         if uses_report_identities:
             all_visible_issues = [*issues, *(removed_issues or [])]
@@ -1775,6 +1806,7 @@ class SecurityValidator(ValidatorBase):
                 SecurityValidator._deduplicate_skillspector_issues_for_scoring(
                     all_visible_issues,
                     uses_report_identities=True,
+                    uses_finding_identity=uses_finding_identity,
                 )
             )
             unknown_finding_count = max(
@@ -1809,6 +1841,7 @@ class SecurityValidator(ValidatorBase):
         issues: list[dict],
         *,
         uses_report_identities: bool,
+        uses_finding_identity: bool,
     ) -> tuple[list[dict], set[tuple]]:
         """Mirror scanner dedup using serialized source and match identities."""
 
@@ -1820,6 +1853,7 @@ class SecurityValidator(ValidatorBase):
                 issue,
                 index,
                 uses_report_identities=uses_report_identities,
+                uses_finding_identity=uses_finding_identity,
             )
             if uses_report_identities:
                 modern_identity_counts[
@@ -1844,6 +1878,7 @@ class SecurityValidator(ValidatorBase):
                     issue,
                     index,
                     uses_report_identities=uses_report_identities,
+                    uses_finding_identity=uses_finding_identity,
                 ),
             )
             existing = cross_file_best.get(key)
@@ -2006,6 +2041,11 @@ class SecurityValidator(ValidatorBase):
             and tuple(int(part) for part in raw_version.split("."))
             >= _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION
         )
+        uses_finding_identity = (
+            uses_report_identities
+            and tuple(int(part) for part in raw_version.split("."))
+            >= _SKILLSPECTOR_FINDING_IDENTITY_VERSION
+        )
         analysis_completeness = data.get("analysis_completeness")
         findings_after_filtering = (
             analysis_completeness.get("findings_after_filtering")
@@ -2019,6 +2059,7 @@ class SecurityValidator(ValidatorBase):
                 scanned_issues,
                 report_components,
                 uses_report_identities=uses_report_identities,
+                uses_finding_identity=uses_finding_identity,
                 findings_after_filtering=findings_after_filtering,
                 reported_score=reported_score,
                 removed_issues=removed_issues,

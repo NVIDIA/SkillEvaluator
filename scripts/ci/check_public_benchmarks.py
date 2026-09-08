@@ -130,6 +130,38 @@ _PASS_METADATA_FIELD_RULES = (
 )
 
 
+# Evaluated-source provenance is opt-in. A card published before the identity
+# contract existed cannot carry these fields, and the orchestration side has to
+# supply them first, so the default scan stays byte-compatible with the previous
+# behaviour and CI enables --require-source-provenance once the pipeline does.
+_SOURCE_PROVENANCE_MARKERS = (
+    "- Evaluated source:",
+    "- Evaluated source revision:",
+    "- Evaluator container revision:",
+)
+_SOURCE_REPOSITORY_VALUE = r"`[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}`"
+_SOURCE_REVISION_VALUE = r"`(?:[0-9a-f]{7,64}|(?:sha256|sha384|sha512):[0-9a-f]{32,128})`"
+_CONTAINER_REVISION_VALUE = r"`[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}`"
+
+_SOURCE_METADATA_FIELD_RULES = (
+    ("Evaluated source", re.compile(rf"(?:{_SOURCE_REPOSITORY_VALUE}|not recorded\b.*)")),
+    ("Evaluated source revision", re.compile(rf"(?:{_SOURCE_REVISION_VALUE}|not recorded\b.*)")),
+    ("Evaluator container revision", re.compile(rf"(?:{_CONTAINER_REVISION_VALUE}|not recorded\b.*)")),
+)
+
+# A published PASS must name the source it evaluated, whatever the Tier 3 policy
+# says, so an "optional by policy" card cannot publish without the identity.
+# A hand-authored backfill card may state its verdict without a blockquote, and
+# the rollout runbook points this flag at exactly those trees, so the source
+# check matches the verdict line either way.
+_PUBLISHED_PASS = re.compile(r"^\s*>?\s*.*Overall verdict:\s*PASS\b", flags=re.IGNORECASE | re.MULTILINE)
+
+_PASS_SOURCE_PROVENANCE_RULES = (
+    ("Evaluated source", re.compile(_SOURCE_REPOSITORY_VALUE)),
+    ("Evaluated source revision", re.compile(_SOURCE_REVISION_VALUE)),
+)
+
+
 @dataclass(frozen=True)
 class Offender:
     path: Path
@@ -154,7 +186,7 @@ def benchmark_files(roots: list[Path]) -> list[Path]:
     return sorted(found)
 
 
-def scan_file(path: Path) -> list[Offender]:
+def scan_file(path: Path, *, require_source_provenance: bool = False) -> list[Offender]:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
@@ -162,7 +194,8 @@ def scan_file(path: Path) -> list[Offender]:
 
     offenders: list[Offender] = []
 
-    for marker in REQUIRED_MARKERS:
+    markers = REQUIRED_MARKERS + (_SOURCE_PROVENANCE_MARKERS if require_source_provenance else ())
+    for marker in markers:
         if marker not in text:
             offenders.append(Offender(path, 1, f"missing required section: {marker}"))
 
@@ -171,17 +204,30 @@ def scan_file(path: Path) -> list[Offender]:
             if pattern.search(line):
                 offenders.append(Offender(path, line_number, reason))
 
-    _check_metadata_semantics(path, text, offenders)
+    _check_metadata_semantics(path, text, offenders, require_source_provenance=require_source_provenance)
     _check_verdict_tier_consistency(path, text, offenders)
+    if require_source_provenance and _PUBLISHED_PASS.search(text):
+        # Independent of the Tier 3 row: a card publishing a PASS must name the
+        # source it evaluated, including one skipped under an optional policy.
+        _check_source_provenance(path, text, offenders)
     return offenders
 
 
-def _check_metadata_semantics(path: Path, text: str, offenders: list[Offender]) -> None:
+def _check_metadata_semantics(
+    path: Path,
+    text: str,
+    offenders: list[Offender],
+    *,
+    require_source_provenance: bool = False,
+) -> None:
     metadata_lines = _metadata_section_lines(text)
     if not metadata_lines:
         return
 
-    for field, pattern in _METADATA_FIELD_RULES:
+    rules = _METADATA_FIELD_RULES
+    if require_source_provenance:
+        rules += _SOURCE_METADATA_FIELD_RULES
+    for field, pattern in rules:
         matches = _metadata_field_matches(metadata_lines, field)
         marker = f"- {field}:"
         if not matches:
@@ -283,6 +329,17 @@ def _check_verdict_tier_consistency(path: Path, text: str, offenders: list[Offen
         offenders.append(Offender(path, line_number, "publication PASS without completed Tier 3 evidence"))
 
 
+def _check_source_provenance(path: Path, text: str, offenders: list[Offender]) -> None:
+    """Reject a published PASS that does not record the source it evaluated."""
+    metadata_lines = _metadata_section_lines(text)
+    fallback_line = metadata_lines[0][0] if metadata_lines else 1
+    for field, pattern in _PASS_SOURCE_PROVENANCE_RULES:
+        matches = _metadata_field_matches(metadata_lines, field)
+        line_number = matches[0][0] if matches else fallback_line
+        if len(matches) != 1 or not pattern.fullmatch(matches[0][1]):
+            offenders.append(Offender(path, line_number, f"publication PASS without recorded {field.lower()}"))
+
+
 def _check_pass_provenance(path: Path, text: str, offenders: list[Offender]) -> None:
     """Reject PASS cards that replace required provenance with legacy placeholders."""
     metadata_lines = _metadata_section_lines(text)
@@ -309,7 +366,11 @@ def _valid_recorded_agent_models(value: str) -> bool:
     return bool(agents) and all(_RECORDED_AGENT_MODEL_STATE.fullmatch(agent) for agent in agents)
 
 
-def find_offenders(roots: list[Path]) -> tuple[list[Path], list[Offender]]:
+def find_offenders(
+    roots: list[Path],
+    *,
+    require_source_provenance: bool = False,
+) -> tuple[list[Path], list[Offender]]:
     files: set[Path] = set()
     offenders: list[Offender] = []
     for root in roots:
@@ -319,7 +380,11 @@ def find_offenders(roots: list[Path]) -> tuple[list[Path], list[Offender]]:
             offenders.append(Offender(root.expanduser().resolve(), 1, "input path does not exist"))
 
     sorted_files = sorted(files)
-    offenders.extend(offender for path in sorted_files for offender in scan_file(path))
+    offenders.extend(
+        offender
+        for path in sorted_files
+        for offender in scan_file(path, require_source_provenance=require_source_provenance)
+    )
     return sorted_files, offenders
 
 
@@ -337,12 +402,20 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail when no BENCHMARK.md files are found",
     )
+    parser.add_argument(
+        "--require-source-provenance",
+        action="store_true",
+        help="Fail PASS cards that do not record an evaluated source repository and revision",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    files, offenders = find_offenders(args.paths)
+    files, offenders = find_offenders(
+        args.paths,
+        require_source_provenance=args.require_source_provenance,
+    )
 
     if offenders:
         print("Public benchmark scan FAILED:")

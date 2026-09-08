@@ -39,6 +39,18 @@ class TestScriptLintValidator:
         checks = [f.check_name for f in result.findings]
         assert "flat_script" in checks
 
+    def test_flat_script_finding_in_tools_dir(self, tmp_path):
+        skill_dir = tmp_path / "tools-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\nname: tools-skill\ndescription: test\n---\n\n# Test\n")
+        tools = skill_dir / "tools"
+        tools.mkdir()
+        (tools / "flat.py").write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n")
+        v = ScriptLintValidator()
+        result = v.validate(skill_dir)
+        checks = [f.check_name for f in result.findings]
+        assert "flat_script" in checks
+
     def test_deep_nesting_finding(self, skill_with_scripts):
         scripts = skill_with_scripts / "scripts"
         nested_code = (

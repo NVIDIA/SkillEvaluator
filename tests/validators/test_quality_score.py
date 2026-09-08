@@ -199,6 +199,14 @@ class TestSkillTypeDetection:
         (sd / "run.py").write_text("print('hi')")
         assert QualityScoreValidator.detect_skill_type(d) == "script-based"
 
+    def test_tools_dir_is_script_based(self, tmp_path):
+        d = tmp_path / "tooled"
+        d.mkdir()
+        tools = d / "tools"
+        tools.mkdir()
+        (tools / "run.py").write_text("print('hi')")
+        assert QualityScoreValidator.detect_skill_type(d) == "script-based"
+
     def test_lib_based(self, tmp_path):
         d = tmp_path / "lib"
         d.mkdir()

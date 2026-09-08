@@ -12,6 +12,26 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Unpinned-dependency warnings are no longer suppressed by comparison
+  operators inside PEP 508 environment markers; requirements such as
+  `pkg; python_version < "3.13"` are now correctly reported, while direct
+  references are treated as pinned independently of marker contents.
+- SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
+  no longer truncated to MIT and allowed. Closing comment markers such as
+  `*/` and `-->` are not treated as part of the expression
+  ([#86](https://github.com/NVIDIA/SkillEvaluator/issues/86)).
+- Windows personal-path PII now flags `C:\Users\...` usernames that start with
+  `s` (for example `steve`), matching the intended whitespace class rather than
+  excluding the letter `s` ([#87](https://github.com/NVIDIA/SkillEvaluator/issues/87)).
+- Quality scoring, script lint, and `create-eval-dataset` now treat `tools/`
+  the same as `scripts/` for executable helpers.
+- License detection no longer treats a frontmatter `license` identifier as
+  authoritative when a LICENSE file declares a different license. Claiming
+  MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is
+  reconciled, NOTICE files stay informational, an unidentified license file is
+  not treated as absent, and a blocking conflict no longer publishes
+  `license_status=allowed`
+  ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
 - `--llm-verify` now refuses to send file context from paths outside the
   skill root, including `..`, absolute paths, and outbound file symlinks.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories
@@ -55,6 +75,11 @@ All notable changes to SkillEvaluator are documented in this file.
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission
   markers.
+- Tier 3 now decodes bounded native Codex `exec` wrappers into their static
+  tool calls. It preserves call order and outer-call provenance, maps an outer
+  observation only when its rendered inner call is known, keeps ambiguous
+  observations explicit, and reports unsupported or malformed JavaScript as
+  untrusted instead of a clean security result.
 
 ### Security
 

@@ -53,6 +53,7 @@ from typing import Any
 
 import yaml
 
+from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
@@ -122,10 +123,16 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
             if frontmatter.get("description"):
                 description = str(frontmatter["description"]).strip()
 
-    # Find scripts
-    scripts_dir = skill_path / "scripts"
-    if scripts_dir.is_dir():
-        scripts = [f.name for f in scripts_dir.glob("*.py")]
+    # Find scripts in scripts/ (historical) and tools/ (agentskills.io)
+    seen_scripts: set[str] = set()
+    for dirname in EXECUTABLE_SKILL_DIRS:
+        directory = skill_path / dirname
+        if not directory.is_dir():
+            continue
+        for script_file in directory.glob("*.py"):
+            if script_file.name not in seen_scripts:
+                seen_scripts.add(script_file.name)
+                scripts.append(script_file.name)
 
     # Detect interactive scripts from SKILL.md content
     interactive_scripts: set[str] = set()

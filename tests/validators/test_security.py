@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.config import load_pii_patterns
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
@@ -134,6 +135,55 @@ Install from: /Users/johndoe/projects/secret/
 
         all_findings = result.errors + result.warnings
         assert any("path" in f.lower() for f in all_findings), f"Expected path detection. Findings: {all_findings}"
+
+    def test_detects_windows_personal_path_for_alice(self, tmp_path: Path):
+        """Windows C:\\Users\\alice paths are still flagged."""
+        skill_dir = tmp_path / "win-alice-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: win-alice-skill
+description: A skill with a Windows personal path for testing detection
+---
+
+# Path Test
+
+See C:\\Users\\alice\\Documents\\notes.txt
+""")
+        result = SecurityValidator().validate_pii_only(skill_dir)
+        all_findings = result.errors + result.warnings
+        assert any("alice" in f and "C:\\Users\\" in f for f in all_findings), (
+            f"Expected Windows path detection for alice. Findings: {all_findings}"
+        )
+
+    def test_detects_windows_personal_path_for_steve(self, tmp_path: Path):
+        """Windows C:\\Users\\steve paths are flagged (usernames starting with s)."""
+        skill_dir = tmp_path / "win-steve-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: win-steve-skill
+description: A skill with a Windows personal path for testing detection
+---
+
+# Path Test
+
+See C:\\Users\\steve\\Documents\\notes.txt
+""")
+        result = SecurityValidator().validate_pii_only(skill_dir)
+        all_findings = result.errors + result.warnings
+        assert any("steve" in f and "C:\\Users\\" in f for f in all_findings), (
+            f"Expected Windows path detection for steve. Findings: {all_findings}"
+        )
+
+    def test_windows_personal_path_pattern_matches_usernames_starting_with_s(self):
+        """Loaded Windows personal-path regex uses a whitespace class, not letter s."""
+        pattern = load_pii_patterns()["personal_paths"][1]["pattern"]
+        assert r"[^\\\s]" in pattern or r"[^\s]" in pattern
+        regex = re.compile(pattern, re.IGNORECASE)
+        assert regex.search(r"C:\Users\steve\Documents\notes.txt")
+        assert regex.search(r"C:\Users\alice\Documents\notes.txt")
+        assert regex.search(r"C:\Users\sam\file.txt")
+        assert regex.search(r"C:\Users\session\file.txt")
+        assert not regex.search(r"C:\Temp\file.txt")
 
     def test_api_route_not_flagged_as_personal_path(self, tmp_path: Path):
         """Test that REST API routes like /users/:id are not flagged as personal macOS paths."""

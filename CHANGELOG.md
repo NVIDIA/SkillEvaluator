@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Unpinned-dependency warnings are no longer suppressed by comparison
+  operators inside PEP 508 environment markers; requirements such as
+  `pkg; python_version < "3.13"` are now correctly reported, while direct
+  references are treated as pinned independently of marker contents.
 - Schema, frontmatter, quality parsing, and security PII scanning accept a leading
   UTF-8 BOM, matching the unicode scanner's "benign BOM" note
   ([#91](https://github.com/NVIDIA/SkillEvaluator/issues/91)).

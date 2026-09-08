@@ -138,7 +138,7 @@ class TestScanIncompleteMarking:
                 {
                     "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                     "issues": [],
-                    "metadata": {},
+                    "metadata": {"skillspector_version": "1.0.0"},
                 }
             ),
             stderr="",

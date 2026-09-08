@@ -173,11 +173,19 @@ class HygieneValidator(ValidatorBase):
                 continue
 
             pkg_name = match.group(1).lower()
+            # Pip strips inline comments introduced by whitespace before it
+            # parses a requirement. Remove them here as well so an "@" in a
+            # comment cannot be mistaken for a direct-reference separator;
+            # URL fragments remain intact because their "#" is not preceded
+            # by whitespace.
+            logical_line = re.split(r"\s+#", line, maxsplit=1)[0]
+
             # Marker comparisons do not constrain the package version. Detect
             # direct references before the marker so an "@" inside a marker
             # value cannot hide an otherwise unpinned requirement.
-            requirement_part = line.partition(";")[0]
-            is_direct_reference = "@" in requirement_part
+            requirement_part = logical_line.partition(";")[0]
+            _, direct_reference_separator, direct_reference_target = requirement_part.partition("@")
+            is_direct_reference = bool(direct_reference_separator and direct_reference_target.strip())
 
             if pkg_name in banned_lower:
                 result.add_error(f"{req_file.name}:{line_num} - Banned package: {pkg_name}")

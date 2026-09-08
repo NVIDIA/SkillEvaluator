@@ -1590,6 +1590,11 @@ class SecurityValidator(ValidatorBase):
             total += n
         return total % 10 == 0
 
+    @staticmethod
+    def _is_frontmatter_delimiter(line: str) -> bool:
+        """True when a line is a YAML frontmatter fence, including BOM-prefixed openers."""
+        return line.strip().removeprefix("\ufeff").strip() == "---"
+
     def _scan_file_for_pii(self, file_path: Path, protected_usernames: set[str] | None = None) -> list[dict]:
         """Scan a single file for PII patterns, yielding findings with full context.
 
@@ -1601,7 +1606,7 @@ class SecurityValidator(ValidatorBase):
             protected_usernames = self._protected_home_usernames(file_path.parent)
 
         try:
-            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            content = file_path.read_text(encoding="utf-8-sig", errors="ignore")
         except Exception as e:
             logger.warning(f"Could not read {file_path}: {e}")
             return []
@@ -1630,10 +1635,12 @@ class SecurityValidator(ValidatorBase):
 
     def _frontmatter_author_emails(self, file_path: Path, lines: list[str]) -> dict[int, str]:
         """Map valid frontmatter author lines to the public contributor email."""
-        if file_path.name not in SKILL_MANIFEST_VARIANTS or not lines or lines[0].strip() != "---":
+        if file_path.name not in SKILL_MANIFEST_VARIANTS or not lines or not self._is_frontmatter_delimiter(lines[0]):
             return {}
         try:
-            frontmatter_end = next(index for index, line in enumerate(lines[1:], 1) if line.strip() == "---")
+            frontmatter_end = next(
+                index for index, line in enumerate(lines[1:], 1) if self._is_frontmatter_delimiter(line)
+            )
         except StopIteration:
             return {}
 

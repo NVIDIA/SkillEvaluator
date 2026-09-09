@@ -197,6 +197,38 @@ _NEGATIVE_QUESTION_CANDIDATES = (
     "What is the orbital period of Jupiter's moon Europa?",
     "How do I replace a ceramic washer on a compression faucet?",
 )
+_CAPABILITY_KEYWORDS: dict[str, frozenset[str]] = {
+    "planning": frozenset(
+        {
+            "plan",
+            "plans",
+            "planning",
+            "schedule",
+            "scheduling",
+            "organize",
+            "organizing",
+            "errand",
+            "errands",
+            "grocery",
+            "appointment",
+            "appointments",
+            "calendar",
+            "task",
+            "tasks",
+            "todo",
+            "agenda",
+            "itinerary",
+            "weekend",
+            "meeting",
+        }
+    ),
+    "audio": frozenset({"wav", "flac", "audio", "metadata", "convert", "conversion"}),
+    "cooking": frozenset({"bread", "dough", "proof", "recipe", "bake", "temperature"}),
+    "academic": frozenset({"bibtex", "cite", "citation", "journal", "preprint", "acs"}),
+    "astronomy": frozenset({"orbital", "europa", "jupiter", "moon", "planet"}),
+    "plumbing": frozenset({"faucet", "washer", "ceramic", "compression", "plumbing"}),
+}
+_AMBIGUOUS_NEGATIVE_CAPABILITY_GROUPS = frozenset({"planning"})
 _NEGATIVE_TOKEN_STOPWORDS = frozenset(
     {
         "what",
@@ -229,6 +261,19 @@ def _skill_domain_tokens(skill: dict[str, Any]) -> set[str]:
     }
 
 
+def _text_capability_groups(text: str) -> set[str]:
+    tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {
+        group
+        for group, keywords in _CAPABILITY_KEYWORDS.items()
+        if tokens & keywords or any(keyword in text.lower() for keyword in keywords)
+    }
+
+
+def _skill_capability_groups(skill: dict[str, Any]) -> set[str]:
+    return _text_capability_groups(f"{skill.get('name', '')} {skill.get('description', '')}")
+
+
 def _question_matches_skill_domain(question: str, skill: dict[str, Any]) -> bool:
     """Return True when the question is plausibly on-skill for template negatives."""
     q_lower = question.lower()
@@ -246,13 +291,23 @@ def _question_matches_skill_domain(question: str, skill: dict[str, Any]) -> bool
         for question_token in question_tokens:
             if domain_token.startswith(question_token) or question_token.startswith(domain_token):
                 return True
+
+    skill_groups = _skill_capability_groups(skill)
+    question_groups = _text_capability_groups(question)
+    if skill_groups & question_groups:
+        return True
     return False
 
 
-def _template_negative_question(skill: dict[str, Any], hint_questions: list[str]) -> str | None:
-    """Return an off-skill question, or None when every candidate would be on-skill."""
-    if len(hint_questions) > 3:
-        return hint_questions[3]
+def _template_negative_question(skill: dict[str, Any], eval_hints: dict[str, list[str]]) -> str | None:
+    """Return an off-skill question, or None when no safe negative is available."""
+    for question in eval_hints.get("negatives", []):
+        if question and not _question_matches_skill_domain(question, skill):
+            return question
+
+    if _skill_capability_groups(skill) & _AMBIGUOUS_NEGATIVE_CAPABILITY_GROUPS:
+        return None
+
     for question in _NEGATIVE_QUESTION_CANDIDATES:
         if not _question_matches_skill_domain(question, skill):
             return question
@@ -266,7 +321,7 @@ def _extract_eval_hints(eval_prompt: str) -> dict[str, list[str]]:
     and returns lists of strings for each. Falls back to treating the whole
     content as general hints if no sections are found.
     """
-    hints: dict[str, list[str]] = {"questions": [], "behaviors": [], "notes": []}
+    hints: dict[str, list[str]] = {"questions": [], "behaviors": [], "notes": [], "negatives": []}
     if not eval_prompt:
         return hints
 
@@ -276,7 +331,9 @@ def _extract_eval_hints(eval_prompt: str) -> dict[str, list[str]]:
         lower = stripped.lower()
         if lower.startswith("## ") or lower.startswith("# "):
             heading = lower.lstrip("# ").strip()
-            if any(k in heading for k in ("question", "prompt", "query", "scenario")):
+            if any(k in heading for k in ("negative", "off-skill", "off skill", "counterexample")):
+                current_section = "negatives"
+            elif any(k in heading for k in ("question", "prompt", "query", "scenario")):
                 current_section = "questions"
             elif any(k in heading for k in ("behavior", "expectation", "criteria")):
                 current_section = "behaviors"
@@ -366,7 +423,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "expected_behavior": pos_behaviors,
         },
     ]
-    negative_question = _template_negative_question(skill, hint_qs)
+    negative_question = _template_negative_question(skill, eval_hints)
     if negative_question is not None:
         cases.append(
             {

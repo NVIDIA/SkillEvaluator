@@ -18,7 +18,7 @@ from skillevaluator.validators.base import ValidationResult
 
 # Regex pattern for extracting frontmatter between --- markers
 FRONTMATTER_PATTERN = re.compile(
-    r"^---[^\S\r\n]*\r?\n(.*?)\r?\n---[^\S\r\n]*(?=\r?\n|\Z)(?:\r?\n)?(.*)",
+    r"^\ufeff?---[^\S\r\n]*\r?\n(.*?)\r?\n---[^\S\r\n]*(?=\r?\n|\Z)(?:\r?\n)?(.*)",
     re.DOTALL,
 )
 
@@ -47,7 +47,7 @@ def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, Valida
     result = ValidationResult()
 
     try:
-        content = file_path.read_text(encoding="utf-8")
+        content = file_path.read_text(encoding="utf-8-sig")
     except Exception as e:
         result.add_error(f"Failed to read {file_path}: {e}")
         return None, result

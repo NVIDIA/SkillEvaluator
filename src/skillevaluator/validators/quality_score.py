@@ -38,6 +38,7 @@ from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
 
 logger = get_logger(__name__)
@@ -281,7 +282,7 @@ class QualityScoreValidator(ValidatorBase):
             result.metadata["quality_scores"] = qs.to_dict()
             return result
 
-        content = manifest.read_text(encoding="utf-8")
+        content = manifest.read_text(encoding="utf-8-sig")
         lines = content.split("\n")
 
         frontmatter_data = self._parse_frontmatter(content)
@@ -333,7 +334,7 @@ class QualityScoreValidator(ValidatorBase):
 
     @staticmethod
     def _parse_frontmatter(content: str) -> dict | None:
-        fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+        fm_match = FRONTMATTER_PATTERN.match(content)
         if not fm_match:
             return None
         try:
@@ -758,7 +759,7 @@ class QualityScoreValidator(ValidatorBase):
 
         # Token estimates
         qs.total_tokens = len(content) // 4
-        fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+        fm_match = FRONTMATTER_PATTERN.match(content)
         if fm_match:
             qs.frontmatter_tokens = len(fm_match.group(1)) // 4
         inst_start = content.find("---", 3) + 3

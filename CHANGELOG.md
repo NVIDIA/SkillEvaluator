@@ -15,6 +15,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Unpinned-dependency warnings are no longer suppressed by comparison
+  operators inside PEP 508 environment markers; requirements such as
+  `pkg; python_version < "3.13"` are now correctly reported, while direct
+  references are treated as pinned independently of marker contents.
+- Schema, frontmatter, quality parsing, and security PII scanning accept a leading
+  UTF-8 BOM, matching the unicode scanner's "benign BOM" note
+  ([#91](https://github.com/NVIDIA/SkillEvaluator/issues/91)).
 - SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
   no longer truncated to MIT and allowed. Closing comment markers such as
   `*/` and `-->` are not treated as part of the expression
@@ -70,6 +77,18 @@ All notable changes to SkillEvaluator are documented in this file.
   for runtime-error phrases when the recorded exception belongs to the
   verifier, health check, or task. Correct answers that discuss errors such as
   `401 Unauthorized` are no longer misreported as agent runtime failures.
+- SkillSpector reports now use validated version-specific completeness
+  contracts. Valid findings from coherent 2.10+ partial scans remain visible
+  while the result stays incomplete, and fully covered 2.9.5/2.9.6 `--no-llm`
+  reports remain compatible. Contradictory finding or component totals and
+  duplicate component identities fail closed. Versioned findings require
+  producer paths, and complete reports reconcile universal analyzer work with
+  the component inventory. Reports scored before 2.10 finding compaction remain
+  accepted. Shipped bytecode findings, source-scoped executable evidence, and
+  version-specific finding identities remain authoritative without overstating
+  compacted or hidden finding evidence. SkillSpector 2.11+ requires bundled
+  execution-surface analyzer evidence; 2.11.1+ uses classification-aware
+  finding IDs while rejecting conflicting reuse of an ID.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission

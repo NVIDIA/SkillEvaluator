@@ -279,7 +279,7 @@ class ValidationResult:
 
     @property
     def incomplete_scans(self) -> list[str]:
-        """External scanners that did not produce trustworthy evidence."""
+        """External scanners that did not produce complete trustworthy evidence."""
         value = self.metadata.get("incomplete_scans")
         if not isinstance(value, list):
             return []
@@ -462,10 +462,11 @@ class ValidationResult:
         self.messages.append(message)
 
     def mark_scan_incomplete(self, tool_name: str) -> None:
-        """Record that an external scanner produced no trustworthy results.
+        """Record that an external scanner did not produce complete trustworthy results.
 
-        Missing, timed-out, crashed, and malformed scanner runs are gate
-        failures. Reporters distinguish them from completed scans with policy
+        Partial, missing, timed-out, crashed, and malformed scanner runs are
+        gate failures. Trustworthy partial findings remain available, while
+        reporters distinguish these runs from completed scans with policy
         findings by using the canonical ``incomplete`` status.
         """
         scans = self.metadata.setdefault("incomplete_scans", [])

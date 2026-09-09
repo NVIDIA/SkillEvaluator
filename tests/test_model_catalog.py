@@ -12,6 +12,7 @@ from http.client import BadStatusLine, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from urllib.error import HTTPError, URLError
+from urllib.request import ProxyHandler, Request
 
 import pytest
 
@@ -638,14 +639,15 @@ def test_fetch_rejects_oversized_and_invalid_json_responses(monkeypatch) -> None
         ("https://example.test:invalid/v1", "invalid_configuration"),
     ],
 )
-def test_catalog_rejects_unsafe_base_urls(base_url: str, expected_kind: str) -> None:
+def test_catalog_rejects_unsafe_base_urls(monkeypatch, base_url: str, expected_kind: str) -> None:
+    monkeypatch.delenv("SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS", raising=False)
     with pytest.raises(ModelCatalogError, match="model catalog base URL") as caught:
         fetch_model_records(_provider("openai-compatible", base_url=base_url))
     assert getattr(caught.value, "kind", None) == expected_kind
 
 
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])
-def test_catalog_allows_plain_http_only_for_loopback(monkeypatch, host: str) -> None:
+def test_catalog_allows_plain_http_for_loopback(monkeypatch, host: str) -> None:
     captured: dict[str, str] = {}
 
     def fake_urlopen(request, **_kwargs):
@@ -655,7 +657,104 @@ def test_catalog_allows_plain_http_only_for_loopback(monkeypatch, host: str) -> 
     monkeypatch.setattr(model_catalog, "urlopen", fake_urlopen)
 
     assert fetch_model_records(_provider("openai-compatible", base_url=f"http://{host}:8000/v1")) == ()
-    assert captured["url"].endswith(":8000/v1/models")
+    assert captured["url"] == f"http://{host}:8000/v1/models"
+
+
+@pytest.mark.parametrize(
+    ("allowlist", "host"),
+    [
+        ("gateway.test", "gateway.test"),
+        ("  GATEWAY.test ", "gateway.test"),
+        ("other.test,gateway.test", "gateway.test"),
+        ("gateway.test,,", "gateway.test"),
+        ("[fd00::1]", "[fd00::1]"),
+        ("fd00::1", "[fd00::1]"),
+        ("100.64.0.2", "100.64.0.2"),
+    ],
+)
+def test_catalog_allows_plain_http_for_an_allowlisted_host(monkeypatch, allowlist: str, host: str) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_urlopen(request, **_kwargs):
+        captured["url"] = request.full_url
+        return _Response({"data": []})
+
+    monkeypatch.setenv("SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS", allowlist)
+    monkeypatch.setattr(model_catalog, "urlopen", fake_urlopen)
+
+    assert fetch_model_records(_provider("openai-compatible", base_url=f"http://{host}:8000/v1")) == ()
+    assert captured["url"] == f"http://{host}:8000/v1/models"
+
+
+@pytest.mark.parametrize(
+    "padded",
+    ["gateway.test\xa0", "\xa0gateway.test", "gateway.test ", "gateway.test\u3000"],
+)
+def test_catalog_allowlist_does_not_match_a_padded_host(monkeypatch, padded: str) -> None:
+    """The gate must match the host the request targets, not a trimmed form."""
+    monkeypatch.setenv("SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS", "gateway.test")
+    with pytest.raises(ModelCatalogError, match="must use HTTPS") as caught:
+        fetch_model_records(_provider("openai-compatible", base_url=f"http://{padded}/v1"))
+    assert getattr(caught.value, "kind", None) == "unsupported"
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["evil.gateway.test", "gateway.test.evil", "gateway-test", "ateway.test", "xgateway.test"],
+)
+def test_catalog_allowlist_matches_the_whole_host_only(monkeypatch, host: str) -> None:
+    monkeypatch.setenv("SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS", "gateway.test")
+    with pytest.raises(ModelCatalogError, match="must use HTTPS") as caught:
+        fetch_model_records(_provider("openai-compatible", base_url=f"http://{host}/v1"))
+    assert getattr(caught.value, "kind", None) == "unsupported"
+
+
+@pytest.mark.parametrize("allowlist", ["", "   ", ",", " , "])
+def test_catalog_empty_allowlist_keeps_plain_http_rejected(monkeypatch, allowlist: str) -> None:
+    monkeypatch.setenv("SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS", allowlist)
+    with pytest.raises(ModelCatalogError, match="must use HTTPS") as caught:
+        fetch_model_records(_provider("openai-compatible", base_url="http://gateway.test/v1"))
+    assert getattr(caught.value, "kind", None) == "unsupported"
+
+
+def test_allowlisting_a_host_does_not_allow_a_different_one(monkeypatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS", "gateway.test")
+    with pytest.raises(ModelCatalogError, match="must use HTTPS"):
+        fetch_model_records(_provider("openai-compatible", base_url="http://192.168.1.2/v1"))
+
+
+@pytest.mark.parametrize(
+    ("allowlist", "scheme", "host", "expect_proxy_bypass"),
+    [
+        ("", "http", "127.0.0.1", True),
+        ("", "https", "127.0.0.1", True),
+        ("", "http", "gateway.test", False),
+        ("gateway.test", "http", "gateway.test", True),
+        ("gateway.test", "https", "gateway.test", False),
+        ("other.test", "http", "gateway.test", False),
+    ],
+)
+def test_allowlisted_catalog_transport_bypasses_environment_proxy(
+    monkeypatch, allowlist: str, scheme: str, host: str, expect_proxy_bypass: bool
+) -> None:
+    """The bearer must not be handed to an inherited proxy for a host we accept."""
+    seen: list[object] = []
+
+    class _Opener:
+        def open(self, _request, **_kwargs):
+            return _Response({"data": []})
+
+    def fake_build_opener(*handlers):
+        seen.extend(handlers)
+        return _Opener()
+
+    monkeypatch.setenv("SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS", allowlist)
+    monkeypatch.setattr(model_catalog, "build_opener", fake_build_opener)
+
+    model_catalog._urlopen_without_redirects(Request(f"{scheme}://{host}:8000/v1/models"), timeout=1.0)
+
+    bypassed = any(isinstance(handler, ProxyHandler) and not handler.proxies for handler in seen)
+    assert bypassed is expect_proxy_bypass
 
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308])

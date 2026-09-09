@@ -43,6 +43,25 @@ description: A test file
         assert result.passed
         assert parsed.content == "    [code](false.md)\n"
 
+    def test_utf8_bom_is_accepted(self, tmp_path: Path):
+        """A valid frontmatter file that starts with a UTF-8 BOM still parses (#91)."""
+        test_file = tmp_path / "bom.md"
+        body = """---
+title: Bom
+description: A file whose only extra is a leading UTF-8 BOM
+---
+
+# Content
+"""
+        test_file.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+        parsed, result = parse_frontmatter(test_file)
+
+        assert parsed is not None
+        assert result.passed
+        assert parsed.yaml_data["title"] == "Bom"
+        assert parsed.content.strip() == "# Content"
+
     def test_missing_frontmatter(self, tmp_path: Path):
         """Test file without frontmatter markers."""
         test_file = tmp_path / "test.mdc"

@@ -685,6 +685,34 @@ print("hello")
 
         assert result.passed, f"Skill with complete body should pass. Errors: {result.errors}"
 
+    def test_utf8_bom_skill_md_passes_schema(self, tmp_path: Path):
+        """A valid SKILL.md that only adds a UTF-8 BOM must still pass schema (#91)."""
+        skill_dir = tmp_path / "bom-skill"
+        skill_dir.mkdir()
+        body = """---
+name: bom-skill
+description: Valid skill whose SKILL.md starts with a UTF-8 BOM
+metadata:
+  author: Bom User <bomuser@example.com>
+---
+
+# BOM Skill
+
+## Instructions
+
+1. Open the file in an editor that writes a BOM.
+
+## Examples
+
+Example usage.
+"""
+        (skill_dir / "SKILL.md").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, f"BOM-only difference should still pass schema. Errors: {result.errors}"
+        assert all(f.check_name != "frontmatter_format" for f in result.findings)
+
     def test_canonical_support_dirs_accepted(self, tmp_path: Path):
         """Canonical public skill support directories must not be flagged.
 

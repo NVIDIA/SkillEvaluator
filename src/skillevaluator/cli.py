@@ -329,6 +329,28 @@ def _report_options(func):
     )(func)
 
 
+_last_validate_json_report: str | None = None
+
+
+def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -> tuple[str, ...]:
+    """Resolve the report formats ``validate`` will actually emit."""
+    if quiet and not _report_formats_explicit():
+        return tuple(dict.fromkeys([fmt for fmt in report_formats if fmt != "cli"] + ["html", "json"]))
+    return report_formats
+
+
+def _record_validate_json_report(report_name: str | None) -> None:
+    global _last_validate_json_report
+    _last_validate_json_report = report_name
+
+
+def _consume_validate_json_report() -> str | None:
+    global _last_validate_json_report
+    report_name = _last_validate_json_report
+    _last_validate_json_report = None
+    return report_name
+
+
 def _report_formats_explicit() -> bool:
     """True when the user passed ``-r``/``--report`` on the command line.
 
@@ -699,17 +721,6 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
 
 
-def _standard_json_report_paths(output_dir: Path) -> set[Path]:
-    """Return standard JSON reports, excluding SARIF sidecars that share the glob."""
-    if not output_dir.is_dir():
-        return set()
-    return {
-        path
-        for path in output_dir.glob("skillevaluator-output-*.json")
-        if path.is_file() and not path.name.endswith(".sarif.json")
-    }
-
-
 def _catalog_child_argv_from_sys(skill_dir: Path, output_dir: Path, parent_argv: list[str]) -> list[str]:
     """Rebuild ``validate`` argv for one catalog skill from ``sys.argv``."""
     argv = list(parent_argv)
@@ -854,10 +865,8 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
         os.chdir(workdir)
 
     skill_name = str(job["skill_name"])
-    output_dir = Path(job["output_dir"])
-    existing_reports = _standard_json_report_paths(output_dir)
     result = CliRunner().invoke(cli, job["argv"])
-    json_report_name = _new_skill_json_report_name(output_dir, existing_reports)
+    json_report_name = _consume_validate_json_report()
     if result.exit_code == 0:
         return skill_name, True, "", json_report_name
     exc = result.exception
@@ -868,14 +877,6 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
             return skill_name, False, str(getattr(exc, "message", exc)), json_report_name
         return skill_name, False, f"unexpected error: {exc}", json_report_name
     return skill_name, False, "validation failed", json_report_name
-
-
-def _new_skill_json_report_name(output_dir: Path, existing_reports: set[Path]) -> str | None:
-    """Return the JSON report filename produced during this worker run."""
-    new_reports = _standard_json_report_paths(output_dir) - existing_reports
-    if not new_reports:
-        return None
-    return sorted(new_reports, reverse=True)[0].name
 
 
 def _catalog_skill_entry(
@@ -949,7 +950,6 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
         "skills": skills,
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
-    output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / CATALOG_SUMMARY_FILENAME
     payload = json.dumps(summary, indent=2, default=str, allow_nan=False).encode("utf-8")
     _write_report_atomically(output_path, payload)
@@ -986,7 +986,6 @@ def _validate_catalog(
     for index, skill_dir in enumerate(skill_dirs, start=1):
         _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
         skill_output = output_dir / skill_dir.name
-        existing_reports = _standard_json_report_paths(skill_output)
         overrides = {
             **ctx.params,
             "target_path": skill_dir,
@@ -1002,7 +1001,7 @@ def _validate_catalog(
         except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
             reason = f"unexpected error: {exc}"
             failures.append((skill_dir.name, reason))
-        skill_reports[skill_dir.name] = _new_skill_json_report_name(skill_output, existing_reports)
+        skill_reports[skill_dir.name] = _consume_validate_json_report()
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
@@ -1039,7 +1038,6 @@ def _validate_catalog_parallel(
         return
 
     workdir = str(Path.cwd())
-    output_dir.mkdir(parents=True, exist_ok=True)
     make_view_console().print(
         f"[dim]Validating {len(skill_dirs)} skills with {workers} worker"
         f"{'s' if workers != 1 else ''} (parallel catalog mode; per-skill pipeline view disabled)[/dim]"
@@ -1527,6 +1525,7 @@ def validate(
     validated against its public contract. Quality/lint/version checks are
     skill-only and skipped for plugins.
     """
+    _record_validate_json_report(None)
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
@@ -1815,10 +1814,7 @@ def validate(
     # the summary; the files carry the findings) and points at them from the
     # footer. An EXPLICIT -r is a contract and is honored exactly — including
     # "cli", which renders the full Rich report below the pipeline view.
-    if quiet and not _report_formats_explicit():
-        effective_formats = tuple(dict.fromkeys([f for f in report_formats if f != "cli"] + ["html", "json"]))
-    else:
-        effective_formats = report_formats
+    effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
     emit_reports(
         results,
@@ -1831,6 +1827,9 @@ def validate(
         announce_paths=not quiet,
         sarif_scan_root=target_path,
         sarif_repository_root=sarif_repository_root,
+    )
+    _record_validate_json_report(
+        f"{report_basename_value}.json" if "json" in effective_formats else None
     )
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on

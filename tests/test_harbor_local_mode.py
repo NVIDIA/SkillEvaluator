@@ -1974,6 +1974,15 @@ def test_runtime_injection_env_is_blocked_before_launcher(name: str, tmp_path: P
     assert name in (result.stderr or "")
 
 
+@pytest.mark.parametrize("name", ["BASH_ENV", "LD_PRELOAD", "PYTHONPATH"])
+def test_empty_runtime_injection_env_is_ignored(name: str) -> None:
+    filtered = SkillEvaluatorLocalEnvironment._filter_command_env(
+        {name: "", "SAFE_VALUE": "kept"}, protected=set()
+    )
+
+    assert filtered == {"SAFE_VALUE": "kept"}
+
+
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_persistent_runtime_injection_env_is_blocked_before_launcher(tmp_path: Path) -> None:
     environment = _local_environment(tmp_path, persistent_env={"NODE_OPTIONS": "--require=/tmp/attack.js"})

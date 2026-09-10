@@ -19,6 +19,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 local mode no longer rejects evaluator-managed empty process-loader environment variables.
 - Unpinned-dependency warnings are no longer suppressed by comparison
   operators inside PEP 508 environment markers; requirements such as
   `pkg; python_version < "3.13"` are now correctly reported, while direct

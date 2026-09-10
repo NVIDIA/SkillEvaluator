@@ -318,9 +318,16 @@ def _urlopen_without_redirects(request: Request, *, timeout: float):
     parsed = urlsplit(request.full_url)
     handlers: list[Any] = [_DeadlineHTTPHandler(), _DeadlineHTTPSHandler(), _RejectRedirects()]
     hostname = parsed.hostname
-    if hostname and (
-        _is_loopback_host(hostname) or (parsed.scheme.casefold() == "http" and _allows_plain_http(hostname))
-    ):
+    if parsed.scheme.casefold() == "http":
+        # Recheck mutable policy, but never let revocation enable a proxy.
+        if not hostname or not _allows_plain_http(hostname):
+            raise ModelCatalogError(
+                "model catalog plain HTTP is no longer authorized; use HTTPS or name the host "
+                f"in {_ALLOW_PLAIN_HTTP_HOSTS_ENV}",
+                kind=ModelCatalogFailureKind.UNSUPPORTED,
+            )
+        handlers.insert(0, ProxyHandler({}))
+    elif hostname and _is_loopback_host(hostname):
         handlers.insert(0, ProxyHandler({}))
     return build_opener(*handlers).open(request, timeout=timeout)
 
@@ -767,8 +774,8 @@ def _allows_plain_http(hostname: str) -> bool:
     """Loopback, or a host the operator named for plain-HTTP catalog reads.
 
     Resolution is deliberately absent. An entry matches one whole host as
-    written, exactly as the loopback rule matches ``localhost``, so the decision
-    cannot change between validation and connection. Only the operator's entry
+    written, exactly as the loopback rule matches ``localhost``, without a DNS
+    classification that could change before connection. Only the operator's entry
     is trimmed: trimming the queried host too would let the gate accept
     ``gateway.test`` while the request targets ``gateway.test\xa0``.
     """

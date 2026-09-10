@@ -9,6 +9,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
   (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
   `trajectory.json` is missing or empty.
+- `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` names hosts whose model catalog may
+  be read over plain HTTP. Catalog reads still require HTTPS for every other
+  non-loopback host. Entries match one whole host as written, with no name
+  resolution. A plain-HTTP request to an accepted host bypasses any inherited
+  HTTP proxy so its bearer token is not offered to an intermediary. The
+  transport rechecks authorization before dispatch and rejects hosts that
+  are no longer allowed.
 - SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
   consumers. Findings map to rule IDs, severity levels, and file locations from
   Tier 1 validation results.

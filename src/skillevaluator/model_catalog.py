@@ -9,6 +9,7 @@ import io
 import ipaddress
 import json
 import math
+import os
 import socket
 import time
 import unicodedata
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from skillevaluator.provider_config import ProviderConfig
 
 _ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+_ALLOW_PLAIN_HTTP_HOSTS_ENV = "SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS"
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_CATALOG_PAGES = 100
 _MAX_MODEL_ID_LENGTH = 512
@@ -315,7 +317,17 @@ class _DeadlineHTTPSHandler(HTTPSHandler):
 def _urlopen_without_redirects(request: Request, *, timeout: float):
     parsed = urlsplit(request.full_url)
     handlers: list[Any] = [_DeadlineHTTPHandler(), _DeadlineHTTPSHandler(), _RejectRedirects()]
-    if parsed.hostname and _is_loopback_host(parsed.hostname):
+    hostname = parsed.hostname
+    if parsed.scheme.casefold() == "http":
+        # Recheck mutable policy, but never let revocation enable a proxy.
+        if not hostname or not _allows_plain_http(hostname):
+            raise ModelCatalogError(
+                "model catalog plain HTTP is no longer authorized; use HTTPS or name the host "
+                f"in {_ALLOW_PLAIN_HTTP_HOSTS_ENV}",
+                kind=ModelCatalogFailureKind.UNSUPPORTED,
+            )
+        handlers.insert(0, ProxyHandler({}))
+    elif hostname and _is_loopback_host(hostname):
         handlers.insert(0, ProxyHandler({}))
     return build_opener(*handlers).open(request, timeout=timeout)
 
@@ -592,9 +604,10 @@ def _provider_url(base_url: str, *, ensure_v1: bool = False) -> str:
             "model catalog base URL path is invalid",
             kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
         )
-    if scheme == "http" and not _is_loopback_host(hostname):
+    if scheme == "http" and not _allows_plain_http(hostname):
         raise ModelCatalogError(
-            "model catalog base URL must use HTTPS unless it targets loopback",
+            "model catalog base URL must use HTTPS unless it targets loopback or a host "
+            f"named in {_ALLOW_PLAIN_HTTP_HOSTS_ENV}",
             kind=ModelCatalogFailureKind.UNSUPPORTED,
         )
 
@@ -755,6 +768,21 @@ def _is_loopback_host(hostname: str) -> bool:
         return ipaddress.ip_address(hostname).is_loopback
     except ValueError:
         return False
+
+
+def _allows_plain_http(hostname: str) -> bool:
+    """Loopback, or a host the operator named for plain-HTTP catalog reads.
+
+    Resolution is deliberately absent. An entry matches one whole host as
+    written, exactly as the loopback rule matches ``localhost``, without a DNS
+    classification that could change before connection. Only the operator's entry
+    is trimmed: trimming the queried host too would let the gate accept
+    ``gateway.test`` while the request targets ``gateway.test\xa0``.
+    """
+    if _is_loopback_host(hostname):
+        return True
+    entries = os.environ.get(_ALLOW_PLAIN_HTTP_HOSTS_ENV, "").split(",")
+    return hostname.casefold() in {host for entry in entries if (host := entry.strip().strip("[]").casefold())}
 
 
 def _is_chat_candidate(model_id: str) -> bool:

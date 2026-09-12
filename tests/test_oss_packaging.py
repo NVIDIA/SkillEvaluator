@@ -597,6 +597,14 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "are not interchangeable" in environment
 
 
+def test_ci_sarif_merge_uses_uv_tool_python() -> None:
+    ci = (REPO_ROOT / "docs" / "ci-integration.mdx").read_text(encoding="utf-8")
+
+    assert 'skillevaluator_python="$(dirname "$(readlink -f "$(command -v skillevaluator)")")/python"' in ci
+    assert "\"$skillevaluator_python\" - <<'PY'" in ci
+    assert "python3 - <<'PY'" not in ci
+
+
 def test_harbor_atif_and_agent_eval_alias_are_defined() -> None:
     harbor_url = "https://github.com/harbor-framework/harbor"
     harbor_pages = [

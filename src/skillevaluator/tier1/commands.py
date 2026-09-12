@@ -21,7 +21,7 @@ from skillevaluator.constants import (
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
-from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
 from skillevaluator.validators.base import continue_on_failure_scope
@@ -72,6 +72,7 @@ REPORTERS = {
     "json": JSONReporter,
     "html": HTMLReporter,
     "markdown": MarkdownReporter,
+    "sarif": SARIFReporter,
 }
 
 
@@ -405,6 +406,8 @@ def emit_reports(
     expected_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
+    sarif_scan_root: Path | None = None,
+    sarif_repository_root: Path | None = None,
 ) -> bool:
     """Render reports and return whether every result passed.
 
@@ -433,6 +436,11 @@ def emit_reports(
                 content_label=content_label,
                 tabs=html_tabs,
                 expected_skill_name=expected_skill_name,
+            )
+        elif fmt == "sarif":
+            reporter = reporter_cls(
+                workspace_root=sarif_repository_root,
+                scan_root=sarif_scan_root,
             )
         else:
             reporter = reporter_cls(expected_skill_name=expected_skill_name)

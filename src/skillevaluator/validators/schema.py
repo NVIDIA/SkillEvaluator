@@ -180,7 +180,7 @@ class SchemaValidator(ValidatorBase):
         file_path = str(skill_md)
 
         try:
-            content = skill_md.read_text(encoding="utf-8")
+            content = skill_md.read_text(encoding="utf-8-sig")
         except Exception as e:
             result.add_finding(
                 Finding(
@@ -440,7 +440,7 @@ class SchemaValidator(ValidatorBase):
         file_path = str(skill_md)
 
         try:
-            line_count = len(skill_md.read_text(encoding="utf-8").splitlines())
+            line_count = len(skill_md.read_text(encoding="utf-8-sig").splitlines())
             if line_count > MAX_SKILL_MD_LINES:
                 result.add_finding(
                     Finding(
@@ -491,7 +491,7 @@ class SchemaValidator(ValidatorBase):
         file_path = str(skill_md)
 
         try:
-            content = skill_md.read_text(encoding="utf-8")
+            content = skill_md.read_text(encoding="utf-8-sig")
         except Exception:
             return result
 

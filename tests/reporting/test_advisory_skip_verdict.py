@@ -1134,6 +1134,7 @@ def test_markdown_flattens_untrusted_tier3_suggestion_markup() -> None:
             "evidence_refs": [
                 {
                     "kind": "trace`\n## Forged evidence section",
+                    "evidence_id": 10**10000,
                     "json_pointer": "/x`\n## Forged pointer section",
                     "excerpt": "excerpt\n## Forged excerpt section",
                 }

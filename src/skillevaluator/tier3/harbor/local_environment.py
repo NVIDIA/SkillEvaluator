@@ -1013,6 +1013,9 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         for key, value in env.items():
             normalized = key.upper()
             if normalized in _BLOCKED_COMMAND_ENV_NAMES or normalized.startswith(_BLOCKED_COMMAND_ENV_PREFIXES):
+                if value == "":
+                    # The adapter emits empty process-control values to clear inherited loader configuration.
+                    continue
                 raise ValueError(
                     f"environment variable {key} can execute or alter code before confinement and is not allowed"
                 )

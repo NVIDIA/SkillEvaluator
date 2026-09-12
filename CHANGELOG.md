@@ -70,6 +70,9 @@ All notable changes to SkillEvaluator are documented in this file.
   instead of replacing their unused `tests/skill_evaluator/` package.
   All native grading modes reject Windows agent or effective verifier
   environments until evaluator projection and verifier scripts are OS-aware.
+- `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
+  `reward.json` `entry_id` metadata, using folder-name parsing only as an
+  unambiguous legacy fallback.
 - Tier 3 local mode now drops evaluator-managed empty process-loader resets
   while continuing to reject non-empty loader overrides, allowing generated
   tasks to reach agent execution

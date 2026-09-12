@@ -298,3 +298,17 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
+
+
+def test_parse_skill_includes_tools_dir_scripts(tmp_path):
+    skill = tmp_path / "tools-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: tools-skill\ndescription: Spec-compliant executables live in tools/.\n---\n# x\n",
+        encoding="utf-8",
+    )
+    tools = skill / "tools"
+    tools.mkdir()
+    (tools / "run.py").write_text("print('hello')\n", encoding="utf-8")
+    parsed = generate_dataset._parse_skill(skill)
+    assert parsed["scripts"] == ["run.py"]

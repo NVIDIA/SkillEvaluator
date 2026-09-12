@@ -34,6 +34,18 @@ logger = get_logger(__name__)
 _SPDX_PATTERN = re.compile(SPDX_LICENSE_PATTERN, re.IGNORECASE)
 _LICENSE_SUFFIX_PATTERN = re.compile(r"(-license|-licence)$")
 _THE_PREFIX_PATTERN = re.compile(r"^(the-)?")
+_SPDX_EXPRESSION_SPLIT = re.compile(r"\s+(?:OR|AND|WITH)\s+", re.IGNORECASE)
+
+
+def _strip_spdx_capture(raw: str) -> str:
+    """Drop inline comment terminators and trailing source after the SPDX value."""
+    raw = raw.split("#", 1)[0]
+    for marker in ("*/", "-->"):
+        idx = raw.find(marker)
+        if idx != -1:
+            raw = raw[:idx]
+    return raw.strip()
+
 
 # File reference indicators in license field values
 _FILE_REFERENCE_KEYWORDS = frozenset(["see ", "refer to ", "license.txt", "license.md", "copying"])
@@ -510,16 +522,28 @@ class LicenseValidator(ValidatorBase):
             with file_path.open(encoding="utf-8", errors="ignore") as f:
                 header = "".join(islice(f, LICENSE_HEADER_SCAN_LINES))
                 if match := _SPDX_PATTERN.search(header):
-                    return match.group(1).strip()
+                    raw = _strip_spdx_capture(match.group(1))
+                    return raw or None
         except Exception as e:
             logger.debug("Could not scan %s: %s", file_path, e)
         return None
+
+    @staticmethod
+    def _expression_symbols(license_id: str) -> list[str]:
+        """Split an SPDX expression into identifiers, keeping hyphenated ids intact."""
+        stripped = license_id.replace("(", " ").replace(")", " ").strip()
+        return [part.strip() for part in _SPDX_EXPRESSION_SPLIT.split(stripped) if part.strip()]
 
     def _validate_license(self, detection: LicenseDetection, result: ValidationResult) -> None:
         """Validate detected license against allowlist/blocklist."""
         license_id = detection.license_id
         if not license_id:
             result.add_warning("License detection returned empty identifier")
+            return
+
+        symbols = self._expression_symbols(license_id)
+        if len(symbols) > 1:
+            self._validate_license_expression(detection, symbols, result)
             return
 
         normalized = self._normalize_license_id(license_id)
@@ -533,6 +557,32 @@ class LicenseValidator(ValidatorBase):
         else:
             self._set_license_metadata(result, detection, "unknown")
             self._handle_unknown_license(result, license_id, detection.file_path)
+
+    def _validate_license_expression(
+        self,
+        detection: LicenseDetection,
+        symbols: list[str],
+        result: ValidationResult,
+    ) -> None:
+        """Fail closed if any SPDX expression symbol is blocked or unknown when required."""
+        blocked = [symbol for symbol in symbols if self._normalize_license_id(symbol) in self._normalized_blocklist]
+        if blocked:
+            self._set_license_metadata(result, detection, "blocked")
+            result.add_message(
+                f"SPDX expression '{detection.license_id}' includes blocked license '{blocked[0]}'"
+            )
+            self._add_blocked_license_finding(result, blocked[0], detection.file_path)
+            return
+        if all(self._normalize_license_id(symbol) in self._normalized_allowlist for symbol in symbols):
+            self._set_license_metadata(result, detection, "allowed")
+            result.add_message(f"License: {detection.license_id} (ALLOWED - permissive)")
+            return
+        unknown = next(
+            (symbol for symbol in symbols if self._normalize_license_id(symbol) not in self._normalized_allowlist),
+            detection.license_id,
+        )
+        self._set_license_metadata(result, detection, "unknown")
+        self._handle_unknown_license(result, unknown, detection.file_path)
 
     @staticmethod
     def _set_license_metadata(result: ValidationResult, detection: LicenseDetection, status: str) -> None:

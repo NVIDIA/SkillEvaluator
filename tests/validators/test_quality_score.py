@@ -199,6 +199,14 @@ class TestSkillTypeDetection:
         (sd / "run.py").write_text("print('hi')")
         assert QualityScoreValidator.detect_skill_type(d) == "script-based"
 
+    def test_tools_dir_is_script_based(self, tmp_path):
+        d = tmp_path / "tooled"
+        d.mkdir()
+        tools = d / "tools"
+        tools.mkdir()
+        (tools / "run.py").write_text("print('hi')")
+        assert QualityScoreValidator.detect_skill_type(d) == "script-based"
+
     def test_lib_based(self, tmp_path):
         d = tmp_path / "lib"
         d.mkdir()
@@ -312,6 +320,33 @@ class TestQualityScoreValidator:
 
         result = QualityScoreValidator(min_score=0).validate(skill_dir)
 
+        assert any("Description contains XML tags" in finding.message for finding in result.findings)
+
+    def test_bom_prefixed_manifest_still_parses_frontmatter(self, tmp_path):
+        """A UTF-8 BOM must not hide frontmatter from the quality parser."""
+        skill_dir = tmp_path / "bom-xml-desc"
+        skill_dir.mkdir()
+        body = (
+            "---\n"
+            "name: bom-xml-desc\n"
+            "description: \"A skill <script>alert('xss')</script> with injected tags\"\n"
+            "metadata:\n"
+            "  author: Test User <test@nvidia.com>\n"
+            "---\n\n"
+            "# XML Description\n\n"
+            "## Instructions\n\n1. Inspect frontmatter quality findings.\n\n"
+            "## Examples\n\n"
+            "```text\n"
+            "Validate the skill.\n"
+            "```\n"
+        )
+        (skill_dir / "SKILL.md").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+        scores = result.metadata["quality_scores"]
+
+        assert scores["metrics"]["has_frontmatter"] is True
+        assert scores["metrics"]["frontmatter_tokens"] > 0
         assert any("Description contains XML tags" in finding.message for finding in result.findings)
 
     def test_unclosed_xml_tag_in_description_remains_quality_error(self, tmp_path):

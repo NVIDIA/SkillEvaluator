@@ -358,6 +358,18 @@ def test_no_llm_negative_case_uses_author_provided_negative_section():
     assert negative["question"] == "What is the capital of Peru?"
 
 
+def test_no_llm_negative_case_omits_media_transcoder_without_author_negative():
+    skill = {
+        "name": "media-transcoder",
+        "description": "Changes sound recordings between lossless formats while retaining tags",
+        "scripts": [],
+        "eval_prompt": "",
+    }
+    cases = _generate_full(skill)
+    assert all(not c["id"].endswith("-neg-001") for c in cases)
+    assert len(cases) == 3
+
+
 def test_no_llm_omits_negative_when_every_candidate_overlaps():
     """If every canned negative would be on-skill, drop the negative bucket."""
     skill = {

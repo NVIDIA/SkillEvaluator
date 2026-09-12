@@ -222,13 +222,29 @@ _CAPABILITY_KEYWORDS: dict[str, frozenset[str]] = {
             "meeting",
         }
     ),
-    "audio": frozenset({"wav", "flac", "audio", "metadata", "convert", "conversion"}),
+    "audio": frozenset(
+        {
+            "wav",
+            "flac",
+            "audio",
+            "metadata",
+            "convert",
+            "conversion",
+            "transcode",
+            "transcoder",
+            "lossless",
+            "recording",
+            "recordings",
+            "sound",
+            "media",
+        }
+    ),
     "cooking": frozenset({"bread", "dough", "proof", "recipe", "bake", "temperature"}),
     "academic": frozenset({"bibtex", "cite", "citation", "journal", "preprint", "acs"}),
     "astronomy": frozenset({"orbital", "europa", "jupiter", "moon", "planet"}),
     "plumbing": frozenset({"faucet", "washer", "ceramic", "compression", "plumbing"}),
 }
-_AMBIGUOUS_NEGATIVE_CAPABILITY_GROUPS = frozenset({"planning"})
+_AMBIGUOUS_NEGATIVE_CAPABILITY_GROUPS = frozenset({"planning", "audio"})
 _NEGATIVE_TOKEN_STOPWORDS = frozenset(
     {
         "what",
@@ -294,9 +310,7 @@ def _question_matches_skill_domain(question: str, skill: dict[str, Any]) -> bool
 
     skill_groups = _skill_capability_groups(skill)
     question_groups = _text_capability_groups(question)
-    if skill_groups & question_groups:
-        return True
-    return False
+    return bool(skill_groups & question_groups)
 
 
 def _template_negative_question(skill: dict[str, Any], eval_hints: dict[str, list[str]]) -> str | None:

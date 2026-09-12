@@ -10,6 +10,7 @@ import json
 import logging
 import math
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -329,7 +330,10 @@ def _report_options(func):
     )(func)
 
 
-_last_validate_json_report: str | None = None
+_validate_json_report_var: ContextVar[str | None] = ContextVar(
+    "_validate_json_report_var",
+    default=None,
+)
 
 
 def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -> tuple[str, ...]:
@@ -340,14 +344,12 @@ def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -
 
 
 def _record_validate_json_report(report_name: str | None) -> None:
-    global _last_validate_json_report
-    _last_validate_json_report = report_name
+    _validate_json_report_var.set(report_name)
 
 
 def _consume_validate_json_report() -> str | None:
-    global _last_validate_json_report
-    report_name = _last_validate_json_report
-    _last_validate_json_report = None
+    report_name = _validate_json_report_var.get()
+    _validate_json_report_var.set(None)
     return report_name
 
 

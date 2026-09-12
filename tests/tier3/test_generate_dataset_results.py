@@ -6,6 +6,7 @@ import shutil
 import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +36,168 @@ def test_discover_trajectories_uses_env_results_root(tmp_path, monkeypatch):
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
 
     assert _discover_trajectories(skill) == {"case-001": trajectory}
+
+
+def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, monkeypatch):
+    """Harbor persists trials as ``{case_id}__{suffix}``; refine looks up by case id."""
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / "demo-001__Lmi47iy"
+    trial.mkdir(parents=True)
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    trial.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": "demo-001__Lmi47iy",
+                "config": {"task": {"path": "tasks/demo-001"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
+
+    found = _discover_trajectories(skill)
+    assert "demo-001" in found
+    assert "demo-001__Lmi47iy" not in found
+    assert found["demo-001"] == trajectory
+
+
+def _write_results_trial(
+    tmp_path: Path,
+    *,
+    skill_name: str,
+    trial_folder: str,
+    trajectory: dict[str, object],
+    reward: dict[str, object] | None = None,
+) -> Path:
+    skill = tmp_path / skill_name
+    skill.mkdir(exist_ok=True)
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / skill_name / run_id
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / trial_folder
+    trial.mkdir(parents=True)
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    if reward is not None:
+        trial.joinpath("reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / skill_name / "latest").symlink_to(run_id)
+    return skill
+
+
+def test_discover_trajectories_prefers_reward_entry_id_over_folder_prefix(tmp_path, monkeypatch):
+    """Stop-on-pass folders must not collapse to the job prefix when entry_id is present."""
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    skill = _write_results_trial(
+        tmp_path,
+        skill_name="demo",
+        trial_folder="harbor-job__demo-001__Lmi47iy",
+        trajectory=trajectory,
+        reward={"entry_id": "demo-001", "overall": 1.0},
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["demo-001"]
+    assert found["demo-001"] == trajectory
+
+
+def test_discover_trajectories_keeps_distinct_case_ids_with_double_underscore(tmp_path, monkeypatch):
+    """Case ids containing ``__`` must not collapse to a shared prefix without metadata."""
+    trajectory_a = {"steps": [{"message": "a"}]}
+    trajectory_b = {"steps": [{"message": "b"}]}
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trials_dir = run_dir / "claude-code" / "with-skill" / "trials"
+    for folder, traj, entry_id in (
+        ("case__one", trajectory_a, "case__one"),
+        ("case__two", trajectory_b, "case__two"),
+    ):
+        trial = trials_dir / folder
+        trial.mkdir(parents=True)
+        trial.joinpath("trajectory.json").write_text(json.dumps(traj), encoding="utf-8")
+        trial.joinpath("reward.json").write_text(json.dumps({"entry_id": entry_id}), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
+
+    found = _discover_trajectories(skill)
+    assert set(found) == {"case__one", "case__two"}
+    assert found["case__one"] == trajectory_a
+    assert found["case__two"] == trajectory_b
+
+
+def test_discover_trajectories_ambiguous_folder_without_reward_uses_full_name(tmp_path, monkeypatch):
+    """Without reward metadata, ambiguous ``__`` folders keep the full directory name."""
+    trajectory = {"steps": [{"tool_calls": []}]}
+    skill = _write_results_trial(
+        tmp_path,
+        skill_name="demo",
+        trial_folder="case__one",
+        trajectory=trajectory,
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["case__one"]
+
+
+def test_discover_trajectories_preserves_versioned_case_id_without_reward(tmp_path, monkeypatch):
+    """IDs like ``case__v2`` must not be truncated when only the folder name is present."""
+    trajectory = {"steps": [{"tool_calls": []}]}
+    skill = _write_results_trial(
+        tmp_path,
+        skill_name="demo",
+        trial_folder="case__v2",
+        trajectory=trajectory,
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["case__v2"]
+
+
+def test_discover_trajectories_resolves_shortuuid_folder_from_result_json(tmp_path, monkeypatch):
+    """All-letter Harbor tails resolve via result.json task metadata, not suffix guessing."""
+    trajectory = {"steps": [{"tool_calls": []}]}
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    run_id = "20260709_120000"
+    run_dir = results_root / "demo" / run_id
+    trial_folder = "case-001__LRZctSP"
+    trial = run_dir / "claude-code" / "with-skill" / "trials" / trial_folder
+    trial.mkdir(parents=True)
+    trial.joinpath("trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    trial.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_folder,
+                "config": {"task": {"path": "tasks/case-001"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (results_root / "demo" / "latest").symlink_to(run_id)
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
+
+    found = _discover_trajectories(skill)
+    assert list(found) == ["case-001"]
 
 
 def test_discover_trajectories_results_dir_overrides_env(tmp_path, monkeypatch):

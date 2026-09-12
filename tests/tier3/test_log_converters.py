@@ -213,6 +213,65 @@ def test_codex_mcp_tool_call_preserves_result():
     assert "found skill" in tcs[0]["observation"]
 
 
+def test_codex_command_execution_preserves_failed_terminal_evidence():
+    log = (
+        '{"type":"item.completed","item":{"type":"command_execution","id":"cmd-1",'
+        '"command":false,"exit_code":1,"status":"failed","aggregated_output":""}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    obs = tcs[0]["observation"]
+    assert "status=failed" in obs
+    assert "exit_code=1" in obs
+
+
+def test_codex_file_change_preserves_status_and_error():
+    log = (
+        '{"type":"item.completed","item":{"type":"file_change","id":"fc-1",'
+        '"changes":[{"path":"/workspace/output/real.py","kind":"add"}],'
+        '"status":"failed","error":{"message":"disk full"}}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    obs = tcs[0]["observation"]
+    assert "status=failed" in obs
+    assert "disk full" in obs
+
+
+def test_codex_mcp_tool_call_string_error():
+    log = (
+        '{"type":"item.completed","item":{"type":"mcp_tool_call","id":"mcp-2",'
+        '"tool":"lookup","arguments":{},"error":"server unavailable","status":"failed"}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    obs = tcs[0]["observation"]
+    assert "server unavailable" in obs
+    assert "status=failed" in obs
+
+
+def test_opencode_tool_error_retains_status_with_partial_output():
+    log = (
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c-err",'
+        '"state":{"status":"error","output":"partial log line",'
+        '"error":{"message":"command aborted"}}}}\n'
+    )
+    traj = synthetic_trajectory_from_opencode_json(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    obs = tcs[0]["observation"]
+    assert "status=error" in obs
+    assert "partial log line" in obs
+    assert "command aborted" in obs
+
+
 def test_codex_plain_text_errors_return_none():
     text = "ERROR responses_websocket: HTTP error: 405 Method Not Allowed\n"
     assert synthetic_trajectory_from_codex_txt(text) is None

@@ -409,18 +409,21 @@ def _normalize_opencode_tool(tool_name: str, raw_input: Any) -> tuple[str, dict[
     return function_name, arguments
 
 
-def _opencode_output_text(state: dict[str, Any]) -> str:
+def _opencode_output_payload(state: dict[str, Any]) -> str:
     output = state.get("output")
-    if output is not None:
-        if isinstance(output, str):
-            return output
-        if isinstance(output, dict):
-            message = output.get("message") or output.get("text")
-            if message is not None:
-                return str(message)
-            return json.dumps(output, ensure_ascii=False)
-        return str(output)
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        message = output.get("message") or output.get("text")
+        if message is not None:
+            return str(message)
+        return json.dumps(output, ensure_ascii=False)
+    return str(output)
 
+
+def _opencode_error_text(state: dict[str, Any]) -> str:
     error = state.get("error")
     if error is None:
         return ""
@@ -437,6 +440,20 @@ def _opencode_output_text(state: dict[str, Any]) -> str:
             return str(message)
         return json.dumps(error, ensure_ascii=False)
     return str(error)
+
+
+def _opencode_tool_observation(state: dict[str, Any]) -> str:
+    parts: list[str] = []
+    status = state.get("status")
+    if status is not None and str(status).strip():
+        parts.append(f"status={status}")
+    output_text = _opencode_output_payload(state)
+    if output_text.strip():
+        parts.append(output_text)
+    error_text = _opencode_error_text(state)
+    if error_text.strip():
+        parts.append(error_text)
+    return "\n".join(parts).strip()[:8000]
 
 
 def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
@@ -513,12 +530,12 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
             ],
             "observation": {"results": []},
         }
-        output_text = _opencode_output_text(state)
-        if output_text:
+        observation_text = _opencode_tool_observation(state)
+        if observation_text:
             step["observation"]["results"].append(
                 {
                     "source_call_id": call_id,
-                    "content": output_text[:8000],
+                    "content": observation_text,
                 }
             )
         steps.append(step)
@@ -584,33 +601,60 @@ def _codex_thread_item(evt: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _codex_mcp_observation(item: dict[str, Any]) -> str:
-    result = item.get("result")
-    if isinstance(result, dict):
-        content = result.get("content")
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict):
-                    text = block.get("text")
-                    parts.append(str(text) if text is not None else json.dumps(block, ensure_ascii=False))
-                else:
-                    parts.append(str(block))
-            joined = "\n".join(part for part in parts if part).strip()
-            if joined:
-                return joined[:8000]
-        structured = result.get("structured_content")
-        if structured is not None:
-            return json.dumps(structured, ensure_ascii=False)[:8000]
-        return json.dumps(result, ensure_ascii=False)[:8000]
-
+def _codex_terminal_evidence_lines(item: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    status = item.get("status")
+    if status is not None and str(status).strip():
+        lines.append(f"status={status}")
+    exit_code = item.get("exit_code")
+    if exit_code is not None:
+        lines.append(f"exit_code={exit_code}")
     error = item.get("error")
-    if isinstance(error, dict):
-        message = error.get("message")
-        if message is not None:
-            return str(message)[:8000]
-        return json.dumps(error, ensure_ascii=False)[:8000]
-    return ""
+    if error is not None:
+        if isinstance(error, dict):
+            message = error.get("message")
+            lines.append(str(message) if message is not None else json.dumps(error, ensure_ascii=False))
+        else:
+            lines.append(str(error))
+    output = item.get("aggregated_output")
+    if output is not None and str(output).strip():
+        lines.append(str(output))
+    return lines
+
+
+def _codex_observation_content(item: dict[str, Any], *, include_result: bool = False) -> str:
+    parts = _codex_terminal_evidence_lines(item)
+    if include_result:
+        result_text = _codex_mcp_result_text(item)
+        if result_text:
+            parts.append(result_text)
+    return "\n".join(part for part in parts if part).strip()[:8000]
+
+
+def _codex_mcp_result_text(item: dict[str, Any]) -> str:
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if isinstance(content, list):
+        blocks: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                blocks.append(str(text) if text is not None else json.dumps(block, ensure_ascii=False))
+            else:
+                blocks.append(str(block))
+        joined = "\n".join(part for part in blocks if part).strip()
+        if joined:
+            return joined
+    structured = result.get("structured_content")
+    if structured is not None:
+        return json.dumps(structured, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _codex_mcp_observation(item: dict[str, Any]) -> str:
+    return _codex_observation_content(item, include_result=True)
 
 
 def _codex_file_change_step(item: dict[str, Any], evt: dict[str, Any], tool_index: int) -> dict[str, Any] | None:
@@ -634,12 +678,21 @@ def _codex_file_change_step(item: dict[str, Any], evt: dict[str, Any], tool_inde
         )
     if not tool_calls:
         return None
-    return {
+    step: dict[str, Any] = {
         "source": "agent",
         "message": "",
         "tool_calls": tool_calls,
         "observation": {"results": []},
     }
+    evidence = _codex_observation_content(item)
+    if evidence:
+        step["observation"]["results"].append(
+            {
+                "source_call_id": tool_calls[0]["tool_call_id"],
+                "content": evidence,
+            }
+        )
+    return step
 
 
 def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
@@ -696,8 +749,10 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
             continue
 
         if item_type == "command_execution":
-            command = str(item.get("command") or "").strip()
-            if not command:
+            command_raw = item.get("command")
+            command = "" if command_raw is None else str(command_raw).strip()
+            evidence = _codex_observation_content(item)
+            if not command and not evidence:
                 continue
             saw_content = True
             call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
@@ -714,12 +769,11 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
                 ],
                 "observation": {"results": []},
             }
-            output = item.get("aggregated_output")
-            if output is not None:
+            if evidence:
                 step["observation"]["results"].append(
                     {
                         "source_call_id": call_id,
-                        "content": str(output)[:8000],
+                        "content": evidence,
                     }
                 )
             steps.append(step)

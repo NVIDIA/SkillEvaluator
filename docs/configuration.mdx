@@ -238,6 +238,16 @@ Names that control the launcher, credentials, or dynamic runtime are rejected:
 | Tracing and tooling | `OTEL_*`, `SKILL_EVAL_*`, `SKILLEVALUATOR_*`, `GIT_*`, `NODE_*`, `PIP_*`, `UV_*` |
 
 Configure the selected Harbor backend in the host environment instead.
+Non-secret constructor kwargs are only for Harbor-native non-Docker backends.
+They are operator-only: use repeatable `--environment-kwarg KEY=VALUE` / `--ek
+KEY=VALUE` flags on `tier3 evaluate`, `doctor`, and `health-check`.
+Skill-owned `evals/config.yml` cannot set them. `docker` and `local` reject any
+environment kwargs. Harbor runtime-policy fields for resource overrides,
+mounts, networks, extra Compose definitions, SkillEvaluator's own lifecycle
+fields (`delete`, `force_build`, `keep_containers`), and Kubernetes pod security
+are reserved. Other backend-specific timeout and retention knobs remain
+operator-owned. Never pass secrets there; credentials remain host environment
+variables.
 
 ## SkillSpector bridge
 

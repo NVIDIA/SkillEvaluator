@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import importlib
 import importlib.util
@@ -20,6 +21,11 @@ from types import SimpleNamespace
 import pytest
 
 
+def _initialize_harbor_context(environment: object) -> None:
+    environment._output_callbacks = contextvars.ContextVar("test_docker_output_callbacks", default=())
+    environment._exec_env_overlays = contextvars.ContextVar("test_docker_exec_env_overlays", default=())
+
+
 def test_secure_docker_exec_streams_environment_without_host_file_or_argv_values(
     monkeypatch,
     tmp_path: Path,
@@ -28,6 +34,7 @@ def test_secure_docker_exec_streams_environment_without_host_file_or_argv_values
     assert importlib.util.find_spec(module_name) is not None, "secure Docker environment module is missing"
     module = importlib.import_module(module_name)
     environment = object.__new__(module.SkillEvaluatorSecureDockerEnvironment)
+    _initialize_harbor_context(environment)
     environment._persistent_env = {"PERSISTENT_TOKEN": "persistent-secret-value"}
     environment.default_user = "1000"
     environment.task_env_config = SimpleNamespace(workdir="/workspace")
@@ -45,16 +52,18 @@ def test_secure_docker_exec_streams_environment_without_host_file_or_argv_values
         command: list[str],
         check: bool = True,
         timeout_sec: int | None = None,
+        stdin_data: bytes | None = None,
+        on_output: object | None = None,
         *,
-        stdin_bytes: bytes | None = None,
-        redact_values: set[str] | None = None,
+        additional_secret_values: set[str] | None = None,
+        exact_secret_values: set[str] | None = None,
         stop_main_on_interrupt: bool = False,
     ):
-        del check, timeout_sec
+        del check, timeout_sec, on_output, exact_secret_values
         assert stop_main_on_interrupt is ("if ! ." in " ".join(command))
-        if stdin_bytes is not None:
-            handoff_payloads.append(stdin_bytes.decode("utf-8"))
-            assert redact_values is not None
+        if stdin_data is not None:
+            handoff_payloads.append(stdin_data.decode("utf-8"))
+            assert additional_secret_values is not None
         docker_commands.append(command)
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 
@@ -88,6 +97,7 @@ def test_secure_docker_exec_redacts_persistent_and_per_call_credentials_from_all
 ) -> None:
     module = importlib.import_module("skillevaluator.tier3.harbor.secure_docker_environment")
     environment = object.__new__(module.SkillEvaluatorSecureDockerEnvironment)
+    _initialize_harbor_context(environment)
     persistent_secret = "persistent-credential-for-redaction"
     per_call_secret = "per-call-credential-for-redaction"
     environment._persistent_env = {"PERSISTENT_TOKEN": persistent_secret}
@@ -98,28 +108,56 @@ def test_secure_docker_exec_redacts_persistent_and_per_call_credentials_from_all
     environment.environment_name = "secure-redaction-test"
     environment.environment_dir = tmp_path
     environment._resources_compose_path = None
+    environment._env_compose_path = None
     environment._mounts_compose_path = None
     environment._use_prebuilt = True
     environment._is_windows_container = False
     environment.extra_docker_compose_paths = []
     environment._network_policy = SimpleNamespace(network_mode="public")
+    environment._enable_egress_control = False
+    environment._egress_control_services_compose_path = None
     environment._compose_env_vars = lambda **_kwargs: {"PATH": "/usr/bin"}
+    environment._compose_infra_env_vars = dict
+    environment._windows_container_name = None
 
     async def fake_upload_file(_source_path: Path | str, _target_path: str) -> None:
         return None
+
+    class FakeInput:
+        def write(self, _data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class FakeOutput:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        async def read(self, _size: int) -> bytes:
+            payload, self._payload = self._payload, b""
+            return payload
 
     class FakeProcess:
         returncode = 0
 
         def __init__(self, *, expose_secrets: bool) -> None:
-            self._expose_secrets = expose_secrets
+            payload = b""
+            if expose_secrets:
+                output = f"stdout {persistent_secret} {per_call_secret}".encode()
+                error = f"stderr {per_call_secret} {persistent_secret}".encode()
+                payload = output + error
+            self.stdin = FakeInput()
+            self.stdout = FakeOutput(payload)
 
-        async def communicate(self, _input: bytes | None = None) -> tuple[bytes, bytes]:
-            if not self._expose_secrets:
-                return b"", b""
-            output = f"stdout {persistent_secret} {per_call_secret}".encode()
-            error = f"stderr {per_call_secret} {persistent_secret}".encode()
-            return output, error
+        async def wait(self) -> int:
+            return self.returncode
 
     async def create_subprocess(*args: object, **_kwargs: object) -> FakeProcess:
         rendered = " ".join(str(arg) for arg in args)
@@ -149,10 +187,11 @@ def test_nvidia_build_docker_command_uses_secure_environment_and_bridge() -> Non
         agent_import_path=agent_import_path,
     )
 
-    assert command[command.index("--agent-import-path") + 1] == agent_import_path
-    assert command[command.index("--environment-import-path") + 1] == runner.SECURE_DOCKER_ENV_IMPORT_PATH
+    assert "--agent-import-path" not in command
+    assert "--environment-import-path" not in command
     assert "-a" not in command
-    assert "--env" not in command
+    assert command[command.index("--agent") + 1] == agent_import_path
+    assert command[command.index("--env") + 1] == runner.SECURE_DOCKER_ENV_IMPORT_PATH
 
 
 def test_secure_docker_exec_cleans_remote_handoff_when_streaming_reports_failure(
@@ -162,6 +201,7 @@ def test_secure_docker_exec_cleans_remote_handoff_when_streaming_reports_failure
     del tmp_path
     module = importlib.import_module("skillevaluator.tier3.harbor.secure_docker_environment")
     environment = object.__new__(module.SkillEvaluatorSecureDockerEnvironment)
+    _initialize_harbor_context(environment)
     environment._persistent_env = {}
     environment.default_user = "1000"
     environment.task_env_config = SimpleNamespace(workdir="/workspace")
@@ -172,11 +212,11 @@ def test_secure_docker_exec_cleans_remote_handoff_when_streaming_reports_failure
         _command: list[str],
         _check: bool = True,
         _timeout_sec: int | None = None,
-        *,
-        stdin_bytes: bytes | None = None,
+        stdin_data: bytes | None = None,
+        _on_output: object | None = None,
         **_kwargs,
     ) -> SimpleNamespace:
-        if stdin_bytes is not None:
+        if stdin_data is not None:
             raise ConnectionError("docker exec disconnected after creating the file")
         return SimpleNamespace(stdout="", stderr=None, return_code=0)
 
@@ -197,6 +237,7 @@ def test_secure_docker_exec_repeated_cancellation_does_not_interrupt_handoff_cle
 ) -> None:
     module = importlib.import_module("skillevaluator.tier3.harbor.secure_docker_environment")
     environment = object.__new__(module.SkillEvaluatorSecureDockerEnvironment)
+    _initialize_harbor_context(environment)
     environment._persistent_env = {}
     environment.default_user = "1000"
     environment.task_env_config = SimpleNamespace(workdir="/workspace")
@@ -212,11 +253,11 @@ def test_secure_docker_exec_repeated_cancellation_does_not_interrupt_handoff_cle
             _command: list[str],
             _check: bool = True,
             _timeout_sec: int | None = None,
-            *,
-            stdin_bytes: bytes | None = None,
+            stdin_data: bytes | None = None,
+            _on_output: object | None = None,
             **_kwargs,
         ) -> SimpleNamespace:
-            if stdin_bytes is not None:
+            if stdin_data is not None:
                 upload_started.set()
                 await asyncio.Event().wait()
             return SimpleNamespace(stdout="", stderr=None, return_code=0)
@@ -246,6 +287,7 @@ def test_secure_docker_exec_repeated_cancellation_does_not_interrupt_handoff_cle
 def test_secure_docker_exec_fails_closed_when_final_secret_cleanup_fails(monkeypatch) -> None:
     module = importlib.import_module("skillevaluator.tier3.harbor.secure_docker_environment")
     environment = object.__new__(module.SkillEvaluatorSecureDockerEnvironment)
+    _initialize_harbor_context(environment)
     environment._persistent_env = {}
     environment.default_user = "1000"
     environment.task_env_config = SimpleNamespace(workdir="/workspace")
@@ -258,12 +300,21 @@ def test_secure_docker_exec_fails_closed_when_final_secret_cleanup_fails(monkeyp
         command: list[str],
         check: bool = True,
         timeout_sec: int | None = None,
+        stdin_data: bytes | None = None,
+        on_output: object | None = None,
         *,
-        stdin_bytes: bytes | None = None,
-        redact_values: set[str] | None = None,
+        additional_secret_values: set[str] | None = None,
+        exact_secret_values: set[str] | None = None,
         stop_main_on_interrupt: bool = False,
     ):
-        del check, timeout_sec, stdin_bytes, redact_values
+        del (
+            check,
+            timeout_sec,
+            stdin_data,
+            on_output,
+            additional_secret_values,
+            exact_secret_values,
+        )
         assert stop_main_on_interrupt is ("if ! ." in " ".join(command))
         return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
 
@@ -309,10 +360,10 @@ def test_harbor_subprocess_receives_nvidia_key_only_over_stdin(monkeypatch, tmp_
         assert environment["NVIDIA_API_KEY"] == runner._NVIDIA_BUILD_STDIN_SENTINEL
         assert environment[runner._NVIDIA_BUILD_KEY_STDIN_ENV] == "1"
         assert runner._NVIDIA_BUILD_KEY_FILE_ENV not in environment
-        assert kwargs["input"] == secret
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert kwargs["stdin_text"] == secret
+        return runner._BoundedHarborProcessResult(returncode=0, output_tail="", output_exceeded=False)
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, ""))
 
     ok, detail = runner._run_harbor(
@@ -356,11 +407,15 @@ def test_harbor_subprocess_redacts_stdin_key_from_early_failure(monkeypatch, tmp
     secret = "nvidia-real-secret-value-for-test"
 
     def fake_run(command, **kwargs):
-        assert kwargs["input"] == secret
+        assert kwargs["stdin_text"] == secret
         assert secret not in kwargs["env"].values()
-        return SimpleNamespace(returncode=1, stdout="", stderr=f"provider rejected {secret}")
+        return runner._BoundedHarborProcessResult(
+            returncode=1,
+            output_tail=f"provider rejected {secret}",
+            output_exceeded=False,
+        )
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_run)
 
     ok, detail = runner._run_harbor(
         dataset=tmp_path / "dataset",

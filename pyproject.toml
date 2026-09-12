@@ -51,7 +51,7 @@ dependencies = [
 llm = [
     "anthropic>=0.83.0",
     "boto3>=1.34.0",
-    "litellm>=1.83.10,<1.89.0.dev0",
+    "litellm>=1.92.0,<1.94.0.dev0",
     "openai>=2.21.0",
 ]
 # Tier 2 intra-skill deduplication and local-catalog inter-skill similarity.
@@ -61,7 +61,7 @@ tier2 = [
 # Tier 3 live agent evaluation through Harbor's native environments.
 tier3 = [
     "skillevaluator[llm]",
-    "harbor==0.13.2",
+    "harbor==0.22.0",
     # CVE-2026-59950, CVE-2026-52870, and CVE-2026-52869 fixed floor.
     "mcp>=1.28.1,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.

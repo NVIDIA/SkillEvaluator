@@ -604,6 +604,7 @@ def evaluate(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
@@ -658,6 +659,9 @@ def evaluate(
             raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
 
         agent_models = parse_agent_model_overrides(agent_model)
+        from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
         if unknown_model_agents:
             raise ValueError(
@@ -687,6 +691,7 @@ def evaluate(
             agent_runtime_preflight=agent_runtime_preflight,
             env_mode=env_mode,
             env_mode_source="CLI",
+            environment_kwargs=environment_kwargs,
             timeout_multiplier=timeout_multiplier,
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
@@ -705,6 +710,7 @@ def doctor(
     *,
     agents: str | None,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
 ) -> int:
@@ -780,7 +786,21 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agent_list)
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+
+    try:
+        environment_kwargs = parse_environment_kwarg_overrides(environment_kwarg, env_mode=env_mode)
+    except ValueError as exc:
+        environment_kwargs = {}
+        prereq_errors = [str(exc)]
+    else:
+        prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
+        prereq_errors = _check_prerequisites(
+            env_mode=env_mode,
+            agents=agent_list,
+            environment_kwargs=environment_kwargs,
+            subprocess_env=prerequisite_subprocess_env,
+        )
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))

@@ -9,3 +9,17 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ['''^sk-AbCdEf1234567890$''']
 paths = ['''^tests/test_tier3_(progress|result_display)\.py$''']
+
+[[allowlists]]
+description = "Synthetic NVIDIA Build token used by streaming redaction tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8$''']
+paths = ['''^tests/test_harbor_local_mode\.py$''']
+
+[[allowlists]]
+description = "Synthetic main-container values used by Docker isolation tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^main-(persistent|task|scoped)-secret-[0-9]{5}$''']
+paths = ['''^tests/test_harbor_secure_docker_environment\.py$''']

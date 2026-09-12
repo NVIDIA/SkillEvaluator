@@ -530,8 +530,33 @@ def _legacy_pass_at_k_is_complete(
     ):
         return False
     extra_case_names = set(extra_cases)
+    extra_case_count = payload.get("extra_case_count", len(extra_cases))
+    extra_cases_truncated = payload.get("extra_cases_truncated", False)
+    if (
+        not _is_nonnegative_int(extra_case_count)
+        or not isinstance(extra_cases_truncated, bool)
+        or len(extra_cases) > extra_case_count
+        or extra_cases_truncated != (len(extra_cases) < extra_case_count)
+    ):
+        return False
     cases = payload.get("cases")
     if not isinstance(cases, dict) or not cases:
+        return False
+    case_details_total = payload.get("case_details_total", len(cases))
+    case_details_shown = payload.get("case_details_shown", len(cases))
+    case_details_truncated = payload.get("case_details_truncated", False)
+    case_details_limit = payload.get("case_details_limit", len(cases))
+    if (
+        not _is_nonnegative_int(case_details_total)
+        or not _is_nonnegative_int(case_details_shown)
+        or not _is_nonnegative_int(case_details_limit)
+        or not isinstance(case_details_truncated, bool)
+        or case_details_shown != len(cases)
+        or case_details_shown > case_details_limit
+        or case_details_shown > case_details_total
+        or case_details_truncated != (case_details_shown < case_details_total)
+        or case_details_total != total_cases + extra_case_count
+    ):
         return False
     total_attempt_rows = 0
     expected_attempt_rows = 0
@@ -544,13 +569,22 @@ def _legacy_pass_at_k_is_complete(
         attempts_skipped = case.get("attempts_skipped")
         attempts_missing = case.get("attempts_missing")
         attempts = case.get("attempts")
+        attempt_details_total = case.get("attempt_details_total", case_attempts_used)
+        attempt_details_shown = case.get("attempt_details_shown", len(attempts) if isinstance(attempts, list) else -1)
+        attempt_details_truncated = case.get("attempt_details_truncated", False)
         if (
             not isinstance(case.get("passed"), bool)
             or not _is_nonnegative_int(case_attempts_used)
             or not _is_nonnegative_int(attempts_skipped)
             or not _is_nonnegative_int(attempts_missing)
             or not isinstance(attempts, list)
-            or len(attempts) != case_attempts_used
+            or not _is_nonnegative_int(attempt_details_total)
+            or not _is_nonnegative_int(attempt_details_shown)
+            or not isinstance(attempt_details_truncated, bool)
+            or attempt_details_total != case_attempts_used
+            or attempt_details_shown != len(attempts)
+            or attempt_details_shown > attempt_details_total
+            or attempt_details_truncated != (attempt_details_shown < attempt_details_total)
         ):
             return False
         first_pass_attempt = case.get("first_pass_attempt")
@@ -558,7 +592,7 @@ def _legacy_pass_at_k_is_complete(
             not isinstance(first_pass_attempt, int)
             or isinstance(first_pass_attempt, bool)
             or first_pass_attempt < 1
-            or first_pass_attempt > len(attempts)
+            or first_pass_attempt > case_attempts_used
         ):
             return False
         for ordinal, attempt in enumerate(attempts, start=1):
@@ -578,30 +612,38 @@ def _legacy_pass_at_k_is_complete(
         attempt_scores = [attempt["score"] for attempt in attempts]
         expected_best_score = max(attempt_scores) if attempt_scores else None
         best_score = case.get("best_score")
-        if (
-            case["passed"] != bool(passing_ordinals)
-            or first_pass_attempt != expected_first_pass
-            or (
-                (expected_best_score is None and best_score is not None)
-                or (
-                    expected_best_score is not None
-                    and (
-                        not _is_finite_number(best_score)
-                        or not math.isclose(best_score, expected_best_score, abs_tol=1e-9)
-                    )
+        if not attempt_details_truncated:
+            best_score_disagrees = (expected_best_score is None and best_score is not None) or (
+                expected_best_score is not None
+                and (
+                    not _is_finite_number(best_score) or not math.isclose(best_score, expected_best_score, abs_tol=1e-9)
                 )
             )
-        ):
-            return False
-        total_attempt_rows += len(attempts)
-        if case_name not in extra_case_names:
+            if (
+                case["passed"] != bool(passing_ordinals)
+                or first_pass_attempt != expected_first_pass
+                or best_score_disagrees
+            ):
+                return False
+        total_attempt_rows += case_attempts_used
+        case_is_extra = case.get("extra_case") is True
+        if not case_is_extra:
             observed_expected_cases += 1
             observed_passed_cases += int(case["passed"])
-            expected_attempt_rows += len(attempts)
+            expected_attempt_rows += case_attempts_used
             if not allow_coverage_failure and case_attempts_used + attempts_skipped + attempts_missing != k:
                 return False
-        elif case.get("extra_case") is not True:
+        elif not (extra_cases_truncated or case_details_truncated or case_name in extra_case_names):
             return False
+    if case_details_truncated:
+        return (
+            observed_expected_cases <= total_cases
+            and observed_passed_cases <= passed_cases
+            and expected_attempt_rows <= attempts_used
+            and total_attempt_rows <= num_trials
+            and (expected_scored_attempts is None or attempts_used == expected_scored_attempts)
+            and (not require_scored_attempt or attempts_used > 0)
+        )
     return (
         extra_case_names.issubset(cases)
         and observed_expected_cases == total_cases

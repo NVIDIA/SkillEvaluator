@@ -983,7 +983,7 @@ def test_native_codex_exec_evidence_refs_resolve_to_the_outer_call():
 def test_copied_verifier_imports_its_sibling_codex_normalizer(tmp_path):
     adapter._copy_verifier(tmp_path)
 
-    tests_dir = tmp_path / "tests"
+    tests_dir = tmp_path / "tests" / adapter._EVALUATOR_TESTS_SUBDIR
     normalizer = tests_dir / "codex_tool_call_normalizer.py"
     evidence = tests_dir / "evidence.py"
     assert normalizer.is_file()

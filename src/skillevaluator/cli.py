@@ -438,6 +438,7 @@ def _run_agent_eval_or_skip(
     *,
     agents: str,
     env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -488,6 +489,7 @@ def _run_agent_eval_or_skip(
         skill_path=target_path,
         agents=agents,
         env_mode=env_mode,
+        environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
@@ -1007,6 +1009,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Harbor environment backend.",
 )
 @click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+@click.option(
     "--skip-baseline",
     is_flag=True,
     cls=GroupedOption,
@@ -1136,6 +1146,7 @@ def validate(
     autopilot: bool,
     agents: str,
     env_mode: str,
+    environment_kwarg: tuple[str, ...],
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -1376,6 +1387,7 @@ def validate(
             target_path,
             agents=agents,
             env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
             skip_baseline=skip_baseline,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
@@ -1747,6 +1759,12 @@ def dedup_scan(
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+@click.option(
     "--autopilot",
     is_flag=True,
     help="Create one eval case when no dataset/task source exists, then evaluate.",
@@ -1790,6 +1808,7 @@ def evaluate(
     skill_path: Path,
     agents: str,
     env_mode: str,
+    environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
     n_attempts: int | None,
@@ -1825,6 +1844,7 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
@@ -2029,14 +2049,26 @@ def models_command(limit: int, as_json: bool) -> None:
     show_default=True,
     help="Comma-separated Harbor agents (claude is an alias for claude-code).",
 )
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
+@click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
 @click.option(
     "--verify-models",
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
-def doctor(agents: str, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
+def doctor(
+    agents: str,
+    env_mode: str,
+    environment_kwarg: tuple[str, ...],
+    agent_model: tuple[str, ...],
+    verify_models: bool,
+) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
@@ -2044,6 +2076,7 @@ def doctor(agents: str, env_mode: str, agent_model: tuple[str, ...], verify_mode
         tier3_doctor(
             agents=agents,
             env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
             verify_models=verify_models,
             agent_model=agent_model,
         )
@@ -2052,12 +2085,26 @@ def doctor(agents: str, env_mode: str, agent_model: tuple[str, ...], verify_mode
 
 @cli.command("health-check")
 @click.option("-a", "--agents", default="codex", show_default=True)
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
-def health_check(agents: str, env_mode: str) -> None:
+@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
+@click.option(
+    "--environment-kwarg",
+    "--ek",
+    multiple=True,
+    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+)
+def health_check(agents: str, env_mode: str, environment_kwarg: tuple[str, ...]) -> None:
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
-    raise SystemExit(tier3_doctor(agents=agents, env_mode=env_mode, verify_models=False, agent_model=()))
+    raise SystemExit(
+        tier3_doctor(
+            agents=agents,
+            env_mode=env_mode,
+            environment_kwarg=environment_kwarg,
+            verify_models=False,
+            agent_model=(),
+        )
+    )
 
 
 @tier3.command("validate")

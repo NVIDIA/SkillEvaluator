@@ -24,6 +24,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
+  `reward.json` `entry_id` metadata, using folder-name parsing only as an
+  unambiguous legacy fallback.
 - Tier 3 local mode now drops evaluator-managed empty process-loader resets
   while continuing to reject non-empty loader overrides, allowing generated
   tasks to reach agent execution

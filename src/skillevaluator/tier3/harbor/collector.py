@@ -26,6 +26,7 @@ from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
     average_custom_metrics,
@@ -35,7 +36,9 @@ from skillevaluator.tier3.harbor.metrics import (
     metric_set_for_reward,
     metric_value,
     overall_score,
+    overall_score_from_metrics,
     score_definition,
+    score_policy_for_metrics,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_data, redact_sensitive_text
@@ -2324,8 +2327,12 @@ def _compute_lift(
             "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
         }
     if metrics in {DISPLAY_METRICS, LEGACY_METRICS}:
-        overall_with = sum(with_scores[m] for m in metrics) / len(metrics)
-        overall_without = sum(without_scores[m] for m in metrics) / len(metrics)
+        overall_with = overall_score_from_metrics(with_scores, metrics)
+        overall_without = overall_score_from_metrics(without_scores, metrics)
+    else:
+        overall_with = None
+        overall_without = None
+    if overall_with is not None and overall_without is not None:
         lift["overall"] = {
             "with_skill": round(overall_with, 4),
             "without_skill": round(overall_without, 4),
@@ -2340,6 +2347,18 @@ def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
     if not values or any(value is None for value in values):
         return None
     return round(sum(value for value in values if value is not None) / len(values), 4)
+
+
+def _aggregate_condition_overall(
+    scores: dict[str, float],
+    metrics: tuple[str, ...],
+    rewards: list[dict[str, Any]],
+) -> float | None:
+    """Aggregate a condition consistently with lift and canonical reports."""
+    if not metrics:
+        return _average_overall(rewards)
+    score = overall_score_from_metrics(scores, metrics)
+    return round(score, 4) if score is not None else None
 
 
 def _compute_custom_lift(
@@ -3041,11 +3060,13 @@ def collect_harbor_results(
         "agents": {},
         "metric_set": DEFAULT_METRIC_SET,
         "metrics": list(DISPLAY_METRICS),
+        "score_policy": DEFAULT_SCORE_POLICY,
         "attempt_policy": {
             "max_attempts": n_attempts,
             "pass_threshold": pass_threshold,
             "stop_on_pass": stop_on_pass,
             "score_definition": score_definition(DISPLAY_METRICS),
+            "score_policy": DEFAULT_SCORE_POLICY,
         },
     }
 
@@ -3087,6 +3108,8 @@ def collect_harbor_results(
             all_results["metric_set"] = with_metric_set
             all_results["metrics"] = list(with_metrics)
             all_results["attempt_policy"]["score_definition"] = score_definition(with_metrics)
+            all_results["score_policy"] = score_policy_for_metrics(with_metrics)
+            all_results["attempt_policy"]["score_policy"] = score_policy_for_metrics(with_metrics)
             with_custom_scores = average_custom_metrics(with_logical_rewards)
             with_pass = _pass_summary(
                 with_logical_rewards,
@@ -3112,7 +3135,9 @@ def collect_harbor_results(
                 with_custom_scores = {}
                 with_pass = {}
             with_overall_score = (
-                _average_overall(with_logical_rewards) if with_execution["execution_status"] == "succeeded" else None
+                _aggregate_condition_overall(with_scores, with_metrics, with_logical_rewards)
+                if with_execution["execution_status"] == "succeeded"
+                else None
             )
             _save_trials(
                 with_collected_rewards,
@@ -3135,6 +3160,7 @@ def collect_harbor_results(
                         "overall_score": with_overall_score,
                         "metric_set": with_metric_set,
                         "metrics": list(with_metrics),
+                        "score_policy": score_policy_for_metrics(with_metrics),
                         "dimensions": dimension_scores(with_scores),
                         "num_trials": len(with_rewards),
                         "pass_at_k": with_pass,
@@ -3270,7 +3296,7 @@ def collect_harbor_results(
                     without_custom_scores = {}
                     without_pass = {}
                 without_overall_score = (
-                    _average_overall(without_logical_rewards)
+                    _aggregate_condition_overall(without_scores, without_metrics, without_logical_rewards)
                     if without_execution["execution_status"] == "succeeded"
                     else None
                 )
@@ -3295,6 +3321,7 @@ def collect_harbor_results(
                             "overall_score": without_overall_score,
                             "metric_set": without_metric_set,
                             "metrics": list(without_metrics),
+                            "score_policy": score_policy_for_metrics(without_metrics),
                             "dimensions": dimension_scores(without_scores),
                             "num_trials": len(without_rewards),
                             "pass_at_k": without_pass,
@@ -3333,6 +3360,7 @@ def collect_harbor_results(
                             "overall_score": None,
                             "metric_set": DEFAULT_METRIC_SET,
                             "metrics": list(DISPLAY_METRICS),
+                            "score_policy": DEFAULT_SCORE_POLICY,
                             "dimensions": {},
                             "num_trials": 0,
                             "pass_at_k": {},
@@ -3369,6 +3397,7 @@ def collect_harbor_results(
                         "custom_scores": {},
                         "overall_score": None,
                         "metrics": [],
+                        "score_policy": DEFAULT_SCORE_POLICY,
                         "dimensions": {},
                         "num_trials": 0,
                         "pass_at_k": {},

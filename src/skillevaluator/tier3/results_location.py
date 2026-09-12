@@ -379,6 +379,18 @@ def _current_result_identity_is_valid(candidate: Path, run_config: dict[object, 
         or not isinstance(attempt_policy.get("stop_on_pass"), bool)
         or not isinstance(attempt_policy.get("score_definition"), str)
         or not attempt_policy["score_definition"]
+        or (
+            "score_policy" in attempt_policy
+            and (not isinstance(attempt_policy["score_policy"], str) or not attempt_policy["score_policy"])
+        )
+    ):
+        return False
+    result_score_policy = result.get("score_policy")
+    attempt_score_policy = attempt_policy.get("score_policy")
+    if "score_policy" in result and (
+        not isinstance(result_score_policy, str)
+        or not result_score_policy
+        or (isinstance(attempt_score_policy, str) and result_score_policy != attempt_score_policy)
     ):
         return False
     return _recorded_path_matches(result.get("run_dir"), candidate) and _recorded_path_matches(

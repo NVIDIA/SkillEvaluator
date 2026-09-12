@@ -24,6 +24,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 local mode now drops evaluator-managed empty process-loader resets
+  while continuing to reject non-empty loader overrides, allowing generated
+  tasks to reach agent execution
+  ([#132](https://github.com/NVIDIA/SkillEvaluator/issues/132)).
 - Unpinned-dependency warnings are no longer suppressed by comparison
   operators inside PEP 508 environment markers; requirements such as
   `pkg; python_version < "3.13"` are now correctly reported, while direct

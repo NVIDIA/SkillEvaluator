@@ -29,8 +29,10 @@ All notable changes to SkillEvaluator are documented in this file.
   exposing environment values on Compose argv. Generated schema 1.3 and
   unmodified native task schemas remain compatible, while collection accepts
   Harbor 0.22 job, trial, reward, and ATIF v1.7 artifacts.
-- Exposed Harbor 0.22's complete 26-backend environment set alongside local
-  mode. Non-secret backend constructor options can be supplied with repeatable,
+- Exposed 23 Harbor 0.22 backends alongside local mode. `cua-cloud`,
+  `opensandbox`, and `hf-sandbox` remain disabled until generated tasks can be
+  projected through a trusted image or backend-native provisioning path.
+  Non-secret backend constructor options can be supplied with repeatable,
   operator-only `--environment-kwarg` / `--ek` flags; skill-owned configuration,
   credentials, and sandbox-policy overrides remain outside that surface.
 

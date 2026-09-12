@@ -775,7 +775,7 @@ def _stub_runner(
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: evals_file)
     monkeypatch.setattr(runner, "generate_harbor_tasks", task_emitter or emit_tasks)
     monkeypatch.setattr(runner, "_provider_environment", lambda _provider: {"OPENAI_API_KEY": provider.api_key})
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({}, []))
+    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates, **_kwargs: ({}, []))
     monkeypatch.setattr(
         runner,
         "_validate_agent_provider_credentials",
@@ -938,7 +938,11 @@ def test_ack_eval_preflight_uses_the_exact_prospective_bedrock_child_environment
     monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
     monkeypatch.setattr(runner, "_provider_environment", real_provider_environment)
     monkeypatch.setattr(runner, "_harbor_subprocess_environment", real_harbor_subprocess_environment)
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({"SAFE_RUNTIME_FLAG": "enabled"}, []))
+    monkeypatch.setattr(
+        runner,
+        "_resolve_runtime_env",
+        lambda _templates, **_kwargs: ({"SAFE_RUNTIME_FLAG": "enabled"}, []),
+    )
 
     result = runner.run_harbor_eval(
         skill,
@@ -2284,7 +2288,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: evals_file)
     monkeypatch.setattr(runner, "generate_harbor_tasks", _emit_tasks)
     monkeypatch.setattr(runner, "_provider_environment", lambda _provider: {"OPENAI_API_KEY": "sk-test-secret"})
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({}, []))
+    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates, **_kwargs: ({}, []))
     monkeypatch.setattr(runner, "_validate_agent_provider_credentials", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(runner, "_harbor_subprocess_environment", lambda **_kwargs: {})
     from skillevaluator.tier3.harbor import runtime_preflight
@@ -2777,7 +2781,11 @@ def test_runner_registers_exact_secrets_before_skill_and_model_render(
         skill_name=secret,
         provider_model=secret,
     )
-    monkeypatch.setattr(runner, "_resolve_runtime_env", lambda _templates: ({"CUSTOM_VALUE": secret}, []))
+    monkeypatch.setattr(
+        runner,
+        "_resolve_runtime_env",
+        lambda _templates, **_kwargs: ({"CUSTOM_VALUE": secret}, []),
+    )
     output = io.StringIO()
     reporter = _progress_module().PlainProgressReporter(stream=output, refresh_interval=60)
 

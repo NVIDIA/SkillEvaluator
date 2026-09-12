@@ -332,7 +332,7 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Where agents run
 
-`--env-mode` selects one of 27 environment modes: 26 Harbor-native backends,
+`--env-mode` selects one of 24 environment modes: 23 Harbor-native backends,
 including the default Docker backend, plus SkillEvaluator's **local mode**,
 which runs the agent CLI directly on the host under an OS-sandbox policy.
 Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
@@ -343,6 +343,10 @@ this release. Harbor 0.22 transport verification covers Docker and local;
 validate any managed backend's extra, credentials, infrastructure, and
 constructor settings with `doctor` and its Harbor preflight before relying on
 it.
+
+Harbor's `cua-cloud`, `opensandbox`, and `hf-sandbox` backends are not
+selectable because they cannot yet receive SkillEvaluator's complete generated
+task bundle through a trusted image or backend-native provisioning path.
 
 Environment kwargs are only for Harbor-native non-Docker backends. Pass
 non-secret constructor settings with the repeatable, operator-only

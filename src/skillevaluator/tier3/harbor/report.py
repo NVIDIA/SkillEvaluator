@@ -28,7 +28,6 @@ from skillevaluator.tier3.harbor.metrics import (
     extract_custom_metrics,
     metric_set_for_reward,
     metric_value,
-    score_value,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
@@ -124,29 +123,29 @@ def _pick_best_agent(
     agents_data: dict[str, dict[str, Any]],
     persisted_agents: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Select the agent with the highest overall with-skill score."""
+    """Select the same best agent identity as the canonical Tier 3 report."""
+    from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
+
     best_agent = ""
-    best_score = -1.0
-    for agent, data in agents_data.items():
+    best_rank: tuple[float, float] | None = None
+    for agent in sorted(agents_data):
+        data = agents_data[agent]
         if not _findings_eligible(data):
             continue
         persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
-        overall = score_value(persisted.get("overall_with_skill")) if isinstance(persisted, dict) else None
-        if overall is not None:
-            if overall > best_score:
-                best_score = overall
-                best_agent = agent
+        ranking_data = persisted if isinstance(persisted, dict) else data
+        standard_metrics = report_data.metrics_for_condition(ranking_data, "with_skill")
+        with_scores = ranking_data.get("with_skill")
+        if standard_metrics and (
+            not isinstance(with_scores, dict)
+            or any(metric_value(with_scores, metric) is None for metric in standard_metrics)
+        ):
             continue
-        with_scores = data.get("with_skill", {})
-        if not isinstance(with_scores, dict) or not with_scores:
+        rank = _canonical_agent_rank_from_info(ranking_data)
+        if rank is None:
             continue
-        metrics = [m for m in DISPLAY_METRICS if m in with_scores] or list(DISPLAY_METRICS)
-        metric_scores = [score for metric in metrics if (score := metric_value(with_scores, metric)) is not None]
-        if len(metric_scores) != len(metrics):
-            continue
-        overall = sum(metric_scores) / len(metric_scores)
-        if overall > best_score:
-            best_score = overall
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
             best_agent = agent
     return best_agent
 
@@ -556,8 +555,8 @@ def _bounded_reason_text(value: Any, *, max_len: int = 512) -> str:
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Build a lookup from each stable compact evidence key to its full dict ref.
 
-    Iterates over all metrics in every reward's ``details`` dict, collecting
-    ``evidence_refs`` entries.  The resulting mapping lets
+    Iterates over every publishable metric and resolves its detail through the
+    same standard/custom precedence used by findings.  The resulting mapping lets
     ``_generate_suggestions_structured`` resolve the compact string refs that
     the LLM returns into the richer dict form consumed by SkillEvaluator report
     templates (which read ``ref.kind``, ``ref.json_pointer``, ``ref.path``,
@@ -565,10 +564,8 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
     """
     lookup: dict[str, dict[str, Any]] = {}
     for reward in rewards:
-        details = reward.get("details") or {}
-        if not isinstance(details, dict):
-            continue
-        for metric_detail in details.values():
+        for metric in _finding_metric_names([reward]):
+            metric_detail = _detail_for_finding(reward, metric)
             if not isinstance(metric_detail, dict):
                 continue
             for ref in metric_detail.get("evidence_refs") or []:

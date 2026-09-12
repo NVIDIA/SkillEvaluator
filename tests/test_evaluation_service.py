@@ -109,6 +109,13 @@ def test_engine_kwargs_excludes_skill_path() -> None:
     assert kwargs["env_mode"] == "docker"
 
 
+def test_evaluation_options_preserves_legacy_positional_skip_baseline() -> None:
+    options = EvaluationOptions(Path("/tmp/x"), "codex", "docker", True)
+
+    assert options.skip_baseline is True
+    assert options.environment_kwarg == ()
+
+
 def test_service_defaults_to_null_progress_reporter(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillevaluator.tier3 import commands
     from skillevaluator.tier3.harbor.progress import NullProgressReporter

@@ -2785,8 +2785,43 @@ def test_compose_model_parser_bounds_recursive_aliases_and_node_expansion(
     assert "HELPER_IMAGE" in environment._compose_model_interpolation_names()
 
     monkeypatch.setattr(secure_docker_environment, "_MAX_COMPOSE_MODEL_NODES", 1)
+    construction_attempted = False
+
+    def reject_construction(*_args: object, **_kwargs: object) -> object:
+        nonlocal construction_attempted
+        construction_attempted = True
+        raise AssertionError("bounded Compose YAML reached object construction")
+
+    monkeypatch.setattr(secure_docker_environment.yaml, "load", reject_construction)
     with pytest.raises(RuntimeError, match="could not inspect Docker Compose"):
         environment._compose_model_interpolation_names()
+    assert construction_attempted is False
+
+
+def test_compose_model_parser_bounds_depth_before_object_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = _initialized_secure_docker_environment(tmp_path)
+    (environment.environment_dir / "docker-compose.yaml").write_text(
+        "services:\n  helper:\n    labels:\n      nested:\n        value: fixed\n",
+        encoding="utf-8",
+    )
+    construction_attempted = False
+
+    def reject_construction(*_args: object, **_kwargs: object) -> object:
+        nonlocal construction_attempted
+        construction_attempted = True
+        raise AssertionError("bounded Compose YAML reached object construction")
+
+    monkeypatch.setattr(secure_docker_environment, "_MAX_COMPOSE_MODEL_DEPTH", 2)
+    monkeypatch.setattr(secure_docker_environment.yaml, "load", reject_construction)
+
+    with pytest.raises(RuntimeError, match="could not inspect Docker Compose"):
+        environment._compose_model_interpolation_names()
+    assert construction_attempted is False
 
 
 def test_compose_model_parser_rejects_non_regular_include_without_blocking(
@@ -6910,6 +6945,28 @@ def test_exec_uses_name_only_argv_and_subprocess_override(tmp_path: Path) -> Non
         "new-value",
     }
     assert captured["additional_secret_values"] is None
+    assert captured["stop_main_on_interrupt"] is True
+
+
+def test_compatibility_exec_without_environment_uses_empty_process_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _initialized_docker_environment(tmp_path)
+    captured: dict[str, object] = {}
+
+    async def capture(command: list[str], **kwargs: object) -> ExecResult:
+        captured["command"] = command
+        captured.update(kwargs)
+        return ExecResult(stdout="ok", stderr=None, return_code=0)
+
+    monkeypatch.setattr(environment, "_run_docker_compose_command", capture)
+
+    result = asyncio.run(environment.exec("true"))
+
+    assert result.return_code == 0
+    assert captured["command"] == ["exec", "main", *environment._platform.exec_shell_args("true")]
+    assert captured["env_overrides"] == {}
     assert captured["stop_main_on_interrupt"] is True
 
 

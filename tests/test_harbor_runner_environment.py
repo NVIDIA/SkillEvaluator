@@ -183,7 +183,10 @@ def test_skill_config_cannot_alias_operator_owned_credentials(
 ) -> None:
     monkeypatch.setenv(source_name, "operator-secret")
 
-    resolved, errors = runner._resolve_runtime_env({"INNOCENT_NAME": f"${{{source_name}}}"})
+    resolved, errors = runner._resolve_runtime_env(
+        {"INNOCENT_NAME": f"${{{source_name}}}"},
+        env_mode="docker",
+    )
 
     assert resolved == {}
     assert errors and "operator-owned" in errors[0]
@@ -206,7 +209,7 @@ def test_skill_config_cannot_stage_conventional_unlisted_secret_names(
         source_name = value.removeprefix("${").removesuffix("}")
         monkeypatch.setenv(source_name, "synthetic-secret")
 
-    resolved, errors = runner._resolve_runtime_env(runtime_env)
+    resolved, errors = runner._resolve_runtime_env(runtime_env, env_mode="docker")
 
     assert resolved == {}
     assert errors
@@ -221,7 +224,10 @@ def test_skill_config_cannot_alias_judge_model_with_default_expansion(
 ) -> None:
     monkeypatch.setenv(source_name, "operator-model")
 
-    resolved, errors = runner._resolve_runtime_env({"INNOCENT_NAME": f"${{{source_name}:-skill-fallback}}"})
+    resolved, errors = runner._resolve_runtime_env(
+        {"INNOCENT_NAME": f"${{{source_name}:-skill-fallback}}"},
+        env_mode="docker",
+    )
 
     assert resolved == {}
     assert errors and "operator-owned" in errors[0]
@@ -239,7 +245,10 @@ def test_skill_config_cannot_alias_judge_model_with_default_expansion(
     ],
 )
 def test_skill_config_cannot_control_evaluator_or_judge_routing(name: str) -> None:
-    resolved, errors = runner._resolve_runtime_env({name: "https://attacker.example/v1"})
+    resolved, errors = runner._resolve_runtime_env(
+        {name: "https://attacker.example/v1"},
+        env_mode="docker",
+    )
 
     assert resolved == {}
     assert errors and "host process" in errors[0]
@@ -280,7 +289,10 @@ def test_runtime_env_rejects_operator_owned_windows_style_variable_references(
 ) -> None:
     monkeypatch.setenv(source_name, "host-value")
 
-    resolved, errors = runner._resolve_runtime_env({"SAFE_ALIAS": f"%{source_name}%"})
+    resolved, errors = runner._resolve_runtime_env(
+        {"SAFE_ALIAS": f"%{source_name}%"},
+        env_mode="docker",
+    )
 
     assert resolved == {}
     assert errors and source_name in errors[0]
@@ -298,11 +310,34 @@ def test_runtime_env_preserves_platform_expansion_for_non_owned_percent_referenc
 
     monkeypatch.setattr(runner.os.path, "expandvars", expandvars)
 
-    resolved, errors = runner._resolve_runtime_env({"SAFE_ALIAS": "%HOST_AGENT_LABEL%"})
+    resolved, errors = runner._resolve_runtime_env(
+        {"SAFE_ALIAS": "%HOST_AGENT_LABEL%"},
+        env_mode="docker",
+    )
 
     assert errors == []
     assert resolved == {"SAFE_ALIAS": "host-value"}
     assert expanded == ["%HOST_AGENT_LABEL%"]
+
+
+def test_runtime_env_allows_mode_unrelated_backend_name() -> None:
+    resolved, errors = runner._resolve_runtime_env(
+        {"API_HOST": "ordinary-task-value"},
+        env_mode="docker",
+    )
+
+    assert errors == []
+    assert resolved == {"API_HOST": "ordinary-task-value"}
+
+
+def test_runtime_env_rejects_selected_backend_control_name() -> None:
+    resolved, errors = runner._resolve_runtime_env(
+        {"API_HOST": "attacker-controlled"},
+        env_mode="beam",
+    )
+
+    assert resolved == {}
+    assert errors == ["harbor.runtime_env.API_HOST controls the host process and is not allowed"]
 
 
 def test_custom_only_does_not_force_the_standard_judge_model_into_custom_verifiers() -> None:
@@ -1678,14 +1713,6 @@ def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> 
             "USE_COMPUTER_SNAPSHOT",
             "USE_COMPUTER_VERSION",
         },
-        "cua-cloud": {
-            "CUA_BASE_URL",
-            "CUA_CLIENT_ID",
-            "CUA_CLIENT_SECRET",
-            "CUA_CLOUD_NAMESPACE",
-            "CUA_CLOUD_STARTUP_COMMAND",
-            "CUA_TOKEN_URL",
-        },
         "blaxel": {
             "BL_API_KEY",
             "BL_API_VERSION",
@@ -1694,7 +1721,6 @@ def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> 
             "BL_REGION",
             "BL_WORKSPACE",
         },
-        "opensandbox": {"OPENSANDBOX_API_KEY", "OPENSANDBOX_DOMAIN"},
         "beam": {
             "API_HOST",
             "API_PORT",
@@ -1729,7 +1755,6 @@ def test_harbor_backend_environment_allowlist_covers_every_native_022_mode() -> 
             "SKYPILOT_SERVICE_ACCOUNT_TOKEN",
             "SSH_AUTH_SOCK",
         },
-        "hf-sandbox": {"HF_ENDPOINT", "HF_HOME", "HF_TOKEN", "HF_TOKEN_PATH", "HUGGING_FACE_HUB_TOKEN"},
         "hyperbrowser": {
             "COMPOSE_ANSI",
             "COMPOSE_HTTP_TIMEOUT",
@@ -1951,14 +1976,11 @@ def test_skip_baseline_keeps_normalized_skill_owned_setup_enabled(
         ("novita", "NOVITA_SANDBOX_URL"),
         ("singularity", "APPTAINER_AUTHFILE"),
         ("tensorlake", "TENSORLAKE_ORGANIZATION_ID"),
-        ("cua-cloud", "CUA_CLIENT_SECRET"),
         ("blaxel", "BL_API_KEY"),
-        ("opensandbox", "OPENSANDBOX_DOMAIN"),
         ("beam", "BEAM_TOKEN"),
         ("beam", "API_HOST"),
         ("skypilot", "SKYPILOT_API_SERVER_ENDPOINT"),
         ("skypilot", "DOCKER_CONFIG"),
-        ("hf-sandbox", "HF_TOKEN_PATH"),
         ("hyperbrowser", "HYPERBROWSER_API_KEY"),
         ("hyperbrowser", "DOCKER_HOST"),
         ("wandb", "NETRC"),
@@ -2024,7 +2046,10 @@ def test_config_declared_substitution_is_resolved_without_leaking_source_variabl
         "environ",
         {"PATH": "/usr/bin", "HOME": "/home/test", "HOST_AGENT_LABEL": "runtime-value", "UNRELATED_SECRET": "no"},
     )
-    configured_runtime_env, errors = runner._resolve_runtime_env({"AGENT_LABEL": "${HOST_AGENT_LABEL}"})
+    configured_runtime_env, errors = runner._resolve_runtime_env(
+        {"AGENT_LABEL": "${HOST_AGENT_LABEL}"},
+        env_mode="docker",
+    )
     provider = _provider()
 
     environment = runner._harbor_subprocess_environment(
@@ -2071,7 +2096,10 @@ def test_runtime_env_rejects_host_process_control_names() -> None:
     )
 
     for name in unsafe_names:
-        resolved, errors = runner._resolve_runtime_env({name: "attacker-controlled"})
+        resolved, errors = runner._resolve_runtime_env(
+            {name: "attacker-controlled"},
+            env_mode="docker",
+        )
         assert name not in resolved
         assert any(name in error and "host process" in error for error in errors)
 

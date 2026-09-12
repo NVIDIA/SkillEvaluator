@@ -177,18 +177,16 @@ def test_harbor_environment_extra_mapping_matches_installed_metadata() -> None:
     provided_extras = set(metadata("harbor").get_all("Provides-Extra") or ())
     system_or_base_backends = {"docker", "openshift", "apple-container", "singularity"}
 
-    assert len(HARBOR_ENVIRONMENTS) == 27
-    assert len(HARBOR_NATIVE_ENV_MODES) == 26
+    assert len(HARBOR_ENVIRONMENTS) == 24
+    assert len(HARBOR_NATIVE_ENV_MODES) == 23
     assert frozenset(HARBOR_ENVIRONMENTS) - {"local"} == HARBOR_NATIVE_ENV_MODES
     assert set(HARBOR_ENVIRONMENT_EXTRAS) == HARBOR_NATIVE_ENV_MODES
     assert {mode for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items() if extra is None} == system_or_base_backends
     assert {extra for extra in HARBOR_ENVIRONMENT_EXTRAS.values() if extra is not None} <= provided_extras
     assert {
         mode: extra for mode, extra in HARBOR_ENVIRONMENT_EXTRAS.items() if extra is not None and extra != mode
-    } == {"ack": "gke", "cua-cloud": "cua"}
+    } == {"ack": "gke"}
     assert HARBOR_ENVIRONMENT_EXTRAS["ack"] == "gke"
-    assert "cloud" in provided_extras
-    assert HARBOR_ENVIRONMENT_EXTRAS["cua-cloud"] == "cua"
 
 
 def _harbor_022_environment_kwargs_from_installed_source() -> dict[str, frozenset[str]]:
@@ -302,8 +300,8 @@ def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
     public_docs = f"{agents}\n{cli_reference}\n{configuration}\n{tier3}\n{eval_config}"
     normalized_docs = " ".join(public_docs.split())
 
-    assert "27 environment modes" in public_docs
-    assert "26 Harbor-native backends" in public_docs
+    assert "24 environment modes" in public_docs
+    assert "23 Harbor-native backends" in public_docs
     assert "All 16 values" not in public_docs
     assert "same 16 values" not in public_docs
     assert "14 additional Harbor-native backends" not in public_docs
@@ -312,7 +310,7 @@ def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
         if extra is not None:
             assert f"| `{mode}` | Harbor-native | `harbor[{extra}]==0.22.0`" in agents
     assert "`harbor[cloud]==0.22.0`" not in public_docs
-    assert "OpenSandbox requires either a non-empty `domain`" in normalized_docs
+    assert "not exposed until SkillEvaluator can project the complete task bundle" in normalized_docs
     assert "does not contact AWS" in normalized_docs
     assert "does not contact the GKE cluster" in normalized_docs
     assert "no harbor python extra" in agents.lower()

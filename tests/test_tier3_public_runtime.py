@@ -36,7 +36,7 @@ from skillevaluator.tier3.harbor.runner import (
     build_harbor_run_command,
 )
 from skillevaluator.tier3.harbor.runtime_preflight import ModelProbeResult
-from skillevaluator.tier3_environments import HARBOR_NATIVE_ENV_MODES
+from skillevaluator.tier3_environments import HARBOR_ENV_MODES, HARBOR_NATIVE_ENV_MODES
 
 
 def _load_verifier_template():
@@ -324,13 +324,11 @@ def test_environment_kwargs_cannot_override_sandbox_or_runtime_policy(
         ("ack", "service_account", "cluster-admin"),
         ("ack", "use_buildkit", True),
         ("blaxel", "dind_extra_args", {"host": "tcp://0.0.0.0:2375"}),
-        ("cua-cloud", "claim_spec", {"serviceAccountName": "cluster-admin"}),
         ("daytona", "network_block_all", False),
         ("ec2", "iam_instance_profile", "administrator"),
         ("ec2", "strict_host_key_checking", "no"),
         ("gke", "memory_limit_multiplier", 0),
         ("modal", "volumes", {"/workspace": "shared"}),
-        ("opensandbox", "volumes", [{"host_path": "/"}]),
         ("openshift", "service_account_name", "cluster-admin"),
         ("singularity", "singularity_no_mount", ""),
         ("use-computer", "resources", {"cpu": 128, "memory": 1048576}),
@@ -388,14 +386,6 @@ def test_backend_aliases_cannot_bypass_sandbox_runtime_policy(
                 "registry_name": "skill-evals",
                 "cloud_build_machine_type": "E2_HIGHCPU_32",
                 "cloud_build_disk_size_gb": 500,
-            },
-        ),
-        (
-            "opensandbox",
-            {
-                "entrypoint": ["/bin/sh", "-lc", "sleep infinity"],
-                "extensions": {"provider.example/feature": "enabled"},
-                "sandbox_timeout_sec": 7200,
             },
         ),
     ],
@@ -554,39 +544,19 @@ def test_ec2_private_ephemeral_environment_accepts_nonempty_subnet() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("environment_kwargs", "subprocess_env", "ready"),
-    [
-        ({}, {}, False),
-        ({}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, True),
-        ({"domain": "sandbox.example.test"}, {}, True),
-        ({"domain": None}, {}, False),
-        ({"domain": None}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, True),
-        ({"domain": ""}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, False),
-        ({"domain": "   "}, {"OPENSANDBOX_DOMAIN": "sandbox.example.test"}, False),
-    ],
-)
-def test_opensandbox_domain_preflight_uses_effective_child_configuration(
-    monkeypatch: pytest.MonkeyPatch,
-    environment_kwargs: dict[str, object],
-    subprocess_env: dict[str, str],
-    ready: bool,
-) -> None:
-    from harbor.environments.factory import EnvironmentFactory
+@pytest.mark.parametrize("env_mode", ["cua-cloud", "opensandbox", "hf-sandbox"])
+def test_unprovisionable_harbor_backends_are_not_publicly_supported(env_mode: str) -> None:
+    with pytest.raises(ValueError, match="env_mode must be one of"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="codex",
+            job_name="unsupported-backend",
+            env_mode=env_mode,
+        )
 
-    monkeypatch.setattr(EnvironmentFactory, "run_preflight", lambda *_args, **_kwargs: None)
-
-    errors = _check_prerequisites(
-        env_mode="opensandbox",
-        agents=[],
-        environment_kwargs=environment_kwargs,
-        subprocess_env=subprocess_env,
-    )
-
-    assert (errors == []) is ready
-    if not ready:
-        assert len(errors) == 1
-        assert "domain" in errors[0]
+    assert _check_prerequisites(env_mode=env_mode, agents=[]) == [
+        f"Unsupported Harbor environment '{env_mode}'. Choose one of: " + ", ".join(sorted(HARBOR_ENV_MODES))
+    ]
 
 
 def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_mode() -> None:
@@ -601,7 +571,6 @@ def test_native_environment_required_kwargs_reject_whitespace_padded_ec2_launch_
 def test_native_environment_install_hints_use_real_harbor_022_extra_names() -> None:
     assert "harbor[gke]==0.22.0" in _environment_extra_install_hint("ack")
     assert "harbor[cloud]==0.22.0" not in _environment_extra_install_hint("ack")
-    assert "harbor[cua]==0.22.0" in _environment_extra_install_hint("cua-cloud")
     assert "no Python extra" in _environment_extra_install_hint("openshift")
 
 

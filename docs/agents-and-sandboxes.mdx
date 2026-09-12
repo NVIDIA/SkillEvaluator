@@ -126,7 +126,7 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 ## Where trials run
 
-SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends,
+SkillEvaluator exposes 24 environment modes: 23 Harbor-native backends,
 including Docker, plus SkillEvaluator's own `local` host-execution mode.
 Docker is the default. The `tier3` extra installs base `harbor==0.22.0`; install
 the environment extra shown below when a managed backend needs one.
@@ -151,12 +151,9 @@ the environment extra shown below when a managed backend needs one.
 | `cwsandbox` | Harbor-native | `harbor[cwsandbox]==0.22.0` |
 | `wandb` | Harbor-native | `harbor[wandb]==0.22.0` |
 | `use-computer` | Harbor-native | `harbor[use-computer]==0.22.0` |
-| `cua-cloud` | Harbor-native | `harbor[cua]==0.22.0` |
 | `blaxel` | Harbor-native | `harbor[blaxel]==0.22.0` |
-| `opensandbox` | Harbor-native | `harbor[opensandbox]==0.22.0` |
 | `beam` | Harbor-native | `harbor[beam]==0.22.0` |
 | `skypilot` | Harbor-native | `harbor[skypilot]==0.22.0` |
-| `hf-sandbox` | Harbor-native | `harbor[hf-sandbox]==0.22.0` |
 | `hyperbrowser` | Harbor-native | `harbor[hyperbrowser]==0.22.0` |
 | `vercel` | Harbor-native | `harbor[vercel]==0.22.0` |
 | `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
@@ -167,6 +164,12 @@ backend, install the mapped Harbor extra or system CLI shown above, set the
 credentials that backend requires, and confirm readiness with
 `skillevaluator doctor --env-mode <mode>` before a full run.
 </Tip>
+
+Harbor 0.22 also defines `cua-cloud`, `opensandbox`, and `hf-sandbox`, but
+those backends are not exposed until SkillEvaluator can project the complete
+task bundle — skill, verifier, dependencies, and inputs — through a trusted
+image or backend-native provisioning path. Selecting one of those names is
+rejected before a run starts.
 
 ### Native backend constructor options
 
@@ -218,12 +221,6 @@ authenticated SSH agent. In the latter case, keep `SSH_AUTH_SOCK` set when
 running SkillEvaluator; it is forwarded only to the EC2 backend process. A
 provided `ssh_key_path` must resolve to an existing regular file. Ephemeral EC2
 with `use_public_ip=false` also requires a non-empty `subnet_id`.
-
-OpenSandbox requires either a non-empty `domain` constructor option or a
-child-visible `OPENSANDBOX_DOMAIN`. An explicitly empty `domain` is invalid and
-does not fall back to the host variable; `domain=null` uses the child-visible
-variable. An API key remains optional because OpenSandbox also supports local
-or otherwise unauthenticated deployments.
 
 Managed-backend readiness is not a connectivity test. EC2 preflight checks the
 Python extra, the local `ssh` executable, and the constructor invariants above;

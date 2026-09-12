@@ -28,12 +28,9 @@ HARBOR_ENVIRONMENTS = (
     "cwsandbox",
     "wandb",
     "use-computer",
-    "cua-cloud",
     "blaxel",
-    "opensandbox",
     "beam",
     "skypilot",
-    "hf-sandbox",
     "hyperbrowser",
     "vercel",
     # Not a Harbor-native backend: SkillEvaluator's host execution mode, run
@@ -42,7 +39,7 @@ HARBOR_ENVIRONMENTS = (
     "local",
 )
 HARBOR_ENV_MODES = frozenset(HARBOR_ENVIRONMENTS)
-#: env modes that Harbor accepts natively via ``--env`` (everything except ``local``).
+#: Public env modes that Harbor accepts natively via ``--env`` (everything except ``local``).
 HARBOR_NATIVE_ENV_MODES = frozenset(m for m in HARBOR_ENVIRONMENTS if m != "local")
 # Exact Harbor 0.22 ``Provides-Extra`` names. ``ack`` reuses the Kubernetes
 # dependencies supplied by ``gke``. Of the four ``None`` entries, Docker needs
@@ -66,12 +63,9 @@ HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
     "cwsandbox": "cwsandbox",
     "wandb": "wandb",
     "use-computer": "use-computer",
-    "cua-cloud": "cua",
     "blaxel": "blaxel",
-    "opensandbox": "opensandbox",
     "beam": "beam",
     "skypilot": "skypilot",
-    "hf-sandbox": "hf-sandbox",
     "hyperbrowser": "hyperbrowser",
     "vercel": "vercel",
 }

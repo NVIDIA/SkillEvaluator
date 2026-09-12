@@ -2628,22 +2628,37 @@ def _overall_verdict_from_agents(agents: dict[str, dict[str, Any]]) -> str:
     return VERDICT_FAIL
 
 
+def _canonical_agent_rank(agent: dict[str, Any]) -> tuple[float, float] | None:
+    """Return the score/lift tuple used to rank one canonical agent payload."""
+    if agent.get("execution_status") != "succeeded":
+        return None
+    score = _finite_float(agent.get("with_skill"))
+    if score is None:
+        return None
+    return score, _as_float(agent.get("lift"))
+
+
+def _canonical_agent_rank_from_info(info: dict[str, Any]) -> tuple[float, float] | None:
+    """Build and rank raw Harbor agent data exactly as the canonical report does."""
+    from skillevaluator.tier3.harbor.report_data import metrics_for_condition
+
+    agent = _build_agent(
+        "",
+        info,
+        metrics_for_condition(info, "with_skill"),
+        metrics_for_condition(info, "without_skill"),
+        None,
+    )
+    return _canonical_agent_rank(agent)
+
+
 def _pick_best_agent(agents: dict[str, dict[str, Any]]) -> str:
-    eligible = {
-        name: agent
-        for name, agent in agents.items()
-        if agent.get("execution_status") == "succeeded" and _finite_float(agent.get("with_skill")) is not None
-    }
+    eligible = {name: rank for name, agent in agents.items() if (rank := _canonical_agent_rank(agent)) is not None}
     if not eligible:
         return ""
     if len(eligible) == 1:
         return next(iter(eligible))
-
-    def _key(item: tuple[str, dict[str, Any]]) -> tuple[float, float]:
-        _name, agent = item
-        return (_as_float(agent.get("with_skill")), _as_float(agent.get("lift")))
-
-    return max(eligible.items(), key=_key)[0]
+    return max(eligible.items(), key=lambda item: item[1])[0]
 
 
 def _insights_from_dimensions(dimensions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

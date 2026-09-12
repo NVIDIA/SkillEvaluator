@@ -841,16 +841,6 @@ _HARBOR_ENV_MODE_VARS = {
     "use-computer": frozenset(
         {"USE_COMPUTER_API_KEY", "USE_COMPUTER_HOST", "USE_COMPUTER_SNAPSHOT", "USE_COMPUTER_VERSION"}
     ),
-    "cua-cloud": frozenset(
-        {
-            "CUA_BASE_URL",
-            "CUA_CLIENT_ID",
-            "CUA_CLIENT_SECRET",
-            "CUA_CLOUD_NAMESPACE",
-            "CUA_CLOUD_STARTUP_COMMAND",
-            "CUA_TOKEN_URL",
-        }
-    ),
     "blaxel": frozenset(
         {
             "BL_API_KEY",
@@ -861,7 +851,6 @@ _HARBOR_ENV_MODE_VARS = {
             "BL_WORKSPACE",
         }
     ),
-    "opensandbox": frozenset({"OPENSANDBOX_API_KEY", "OPENSANDBOX_DOMAIN"}),
     "beam": frozenset(
         {
             "API_HOST",
@@ -884,7 +873,6 @@ _HARBOR_ENV_MODE_VARS = {
             "SKYPILOT_SERVICE_ACCOUNT_TOKEN",
         }
     ),
-    "hf-sandbox": frozenset({"HF_ENDPOINT", "HF_HOME", "HF_TOKEN", "HF_TOKEN_PATH", "HUGGING_FACE_HUB_TOKEN"}),
     "hyperbrowser": _DOCKER_HOST_ENV_VARS | frozenset({"HYPERBROWSER_API_KEY", "HYPERBROWSER_BASE_URL"}),
     "vercel": frozenset({"VERCEL_OIDC_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"}),
 }
@@ -896,10 +884,7 @@ _BEDROCK_HOST_ENV_VARS = _AWS_HOST_ENV_VARS | {
     "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
 }
 _RUNTIME_ENV_HOST_CONTROL_NAMES = (
-    _RUNTIME_PROCESS_CONTROL_ENV_NAMES
-    | _BEDROCK_HOST_ENV_VARS
-    | _VERIFIER_JUDGE_CONTROL_ENV_VARS
-    | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
+    _RUNTIME_PROCESS_CONTROL_ENV_NAMES | _BEDROCK_HOST_ENV_VARS | _VERIFIER_JUDGE_CONTROL_ENV_VARS
 )
 _RUNTIME_ENV_HOST_CONTROL_PREFIXES = _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES
 _OPERATOR_OWNED_AGENT_ENV = frozenset(
@@ -1028,12 +1013,10 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
         }
     ),
     "blaxel": frozenset({"dind_extra_args"}),
-    "cua-cloud": frozenset({"claim_spec"}),
     "daytona": frozenset({"network_block_all"}),
     "ec2": frozenset({"iam_instance_profile", "strict_host_key_checking"}),
     "gke": frozenset({"memory_limit_multiplier"}),
     "modal": frozenset({"volumes"}),
-    "opensandbox": frozenset({"volumes"}),
     "openshift": frozenset({"service_account_name"}),
     "singularity": frozenset({"singularity_no_mount"}),
     "use-computer": frozenset({"resources"}),
@@ -1435,8 +1418,6 @@ def _environment_kwarg_prerequisite_errors(
         invalid := invalid_strings(*(name for name in ("context", "kubeconfig") if name in kwargs))
     ):
         return ["Harbor environment 'ack' requires non-empty string --environment-kwarg for: " + ", ".join(invalid)]
-    if env_mode == "opensandbox" and kwargs.get("domain") is not None and invalid_strings("domain"):
-        return ["Harbor environment 'opensandbox' requires domain to be a non-empty string when provided"]
     if env_mode == "ec2":
         launch_mode_value = kwargs.get("launch_mode", "ephemeral")
         if not isinstance(launch_mode_value, str):
@@ -1622,21 +1603,6 @@ def _check_prerequisites(
         return ["Harbor environment 'singularity' requires the singularity CLI on PATH."]
     if env_mode == "islo" and not os.environ.get("ISLO_API_KEY", "").strip():
         return ["Harbor environment 'islo' requires a non-empty ISLO_API_KEY in the host environment."]
-    if env_mode == "opensandbox" and (environment_kwargs or {}).get("domain") is None:
-        opensandbox_env = (
-            subprocess_env
-            if subprocess_env is not None
-            else _selected_host_environment(
-                _HARBOR_BASE_ENV_VARS | _HARBOR_ENV_MODE_VARS["opensandbox"],
-                os.environ,
-            )
-        )
-        if not opensandbox_env.get("OPENSANDBOX_DOMAIN", "").strip():
-            return [
-                "Harbor environment 'opensandbox' requires a non-empty domain --environment-kwarg "
-                "or child-visible OPENSANDBOX_DOMAIN."
-            ]
-
     if env_mode == "modal":
         _, modal_config_error = _modal_custom_config_status()
         if modal_config_error:
@@ -1743,21 +1709,26 @@ def _check_prerequisites(
     return []
 
 
-def _is_operator_owned_runtime_name(name: str) -> bool:
+def _is_operator_owned_runtime_name(name: str, *, env_mode: str) -> bool:
     normalized = name.upper()
     return (
         is_sensitive_key(name)
         or normalized in _RUNTIME_ENV_HOST_CONTROL_NAMES
+        or normalized in _HARBOR_ENV_MODE_VARS.get(env_mode, frozenset())
         or normalized in _OPERATOR_OWNED_AGENT_ENV
         or normalized.startswith(_RUNTIME_ENV_HOST_CONTROL_PREFIXES)
     )
 
 
-def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, str], list[str]]:
+def _resolve_runtime_env(
+    templates: dict[str, str] | None,
+    *,
+    env_mode: str,
+) -> tuple[dict[str, str], list[str]]:
     resolved: dict[str, str] = {}
     errors: list[str] = []
     for name, template in (templates or {}).items():
-        if _is_operator_owned_runtime_name(name):
+        if _is_operator_owned_runtime_name(name, env_mode=env_mode):
             errors.append(f"harbor.runtime_env.{name} controls the host process and is not allowed")
             continue
         template_value = str(template)
@@ -1770,7 +1741,9 @@ def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, st
         }
         percent_references = set(re.findall(r"%([A-Za-z_][A-Za-z0-9_]*)%", template_value))
         references = dollar_references | percent_references
-        owned_references = sorted(reference for reference in references if _is_operator_owned_runtime_name(reference))
+        owned_references = sorted(
+            reference for reference in references if _is_operator_owned_runtime_name(reference, env_mode=env_mode)
+        )
         if owned_references:
             errors.append(
                 f"harbor.runtime_env.{name} references operator-owned credential(s): " + ", ".join(owned_references)
@@ -3527,7 +3500,10 @@ def _run_harbor_eval_impl(
         model_resolution[agent] = {"agent": agent, "model": selected, "source": source}
 
     provider_env = _provider_environment(provider)
-    configured_runtime_env, runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"))
+    configured_runtime_env, runtime_errors = _resolve_runtime_env(
+        harbor_config.get("runtime_env"),
+        env_mode=env_mode,
+    )
     reporter.set_secret_values(secret_values_from_environment(provider_env) | set(configured_runtime_env.values()))
     reporter.emit(ProgressEvent(stage="model-resolution", state="complete", detail="agent models resolved"))
     reporter.start(
@@ -3546,7 +3522,7 @@ def _run_harbor_eval_impl(
     )
 
     prerequisite_subprocess_env: dict[str, str] | None = None
-    if env_mode in {"ack", "opensandbox"} and agents:
+    if env_mode == "ack" and agents:
         preflight_agent = agents[0]
         runtime_provider_env = {
             name: value for name, value in provider_env.items() if name not in _VERIFIER_JUDGE_CONTROL_ENV_VARS

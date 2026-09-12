@@ -2401,6 +2401,72 @@ def test_persisted_trial_alias_keeps_exact_source_identity_with_trailing_space(t
     }
 
 
+def test_distinct_unsafe_trial_roots_receive_distinct_published_identities(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs"
+    trial_root_names = ("ghp_" + ("a" * 36), "ghp_" + ("b" * 36))
+    rewards: list[dict[str, object]] = []
+    for index, trial_root_name in enumerate(trial_root_names, start=1):
+        (job_dir / trial_root_name).mkdir(parents=True)
+        rewards.append(
+            {
+                **_default_reward(f"case-{index}", 1.0),
+                "_trial_name": trial_root_name,
+                "_trial_root_name": trial_root_name,
+            }
+        )
+
+    trials_dir = tmp_path / "results" / "trials"
+    collector_module._save_trials(
+        rewards,
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    persisted_rewards = [
+        json.loads(path.read_text(encoding="utf-8")) for path in sorted(trials_dir.glob("*/reward.json"))
+    ]
+    published_ids = {reward["trial_id"] for reward in persisted_rewards}
+    assert len(published_ids) == 2
+    assert all(str(trial_id).startswith("redacted-or-invalid-trial-") for trial_id in published_ids)
+    assert published_ids.isdisjoint(trial_root_names)
+    assert sorted(len(group) for group in report_data.logical_trial_reward_groups(persisted_rewards)) == [1, 1]
+
+
+def test_unsafe_multistep_trial_rows_share_one_published_identity(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs"
+    trial_root_name = "ghp_" + ("c" * 36)
+    (job_dir / trial_root_name).mkdir(parents=True)
+    rewards = [
+        {
+            **_default_reward("case-1", score),
+            "_trial_name": trial_root_name,
+            "_trial_root_name": trial_root_name,
+            "_step_name": step_name,
+        }
+        for step_name, score in (("prepare", 0.5), ("finish", 1.0))
+    ]
+
+    trials_dir = tmp_path / "results" / "trials"
+    collector_module._save_trials(
+        rewards,
+        trials_dir,
+        job_dir,
+        skill_name="demo",
+        agent="opencode",
+        variant="with_skill",
+    )
+
+    persisted_rewards = [
+        json.loads(path.read_text(encoding="utf-8")) for path in sorted(trials_dir.glob("*/reward.json"))
+    ]
+    assert len(persisted_rewards) == 2
+    assert {reward["trial_id"] for reward in persisted_rewards} == {"redacted-or-invalid-trial-000001"}
+    assert [len(group) for group in report_data.logical_trial_reward_groups(persisted_rewards)] == [2]
+
+
 def test_scored_and_unscored_portable_name_collision_persists_distinct_trials(tmp_path: Path) -> None:
     job_dir = tmp_path / "jobs"
     scored_source = job_dir / "foo "

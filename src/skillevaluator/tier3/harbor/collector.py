@@ -316,17 +316,45 @@ def _identity_text_is_publishable(value: object) -> bool:
     return len(encoded) <= REWARD_IDENTITY_TEXT_MAX_BYTES and not contains_credential_value(value)
 
 
-def _published_trial_label(value: object, *, alias_ordinal: int | None = None) -> str:
-    """Return a bounded value-only label; unsafe identities never become keys or paths."""
+def _direct_published_trial_label(value: object) -> str | None:
+    """Return a safe trial label verbatim, or ``None`` when it needs an alias."""
     if isinstance(value, str) and value and value.isprintable() and not contains_credential_value(value):
         try:
             if len(value.encode("utf-8")) <= REWARD_IDENTITY_TEXT_MAX_BYTES:
                 return value
         except UnicodeError:
             pass
+    return None
+
+
+def _published_trial_label(value: object, *, alias_ordinal: int | None = None) -> str:
+    """Return a bounded value-only label; unsafe identities never become keys or paths."""
+    if direct_label := _direct_published_trial_label(value):
+        return direct_label
     if alias_ordinal is not None:
         return f"redacted-or-invalid-trial-{alias_ordinal:06d}"
     return "redacted-or-invalid-trial"
+
+
+def _published_trial_labels_by_root(trial_root_names: list[str]) -> dict[str, str]:
+    """Assign one stable, distinct published identity to each physical trial root."""
+    unique_roots = set(trial_root_names)
+    labels = {
+        trial_root_name: direct_label
+        for trial_root_name in unique_roots
+        if (direct_label := _direct_published_trial_label(trial_root_name)) is not None
+    }
+    used_labels = set(labels.values())
+    alias_ordinal = 1
+    for trial_root_name in sorted(unique_roots - labels.keys()):
+        while True:
+            alias = _published_trial_label(trial_root_name, alias_ordinal=alias_ordinal)
+            alias_ordinal += 1
+            if alias not in used_labels:
+                break
+        labels[trial_root_name] = alias
+        used_labels.add(alias)
+    return labels
 
 
 def _validated_expected_case_ids(expected_case_ids: list[str] | None) -> list[str]:
@@ -5306,6 +5334,9 @@ def _save_trials(
     agent_model_source = _bounded_reward_metadata_text(agent_model_source)
     trials_dir.mkdir(parents=True, exist_ok=True)
     persisted_names, unscored_names = _persisted_trial_layout(rewards, job_dir)
+    published_trial_ids = _published_trial_labels_by_root(
+        [trial_root_name for _trial_name, trial_root_name in persisted_names]
+    )
     for reward, (trial_name, trial_root_name) in zip(rewards, persisted_names, strict=True):
         trial_out = trials_dir / trial_name
         trial_out.mkdir(parents=True, exist_ok=True)
@@ -5351,7 +5382,7 @@ def _save_trials(
         # fallback multi-step rows for diagnostics without weighting a logical
         # Harbor trial once per step.  This also populates the canonical report's
         # existing trial_id field instead of inventing a second report schema.
-        clean_reward["trial_id"] = _published_trial_label(trial_root_name)
+        clean_reward["trial_id"] = published_trial_ids[trial_root_name]
         if not clean_reward.get("entry_id"):
             clean_reward["entry_id"] = _entry_id(reward)
         clean_reward["agent"] = agent

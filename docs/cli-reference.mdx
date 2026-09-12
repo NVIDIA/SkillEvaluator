@@ -306,7 +306,7 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
-| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends, including Docker, plus SkillEvaluator `local` mode. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 24 environment modes: 23 Harbor-native backends, including Docker, plus SkillEvaluator `local` mode. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved. |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |

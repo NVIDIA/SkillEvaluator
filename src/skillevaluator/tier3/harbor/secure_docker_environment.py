@@ -201,6 +201,23 @@ for _compose_override_tag in ("!reset", "!override"):
     )
 
 
+def _validate_compose_model_parse_budget(content: str) -> None:
+    """Reject oversized YAML graphs before PyYAML constructs them."""
+    node_count = 0
+    depth = 0
+    for event in yaml.parse(content, Loader=_ComposeModelLoader):
+        if isinstance(event, yaml.events.NodeEvent):
+            node_count += 1
+            if node_count > _MAX_COMPOSE_MODEL_NODES:
+                raise RuntimeError("could not inspect Docker Compose interpolation inputs")
+        if isinstance(event, yaml.events.CollectionStartEvent):
+            depth += 1
+            if depth > _MAX_COMPOSE_MODEL_DEPTH:
+                raise RuntimeError("could not inspect Docker Compose interpolation inputs")
+        elif isinstance(event, yaml.events.CollectionEndEvent):
+            depth -= 1
+
+
 class _SecretTrieNode:
     __slots__ = ("children", "failure", "max_terminal_length", "terminal_length")
 
@@ -1890,7 +1907,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         user: str | int | None = None,
     ) -> ExecResult:
         user = self._resolve_user(user)
-        merged_environment = self._merge_env(env)
+        merged_environment = self._merge_env(env) or {}
         environment_args, subprocess_environment = _secure_exec_arguments(merged_environment)
         exact_secret_values = _sensitive_environment_values(merged_environment)
         exact_secret_values.update(_credential_uri_environment_values(merged_environment))
@@ -2042,12 +2059,16 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 if len(content) > remaining_bytes:
                     raise RuntimeError("could not inspect Docker Compose interpolation inputs")
                 total_bytes += len(content)
+                decoded_content = content.decode("utf-8")
+                # Scan PyYAML's incremental event stream before composing the object
+                # graph. This keeps compact, deeply nested, or high-node YAML from
+                # exhausting memory or recursion before the post-load metadata walk.
+                _validate_compose_model_parse_budget(decoded_content)
                 # _ComposeModelLoader subclasses yaml.SafeLoader and registers only
                 # scalar, sequence, and mapping constructors for Compose's !reset and
                 # !override tags, so arbitrary Python-object construction stays disabled.
-                # Depth and node-count bounds are enforced separately after parsing.
                 model = yaml.load(  # nosec B506
-                    content.decode("utf-8"),
+                    decoded_content,
                     Loader=_ComposeModelLoader,
                 )
             except (OSError, RecursionError, UnicodeDecodeError, yaml.YAMLError) as exc:

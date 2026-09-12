@@ -447,10 +447,13 @@ def test_local_is_a_registered_env_mode() -> None:
     assert "local" in HARBOR_ENV_MODES
 
 
-def test_registered_native_env_modes_match_pinned_harbor_release() -> None:
+def test_registered_native_env_modes_are_supported_subset_of_pinned_harbor_release() -> None:
     from harbor.models.environment_type import EnvironmentType
 
-    assert frozenset(environment.value for environment in EnvironmentType) == HARBOR_NATIVE_ENV_MODES
+    harbor_modes = frozenset(environment.value for environment in EnvironmentType)
+
+    assert harbor_modes > HARBOR_NATIVE_ENV_MODES
+    assert harbor_modes - HARBOR_NATIVE_ENV_MODES == {"cua-cloud", "opensandbox", "hf-sandbox"}
 
 
 def test_build_command_uses_unified_flags_for_local_imports() -> None:

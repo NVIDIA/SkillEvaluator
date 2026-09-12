@@ -41,6 +41,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.spdx import is_spdx_only_html_comment
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -815,7 +816,7 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        self._process_skillspector_cli_result(data, result)
+        self._process_skillspector_cli_result(data, result, source_root=original_root or scan_root)
         return result
 
     @staticmethod
@@ -1999,6 +2000,8 @@ class SecurityValidator(ValidatorBase):
         self,
         data: dict,
         result: ValidationResult,
+        *,
+        source_root: Path | None = None,
     ) -> None:
         """Convert a validated SkillSpector JSON report into ValidationResult entries."""
         self._store_skillspector_metadata(data, result)
@@ -2012,7 +2015,7 @@ class SecurityValidator(ValidatorBase):
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
-            if self._is_generated_artifact_issue(issue):
+            if self._is_generated_artifact_issue(issue, source_root=source_root):
                 removed_issues.append(issue)
                 skipped_generated += 1
                 continue
@@ -2086,15 +2089,34 @@ class SecurityValidator(ValidatorBase):
             self._summarize_skillspector_results(scanned_issues, has_critical_or_high, result)
 
     @staticmethod
-    def _is_generated_artifact_issue(issue: dict) -> bool:
+    def _is_generated_artifact_issue(issue: dict, *, source_root: Path | None = None) -> bool:
         """Return True when a skillspector issue points at generated output."""
         if issue.get("id") == "SC8":
             return False
         file_path, _line_number = SecurityValidator._parse_issue_location(issue)
         path = Path(file_path)
-        if path.name in SCAN_EXCLUDED_FILES:
+
+        if source_root is None:
+            if path.name in SCAN_EXCLUDED_FILES:
+                return True
+            return any(part in SCAN_EXCLUDED_DIRS for part in path.parts)
+
+        root = Path(os.path.abspath(source_root))  # noqa: PTH100 - do not follow untrusted path links
+        candidate = path if path.is_absolute() else root / path
+        candidate = Path(os.path.abspath(candidate))  # noqa: PTH100 - lexical containment is intentional
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            return False
+
+        if matches_filesystem_name(candidate, SCAN_EXCLUDED_FILES):
             return True
-        return any(part in SCAN_EXCLUDED_DIRS for part in path.parts)
+        current = root
+        for part in relative.parts[:-1]:
+            current /= part
+            if matches_filesystem_name(current, SCAN_EXCLUDED_DIRS):
+                return True
+        return False
 
     @staticmethod
     def _is_spdx_only_hidden_instruction(issue: dict) -> bool:

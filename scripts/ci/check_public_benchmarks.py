@@ -411,9 +411,10 @@ def _check_required_headings(path: Path, text: str, offenders: list[Offender]) -
 
 
 def _check_metadata_semantics(path: Path, text: str, offenders: list[Offender]) -> None:
+    metadata_heading_lines = _section_heading_lines(text, "Evaluation Metadata")
     metadata_sections = _section_occurrences(text, "Evaluation Metadata")
-    if len(metadata_sections) > 1:
-        offenders.append(Offender(path, metadata_sections[1][0], "duplicate Evaluation Metadata section"))
+    if len(metadata_heading_lines) > 1:
+        offenders.append(Offender(path, metadata_heading_lines[1], "duplicate Evaluation Metadata section"))
     if not metadata_sections:
         return
     fallback_line, section_tokens = metadata_sections[0]
@@ -600,6 +601,15 @@ def _section_occurrences(text: str, title: str) -> list[tuple[int, tuple[Token, 
                 break
         sections.append((start_line, tokens[token_index + 3 : end_index]))
     return sections
+
+
+def _section_heading_lines(text: str, title: str) -> list[int]:
+    """Return every matching level-two heading, including untrusted variants."""
+    return [
+        start_line
+        for _token_index, level, start_line, heading_title, _trusted in _heading_entries(text)
+        if level == 2 and _semantic_text(heading_title).casefold() == title.casefold()
+    ]
 
 
 @lru_cache(maxsize=128)
@@ -953,9 +963,10 @@ def _backticked_identity_present(value: str) -> bool:
 
 def _check_verdict_tier_consistency(path: Path, text: str, offenders: list[Offender]) -> None:
     tier_rows: dict[int, tuple[int, str]] = {}
+    tier_heading_lines = _section_heading_lines(text, "Tier Status")
     tier_sections = _section_occurrences(text, "Tier Status")
-    if len(tier_sections) > 1:
-        offenders.append(Offender(path, tier_sections[1][0], "duplicate Tier Status section"))
+    if len(tier_heading_lines) > 1:
+        offenders.append(Offender(path, tier_heading_lines[1], "duplicate Tier Status section"))
     elif tier_sections:
         section_tokens = tier_sections[0][1]
         for tier in _TIER_COMPLETION_STATUSES:
@@ -985,9 +996,12 @@ def _check_verdict_tier_consistency(path: Path, text: str, offenders: list[Offen
     if verdict_status not in _OVERALL_VERDICT_STATUSES:
         offenders.append(Offender(path, verdict_line, "invalid Overall verdict field"))
         return
+    recommendation_heading_lines = _section_heading_lines(text, "Publication Recommendation")
     recommendation_sections = _section_occurrences(text, "Publication Recommendation")
-    if len(recommendation_sections) > 1:
-        offenders.append(Offender(path, recommendation_sections[1][0], "duplicate Publication Recommendation section"))
+    if len(recommendation_heading_lines) > 1:
+        offenders.append(
+            Offender(path, recommendation_heading_lines[1], "duplicate Publication Recommendation section")
+        )
     if verdict_status != "PASS":
         if _has_publication_recommendation(text) or recommendation_sections:
             recommendation_line = recommendation_sections[0][0] if recommendation_sections else verdict_line

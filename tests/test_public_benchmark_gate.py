@@ -2146,6 +2146,65 @@ def test_gate_rejects_duplicate_decision_headings(
     assert reason in {offender.reason for offender in offenders}
 
 
+@pytest.mark.parametrize(
+    "heading_template",
+    [
+        "## [{section}](https://example.invalid/phish)",
+        "## <span>{section}</span>",
+        "<h2>{section}</h2>",
+    ],
+    ids=["linked-heading", "inline-html-heading", "raw-html-heading"],
+)
+@pytest.mark.parametrize(
+    ("section", "conflicting_body", "reason"),
+    [
+        (
+            "Evaluation Metadata",
+            "- Evaluation date: 2025-01-01\n- Agents: Other (`other-model`)",
+            "duplicate Evaluation Metadata section",
+        ),
+        (
+            "Tier Status",
+            "| Tier | Purpose | Status | Evidence |\n"
+            "|---|---|---|---|\n"
+            "| Tier 1 | Static validation | **FAILED** | Conflicting result |",
+            "duplicate Tier Status section",
+        ),
+        (
+            "Publication Recommendation",
+            "**Publication blocked.**",
+            "duplicate Publication Recommendation section",
+        ),
+    ],
+    ids=["metadata", "tier-status", "publication-recommendation"],
+)
+def test_gate_rejects_untrusted_duplicate_decision_headings(
+    tmp_path: Path,
+    heading_template: str,
+    section: str,
+    conflicting_body: str,
+    reason: str,
+) -> None:
+    benchmark = tmp_path / "BENCHMARK.md"
+    canonical_section = (
+        "## Publication Recommendation\n\nRecommended for publication.\n\n"
+        if section == "Publication Recommendation"
+        else ""
+    )
+    duplicate_section = f"{heading_template.format(section=section)}\n\n{conflicting_body}\n\n"
+    benchmark.write_text(
+        _valid_benchmark().replace(
+            "## Freshness",
+            f"{canonical_section}{duplicate_section}## Freshness",
+        ),
+        encoding="utf-8",
+    )
+
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert [offender.reason for offender in offenders] == [reason]
+
+
 def test_gate_rejects_unknown_tier_status_for_nonpass_card(tmp_path: Path) -> None:
     benchmark = tmp_path / "BENCHMARK.md"
     benchmark.write_text(

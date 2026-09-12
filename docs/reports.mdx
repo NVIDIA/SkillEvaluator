@@ -32,6 +32,10 @@ same rule and relocates to `<catalog>-reports/`. An explicit in-target `-o` is
 rejected; choose an external directory instead. Existing nonempty sibling
 directories are reused only when their SkillEvaluator ownership marker is
 valid, preventing the default from overwriting an unrelated directory.
+With `--copy-repo`, an output directory elsewhere inside the repository must
+likewise be new, empty, or already carry a valid ownership marker. A nonempty
+unowned directory is rejected so selecting an authored subtree cannot silently
+remove that subtree from the full-repository evaluation context.
 
 For compatibility, commands launched from a parent directory keep the familiar
 layout: `skillevaluator validate ./my-skill` still writes to `./reports/`

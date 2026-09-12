@@ -430,18 +430,20 @@ def is_cleanly_skipped(result: ValidationResult) -> bool:
 def get_skip_reason(result: ValidationResult) -> str:
     """Return a stable human-readable reason for a skipped result."""
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
-    reason = metadata.get("skip_reason")
+    reason = _agent_eval_safe_text(metadata.get("skip_reason"))
     if reason:
-        return str(reason)
+        return reason
 
     payload = metadata.get("agent_eval")
     provenance = payload.get("provenance") if isinstance(payload, dict) else None
-    advisory_message = provenance.get("message") if isinstance(provenance, dict) else None
+    advisory_message = _agent_eval_safe_text(provenance.get("message")) if isinstance(provenance, dict) else ""
     if advisory_message:
-        return str(advisory_message)
+        return advisory_message
 
     if result.warnings:
-        return str(result.warnings[0])
+        warning = _agent_eval_safe_text(result.warnings[0])
+        if warning:
+            return warning
     return "Prerequisite unavailable"
 
 
@@ -940,14 +942,16 @@ def _agent_eval_attempt_coverage_complete(payload: dict[str, Any] | None) -> boo
         or scored_attempts is None
         or expected_attempts <= 0
         or scored_attempts <= 0
-        or scored_attempts > expected_attempts
+        or scored_attempts != expected_attempts
     ):
         return False
 
-    scored_agents = 0
     summed_expected = 0
     summed_scored = 0
-    for agent in _agent_eval_agents(payload).values():
+    agents = _agent_eval_agents(payload)
+    if not agents:
+        return False
+    for agent in agents.values():
         raw_expected = agent.get("expected_attempts")
         raw_scored = agent.get("scored_attempts")
         if (
@@ -959,16 +963,30 @@ def _agent_eval_attempt_coverage_complete(payload: dict[str, Any] | None) -> boo
             return False
         agent_expected = _agent_eval_count(agent.get("expected_attempts"))
         agent_scored = _agent_eval_count(agent.get("scored_attempts"))
-        if agent_scored > agent_expected:
+        if (
+            _agent_eval_safe_text(agent.get("execution_status")).casefold() != "succeeded"
+            or agent_expected <= 0
+            or agent_scored != agent_expected
+        ):
             return False
         summed_expected += agent_expected
         summed_scored += agent_scored
-        if _agent_eval_safe_text(agent.get("execution_status")).casefold() != "succeeded":
+    return summed_expected == expected_attempts and summed_scored == scored_attempts
+
+
+def _agent_eval_execution_errors_clear(payload: dict[str, Any] | None) -> bool:
+    """Return whether succeeded Tier 3 evidence contains no execution errors."""
+    if not isinstance(payload, dict):
+        return False
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    containers = [payload, summary, *_agent_eval_agents(payload).values()]
+    for container in containers:
+        if "execution_errors" not in container:
             continue
-        if agent_expected <= 0 or agent_scored <= 0:
+        errors = container["execution_errors"]
+        if not isinstance(errors, list) or errors:
             return False
-        scored_agents += 1
-    return bool(scored_agents > 0 and summed_expected == expected_attempts and summed_scored == scored_attempts)
+    return True
 
 
 def _agent_eval_dimension_scores(agent: dict[str, Any]) -> list[float] | None:
@@ -1075,6 +1093,7 @@ def agent_eval_publication_evidence_complete(payload: dict[str, Any] | None) -> 
         truth_consistent
         and verdict in {"pass", "neutral", "fail"}
         and execution_status == "succeeded"
+        and _agent_eval_execution_errors_clear(payload)
         and agent_eval_dimension_verdict(payload) is not None
         and agent_eval_publication_evaluated_at(payload) is not None
         and publication_identity_present(evaluator_version)

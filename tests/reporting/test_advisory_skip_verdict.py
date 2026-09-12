@@ -164,6 +164,43 @@ def _complete_tier3_result(
     return result
 
 
+def _publication_ready_results(marker: str) -> list[ValidationResult]:
+    """Return a result set whose unmodified evidence is publication-complete."""
+    tier1 = ValidationResult(validator_name="SCHEMA")
+    tier1.add_success("schema", "Schema passed")
+    tier2 = ValidationResult(validator_name="Similarity Check")
+    tier2.add_success("similarity_check", "Similarity scan completed")
+    tier3 = _complete_tier3_result(marker, score=0.9, runtime_seconds=1.0)
+    results = [tier1, tier2, tier3]
+    _bind_publication_target(results, tier3.metadata["publication_target"])
+    return results
+
+
+def _assert_publication_incomplete_across_reporters(
+    results: list[ValidationResult],
+    tmp_path: Path,
+) -> None:
+    """Assert imported evidence fails closed consistently in every report view."""
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all(results)
+    cli = _plain_cli(CLIReporter().render_all(results))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all(results))
+    json_payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    benchmark_path = tmp_path / "BENCHMARK.md"
+    benchmark_path.write_text(benchmark, encoding="utf-8")
+    _files, offenders = benchmark_gate.find_offenders([benchmark_path])
+
+    assert "Overall verdict: INCOMPLETE" in benchmark
+    assert "## Publication Recommendation" not in benchmark
+    assert "AGENT_EVAL" in cli
+    assert json_payload["publication_status"] == "incomplete"
+    assert json_payload["publication"]["tier3"]["evidence_complete"] is False
+    assert html_data["publication"]["status"] == "incomplete"
+    assert html_data["publication"]["tier3"]["evidence_complete"] is False
+    assert "**Publication status:** ⚠️ INCOMPLETE" in markdown
+    assert offenders == []
+
+
 def test_advisory_skip_is_non_blocking_in_json() -> None:
     payload = json.loads(
         JSONReporter(include_timestamp=False).render_all(
@@ -176,6 +213,23 @@ def test_advisory_skip_is_non_blocking_in_json() -> None:
     assert payload["total_advisory_skipped"] == 1
     assert payload["results"][0]["passed"] is False
     assert payload["results"][0]["status"] == "skipped"
+
+
+def test_oversized_numeric_skip_reasons_fall_back_safely_across_reporters() -> None:
+    result = advisory_skip_result("Safe fallback reason", skill_name="demo")
+    oversized_integer = 1 << 40_000
+    result.metadata["skip_reason"] = oversized_integer
+    result.metadata["agent_eval"]["provenance"]["message"] = oversized_integer
+
+    outputs = [
+        BenchmarkReporter(include_timestamp=False).render_all([result]),
+        CLIReporter().render_all([result]),
+        HTMLReporter(include_timestamp=False).render_all([result]),
+        JSONReporter(include_timestamp=False).render_all([result]),
+        MarkdownReporter(include_timestamp=False).render_all([result]),
+    ]
+
+    assert all("Safe fallback reason" in output for output in outputs)
 
 
 def test_clean_tier2_skip_is_explicit_in_combined_outputs() -> None:
@@ -2363,6 +2417,54 @@ def test_missing_or_inconsistent_scored_attempts_cannot_certify_publication(
     assert html_data["publication"]["status"] == "incomplete"
     assert "**Publication status:** ⚠️ INCOMPLETE" in markdown
     assert offenders == []
+
+
+def test_succeeded_under_scored_attempts_cannot_certify_publication(tmp_path: Path) -> None:
+    results = _publication_ready_results("UNDER-SCORED")
+    payload = results[-1].metadata["agent_eval"]
+    for container in (payload, payload["summary"], *payload["agents"].values()):
+        container["expected_attempts"] = 2
+        container["scored_attempts"] = 1
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize("agent_status", ["failed", "skipped", "incomplete", None])
+def test_non_succeeded_agent_peer_cannot_certify_publication(
+    tmp_path: Path,
+    agent_status: str | None,
+) -> None:
+    results = _publication_ready_results("NON-SUCCEEDED-PEER")
+    payload = results[-1].metadata["agent_eval"]
+    peer: dict[str, object] = {
+        "model": "peer-model",
+        "expected_attempts": 0,
+        "scored_attempts": 0,
+    }
+    if agent_status is not None:
+        peer["execution_status"] = agent_status
+    payload["agents"]["peer"] = peer
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize("error_location", ["payload", "summary", "agent"])
+@pytest.mark.parametrize("invalid_errors", [["worker crashed"], (), {}], ids=["nonempty", "tuple", "mapping"])
+def test_succeeded_evidence_with_invalid_execution_errors_cannot_certify_publication(
+    tmp_path: Path,
+    error_location: str,
+    invalid_errors: object,
+) -> None:
+    results = _publication_ready_results("EXECUTION-ERRORS")
+    payload = results[-1].metadata["agent_eval"]
+    agent = next(iter(payload["agents"].values()))
+    payload["execution_errors"] = []
+    payload["summary"]["execution_errors"] = []
+    agent["execution_errors"] = []
+    container = payload if error_location == "payload" else payload["summary"] if error_location == "summary" else agent
+    container["execution_errors"] = invalid_errors
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
 
 
 def test_aggregate_attempt_counts_must_match_agent_evidence() -> None:

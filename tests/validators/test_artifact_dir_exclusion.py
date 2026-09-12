@@ -160,6 +160,43 @@ class TestSkillspectorFilteredCopy:
 
     @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
     @patch.object(Tools.skillspector, "run")
+    def test_report_filter_uses_scanned_filesystem_case_semantics(self, mock_run, tmp_path: Path) -> None:
+        skill = tmp_path / "clean-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("---\nname: clean-skill\n---\n")
+        alias = skill / "benchmark.md"
+        alias.write_text("authored or generated, depending on filesystem semantics\n")
+        canonical = skill / "BENCHMARK.md"
+        data = json.loads(_clean_spector_result().stdout)
+        data["risk_assessment"] = {"score": 5, "severity": "LOW", "recommendation": "SAFE"}
+        data["issues"] = [
+            {
+                "id": "SQP-2",
+                "pattern": "Generated card warning",
+                "severity": "LOW",
+                "confidence": 1.0,
+                "finding": "Generated card includes outputs",
+                "location": {"file": "benchmark.md", "start_line": 1},
+            }
+        ]
+        mock_run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(data),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator()._run_skillspector(skill)
+
+        if canonical.exists() and alias.samefile(canonical):
+            assert result.findings == []
+            assert any("ignored 1 generated artifact" in message for message in result.messages)
+        else:
+            assert len(result.findings) == 1
+            assert result.findings[0].file_path == "benchmark.md"
+
+    @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
+    @patch.object(Tools.skillspector, "run")
     def test_staged_scan_preserves_shipped_bytecode_for_sc8(self, mock_run, skill_with_artifacts):
         bytecode = skill_with_artifacts / "__pycache__" / "payload.pyc"
         bytecode.parent.mkdir()
@@ -295,3 +332,48 @@ class TestSkillspectorArtifactIssueFilter:
     def test_live_issue_is_kept(self):
         issue = {"location": {"file": "scripts/deploy.py", "start_line": 3}}
         assert SecurityValidator._is_generated_artifact_issue(issue) is False
+
+    @pytest.mark.parametrize("absolute_location", [False, True])
+    def test_generated_file_case_alias_follows_filesystem_semantics(
+        self,
+        tmp_path: Path,
+        absolute_location: bool,
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        alias = skill / "benchmark.md"
+        alias.write_text("authored or generated, depending on filesystem semantics\n")
+        canonical = skill / "BENCHMARK.md"
+        reported = alias if absolute_location else alias.relative_to(skill)
+        issue = {"location": {"file": str(reported), "start_line": 1}}
+
+        filtered = SecurityValidator._is_generated_artifact_issue(issue, source_root=skill)
+
+        if canonical.exists() and alias.samefile(canonical):
+            assert filtered is True
+        else:
+            assert filtered is False
+
+    def test_generated_directory_case_alias_follows_filesystem_semantics(self, tmp_path: Path) -> None:
+        skill = tmp_path / "skill"
+        alias = skill / "RESULTS"
+        alias.mkdir(parents=True)
+        finding = alias / "finding.md"
+        finding.write_text("authored or generated, depending on filesystem semantics\n")
+        canonical = skill / "results"
+        issue = {"location": {"file": "RESULTS/finding.md", "start_line": 1}}
+
+        filtered = SecurityValidator._is_generated_artifact_issue(issue, source_root=skill)
+
+        if canonical.exists() and alias.samefile(canonical):
+            assert filtered is True
+        else:
+            assert filtered is False
+
+    def test_generated_name_outside_source_root_is_not_filtered(self, tmp_path: Path) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (tmp_path / "BENCHMARK.md").write_text("outside the scanned skill\n")
+        issue = {"location": {"file": "../BENCHMARK.md", "start_line": 1}}
+
+        assert SecurityValidator._is_generated_artifact_issue(issue, source_root=skill) is False

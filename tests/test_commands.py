@@ -492,6 +492,7 @@ def test_validate_excludes_report_output_from_tier3_repo_context(
 ) -> None:
     from skillevaluator import cli as cli_module
     from skillevaluator.models.result import ValidationResult
+    from skillevaluator.tier3.output_provenance import is_generated_output_root
 
     skill = tmp_path / "repo" / "simple"
     shutil.copytree(FIXTURE, skill)
@@ -524,6 +525,7 @@ def test_validate_excludes_report_output_from_tier3_repo_context(
 
     assert result.exit_code == 0, result.output
     assert captured["repo_context_exclude_paths"] == (output_dir,)
+    assert is_generated_output_root(output_dir)
 
 
 @pytest.mark.parametrize("output_dir", [".", "missing/.."])
@@ -566,6 +568,51 @@ def test_validate_copy_repo_rejects_repo_root_report_output_before_tier3(
     assert "with --copy-repo" in result.output.lower()
     assert "repository root" in result.output.lower()
     assert "dedicated path" in result.output.lower()
+    assert calls == []
+
+
+def test_validate_copy_repo_rejects_authored_report_subtree_before_tier3(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (repo / ".git").mkdir()
+    authored_output = repo / "src"
+    authored_output.mkdir()
+    authored = authored_output / "app.py"
+    authored.write_text("print('authored')\n", encoding="utf-8")
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        cli_module,
+        "_run_agent_eval_or_skip",
+        lambda target, **_kwargs: calls.append(target),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--copy-repo",
+            "--checks",
+            "schema",
+            "--report",
+            "cli",
+            "--output-dir",
+            str(authored_output),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "dedicated skillevaluator generated-output directory" in result.output.lower()
+    assert authored.read_text(encoding="utf-8") == "print('authored')\n"
     assert calls == []
 
 
@@ -1394,6 +1441,44 @@ def test_validate_quiet_honors_explicit_report_formats() -> None:
         assert result.exit_code == 0, result.output
         assert list(Path("out").glob("*.json"))
         assert not list(Path("out").glob("*.html"))
+
+
+def test_validate_non_skill_cli_only_does_not_reserve_output_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    sibling = rules.with_name("rules-reports")
+    sibling.mkdir()
+    authored = sibling / "owner.txt"
+    authored.write_text("author-owned\n", encoding="utf-8")
+    monkeypatch.chdir(rules)
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli_module, "emit_reports", lambda *_args, **_kwargs: True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            ".",
+            "--type",
+            "rules",
+            "--no-llm",
+            "--no-tier2",
+            "--checks",
+            "schema",
+            "--report",
+            "cli",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert authored.read_text(encoding="utf-8") == "author-owned\n"
+    assert list(sibling.iterdir()) == [authored]
+    assert not (rules / "reports").exists()
 
 
 def test_validate_catalog_survives_failing_skills(monkeypatch) -> None:

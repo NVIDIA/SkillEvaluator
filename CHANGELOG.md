@@ -116,7 +116,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Report output is required outside the publication target. A default
   in-target `reports/` location relocates to an authenticated sibling
   `<skill>-reports` (or `<catalog>-reports`), refuses unowned collisions, and is
-  excluded from Tier 3 full-repository staging.
+  excluded from Tier 3 full-repository staging. In-repository `--copy-repo`
+  report roots are excluded only after they are reserved or authenticated as
+  generated output, preventing an authored subtree from being silently omitted.
 - Public benchmark provenance now rejects placeholder identities, malformed or
   future calendar dates, missing duplicated run IDs, hostile benchmark-policy
   metadata, and environment-label substitutions in required proof fields.

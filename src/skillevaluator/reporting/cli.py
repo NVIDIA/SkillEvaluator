@@ -27,7 +27,12 @@ from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
 )
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    get_skip_reason,
+    is_advisory_agent_eval_skip,
+    passes_required_gate,
+)
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -533,9 +538,7 @@ class CLIReporter(ReporterBase):
             static_test_evidence = self._static_test_evidence_message(result)
 
             if advisory_skip:
-                agent_eval = result.metadata.get("agent_eval", {})
-                provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
-                details = str(provenance.get("message") or "Live evaluation did not run")
+                details = get_skip_reason(result)
             elif result.is_incomplete:
                 details = f"[bold yellow]{', '.join(result.incomplete_scans)} did not complete[/bold yellow]"
                 counts = []

@@ -114,7 +114,10 @@ nested, reference, or workspace skill into agent-visible copies. Runtime skill
 projection and `--copy-repo` also omit every generated path excluded by the
 versioned publication-source digest. The active report directory and the whole
 catalog report root are explicitly excluded from full repo context, preventing
-a repeated run from exposing prior reports or Tier 3 evidence to the agent.
+a repeated run from exposing prior reports or Tier 3 evidence to the agent. An
+in-repository report directory is excluded only after SkillEvaluator reserves
+or authenticates it as generated output; a nonempty unowned directory is
+rejected instead of silently removing authored files from `--copy-repo`.
 Authenticated historical result roots remain excluded after the configured
 output location is changed; a present marker that is copied, stale, or cannot
 be authenticated fails staging closed instead of copying that tree. Custom result roots created

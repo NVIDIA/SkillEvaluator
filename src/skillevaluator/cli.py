@@ -419,7 +419,7 @@ def _reject_copy_repo_root_output(
     copy_repo: bool,
     agent_eval: bool,
 ) -> None:
-    """Reject a report root equal to the full Tier 3 repository context."""
+    """Reject or reserve report storage inside the full Tier 3 repo context."""
     if not copy_repo or not agent_eval:
         return
     try:
@@ -432,6 +432,27 @@ def _reject_copy_repo_root_output(
             "With --copy-repo, report output cannot be the repository root; "
             f"choose a dedicated path such as ./reports instead of: {output_dir}"
         )
+    try:
+        output_is_in_repo = _path_is_within(output_dir, repo_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(f"Cannot validate --copy-repo report output directory: {output_dir}") from exc
+    if not output_is_in_repo:
+        return
+
+    # Full-repo staging excludes this whole directory so prior reports cannot
+    # influence the agent. Only an authentically evaluator-owned tree is safe
+    # to omit wholesale; otherwise an arbitrary --output-dir such as repo/src
+    # would silently remove authored context from the evaluation.
+    from skillevaluator.tier3.output_provenance import mark_generated_output_root
+
+    try:
+        mark_generated_output_root(output_dir)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.UsageError(
+            "With --copy-repo, an in-repository report output must be a dedicated "
+            "SkillEvaluator generated-output directory; choose a new or authenticated "
+            f"report directory instead of: {output_dir}"
+        ) from exc
 
 
 def _report_formats_explicit() -> bool:
@@ -1342,22 +1363,32 @@ def validate(
 
     from skillevaluator.constants import CONTENT_TYPE_UNKNOWN
 
-    output_dir = _resolve_report_output_location(target_path, output_dir)
-    _reject_copy_repo_root_output(
-        target_path,
-        output_dir,
-        copy_repo=copy_repo,
-        agent_eval=agent_eval,
-    )
-
-    # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
-    # once per skill, serially, each as its own job with its own reports.
-    if (
+    is_catalog = (
         resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
         and target_path.is_dir()
         and not (target_path / "SKILL.md").exists()
         and any(target_path.glob("*/SKILL.md"))
-    ):
+    )
+    # Quiet (default) swaps the implicit CLI reporter for HTML+JSON, while an
+    # explicit -r cli is a no-file contract. Skills and catalogs additionally
+    # require storage for their compulsory BENCHMARK.md output.
+    quiet = not verbose and not logging.getLogger().isEnabledFor(logging.DEBUG)
+    file_report_required = any(report_format in _FILE_REPORT_EXTENSIONS for report_format in report_formats) or (
+        quiet and not _report_formats_explicit()
+    )
+    report_output_required = resolved_type == CONTENT_TYPE_SKILL or is_catalog or file_report_required
+    if report_output_required:
+        output_dir = _resolve_report_output_location(target_path, output_dir)
+        _reject_copy_repo_root_output(
+            target_path,
+            output_dir,
+            copy_repo=copy_repo,
+            agent_eval=agent_eval,
+        )
+
+    # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
+    # once per skill, serially, each as its own job with its own reports.
+    if is_catalog:
         _validate_catalog(
             click.get_current_context(),
             resolved_target=target_path,
@@ -1367,7 +1398,6 @@ def validate(
 
     # Quiet (default) drives the compact pipeline view; --verbose keeps the
     # historical full-detail stream, as does DEBUG logging via the group -v.
-    quiet = not verbose and not logging.getLogger().isEnabledFor(logging.DEBUG)
     run_tier3 = agent_eval
     planned_tiers = [(1, "Static & Security", "static & security")]
     tier2_index = tier3_index = None
@@ -1505,7 +1535,7 @@ def validate(
             view.tier_progress(tier3_index, [*tier3_config_rows, *engine_feed_rows(lines)])
 
         reporter = ViewProgressReporter(_on_engine_tail) if quiet else None
-        repo_context_exclude_paths = [output_dir]
+        repo_context_exclude_paths = [output_dir] if report_output_required else []
         catalog_report_root = click.get_current_context().meta.get("skillevaluator_catalog_report_root")
         if isinstance(catalog_report_root, Path) and not paths_refer_to_same_location(
             catalog_report_root,

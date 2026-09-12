@@ -414,6 +414,26 @@ def test_benchmark_allows_tier1_only_when_both_later_tiers_are_optional() -> Non
     assert "| Tier 3 | Live agent evaluation | **NOT RUN** |" in rendered
 
 
+def test_benchmark_infers_expected_skill_name_from_publication_target() -> None:
+    tier1 = ValidationResult(
+        validator_name="SCHEMA",
+        validator_description="Validate SKILL.md frontmatter and repository structure",
+    )
+    tier1.add_success("schema", "Schema passed")
+    tier1.metadata["benchmark_policy"] = {
+        "tier2_required": False,
+        "tier3_required": False,
+    }
+    _bind_target(tier1, skill_name="simple")
+
+    rendered = BenchmarkReporter(include_timestamp=False).render_all([tier1])
+
+    assert "Overall verdict: PASS" in rendered
+    assert "# Skill Benchmark: simple" in rendered
+    assert "- Skill: `simple`" in rendered
+    assert "## Publication Recommendation" in rendered
+
+
 def test_benchmark_required_skipped_tier2_is_incomplete() -> None:
     tier1 = _deterministic_results()[0]
 

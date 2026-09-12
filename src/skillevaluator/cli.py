@@ -46,6 +46,7 @@ from skillevaluator.tier1.commands import (
     run_validation,
 )
 from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
+from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
     paths_refer_to_same_location,
@@ -397,6 +398,39 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
     raise click.ClickException(
         f"Report output must be outside the publication target; use an external --output-dir: {output_dir}"
     )
+
+
+def _resolve_file_report_output_location(
+    target_path: Path,
+    output_dir: Path,
+    report_formats: tuple[str, ...],
+) -> Path:
+    """Resolve and reserve report storage only when a file reporter needs it."""
+    if not any(report_format in _FILE_REPORT_EXTENSIONS for report_format in report_formats):
+        return output_dir
+    return _resolve_report_output_location(target_path, output_dir)
+
+
+def _reject_copy_repo_root_output(
+    target_path: Path,
+    output_dir: Path,
+    *,
+    copy_repo: bool,
+    agent_eval: bool,
+) -> None:
+    """Reject a report root equal to the full Tier 3 repository context."""
+    if not copy_repo or not agent_eval:
+        return
+    try:
+        repo_root = resolve_repo_context_root(target_path)
+        output_is_repo_root = paths_refer_to_same_location(output_dir, repo_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(f"Cannot validate --copy-repo report output directory: {output_dir}") from exc
+    if output_is_repo_root:
+        raise click.UsageError(
+            "With --copy-repo, report output cannot be the repository root; "
+            f"choose a dedicated path such as ./reports instead of: {output_dir}"
+        )
 
 
 def _report_formats_explicit() -> bool:
@@ -1308,6 +1342,12 @@ def validate(
     from skillevaluator.constants import CONTENT_TYPE_UNKNOWN
 
     output_dir = _resolve_report_output_location(target_path, output_dir)
+    _reject_copy_repo_root_output(
+        target_path,
+        output_dir,
+        copy_repo=copy_repo,
+        agent_eval=agent_eval,
+    )
 
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
     # once per skill, serially, each as its own job with its own reports.
@@ -1617,7 +1657,7 @@ validate.help_group_descriptions = {
 @_report_options
 def quality_check(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Score skill quality across correctness, discoverability, reliability, and efficiency."""
-    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
         run_quality_check(target_path, min_score=min_score),
         report_formats=report_formats,
@@ -1633,7 +1673,7 @@ def quality_check(target_path: Path, min_score: int, report_formats: tuple[str, 
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
-    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
         run_rubric_eval(target_path, min_score=min_score),
         report_formats=report_formats,
@@ -1652,7 +1692,7 @@ def security_scan(
     target_path: Path, llm: bool, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path
 ) -> None:
     """Scan for security vulnerabilities."""
-    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
         run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify),
         report_formats=report_formats,
@@ -1668,7 +1708,7 @@ def security_scan(
 @_report_options
 def pii_scan(target_path: Path, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Scan for PII and local identifiers."""
-    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
         run_pii_scan(target_path, llm_verify=llm_verify),
         report_formats=report_formats,
@@ -1683,7 +1723,7 @@ def pii_scan(target_path: Path, llm_verify: bool, report_formats: tuple[str, ...
 @_report_options
 def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run advisory lint checks on skill scripts."""
-    output_dir = _resolve_report_output_location(target_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
         run_lint_scripts(target_path),
         report_formats=report_formats,
@@ -1740,7 +1780,7 @@ def similarity_check(
         raise click.UsageError("--catalog and --save-catalog cannot be used together")
 
     _reject_linked_tier2_root(content_path)
-    output_dir = _resolve_report_output_location(content_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(content_path.resolve(), output_dir, report_formats)
     similarity_basename = report_basename("similarity")
     _reject_catalog_report_collisions(
         resolved_catalog,
@@ -1793,7 +1833,7 @@ def context_optimization_check(
     from skillevaluator.tier2.commands import run_context_optimization_check
 
     _reject_linked_tier2_root(skill_path)
-    output_dir = _resolve_report_output_location(skill_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
     results = run_context_optimization_check(skill_path, threshold=threshold, model=model, llm_model=llm_model)
     sanitize_tier2_results(results, skill_path)
     if not emit_reports(
@@ -1823,7 +1863,7 @@ def dedup_scan(
     from skillevaluator.tier2.commands import run_dedup_scan
 
     _reject_linked_tier2_root(skill_path)
-    output_dir = _resolve_report_output_location(skill_path.resolve(), output_dir)
+    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
     results = run_dedup_scan(
         skill_path,
         threshold=threshold,

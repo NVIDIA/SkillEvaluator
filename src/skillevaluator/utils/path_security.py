@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 from collections.abc import Collection
 from pathlib import Path
 
@@ -78,4 +79,43 @@ def matches_filesystem_name(path: Path, canonical_names: Collection[str]) -> boo
     return False
 
 
-__all__ = ["canonicalize_trusted_root_alias", "matches_filesystem_name"]
+def find_git_repo_root(path: Path) -> Path | None:
+    """Return the containing Git root, with a metadata-search fallback."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip()).resolve()
+    except Exception:
+        pass
+
+    current = path.resolve()
+    if current.is_file():
+        current = current.parent
+    for parent in (current, *current.parents):
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def resolve_repo_context_root(path: Path) -> Path:
+    """Return the exact source root used by Tier 3 repo-context staging."""
+    try:
+        repo_root = find_git_repo_root(path)
+        resolved = path.resolve()
+        return repo_root or resolved.parent
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"Cannot resolve repository context root for: {path}") from exc
+
+
+__all__ = [
+    "canonicalize_trusted_root_alias",
+    "find_git_repo_root",
+    "matches_filesystem_name",
+    "resolve_repo_context_root",
+]

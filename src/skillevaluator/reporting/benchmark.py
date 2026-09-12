@@ -132,8 +132,16 @@ class BenchmarkReporter(ReporterBase):
 
     def render_all(self, results: list[ValidationResult]) -> str:
         ae = _agent_eval_payload(results)
-        expected_skill_name = self.skill_name or _skill_name(results, ae)
-        skill_name = _publication_safe_skill_name(expected_skill_name)
+        publication_target = publication_target_for_results(
+            results,
+            ae,
+            expected_skill_name=self.skill_name,
+        )
+        expected_skill_name = self.skill_name or (
+            publication_target.skill_name if publication_target is not None else None
+        )
+        display_skill_name = self.skill_name or _skill_name(results, ae) or expected_skill_name or "skill"
+        skill_name = _publication_safe_skill_name(display_skill_name)
         private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
         status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
@@ -716,7 +724,7 @@ def _verdict_callout(status: str) -> str:
     return f"> {labels.get(status, f'**Overall verdict: {status}**')}"
 
 
-def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str:
+def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str | None:
     if ae:
         summary = _mapping(ae.get("summary"))
         candidate = ae.get("skill_name") or summary.get("skill_name")
@@ -726,7 +734,7 @@ def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> s
         quality = result.metadata.get("quality_scores") if isinstance(result.metadata, dict) else None
         if isinstance(quality, dict) and (candidate := _safe_scalar_text(quality.get("skill_name")).strip()):
             return candidate
-    return "skill"
+    return None
 
 
 def _safe_scalar_text(value: object) -> str:

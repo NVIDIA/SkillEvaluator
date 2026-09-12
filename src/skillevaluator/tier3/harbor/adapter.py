@@ -54,6 +54,10 @@ from skillevaluator.tier3.output_provenance import (
     write_generated_output_marker,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.utils.path_security import (
+    find_git_repo_root,
+    resolve_repo_context_root,
+)
 from skillevaluator.utils.process_environment import child_process_env
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
@@ -248,40 +252,6 @@ def _verifier_env_block(runtime_env: dict[str, str] | None = None, indent: str =
     return "\n".join(f'{indent}{name} = "${{{name}}}"' for name in _verifier_env_vars(runtime_env))
 
 
-def _find_repo_root(path: Path) -> Path | None:
-    """Return the git repo root for *path*, falling back to parent .git search."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip()).resolve()
-    except Exception:
-        pass
-
-    current = path.resolve()
-    if current.is_file():
-        current = current.parent
-    for parent in (current, *current.parents):
-        if (parent / ".git").exists():
-            return parent
-    return None
-
-
-def _repo_context_root(path: Path) -> Path:
-    """Return the exact source root used by repo-context staging."""
-    try:
-        repo_root = _find_repo_root(path)
-        resolved = path.resolve()
-        return repo_root or resolved.parent
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"Cannot resolve repository context root for: {path}") from exc
-
-
 def validate_output_provenance_key_location(
     skill_path: Path,
     output_dir: Path,
@@ -293,7 +263,7 @@ def validate_output_provenance_key_location(
     protected_roots = [skill_path, output_dir, *workspace_skill_paths]
     if reference_skills_dir is not None:
         protected_roots.append(reference_skills_dir)
-    repo_root = _find_repo_root(skill_path)
+    repo_root = find_git_repo_root(skill_path)
     if repo_root is not None:
         protected_roots.append(repo_root)
     for protected_root in protected_roots:
@@ -1139,7 +1109,7 @@ def _stage_repo_context(
 
     source_skill_path = source_skill_path.resolve()
     skill_md = _skill_manifest(source_skill_path)
-    repo_root = _repo_context_root(source_skill_path)
+    repo_root = resolve_repo_context_root(source_skill_path)
     authenticated_output_roots: set[Path] = set()
     if (
         _authenticated_generated_output_ancestor(

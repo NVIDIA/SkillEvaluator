@@ -361,7 +361,7 @@ def test_standalone_tier1_rejects_in_skill_report_output_before_validation(
 
     result = CliRunner().invoke(
         cli,
-        ["quality-check", str(skill), "--output-dir", str(output_dir)],
+        ["quality-check", str(skill), "--report", "json", "--output-dir", str(output_dir)],
     )
 
     assert result.exit_code != 0
@@ -388,13 +388,54 @@ def test_standalone_tier2_rejects_in_skill_report_output_before_validation(
 
     result = CliRunner().invoke(
         cli,
-        ["context-optimization-check", str(skill), "--output-dir", str(output_dir)],
+        ["context-optimization-check", str(skill), "--report", "json", "--output-dir", str(output_dir)],
     )
 
     assert result.exit_code != 0
     assert "report output" in result.output.lower()
     assert calls == []
     assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "runner_name"),
+    [
+        ("quality-check", "run_quality_check"),
+        ("rubric-eval", "run_rubric_eval"),
+        ("security-scan", "run_security_scan"),
+        ("pii-scan", "run_pii_scan"),
+        ("lint-scripts", "run_lint_scripts"),
+        ("similarity-check", "run_similarity_check"),
+        ("context-optimization-check", "run_context_optimization_check"),
+        ("dedup-scan", "run_dedup_scan"),
+    ],
+)
+def test_standalone_cli_only_report_does_not_reserve_output_storage(
+    command: str,
+    runner_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.tier2 import commands as tier2_commands
+
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    private_state = tmp_path / "private-state"
+    private_state.mkdir(mode=0o700)
+    monkeypatch.setenv("SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE", str(private_state / "key"))
+    monkeypatch.chdir(skill)
+
+    runner_module = tier2_commands if hasattr(tier2_commands, runner_name) else cli_module
+    calls: list[bool] = []
+    monkeypatch.setattr(runner_module, runner_name, lambda *_args, **_kwargs: calls.append(True) or [])
+
+    result = CliRunner().invoke(cli, [command, ".", "--report", "cli"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [True]
+    assert not skill.with_name("simple-reports").exists()
+    assert not (skill / "reports").exists()
 
 
 def test_validate_tier_aliases_and_selector(monkeypatch) -> None:
@@ -476,6 +517,93 @@ def test_validate_excludes_report_output_from_tier3_repo_context(
             "--copy-repo",
             "--checks",
             "schema",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["repo_context_exclude_paths"] == (output_dir,)
+
+
+@pytest.mark.parametrize("output_dir", [".", "missing/.."])
+def test_validate_copy_repo_rejects_repo_root_report_output_before_tier3(
+    output_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (repo / ".git").mkdir()
+    monkeypatch.chdir(repo)
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        cli_module,
+        "_run_agent_eval_or_skip",
+        lambda target, **_kwargs: calls.append(target),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            "skills/simple",
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--copy-repo",
+            "--checks",
+            "schema",
+            "--output-dir",
+            output_dir,
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "with --copy-repo" in result.output.lower()
+    assert "repository root" in result.output.lower()
+    assert "dedicated path" in result.output.lower()
+    assert calls == []
+
+
+def test_validate_copy_repo_allows_report_output_above_repo_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.models.result import ValidationResult
+
+    repo = tmp_path / "workspace" / "repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (repo / ".git").mkdir()
+    output_dir = repo.parent.parent
+    captured: dict[str, object] = {}
+
+    def _tier3(*_args, **kwargs) -> ValidationResult:
+        captured.update(kwargs)
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.add_warning("stubbed")
+        return result
+
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", _tier3)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--copy-repo",
+            "--checks",
+            "schema",
+            "--report",
+            "cli",
             "--output-dir",
             str(output_dir),
         ],

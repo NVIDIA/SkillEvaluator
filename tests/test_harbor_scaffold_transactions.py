@@ -27,6 +27,25 @@ def _skill(tmp_path: Path) -> Path:
     return skill
 
 
+def test_harbor_scaffold_verifier_timeout_covers_all_structured_judge_attempts(tmp_path: Path) -> None:
+    skill = _skill(tmp_path)
+
+    assert (
+        commands.init_harbor_task(
+            skill,
+            force=False,
+            case_id="case-001",
+            mode="default",
+            language="python",
+            with_config=True,
+        )
+        == 0
+    )
+    task = tomllib.loads((skill / "evals" / "harbor" / "case-001" / "task.toml").read_text(encoding="utf-8"))
+
+    assert task["verifier"]["timeout_sec"] >= (3 * 2 * 90) + 60
+
+
 @pytest.mark.parametrize("case_id", ["../outside", r"..\outside", "/tmp/outside", r"C:\outside"])
 def test_scaffold_rejects_escaping_case_id_before_mutation(tmp_path: Path, case_id: str) -> None:
     skill = _skill(tmp_path)

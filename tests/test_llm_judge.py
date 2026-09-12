@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -101,6 +102,69 @@ def test_call_public_llm_uses_production_gpt5_payload_without_temperature(
     call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
     assert call_kwargs["max_completion_tokens"] == 4096
     assert "temperature" not in call_kwargs
+
+
+@pytest.mark.parametrize(
+    ("judge_name", "valid_response"),
+    [
+        (
+            "judge_accuracy",
+            json.dumps(
+                {
+                    "criteria": {
+                        "SKILL_IDENTIFIED": True,
+                        "ACTION_CORRECT": True,
+                        "FACTUALLY_ACCURATE": True,
+                        "TASK_ADDRESSED": True,
+                        "ACTIONABLE": True,
+                    },
+                    "score": 1.0,
+                    "reason": "recovered",
+                }
+            ),
+        ),
+        (
+            "judge_goal_accuracy",
+            json.dumps({"achieved": True, "score": 1.0, "reason": "recovered"}),
+        ),
+    ],
+)
+def test_shared_structured_judges_retry_empty_sdk_response(
+    monkeypatch: pytest.MonkeyPatch,
+    judge_name: str,
+    valid_response: str,
+) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create.side_effect = [
+        MagicMock(choices=[MagicMock(message=MagicMock(content=""))]),
+        MagicMock(choices=[MagicMock(message=MagicMock(content=valid_response))]),
+    ]
+
+    with patch("openai.OpenAI", return_value=mock_openai):
+        result = getattr(llm_judge, judge_name)("question", "ground truth", "agent response")
+
+    assert result["score"] == 1.0
+    assert mock_openai.chat.completions.create.call_count == 2
+    calls = mock_openai.chat.completions.create.call_args_list
+    assert [call.kwargs["max_tokens"] for call in calls] == [4096, 4096]
+    assert "previous reply could not be parsed or validated" in calls[1].kwargs["messages"][1]["content"]
+
+
+def test_shared_structured_judge_does_not_retry_sdk_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create.side_effect = RuntimeError("transport unavailable")
+
+    with patch("openai.OpenAI", return_value=mock_openai):
+        result = llm_judge.judge_accuracy("question", "ground truth", "agent response")
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert mock_openai.chat.completions.create.call_count == 1
 
 
 @pytest.mark.parametrize(

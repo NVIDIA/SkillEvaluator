@@ -1535,6 +1535,65 @@ def test_merge_attempt_jobs_rejects_source_destination_overlap(tmp_path: Path, r
     assert marker.read_text(encoding="utf-8") == "source"
 
 
+@pytest.mark.parametrize(
+    "task_toml",
+    [
+        "[agent]\ntimeout_sec = 300.0\n\n[verifier]\ntimeout_sec = 600.0\n",
+        "[agent]\ntimeout_sec = 300.0\n",
+        (
+            "[agent]\ntimeout_sec = 300.0\n\n"
+            '[[steps]]\nname = "first"\n\n'
+            '[[steps]]\nname = "second"\n[steps.agent]\ntimeout_sec = 450.0\n'
+        ),
+        "[verifier]\ntimeout_sec = 600.0\n",
+    ],
+    ids=("single-step", "native-verifier-default", "multi-step", "unbounded-agent"),
+)
+def test_run_harbor_defers_to_harbor_phase_timeouts_without_outer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task_toml: str,
+) -> None:
+    dataset = tmp_path / "dataset"
+    for index in range(5):
+        task = dataset / f"case-{index}"
+        task.mkdir(parents=True)
+        (task / "task.toml").write_text(task_toml, encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(runner, "build_harbor_run_command", lambda **_kwargs: ["harbor", "run"])
+
+    def completed_run(command: list[str], **kwargs: object) -> runner._BoundedHarborProcessResult:
+        del command
+        captured.update(kwargs)
+        return runner._BoundedHarborProcessResult(
+            returncode=1,
+            output_tail="expected test stop",
+            output_exceeded=False,
+        )
+
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", completed_run)
+
+    ok, _detail = runner._run_harbor(
+        dataset=dataset,
+        agent="opencode",
+        job_name="demo-opencode-with",
+        env_mode="docker",
+        model="nvidia/openai/gpt-oss-120b",
+        jobs_dir=tmp_path / "jobs",
+        run_env={},
+        n_attempts=3,
+        n_concurrent=2,
+        timeout_multiplier=1.5,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+        expected_trials=15,
+    )
+
+    assert ok is False
+    assert captured["timeout_seconds"] is None
+
+
 def _run(
     monkeypatch: pytest.MonkeyPatch,
     jobs_dir: Path,

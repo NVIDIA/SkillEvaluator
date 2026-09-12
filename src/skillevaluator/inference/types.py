@@ -12,6 +12,10 @@ class LLMClientError(Exception):
     """Raised when an LLM operation fails (missing key, bad response, etc.)."""
 
 
+class EmptyLLMResponseError(LLMClientError):
+    """Raised when a successful provider response contains no model text."""
+
+
 LLMConfigError = LLMClientError
 
 

@@ -19,7 +19,7 @@ from skillevaluator.constants import (
     CONTENT_TYPE_WORKFLOWS,
 )
 from skillevaluator.models.result import ValidationResult
-from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
 from skillevaluator.validators.base import continue_on_failure_scope
@@ -70,6 +70,7 @@ REPORTERS = {
     "json": JSONReporter,
     "html": HTMLReporter,
     "markdown": MarkdownReporter,
+    "sarif": SARIFReporter,
 }
 
 
@@ -332,6 +333,8 @@ def emit_reports(
     target_path: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
+    sarif_scan_root: Path | None = None,
+    sarif_repository_root: Path | None = None,
 ) -> bool:
     """Render reports and return whether every result passed.
 
@@ -356,6 +359,11 @@ def emit_reports(
         reporter_cls = REPORTERS[fmt]
         if fmt == "html":
             reporter = reporter_cls(target_path=target_path, content_label=content_label, tabs=html_tabs)
+        elif fmt == "sarif":
+            reporter = reporter_cls(
+                workspace_root=sarif_repository_root,
+                scan_root=sarif_scan_root,
+            )
         else:
             reporter = reporter_cls()
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"

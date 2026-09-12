@@ -261,6 +261,7 @@ def test_native_custom_only_preserves_authored_judge_controls_in_verifier_env(
 
     task_config = tomllib.loads((task / "task.toml").read_text(encoding="utf-8"))
     assert task_config["verifier"]["env"] == {name: "skill-model"}
+    assert task_config["verifier"]["timeout_sec"] == 180.0
 
 
 @pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
@@ -635,6 +636,21 @@ def test_native_tasks_allow_staged_verifier_env_interpolation_in_separate_verifi
     staged_compose = (staged_task / staged_relative_context / "docker-compose.yaml").read_text(encoding="utf-8")
     assert "${VERIFY_IMAGE}" in staged_compose
     assert "ports:" not in staged_compose
+
+
+def test_native_task_injected_verifier_timeout_covers_all_structured_judge_attempts(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+
+    task = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-injected-verifier-timeout",
+        grading_mode="default",
+        verifier_env={"SKILL_EVAL_LLM_PROVIDER": "${SKILL_EVAL_LLM_PROVIDER}"},
+    )[0]
+    task_config = tomllib.loads((task / "task.toml").read_text(encoding="utf-8"))
+
+    assert task_config["verifier"]["timeout_sec"] >= (3 * 2 * 90) + 60
 
 
 def test_native_task_reuses_existing_exact_provider_placeholder_when_injecting(tmp_path: Path) -> None:

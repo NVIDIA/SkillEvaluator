@@ -3991,6 +3991,15 @@ def test_output_redaction_balances_component_names_and_legacy_fallback(
         assert callback_output == value
 
 
+@pytest.mark.parametrize("name", ["BASH_ENV", "ENV", "LD_PRELOAD", "PYTHONPATH"])
+def test_empty_runtime_injection_env_is_dropped(name: str) -> None:
+    assert SkillEvaluatorLocalEnvironment._filter_command_env({name: ""}, protected=set()) == {}
+
+
+def test_unblocked_empty_runtime_env_is_preserved() -> None:
+    assert SkillEvaluatorLocalEnvironment._filter_command_env({"EXAMPLE": ""}, protected=set()) == {"EXAMPLE": ""}
+
+
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 def test_persistent_runtime_injection_env_is_blocked_before_launcher(tmp_path: Path) -> None:
     environment = _local_environment(tmp_path, persistent_env={"NODE_OPTIONS": "--require=/tmp/attack.js"})

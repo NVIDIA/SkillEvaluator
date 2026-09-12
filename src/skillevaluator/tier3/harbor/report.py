@@ -16,6 +16,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.evidence import evidence_ref_identity
+from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
@@ -29,7 +31,7 @@ from skillevaluator.tier3.harbor.metrics import (
     score_value,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
-from skillevaluator.utils.redaction import redact_sensitive_data
+from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ _MAX_FINDING_TEXT_CHARS = 2048
 _EVIDENCE_REF_TEXT_LIMITS = {
     "source": 256,
     "json_pointer": 512,
+    "evidence_id": 512,
     "kind": 64,
     "path": 512,
     "label": 256,
@@ -66,6 +69,8 @@ def _bounded_json_text(value: Any, *, max_encoded_bytes: int) -> str:
             high = midpoint - 1
     return text[:low] + suffix if low else suffix[:max_encoded_bytes]
 
+
+_REPORT_REASON_LIMIT = 512
 
 _METRIC_LABELS = {
     "security": "SECURITY (unsafe operations, secret leakage, unauthorized access)",
@@ -290,7 +295,7 @@ def _extract_findings(
             if not isinstance(raw_ref, dict | str):
                 continue
             r = _resolve_evidence_ref(raw_ref, {})
-            k = tuple(str(r.get(field) or "") for field in ("source", "json_pointer", "kind", "path"))
+            k = (r.get("source"), evidence_ref_identity(r), r.get("kind"))
             if k not in _seen:
                 _seen.add(k)
                 _refs.append(r)
@@ -355,16 +360,47 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
             if isinstance(ref, str):
                 body.append(f"      evidence: {ref}\n", style="dim")
             else:
-                loc = ref.get("json_pointer") or ref.get("path") or ""
-                body.append(f"      evidence: {ref.get('source', '')}{loc}\n", style="dim")
+                body.append(f"      evidence: {_compact_evidence_ref(ref)}\n", style="dim")
 
         body.append("\n")
     return body
 
 
+def _bounded_report_reason(value: Any) -> str:
+    """Coerce legacy/custom artifact values into bounded display text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError):
+            text = str(value)
+        text = text.strip()
+    text = redact_sensitive_text(_redact_configured_credentials(text))
+    if len(text) > _REPORT_REASON_LIMIT:
+        text = text[: _REPORT_REASON_LIMIT - 3] + "..."
+    return text
+
+
+def _dedupe_report_reasons(reasons: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in reasons:
+        reason = _bounded_report_reason(value)
+        if not reason:
+            continue
+        key = reason[:80].lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(reason)
+    return deduped
+
+
 def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str]:
     """Extract human-readable failure reasons from trial details."""
-    reasons: list[str] = []
+    reasons: list[Any] = []
 
     for trial in trials:
         detail = trial["detail"]
@@ -442,19 +478,12 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                 ):
                     reasons.append(reason)
 
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for r in reasons:
-        key = r[:80].lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(r)
-    return deduped
+    return _dedupe_report_reasons(reasons)
 
 
 def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str]:
     """Extract concise success reasons."""
-    reasons: list[str] = []
+    reasons: list[Any] = []
     for trial in trials:
         detail = trial["detail"]
         if not isinstance(detail, dict):
@@ -511,27 +540,21 @@ def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                 ):
                     reasons.append(reason)
 
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for r in reasons:
-        key = r[:80].lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(r)
-    return deduped
+    return _dedupe_report_reasons(reasons)
+
+
+def _compact_evidence_ref(ref: dict[str, Any]) -> str:
+    """Return the stable compact key for one evidence reference."""
+    return f"{ref.get('source') or ''}#{evidence_ref_identity(ref)}"
 
 
 def _bounded_reason_text(value: Any, *, max_len: int = 512) -> str:
-    """Normalize scalar evaluator explanations without expanding malformed containers."""
-    if isinstance(value, str):
-        return value[:max_len]
-    if isinstance(value, int | float | bool):
-        return str(value)[:max_len]
-    return ""
+    """Normalize, redact, and bound evaluator explanations."""
+    return _bounded_report_reason(value)[:max_len]
 
 
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Build a lookup from compact string key ``source#json_pointer`` to full dict ref.
+    """Build a lookup from each stable compact evidence key to its full dict ref.
 
     Iterates over all metrics in every reward's ``details`` dict, collecting
     ``evidence_refs`` entries.  The resulting mapping lets
@@ -551,10 +574,8 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
             for ref in metric_detail.get("evidence_refs") or []:
                 if not isinstance(ref, dict):
                     continue
-                source = ref.get("source") or ""
-                pointer = ref.get("json_pointer") or ""
-                if source or pointer:
-                    key = f"{source}#{pointer}"
+                if ref.get("source") or evidence_ref_identity(ref):
+                    key = _compact_evidence_ref(ref)
                     if key not in lookup:
                         lookup[key] = ref
     return lookup
@@ -574,7 +595,7 @@ def _resolve_evidence_ref(ref: Any, lookup: dict[str, dict[str, Any]]) -> dict[s
     """Resolve a single evidence ref to a dict.
 
     If ``ref`` is already a dict, return it unchanged.  If ``ref`` is a string
-    of the form ``"source#json_pointer"``, look it up in *lookup* and return the
+    of the form ``"source#json_pointer"`` (or a normalized evidence identity), look it up in *lookup* and return the
     full dict.  If the lookup misses, fall back to a minimal dict parsed from
     the string, with ``kind`` set to ``"evidence"``.
     """
@@ -647,9 +668,8 @@ def _generate_suggestions_structured(
     for f in failed_findings:
         for ref in (f.get("evidence_refs") or [])[:3]:
             if isinstance(ref, dict):
-                loc = ref.get("json_pointer") or ref.get("path") or ""
                 evidence_lines.append(
-                    f"  - [{f['metric']}] {ref.get('kind', '')} {ref.get('source', '')}{loc}: "
+                    f"  - [{f['metric']}] {ref.get('kind', '')} {_compact_evidence_ref(ref)}: "
                     f"{str(ref.get('label') or ref.get('excerpt') or '')[:120]}"
                 )
     evidence_block = "\n".join(evidence_lines) or "(no evidence refs)"
@@ -665,7 +685,7 @@ FAILED BEHAVIORS:
 ERROR RECOVERY ISSUES:
 {chr(10).join(f"- {e}" for e in error_recovery_info[:4]) or "(none)"}
 
-EVIDENCE REFERENCES (cite the relevant ones as trajectory.json#/pointer in your suggestions):
+EVIDENCE REFERENCES (cite the relevant compact reference exactly in your suggestions):
 {evidence_block}
 
 Based on these results, provide exactly 3-4 specific, actionable suggestions for the skill developer to improve their skill. Focus on:

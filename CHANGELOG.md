@@ -4,6 +4,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` names hosts whose model catalog may
+  be read over plain HTTP. Catalog reads still require HTTPS for every other
+  non-loopback host. Entries match one whole host as written, with no name
+  resolution. A plain-HTTP request to an accepted host bypasses any inherited
+  HTTP proxy so its bearer token is not offered to an intermediary. The
+  transport rechecks authorization before dispatch and rejects hosts that
+  are no longer allowed.
+- SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
+  consumers. Findings map to rule IDs, severity levels, and file locations from
+  Tier 1 validation results.
+
 ### Changed
 
 - Upgraded the optional Tier 3 backend to Harbor 0.22.0 and its compatible
@@ -57,6 +70,84 @@ All notable changes to SkillEvaluator are documented in this file.
   instead of replacing their unused `tests/skill_evaluator/` package.
   All native grading modes reject Windows agent or effective verifier
   environments until evaluator projection and verifier scripts are OS-aware.
+- Tier 3 local mode now drops evaluator-managed empty process-loader resets
+  while continuing to reject non-empty loader overrides, allowing generated
+  tasks to reach agent execution
+  ([#132](https://github.com/NVIDIA/SkillEvaluator/issues/132)).
+- Unpinned-dependency warnings are no longer suppressed by comparison
+  operators inside PEP 508 environment markers; requirements such as
+  `pkg; python_version < "3.13"` are now correctly reported, while direct
+  references are treated as pinned independently of marker contents.
+- Schema, frontmatter, quality parsing, and security PII scanning accept a leading
+  UTF-8 BOM, matching the unicode scanner's "benign BOM" note
+  ([#91](https://github.com/NVIDIA/SkillEvaluator/issues/91)).
+- SPDX headers keep the full license expression, so `MIT OR GPL-3.0` is
+  no longer truncated to MIT and allowed. Closing comment markers such as
+  `*/` and `-->` are not treated as part of the expression
+  ([#86](https://github.com/NVIDIA/SkillEvaluator/issues/86)).
+- Windows personal-path PII now flags `C:\Users\...` usernames that start with
+  `s` (for example `steve`), matching the intended whitespace class rather than
+  excluding the letter `s` ([#87](https://github.com/NVIDIA/SkillEvaluator/issues/87)).
+- Quality scoring, script lint, and `create-eval-dataset` now treat `tools/`
+  the same as `scripts/` for executable helpers.
+- License detection no longer treats a frontmatter `license` identifier as
+  authoritative when a LICENSE file declares a different license. Claiming
+  MIT while shipping GPL-3.0 now fails closed. Every LICENSE/COPYING file is
+  reconciled, NOTICE files stay informational, an unidentified license file is
+  not treated as absent, and a blocking conflict no longer publishes
+  `license_status=allowed`
+  ([#85](https://github.com/NVIDIA/SkillEvaluator/issues/85)).
+- `--llm-verify` now refuses to send file context from paths outside the
+  skill root, including `..`, absolute paths, and outbound file symlinks.
+- Gitleaks path allowlist now skips test/example/fixture/mock directories
+  instead of any path containing those substrings, so files like `latest.py`
+  are scanned.
+- The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
+  the results directory is not visible to the Docker daemon. Previously the smoke
+  run passed -- agent output travels over the Docker exec API rather than through
+  the mounts -- and every scored trial then failed with `RewardFileNotFoundError`
+  while the rewards sat inside the daemon's own filesystem.
+- Dead-link validation now uses the shared CommonMark parser, covering
+  reference-style and HTML links while preserving Markdown image checks and
+  consistently normalizing local destinations. Root-absolute URLs are ignored
+  instead of being treated as host paths; href-only diagnostics collapse
+  repeated links to the same normalized target. Invalid destination bytes do
+  not alias other files, relative URLs that normalize to absolute or
+  drive-relative paths are reported without lookup, lookup failures remain
+  per-link findings, and link diagnostics are bounded and escaped. Malformed
+  frontmatter and repeated unclosed HTML comments no longer abort or stall
+  supporting-document checks.
+- Tier 3 accuracy and custom goal judges now retry one malformed (including
+  empty) or schema-invalid response with a 4096-token output budget before
+  failing closed, preventing a transient formatting error from making an otherwise
+  successful trial and its full comparison arm unscoreable. Generated and
+  injected Harbor verifier configs now reserve 600 seconds for six sequential
+  direct provider attempts plus fail-closed artifact writes. Explicit native
+  task timeouts remain owner-controlled and are not rewritten, and whole jobs
+  defer to Harbor's task-configured phase controls instead of a hidden two-hour
+  cap
+  ([#70](https://github.com/NVIDIA/SkillEvaluator/issues/70)).
+- PII scanning no longer treats Markdown ATX headings as code comments, so
+  emails in headings such as `# Contact: ...` are flagged. Hash lines inside
+  Python strings, YAML scalars, and shell heredocs are scanned too. Real
+  comments stay skipped, including YAML frontmatter, fenced code, and
+  `requirements.txt` ([#88](https://github.com/NVIDIA/SkillEvaluator/issues/88)).
+- Tier 3 Harbor collection no longer scans an agent's unstructured transcript
+  for runtime-error phrases when the recorded exception belongs to the
+  verifier, health check, or task. Correct answers that discuss errors such as
+  `401 Unauthorized` are no longer misreported as agent runtime failures.
+- SkillSpector reports now use validated version-specific completeness
+  contracts. Valid findings from coherent 2.10+ partial scans remain visible
+  while the result stays incomplete, and fully covered 2.9.5/2.9.6 `--no-llm`
+  reports remain compatible. Contradictory finding or component totals and
+  duplicate component identities fail closed. Versioned findings require
+  producer paths, and complete reports reconcile universal analyzer work with
+  the component inventory. Reports scored before 2.10 finding compaction remain
+  accepted. Shipped bytecode findings, source-scoped executable evidence, and
+  version-specific finding identities remain authoritative without overstating
+  compacted or hidden finding evidence. SkillSpector 2.11+ requires bundled
+  execution-surface analyzer evidence; 2.11.1+ uses classification-aware
+  finding IDs while rejecting conflicting reuse of an ID.
 - Tier 3 paired pass@k evidence now respects Python's active integer-string
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission
@@ -65,6 +156,11 @@ All notable changes to SkillEvaluator are documented in this file.
   custom-metric contracts, publishes exact truncation metadata for bounded
   case and failure-detail samples, and keeps findings, attribution, and
   per-trial JSON inside the report loader's artifact envelope.
+- Tier 3 now decodes bounded native Codex `exec` wrappers into their static
+  tool calls. It preserves call order and outer-call provenance, maps an outer
+  observation only when its rendered inner call is known, keeps ambiguous
+  observations explicit, and reports unsupported or malformed JavaScript as
+  untrusted instead of a clean security result.
 
 ## 0.2.1 - 2026-08-24
 

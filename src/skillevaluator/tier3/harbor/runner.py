@@ -574,7 +574,6 @@ def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> di
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _NVIDIA_BUILD_BRIDGED_AGENT_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
-_HARBOR_RUN_TIMEOUT_SECONDS = 7200.0
 _HARBOR_RUN_OUTPUT_MAX_BYTES = MAX_COMMAND_OUTPUT_BYTES
 _HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS = 16 * 1024
 _HARBOR_RUN_OUTPUT_READ_BYTES = 64 * 1024
@@ -2415,13 +2414,13 @@ def _run_bounded_harbor_process(
     *,
     env: Mapping[str, str],
     stdin_text: str | None,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     max_output_bytes: int,
     diagnostic_tail_chars: int,
     secret_values: set[str],
 ) -> _BoundedHarborProcessResult:
-    """Run Harbor with bounded merged output and platform cleanup ownership."""
-    if timeout_seconds <= 0:
+    """Run Harbor with bounded merged output and optional cleanup deadline."""
+    if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("Harbor run timeout must be positive")
     if max_output_bytes <= 0:
         raise ValueError("Harbor output byte limit must be positive")
@@ -2447,7 +2446,7 @@ def _run_bounded_harbor_process(
     reader_error: list[BaseException] = []
     stdin_error: list[BaseException] = []
     output_tail = ""
-    deadline = time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
 
     def append_tail(text: str) -> None:
         nonlocal output_tail
@@ -2526,6 +2525,9 @@ def _run_bounded_harbor_process(
                 break
             if reader_done.is_set() and process.poll() is not None:
                 break
+            if deadline is None:
+                reader_done.wait(_HARBOR_RUN_POLL_SECONDS)
+                continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
@@ -2547,6 +2549,7 @@ def _run_bounded_harbor_process(
         if stdin_error:
             raise RuntimeError("Harbor stdin delivery failed") from stdin_error[0]
         if timed_out:
+            assert timeout_seconds is not None
             detail = f"Harbor run timed out after {timeout_seconds:g} seconds"
             safe_tail = redact_progress_detail(output_tail, secret_values=secret_values)
             if safe_tail:
@@ -2627,11 +2630,14 @@ def _run_harbor(
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
+        # Harbor owns its phase deadlines, and native tasks may intentionally
+        # leave the agent unbounded. Keep bounded streaming and process-tree
+        # cleanup without imposing an outer orchestration deadline.
         result = _run_bounded_harbor_process(
             command,
             env=handoff.subprocess_env,
             stdin_text=handoff.stdin_text,
-            timeout_seconds=_HARBOR_RUN_TIMEOUT_SECONDS,
+            timeout_seconds=None,
             max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
             diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
             secret_values=secret_values,

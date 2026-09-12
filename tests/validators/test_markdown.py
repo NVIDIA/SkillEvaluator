@@ -6,7 +6,7 @@
 import pytest
 
 from skillevaluator.validators import markdown as markdown_validator
-from skillevaluator.validators.markdown import markdown_link_targets
+from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
 _CLOSED_NON_NAVIGATION_HTML_TAGS = (
     "script",
@@ -43,6 +43,30 @@ def test_non_navigation_markdown_does_not_produce_links(content: str) -> None:
 @pytest.mark.parametrize(
     ("content", "target"),
     [
+        ("![diagram](inline.png)", "inline.png"),
+        ("![diagram][asset]\n\n[asset]: reference.png", "reference.png"),
+    ],
+)
+def test_image_targets_are_opt_in(content: str, target: str) -> None:
+    assert markdown_link_targets(content) == []
+    assert markdown_link_targets(content, include_images=True) == [target]
+
+
+def test_opted_in_images_preserve_order_and_escaped_destinations() -> None:
+    content = "[first](first.md) ![diagram](a&b.png) [last](last.md)"
+
+    assert markdown_link_targets(content, include_images=True) == ["first.md", "a&b.png", "last.md"]
+
+
+def test_local_path_normalization_can_preserve_directory_targets() -> None:
+    assert normalized_local_path("docs/") is None
+    assert normalized_local_path("docs/", allow_directory=True) == "docs"
+    assert normalized_local_path("") == "."
+
+
+@pytest.mark.parametrize(
+    ("content", "target"),
+    [
         ("[guide](inline.md)", "inline.md"),
         ("[outer [inner]](nested.md)", "nested.md"),
         (r"[escaped \] label](escaped.md)", "escaped.md"),
@@ -68,6 +92,37 @@ def test_commonmark_links_are_extracted(content: str, target: str) -> None:
 )
 def test_html_anchor_links_are_extracted(content: str, target: str) -> None:
     assert markdown_link_targets(content) == [target]
+
+
+def test_cdata_mode_falls_back_to_legacy_stdlib_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def legacy_set_cdata_mode(_parser, element: str) -> None:
+        calls.append(element)
+
+    monkeypatch.setattr(markdown_validator.HTMLParser, "set_cdata_mode", legacy_set_cdata_mode)
+    monkeypatch.setattr(markdown_validator, "_HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA", False)
+    parser = markdown_validator._AnchorHrefParser()
+
+    parser.set_cdata_mode("script")
+    parser.set_cdata_mode("textarea", escapable=True)
+
+    assert calls == ["script", "textarea"]
+
+
+def test_cdata_mode_forwards_escapable_to_new_stdlib_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def modern_set_cdata_mode(_parser, element: str, *, escapable: bool = False) -> None:
+        calls.append((element, escapable))
+
+    monkeypatch.setattr(markdown_validator.HTMLParser, "set_cdata_mode", modern_set_cdata_mode)
+    monkeypatch.setattr(markdown_validator, "_HTML_PARSER_SUPPORTS_ESCAPABLE_CDATA", True)
+    parser = markdown_validator._AnchorHrefParser()
+
+    parser.set_cdata_mode("textarea", escapable=True)
+
+    assert calls == [("textarea", True)]
 
 
 def test_markdown_and_html_links_preserve_source_order() -> None:

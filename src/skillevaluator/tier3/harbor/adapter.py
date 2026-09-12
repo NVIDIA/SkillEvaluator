@@ -40,6 +40,7 @@ from skillevaluator.tier3.case_ids import (
     validate_case_ids,
     validate_output_directory_path,
 )
+from skillevaluator.tier3.harbor import DEFAULT_LLM_VERIFIER_TIMEOUT_SEC
 from skillevaluator.tier3.harbor.secure_copy import (
     copy_file_secure,
     copytree_secure,
@@ -1953,7 +1954,7 @@ has_skill = {str(has_skill).lower()}
 timeout_sec = 300.0
 
 [verifier]
-timeout_sec = 180.0
+timeout_sec = {DEFAULT_LLM_VERIFIER_TIMEOUT_SEC}
 
 [verifier.env]
 {_verifier_env_block(verifier_env if verifier_env is not None else runtime_env)}
@@ -2118,16 +2119,17 @@ def _copy_verifier(task_dir: Path) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
     evaluator_dir = _replace_evaluator_tests_dir(task_dir)
-    src = TEMPLATES_DIR / "eval.py"
-    if src.exists():
-        shutil.copy2(src, evaluator_dir / "eval.py")
-    else:
-        logger.warning("Verifier template not found at %s", src)
-    lc = _EVAL_CORE_DIR / "log_converters.py"
-    if lc.exists():
-        shutil.copy2(lc, evaluator_dir / "log_converters.py")
-    else:
-        logger.warning("log_converters helper not found at %s", lc)
+    sources = (
+        (TEMPLATES_DIR / "eval.py", "Verifier template"),
+        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
+        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
+        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
+    )
+    for src, label in sources:
+        if src.exists():
+            shutil.copy2(src, evaluator_dir / src.name)
+        else:
+            logger.warning("%s not found at %s", label, src)
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:
@@ -4907,7 +4909,7 @@ def _ensure_skill_evaluator_verifier_env(task_dir: Path, *, verifier_env: dict[s
         if not isinstance(verifier, dict):
             raise TypeError("verifier is not a table")
         if verifier_missing:
-            verifier["timeout_sec"] = 180.0
+            verifier["timeout_sec"] = DEFAULT_LLM_VERIFIER_TIMEOUT_SEC
         environment = verifier.setdefault("env", {})
         if not isinstance(environment, dict):
             raise TypeError("verifier.env is not a table")

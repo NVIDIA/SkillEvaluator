@@ -53,6 +53,20 @@ def _load_template_module():
 eval_template = _load_template_module()
 
 
+class _JSONResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+
 # ---------------------------------------------------------------------------
 # Captured offending shapes
 # ---------------------------------------------------------------------------
@@ -234,6 +248,18 @@ def test_extract_json_rejects_nonstandard_json_constants(constant):
     assert eval_template.extract_json(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('{"metadata": 1e999}', id="positive-overflow"),
+        pytest.param('{"nested": [{"value": -1e999}]}', id="negative-nested-overflow"),
+    ],
+)
+def test_extract_json_rejects_finite_syntax_that_overflows_to_infinity(text):
+    assert llm_judge._extract_json(text) is None
+    assert eval_template.extract_json(text) is None
+
+
 def test_behavior_judge_treats_list_payload_as_unparseable(monkeypatch):
     # A bare array is valid JSON but not a judge object; old code raised
     # AttributeError on parsed.get -- now it takes the structured-error path.
@@ -258,6 +284,13 @@ def test_salvage_recovers_complete_entries_from_truncated_results():
 
     assert [r["step"] for r in salvaged] == [1, 2]
     assert [r["passed"] for r in salvaged] == [True, False]
+
+
+def test_salvage_rejects_complete_entries_with_overflowed_numeric_metadata():
+    text = '{"results":[{"step":1,"passed":true,"metadata":1e999},{"step":2'
+
+    assert llm_judge._salvage_behavior_results(text) == []
+    assert eval_template._salvage_behavior_results(text) == []
 
 
 def test_salvage_returns_empty_for_empty_or_alien_text():
@@ -432,6 +465,8 @@ def test_template_behavior_judge_matches_eval_core(monkeypatch, responses):
 
 def test_template_behavior_judge_max_tokens_matches_eval_core_constant():
     assert eval_template.BEHAVIOR_JUDGE_MAX_TOKENS == llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS
+    assert eval_template.BEHAVIOR_JUDGE_MAX_TOKENS == eval_template.STRUCTURED_JUDGE_MAX_TOKENS
+    assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS == llm_judge.STRUCTURED_JUDGE_MAX_TOKENS
     assert llm_judge.BEHAVIOR_JUDGE_MAX_TOKENS >= 4096
 
 
@@ -521,6 +556,81 @@ def test_template_bedrock_request_uses_model_compatible_temperature(monkeypatch,
         assert "temperature" not in inference_config
     else:
         assert inference_config["temperature"] == expected_temperature
+
+
+@pytest.mark.parametrize(
+    ("judge_name", "valid_response"),
+    [
+        pytest.param(
+            "judge_accuracy",
+            {"score": 1.0, "reason": "recovered"},
+            id="accuracy",
+        ),
+        pytest.param(
+            "judge_goal_accuracy",
+            {
+                "achieved": True,
+                "score": 1.0,
+                "reason": "recovered",
+                "user_goal": "complete the task",
+                "end_state": "task completed",
+            },
+            id="custom-goal",
+        ),
+    ],
+)
+def test_template_structured_judges_retry_nullable_openai_content(
+    monkeypatch,
+    judge_name,
+    valid_response,
+):
+    responses = iter(
+        [
+            {"choices": [{"message": {"content": None}}]},
+            {"choices": [{"message": {"content": json.dumps(valid_response)}}]},
+        ]
+    )
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 90
+        requests.append(json.loads(request.data))
+        return _JSONResponse(next(responses))
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://openai-compatible.example/v1")
+    monkeypatch.delenv("LLM_JUDGE_FALLBACK_MODELS", raising=False)
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+
+    result = getattr(eval_template, judge_name)("question", "ground truth", "agent response")
+
+    assert result["score"] == 1.0
+    assert len(requests) == 2
+    assert [request["max_tokens"] for request in requests] == [4096, 4096]
+    assert "previous reply could not be parsed or validated" in requests[1]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("content", [{"nested": "text"}, ["text"], 1])
+def test_template_non_string_openai_content_remains_a_provider_error(monkeypatch, content):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(json.loads(request.data))
+        return _JSONResponse({"choices": [{"message": {"content": content}}]})
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://openai-compatible.example/v1")
+    monkeypatch.delenv("LLM_JUDGE_FALLBACK_MODELS", raising=False)
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+
+    result = eval_template.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(requests) == 1
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert result["reason"].startswith("LLM judge error: Public provider call failed")
 
 
 @pytest.mark.parametrize(

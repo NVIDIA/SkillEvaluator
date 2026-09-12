@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from skillevaluator.inference import LLMClient, LLMClientError, LLMVerdict
+from skillevaluator.inference import EmptyLLMResponseError, LLMClient, LLMClientError, LLMVerdict
 from skillevaluator.inference.client import _is_native_openai_endpoint, _token_limit_kwargs
 from skillevaluator.provider_config import (
     CHAT_DEFAULT_ANTHROPIC,
@@ -328,6 +328,40 @@ class TestCompletions:
             client = LLMClient()
             result = client.completions("system", "user")
         assert result == "Hello world"
+
+    def test_openai_compatible_empty_response_uses_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content=""))]
+
+        with (
+            patch("openai.OpenAI", return_value=mock_openai),
+            pytest.raises(EmptyLLMResponseError, match="empty response"),
+        ):
+            LLMClient().completions("system", "user")
+
+    def test_anthropic_empty_response_uses_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value.content = []
+
+        with (
+            patch("anthropic.Anthropic", return_value=mock_anthropic),
+            pytest.raises(EmptyLLMResponseError, match="empty response"),
+        ):
+            LLMClient().completions("system", "user")
+
+    def test_bedrock_empty_response_uses_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=""))])
+
+        with (
+            patch("litellm.completion", return_value=response),
+            pytest.raises(EmptyLLMResponseError, match="empty response"),
+        ):
+            LLMClient().completions("system", "user")
 
     def test_none_temperature_is_omitted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class NoTemperatureClient(LLMClient):

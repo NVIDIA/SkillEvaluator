@@ -62,6 +62,22 @@ def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
     ]
 
 
+def resolve_git_root(local_path: Path) -> Path | None:
+    """Return the containing Git repository root without importing optional tiers."""
+    resolved = local_path.resolve()
+    working_dir = resolved if resolved.is_dir() else resolved.parent
+    try:
+        root = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(working_dir),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    return Path(root).resolve() if root else None
+
+
 def resolve_git_remote_url(local_path: Path) -> str | None:
     """Resolve a local path to a browsable HTTPS URL if inside a git repo.
 
@@ -79,20 +95,15 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
         HTTPS URL string, or None if not inside a git repo
     """
     resolved = local_path.resolve()
+    repo_root = resolve_git_root(resolved)
+    if repo_root is None:
+        return None
 
     try:
-        # Find the git repo root
-        repo_root = subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(resolved if resolved.is_dir() else resolved.parent),
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-
         # Get the remote origin URL
         remote_url = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
-            cwd=repo_root,
+            cwd=str(repo_root),
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
@@ -108,7 +119,7 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
             try:
                 branch = subprocess.check_output(
                     ["git", "rev-parse", "HEAD"],
-                    cwd=repo_root,
+                    cwd=str(repo_root),
                     stderr=subprocess.DEVNULL,
                     text=True,
                 ).strip()
@@ -118,7 +129,7 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
             try:
                 branch = subprocess.check_output(
                     ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                    cwd=repo_root,
+                    cwd=str(repo_root),
                     stderr=subprocess.DEVNULL,
                     text=True,
                 ).strip()

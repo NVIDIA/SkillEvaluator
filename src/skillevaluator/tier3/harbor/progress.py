@@ -245,7 +245,7 @@ class PlainProgressReporter:
             ("preflight-trials", plan.preflight_trials),
             ("containers", plan.total_containers),
             (
-                "task-timeout",
+                "max-scaled-top-level-agent-timeout",
                 None if plan.task_timeout_seconds is None else f"{plan.task_timeout_seconds:g}s",
             ),
         )
@@ -395,7 +395,7 @@ class RichProgressReporter(PlainProgressReporter):
             ("Preflight trials", plan.preflight_trials),
             ("Containers", plan.total_containers),
             (
-                "Task timeout",
+                "Max scaled top-level agent timeout",
                 None if plan.task_timeout_seconds is None else f"{plan.task_timeout_seconds:g}s",
             ),
         )

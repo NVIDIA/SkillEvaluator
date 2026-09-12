@@ -37,6 +37,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
+from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 
 # Verdict labels mirror SkillEvaluator's AGENT_EVAL_VERDICT_* values so the ported
@@ -1387,8 +1388,8 @@ def _compact_evidence_refs(raw_refs: object) -> list[str]:
             rendered = raw.strip()
         elif isinstance(raw, dict):
             source = str(raw.get("source") or "").strip()
-            pointer = str(raw.get("json_pointer") or raw.get("path") or "").strip()
-            rendered = f"{source}{pointer}" if source else pointer
+            identity = evidence_ref_identity(raw)
+            rendered = f"{source}{identity}" if source else identity
         else:
             continue
         if rendered and rendered not in refs:

@@ -110,7 +110,11 @@ def _clean_spector_result():
             {
                 "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
                 "issues": [],
-                "metadata": {"llm_requested": False, "llm_available": False},
+                "metadata": {
+                    "skillspector_version": "1.0.0",
+                    "llm_requested": False,
+                    "llm_available": False,
+                },
             }
         ),
         stderr="",
@@ -156,6 +160,48 @@ class TestSkillspectorFilteredCopy:
 
     @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
     @patch.object(Tools.skillspector, "run")
+    def test_staged_scan_preserves_shipped_bytecode_for_sc8(self, mock_run, skill_with_artifacts):
+        bytecode = skill_with_artifacts / "__pycache__" / "payload.pyc"
+        bytecode.parent.mkdir()
+        bytecode.write_bytes(b"shipped bytecode")
+        seen: dict = {}
+
+        def capture(args, **kwargs):
+            scanned = Path(args[args.index("scan") + 1])
+            seen["path"] = scanned
+            seen["has_bytecode"] = (scanned / "__pycache__" / "payload.pyc").is_file()
+            seen["has_generated_results"] = (scanned / "evals" / "results").exists()
+            if not seen["has_bytecode"]:
+                return _clean_spector_result()
+            data = json.loads(_clean_spector_result().stdout)
+            data["risk_assessment"] = {
+                "score": 51,
+                "severity": "HIGH",
+                "recommendation": "DO_NOT_INSTALL",
+            }
+            data["issues"] = [
+                {
+                    "id": "SC8",
+                    "pattern": "Shipped Python bytecode",
+                    "severity": "HIGH",
+                    "confidence": 0.95,
+                    "finding": "Compiled Python artifact",
+                    "location": {"file": "__pycache__/payload.pyc", "start_line": 1},
+                }
+            ]
+            return ToolResult(success=False, stdout=json.dumps(data), stderr="", exit_code=1)
+
+        mock_run.side_effect = capture
+        result = SecurityValidator()._run_skillspector(skill_with_artifacts)
+
+        assert seen["path"] != skill_with_artifacts.resolve()
+        assert seen["has_bytecode"] is True
+        assert seen["has_generated_results"] is False
+        assert result.status == "failed"
+        assert any(finding.check_name.endswith("(SC8)") for finding in result.findings)
+
+    @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
+    @patch.object(Tools.skillspector, "run")
     def test_findings_map_back_to_original_paths(self, mock_run, skill_with_artifacts):
         def report_on_copy(args, **kwargs):
             scanned = args[args.index("scan") + 1]
@@ -173,6 +219,7 @@ class TestSkillspectorFilteredCopy:
                         "finding": "dangerous call",
                     }
                 ],
+                "metadata": {"skillspector_version": "1.0.0"},
             }
             return ToolResult(success=False, stdout=json.dumps(data), stderr="", exit_code=1)
 

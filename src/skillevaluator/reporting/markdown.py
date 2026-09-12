@@ -18,6 +18,7 @@ import html
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
@@ -242,7 +243,7 @@ class MarkdownReporter(ReporterBase):
                             label = harbor_evidence_link_text(harbor_evidence)
                             lines.append(f"   - Evidence: [{label}]({url})")
                     for ref in (suggestion.get("evidence_refs") or [])[:3]:
-                        pointer = ref.get("json_pointer") or ref.get("path") or ""
+                        pointer = evidence_ref_identity(ref)
                         excerpt = str(ref.get("excerpt") or ref.get("label") or "")[:120]
                         lines.append(f"   - Evidence: `{ref.get('kind', 'evidence')}` `{pointer}` {excerpt}")
                 lines.append("")

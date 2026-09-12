@@ -145,17 +145,27 @@ def _live_tier3_result() -> ValidationResult:
         "run_id": _TIER3_RUN_ID,
         "publication_target": dict(_PUBLICATION_TARGET),
         "verdict": "pass",
+        "best_agent": "claude-code",
+        "agents_run": ["claude-code", "codex"],
+        "overall_score": 0.92,
+        "overall_lift": 0.45,
         "execution_status": "succeeded",
         "evaluated_at": "2026-07-24T12:30:00+00:00",
         "evaluator_version": "0.8.2",
-        "expected_attempts": 16,
-        "scored_attempts": 16,
+        "execution_errors": [],
+        "expected_attempts": 96,
+        "scored_attempts": 96,
         "summary": {
             "environment": _private_sandbox_name("-"),
             "verdict": "pass",
+            "best_agent": "claude-code",
+            "agents_run": ["claude-code", "codex"],
+            "overall_score": 0.92,
+            "overall_lift": 0.45,
             "execution_status": "succeeded",
-            "expected_attempts": 16,
-            "scored_attempts": 16,
+            "execution_errors": [],
+            "expected_attempts": 96,
+            "scored_attempts": 96,
             "run_id": _TIER3_RUN_ID,
             "publication_target": dict(_PUBLICATION_TARGET),
         },
@@ -168,30 +178,64 @@ def _live_tier3_result() -> ValidationResult:
         },
         "dataset_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
-        "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5},
+        "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5, "stop_on_pass": False},
         "agents": {
             "claude-code": {
                 "model": "claude-sonnet",
                 "execution_status": "succeeded",
-                "expected_attempts": 8,
-                "scored_attempts": 8,
+                "execution_errors": [],
+                "expected_attempts": 48,
+                "scored_attempts": 48,
+                "conditions": {
+                    "with_skill": {
+                        "execution_status": "succeeded",
+                        "execution_errors": [],
+                        "expected_attempts": 24,
+                        "scored_attempts": 24,
+                    },
+                    "without_skill": {
+                        "execution_status": "succeeded",
+                        "execution_errors": [],
+                        "expected_attempts": 24,
+                        "scored_attempts": 24,
+                    },
+                },
                 "baseline": 0.47,
                 "with_skill": 0.92,
+                "lift": 0.45,
                 "dimensions": dimensions(0.47, 0.92),
                 "evaluators": {"accuracy": {"baseline": 0.47, "with_skill": 0.92}},
             },
             "codex": {
                 "model": "gpt-codex",
                 "execution_status": "succeeded",
-                "expected_attempts": 8,
-                "scored_attempts": 8,
+                "execution_errors": [],
+                "expected_attempts": 48,
+                "scored_attempts": 48,
+                "conditions": {
+                    "with_skill": {
+                        "execution_status": "succeeded",
+                        "execution_errors": [],
+                        "expected_attempts": 24,
+                        "scored_attempts": 24,
+                    },
+                    "without_skill": {
+                        "execution_status": "succeeded",
+                        "execution_errors": [],
+                        "expected_attempts": 24,
+                        "scored_attempts": 24,
+                    },
+                },
                 "baseline": 0.55,
                 "with_skill": 0.88,
+                "lift": 0.33,
                 "dimensions": dimensions(0.55, 0.88),
                 "evaluators": {"accuracy": {"baseline": 0.55, "with_skill": 0.88}},
             },
         },
     }
+    payload = result.metadata["agent_eval"]
+    payload["dimensions"] = payload["agents"]["claude-code"]["dimensions"]
     result.add_success("agent_eval", "Live evaluation completed")
     return _bind_target(result)
 
@@ -1017,7 +1061,8 @@ def test_benchmark_no_baseline_never_fabricates_uplift() -> None:
 
     rendered = BenchmarkReporter(include_timestamp=False).render_all([*_deterministic_results(), tier3])
 
-    assert "Overall verdict: NEUTRAL" in rendered
+    assert "Overall verdict: INCOMPLETE" in rendered
+    assert "Tier 3 ran but lacks publication-complete provenance or dimension evidence" in rendered
     assert "92% — baseline not run; uplift unavailable" in rendered
     assert "88% — baseline not run; uplift unavailable" in rendered
     assert "Publication Recommendation" not in rendered

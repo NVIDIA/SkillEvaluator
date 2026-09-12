@@ -18,6 +18,8 @@ from skillevaluator.publication_evidence import (
     stamp_publication_evidence,
 )
 from skillevaluator.reporting import HTMLReporter, JSONReporter
+from skillevaluator.reporting.base import assess_publication, result_has_execution_evidence
+from skillevaluator.utils.tool_runner import ToolResult, Tools
 
 
 def test_stamp_and_project_recognized_publication_evidence() -> None:
@@ -138,6 +140,125 @@ def test_all_built_in_command_wrappers_stamp_canonical_check_identities(
         "similarity",
         "context-optimization",
     }
+
+
+def test_clean_actual_tier1_validators_produce_publication_execution_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier1.commands import run_validation
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        """---
+name: demo
+description: Summarize short user notes into clear action items.
+license: MIT
+metadata:
+  author: Test Author <test-author@example.com>
+---
+
+# Demo
+
+## Instructions
+
+Read the user's note and return a concise list of action items.
+
+## Examples
+
+Input: "Follow up tomorrow."
+
+Output: "Action item: Follow up tomorrow."
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Tools.gitleaks, "_path", "/usr/bin/gitleaks")
+    monkeypatch.setattr(
+        Tools.gitleaks,
+        "run",
+        lambda *_args, **_kwargs: ToolResult(
+            success=True,
+            stdout="[]",
+            stderr="",
+            exit_code=0,
+        ),
+    )
+
+    results = run_validation(
+        skill,
+        checks="schema,license,code-integrity,dependency",
+        content_type="skill",
+        on_check=lambda _check: None,
+    )
+    for result in results:
+        result.metadata["benchmark_policy"] = {
+            "tier2_required": False,
+            "tier3_required": False,
+        }
+
+    assert all(result.passed for result in results)
+    assert all(result_has_execution_evidence(result) for result in results)
+    assessment = assess_publication(results, expected_skill_name="demo")
+    assert assessment.status == "pass"
+    assert not assessment.reasons
+
+
+def test_dependency_publication_is_incomplete_when_one_requirements_scan_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One clean source must not hide another source's missing audit evidence."""
+    from skillevaluator.tier1.commands import run_validation
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Test dependency audit publication evidence.\n---\n",
+        encoding="utf-8",
+    )
+    (skill / "requirements-a.txt").write_text("requests==2.32.0\n", encoding="utf-8")
+    (skill / "requirements-b.txt").write_text("urllib3==2.2.2\n", encoding="utf-8")
+
+    tool_results = iter(
+        [
+            ToolResult(
+                success=True,
+                stdout='{"dependencies": [], "fixes": []}',
+                stderr="",
+                exit_code=0,
+            ),
+            ToolResult(
+                success=False,
+                stdout="",
+                stderr="",
+                exit_code=-1,
+                error_message="pip-audit timed out",
+            ),
+        ]
+    )
+    monkeypatch.setattr(Tools.pip_audit, "_path", "/usr/bin/pip-audit")
+    monkeypatch.setattr(Tools.pip_audit, "run", lambda *_args, **_kwargs: next(tool_results))
+    monkeypatch.setattr(Tools.safety, "_path", None)
+
+    results = run_validation(
+        skill,
+        checks="dependency",
+        content_type="skill",
+        on_check=lambda _check: None,
+    )
+    dependency = results[0]
+    dependency.metadata["benchmark_policy"] = {
+        "tier2_required": False,
+        "tier3_required": False,
+    }
+
+    assert dependency.status == "incomplete"
+    assert dependency.incomplete_scans == ["pip-audit"]
+    assert len([detail for detail in dependency.success_details if detail.check_name == "pip_audit"]) == 1
+    assessment = assess_publication(results, expected_skill_name="demo")
+    assert assessment.status == "incomplete"
+    assert "One or more validators reported incomplete scanner evidence." in assessment.reasons
 
 
 def test_machine_reporters_preserve_only_valid_publication_evidence() -> None:

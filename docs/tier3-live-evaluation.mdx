@@ -133,6 +133,16 @@ dataset/configuration files, graders, developer eval guidance, benchmark
 conversion reports, native Harbor tasks, custom environments, evaluator tests,
 or generated results.
 
+Publication identity covers the evaluated skill tree itself. A Tier 3 run that
+actually stages linked or full-repository context, or separately configured
+external reference/workspace skills, still executes and remains available for
+diagnosis, but its publication evidence fails closed as `INCOMPLETE`.
+Full-repository selection also depends on Git/operator state excluded from the
+skill digest, even when the repository root is the skill directory. Keep
+publication-certifying runtime inputs inside the evaluated skill tree without
+repository-context staging. Binding arbitrary repository projections under a
+separate, versioned identity is not currently supported.
+
 MCP declarations are read only from a bounded, stable, single-link regular
 `evals/environment/mcp_servers.toml` through a descriptor-anchored evaluator
 root. Linked configuration files or parents, hardlinks, reparse points, and

@@ -43,6 +43,9 @@ if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
 
 
+_SKIP_REASON_MAX_CHARS = 1024
+
+
 def _related_paths(finding: Finding) -> list[str]:
     """Return distinct path-like string values carried in finding metadata."""
     metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
@@ -54,6 +57,14 @@ def _related_paths(finding: Finding) -> list[str]:
         if isinstance(value, str) and value and value not in paths:
             paths.append(value)
     return paths
+
+
+def _rich_skip_reason(result: ValidationResult) -> str:
+    """Return one bounded, single-line skip reason inert to Rich markup."""
+    reason = " ".join(get_skip_reason(result).replace("\r\n", "\n").replace("\r", "\n").split())
+    if len(reason) > _SKIP_REASON_MAX_CHARS:
+        reason = reason[: _SKIP_REASON_MAX_CHARS - 1] + "…"
+    return rich_escape(reason)
 
 
 class CLIReporter(ReporterBase):
@@ -538,7 +549,7 @@ class CLIReporter(ReporterBase):
             static_test_evidence = self._static_test_evidence_message(result)
 
             if advisory_skip:
-                details = get_skip_reason(result)
+                details = _rich_skip_reason(result)
             elif result.is_incomplete:
                 details = f"[bold yellow]{', '.join(result.incomplete_scans)} did not complete[/bold yellow]"
                 counts = []

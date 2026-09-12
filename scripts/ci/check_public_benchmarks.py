@@ -26,7 +26,7 @@ from urllib.parse import unquote as url_unquote
 
 from markdown_it import MarkdownIt
 
-from skillevaluator.publication_text import publication_identity_present
+from skillevaluator.publication_text import publication_confusable_skeleton, publication_identity_present
 
 if TYPE_CHECKING:
     from markdown_it.token import Token
@@ -60,7 +60,7 @@ LINE_RULES = (
     (
         "internal environment identity",
         re.compile(
-            r"(?:^\s*-\s*Environment:\s*`?astra`?\s*$|\bastra[\s_-]+sandbox\b)",
+            r"(?:^\s*-\s*Environment:\s*`?astra(?:[^A-Za-z0-9]|$)|\bastra[\s_-]+sandbox\b)",
             flags=re.IGNORECASE,
         ),
     ),
@@ -100,6 +100,9 @@ _AGENT_MODEL_STATE = re.compile(
 _OVERALL_VERDICT_FIELD = re.compile(
     r"^\s*(?:(?:✅|❌|⚠\ufe0f?)\s*)?Overall verdict:\s*(?P<value>.*)$",
     flags=re.IGNORECASE,
+)
+_OVERALL_VERDICT_SKELETON_FIELD = re.compile(
+    r"^\s*(?:(?:✅|❌|⚠\ufe0f?)\s*)?overall verdict:\s*(?P<value>.*)$",
 )
 _INVISIBLE_IDENTITY_CHARACTERS = frozenset(
     {
@@ -155,6 +158,11 @@ _METADATA_FIELD_RULES = (
         re.compile(r"(?:required for publication|optional by policy)"),
     ),
 )
+_METADATA_FIELD_NAMES = (
+    *(field for field, _pattern in _METADATA_FIELD_RULES),
+    "Tier 2 evidence",
+    "Agents",
+)
 _PASS_SOURCE_METADATA_FIELD_RULES = (
     (
         "Source digest",
@@ -193,31 +201,200 @@ _MAX_BENCHMARK_BYTES = 128 * 1024
 _MAX_BENCHMARK_LINE_CHARACTERS = 32 * 1024
 _MARKDOWN = MarkdownIt("commonmark").enable("table")
 _NON_RENDERED_HTML_TAGS = frozenset({"noscript", "script", "style", "template"})
+_STRUCTURAL_HTML_HEADING_TAGS = frozenset({"h1", "h2"})
 _VOID_HTML_TAGS = frozenset(
     {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 )
+_HTML_TEXT_SEPARATOR_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "dd",
+        "details",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hgroup",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "summary",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+    }
+)
+_AMBIGUOUS_HTML_RENDERING_TAGS = _NON_RENDERED_HTML_TAGS | frozenset(
+    {
+        "audio",
+        "base",
+        "bdi",
+        "bdo",
+        "button",
+        "canvas",
+        "dialog",
+        "embed",
+        "form",
+        "iframe",
+        "input",
+        "link",
+        "math",
+        "meta",
+        "meter",
+        "noembed",
+        "noframes",
+        "object",
+        "option",
+        "optgroup",
+        "output",
+        "picture",
+        "plaintext",
+        "progress",
+        "select",
+        "source",
+        "svg",
+        "table",
+        "textarea",
+        "video",
+        "xmp",
+    }
+)
+_AMBIGUOUS_HTML_RENDERING_ATTRIBUTES = frozenset(
+    {
+        "align",
+        "bgcolor",
+        "class",
+        "color",
+        "dir",
+        "face",
+        "height",
+        "hidden",
+        "id",
+        "inert",
+        "size",
+        "style",
+        "width",
+    }
+)
+
+
+def _html_element_is_visually_hidden(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+    """Return whether an HTML element is removed from visual rendering."""
+    if tag.casefold() in _NON_RENDERED_HTML_TAGS:
+        return True
+    normalized_attrs = {name.casefold(): value for name, value in attrs}
+    if "hidden" in normalized_attrs:
+        return True
+    style = normalized_attrs.get("style")
+    if style is None:
+        return False
+    uncommented_style = re.sub(r"/\*.*?\*/", "", style, flags=re.DOTALL)
+    declarations: dict[str, tuple[str, bool]] = {}
+    for declaration in uncommented_style.split(";"):
+        property_name, separator, value = declaration.partition(":")
+        if not separator:
+            continue
+        normalized_property = property_name.strip().casefold()
+        if normalized_property not in {"display", "visibility"}:
+            continue
+        important = re.search(r"!\s*important\s*$", value, flags=re.IGNORECASE) is not None
+        normalized_value = re.sub(r"!\s*important\s*$", "", value, flags=re.IGNORECASE).strip().casefold()
+        previous = declarations.get(normalized_property)
+        if previous is not None and previous[1] and not important:
+            continue
+        declarations[normalized_property] = (normalized_value, important)
+    display = declarations.get("display", ("", False))[0]
+    visibility = declarations.get("visibility", ("", False))[0]
+    return display == "none" or visibility in {"hidden", "collapse"}
+
+
+def _close_html_element_stack(stack: list[tuple[str, bool]], tag: str) -> int | None:
+    """Pop one exactly nested element; ambiguous markup stays fail-closed."""
+    if not stack or stack[-1][0] != tag:
+        return None
+    _name, is_hidden = stack.pop()
+    return int(is_hidden)
 
 
 class _VisibleHTMLParser(HTMLParser):
     """Collect rendered text while suppressing comments and control elements."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, suppress_visually_hidden: bool = True) -> None:
         super().__init__(convert_charrefs=True)
+        self._suppress_visually_hidden = suppress_visually_hidden
+        self._element_stack: list[tuple[str, bool]] = []
         self._hidden_depth = 0
         self._line_parts: dict[int, list[str]] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
-        if tag.casefold() in _NON_RENDERED_HTML_TAGS:
-            self._hidden_depth += 1
+        normalized_tag = tag.casefold()
+        is_hidden = normalized_tag in _NON_RENDERED_HTML_TAGS or (
+            self._suppress_visually_hidden and _html_element_is_visually_hidden(normalized_tag, attrs)
+        )
+        if normalized_tag not in _VOID_HTML_TAGS:
+            self._element_stack.append((normalized_tag, is_hidden))
+        if is_hidden:
+            if normalized_tag not in _VOID_HTML_TAGS:
+                self._hidden_depth += 1
+            return
+        if self._hidden_depth:
+            return
+        if normalized_tag == "br" or normalized_tag in _HTML_TEXT_SEPARATOR_TAGS:
+            self._append_visible(" ")
+        elif normalized_tag == "img":
+            alt = next((value for name, value in attrs if name.casefold() == "alt"), None)
+            if alt is not None:
+                self._append_visible(f" {alt} ")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # HTML slash syntax does not self-close non-void elements in browsers.
+        self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.casefold() in _NON_RENDERED_HTML_TAGS and self._hidden_depth:
-            self._hidden_depth -= 1
+        normalized_tag = tag.casefold()
+        if normalized_tag == "br":
+            if not self._hidden_depth:
+                # HTML5 treats the otherwise-invalid </br> token as <br>.
+                self._append_visible(" ")
+            return
+        hidden_before = self._hidden_depth
+        hidden_count = _close_html_element_stack(self._element_stack, normalized_tag)
+        if hidden_count is None:
+            return
+        self._hidden_depth = max(0, self._hidden_depth - hidden_count)
+        if not hidden_before and normalized_tag in _HTML_TEXT_SEPARATOR_TAGS:
+            self._append_visible(" ")
 
     def handle_data(self, data: str) -> None:
         if self._hidden_depth:
             return
+        self._append_visible(data)
+
+    def _append_visible(self, data: str) -> None:
         start_line, _column = self.getpos()
         for offset, part in enumerate(data.split("\n")):
             self._line_parts.setdefault(start_line + offset, []).append(part)
@@ -236,12 +413,48 @@ class _HTMLAttributeParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.values: list[str] = []
+        self.image_alts: list[str] = []
+        self.events: list[tuple[str, str, bool, str | None, int]] = []
+        self.ambiguous_rendering_lines: list[int] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del tag
+        normalized_tag = tag.casefold()
         self.values.extend(value for _name, value in attrs if value is not None)
+        alt = next((value for name, value in attrs if name.casefold() == "alt"), None)
+        line = self.getpos()[0]
+        self.events.append(("start", normalized_tag, _html_element_is_visually_hidden(normalized_tag, attrs), alt, line))
+        attribute_names = {name.casefold() for name, _value in attrs}
+        if (
+            normalized_tag in _AMBIGUOUS_HTML_RENDERING_TAGS
+            or attribute_names & _AMBIGUOUS_HTML_RENDERING_ATTRIBUTES
+            or any(name.startswith("on") for name in attribute_names)
+        ):
+            self.ambiguous_rendering_lines.append(line)
+        if normalized_tag == "img":
+            self.image_alts.extend(value for name, value in attrs if name.casefold() == "alt" and value is not None)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        self.events.append(("end", tag.casefold(), False, None, self.getpos()[0]))
+
+
+class _RawStructuralHeadingParser(HTMLParser):
+    """Locate raw HTML headings that cannot be trusted as card structure."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.lines: list[int] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag.casefold() in _STRUCTURAL_HTML_HEADING_TAGS:
+            self.lines.append(self.getpos()[0])
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # A slash does not self-close h1/h2 in text/html, but the start still
+        # creates ambiguous browser-visible structure and must be rejected.
         self.handle_starttag(tag, attrs)
 
 
@@ -251,22 +464,42 @@ class _HTMLStructureParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.events: list[tuple[str, str]] = []
-        self.headings: list[tuple[int, str]] = []
+        self.headings: list[tuple[int, int, str]] = []
         self._heading_level: int | None = None
+        self._heading_line = 1
         self._heading_parts: list[str] = []
+        self._element_stack: list[tuple[str, bool]] = []
+        self._hidden_depth = 0
         self._in_noscript = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
         normalized_tag = tag.casefold()
         if self._in_noscript:
             return
         self.events.append(("start", normalized_tag))
+        is_hidden = _html_element_is_visually_hidden(normalized_tag, attrs)
+        if normalized_tag not in _VOID_HTML_TAGS:
+            self._element_stack.append((normalized_tag, is_hidden))
         if normalized_tag == "noscript":
             self._in_noscript = True
-        if normalized_tag in {"h1", "h2"} and self._heading_level is None:
+        if is_hidden:
+            if normalized_tag not in _VOID_HTML_TAGS:
+                self._hidden_depth += 1
+            return
+        if self._hidden_depth:
+            return
+        if normalized_tag in _STRUCTURAL_HTML_HEADING_TAGS and self._heading_level is None:
             self._heading_level = int(normalized_tag[1])
+            self._heading_line = self.getpos()[0]
             self._heading_parts = []
+        elif self._heading_level is not None and (
+            normalized_tag == "br" or normalized_tag in _HTML_TEXT_SEPARATOR_TAGS
+        ):
+            self._heading_parts.append(" ")
+        elif self._heading_level is not None and normalized_tag == "img":
+            alt = next((value for name, value in attrs if name.casefold() == "alt"), None)
+            if alt is not None:
+                self._heading_parts.extend((" ", alt, " "))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # HTML slash syntax does not self-close non-void elements in browsers.
@@ -274,24 +507,47 @@ class _HTMLStructureParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         normalized_tag = tag.casefold()
+        if normalized_tag == "br":
+            self.events.append(("end", normalized_tag))
+            if not self._in_noscript and not self._hidden_depth and self._heading_level is not None:
+                self._heading_parts.append(" ")
+            return
         if self._in_noscript:
             if normalized_tag != "noscript":
                 return
             self._in_noscript = False
         self.events.append(("end", normalized_tag))
+        hidden_before = self._hidden_depth
+        hidden_count = _close_html_element_stack(self._element_stack, normalized_tag)
+        if hidden_count:
+            self._hidden_depth = max(0, self._hidden_depth - hidden_count)
+        if self._hidden_depth:
+            return
+        if (
+            not hidden_before
+            and self._heading_level is not None
+            and normalized_tag in _HTML_TEXT_SEPARATOR_TAGS
+            and normalized_tag != f"h{self._heading_level}"
+        ):
+            self._heading_parts.append(" ")
         if self._heading_level is not None and normalized_tag == f"h{self._heading_level}":
             title = " ".join("".join(self._heading_parts).split())
-            self.headings.append((self._heading_level, title))
+            self.headings.append((self._heading_level, self._heading_line, title))
             self._heading_level = None
             self._heading_parts = []
 
     def handle_data(self, data: str) -> None:
-        if not self._in_noscript and self._heading_level is not None:
+        if not self._in_noscript and not self._hidden_depth and self._heading_level is not None:
             self._heading_parts.append(data)
 
 
 @lru_cache(maxsize=256)
-def _html_structure(content: str) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[int, str], ...]]:
+def _html_structure(
+    content: str,
+) -> tuple[
+    tuple[tuple[str, str], ...],
+    tuple[tuple[int, int, str], ...],
+]:
     parser = _HTMLStructureParser()
     try:
         parser.feed(content)
@@ -334,11 +590,15 @@ def scan_file(path: Path) -> list[Offender]:
         return [Offender(path, 1, f"unreadable file ({type(error).__name__})")]
 
     offenders: list[Offender] = []
-    line_number = 1
-    for character in text:
-        if character == "\n":
-            line_number += 1
-        elif character not in {"\r", "\t"} and unicodedata.category(character) == "Cc":
+    for line_number, line in enumerate(text.splitlines(keepends=True), 1):
+        # Character references can render the same bidirectional and format
+        # controls as literal Unicode. Reject both representations before any
+        # semantic normalization removes them.
+        encoded_surface = unescape(line.replace("\n", "").replace("\r", "").replace("\t", ""))
+        if _contains_disallowed_category_c(line, allow_layout_whitespace=True) or _contains_disallowed_category_c(
+            encoded_surface,
+            allow_layout_whitespace=False,
+        ):
             offenders.append(Offender(path, line_number, "benchmark contains disallowed control character"))
             break
 
@@ -368,37 +628,76 @@ def scan_file(path: Path) -> list[Offender]:
         rendered_surfaces = () if line_number in literal_code_lines else _rendered_inline_surfaces(line)
         semantic_lines = tuple(_semantic_text(surface) for surface in (line, *rendered_surfaces))
         for reason, pattern in LINE_RULES:
-            if any(pattern.search(semantic_line) for semantic_line in semantic_lines):
+            candidate_lines = semantic_lines
+            if reason in {"retired product identity", "internal environment identity"}:
+                candidate_lines = (
+                    *candidate_lines,
+                    *(publication_confusable_skeleton(semantic_line) for semantic_line in semantic_lines),
+                )
+            if reason == "internal environment identity":
+                for semantic_line in semantic_lines:
+                    environment_field = re.match(
+                        r"^\s*-\s*Environment:\s*(?P<value>.*)$",
+                        semantic_line,
+                        flags=re.IGNORECASE,
+                    )
+                    if environment_field is not None:
+                        candidate_lines = (
+                            *candidate_lines,
+                            "- Environment: "
+                            + publication_confusable_skeleton(environment_field.group("value")),
+                        )
+            if any(pattern.search(candidate_line) for candidate_line in candidate_lines):
                 offenders.append(Offender(path, line_number, reason))
 
     semantic_document = _semantic_text(text)
     for reason, pattern in LINE_RULES:
         if reason not in {"retired product identity", "internal environment identity"}:
             continue
-        if pattern.search(semantic_document) and not any(offender.reason == reason for offender in offenders):
+        if (
+            pattern.search(semantic_document)
+            or pattern.search(publication_confusable_skeleton(semantic_document))
+        ) and not any(offender.reason == reason for offender in offenders):
             offenders.append(Offender(path, 1, reason))
 
     _check_required_headings(path, text, offenders)
     _check_metadata_semantics(path, text, offenders)
     _check_verdict_tier_consistency(path, text, offenders)
+    _check_untrusted_structural_headings(path, text, offenders)
+    _check_html_rendering_safety(path, text, offenders)
     return offenders
 
 
 def _check_required_headings(path: Path, text: str, offenders: list[Offender]) -> None:
     """Require canonical headings in rendered Markdown structure."""
     headings = _heading_entries(text)
+    for _index, level, line, title, _trusted in headings:
+        structural_title = title.partition(":")[0] + ":" if level == 1 and ":" in title else title
+        if level in {1, 2} and not structural_title.isascii():
+            offenders.append(Offender(path, line, "non-ASCII structural heading"))
     for required_level, required_title, is_prefix, marker in _REQUIRED_HEADINGS:
+        required_visual_key = _visual_text_key(required_title)
+        required_canonical_key = _canonical_text_key(required_title)
         matching_headings = [
             (line, title, trusted)
             for _index, level, line, title, trusted in headings
             if level == required_level
             and (
-                _semantic_text(title).casefold().startswith(required_title.casefold())
+                _visual_text_key(title).startswith(required_visual_key)
                 if is_prefix
-                else _semantic_text(title).casefold() == required_title.casefold()
+                else _visual_text_key(title) == required_visual_key
             )
         ]
-        trusted_headings = [heading for heading in matching_headings if heading[2]]
+        trusted_headings = [
+            heading
+            for heading in matching_headings
+            if heading[2]
+            and (
+                _canonical_text_key(heading[1]).startswith(required_canonical_key)
+                if is_prefix
+                else _canonical_text_key(heading[1]) == required_canonical_key
+            )
+        ]
         trusted_prefix_identity = (
             trusted_headings[0][1][len(required_title) :]
             if trusted_headings and trusted_headings[0][1].casefold().startswith(required_title.casefold())
@@ -410,6 +709,57 @@ def _check_required_headings(path: Path, text: str, offenders: list[Offender]) -
             offenders.append(Offender(path, matching_headings[1][0], f"duplicate required section: {marker}"))
 
 
+def _check_untrusted_structural_headings(path: Path, text: str, offenders: list[Offender]) -> None:
+    """Require root h1/h2 structure to use unambiguous plain Markdown text."""
+    duplicate_lines = {offender.line for offender in offenders if offender.reason.startswith("duplicate ")}
+    for line_number in _untrusted_structural_heading_lines(text):
+        if line_number not in duplicate_lines:
+            offenders.append(Offender(path, line_number, "ambiguous structural heading markup"))
+
+
+def _check_html_rendering_safety(path: Path, text: str, offenders: list[Offender]) -> None:
+    """Reject raw HTML whose browser presentation cannot be parsed safely."""
+    stack: list[tuple[str, int]] = []
+    ambiguous_lines: set[int] = set()
+
+    def inspect_fragment(content: str, base_line: int) -> None:
+        parser = _HTMLAttributeParser()
+        try:
+            parser.feed(content)
+            parser.close()
+        except (AssertionError, ValueError):
+            ambiguous_lines.add(base_line)
+            return
+        ambiguous_lines.update(base_line + relative_line - 1 for relative_line in parser.ambiguous_rendering_lines)
+        for event, tag, _visually_hidden, _alt, relative_line in parser.events:
+            line = base_line + relative_line - 1
+            if event == "start":
+                if tag not in _VOID_HTML_TAGS:
+                    stack.append((tag, line))
+                continue
+            if tag == "br":
+                # HTML5 defines </br> as a line break rather than a close.
+                continue
+            if not stack or stack[-1][0] != tag:
+                ambiguous_lines.add(line)
+                continue
+            stack.pop()
+
+    for token in _markdown_tokens(text):
+        if token.map is None:
+            continue
+        if token.type == "html_block":
+            inspect_fragment(token.content, token.map[0] + 1)
+        elif token.type == "inline":
+            for child in token.children or []:
+                if child.type == "html_inline":
+                    inspect_fragment(child.content, token.map[0] + 1)
+
+    ambiguous_lines.update(line for _tag, line in stack)
+    for line in sorted(ambiguous_lines):
+        offenders.append(Offender(path, line, "ambiguous HTML rendering semantics"))
+
+
 def _check_metadata_semantics(path: Path, text: str, offenders: list[Offender]) -> None:
     metadata_heading_lines = _section_heading_lines(text, "Evaluation Metadata")
     metadata_sections = _section_occurrences(text, "Evaluation Metadata")
@@ -419,6 +769,15 @@ def _check_metadata_semantics(path: Path, text: str, offenders: list[Offender]) 
         return
     fallback_line, section_tokens = metadata_sections[0]
     metadata_lines = _metadata_list_items(section_tokens)
+
+    for line_number, source in metadata_lines:
+        rendered = _rendered_inline_fragment(source)
+        rendered_match = re.match(r"^\s*-\s*(?P<label>[^:]+?)\s*:", rendered or "")
+        if rendered_match is not None and not rendered_match.group("label").isascii():
+            offenders.append(Offender(path, line_number, "non-ASCII metadata field label"))
+
+    for line_number, field in _confusable_metadata_field_aliases(metadata_lines):
+        offenders.append(Offender(path, line_number, f"confusable metadata field: - {field}:"))
 
     for field, pattern in _METADATA_FIELD_RULES:
         matches = _metadata_field_matches(metadata_lines, field)
@@ -531,6 +890,28 @@ def _metadata_field_matches(
     ]
 
 
+def _confusable_metadata_field_aliases(
+    metadata_lines: list[tuple[int, str]],
+) -> list[tuple[int, str]]:
+    """Return visually canonical metadata labels that are not canonical text."""
+    canonical_by_visual_key = {_visual_text_key(field): field for field in _METADATA_FIELD_NAMES}
+    aliases: list[tuple[int, str]] = []
+    for line_number, source in metadata_lines:
+        rendered = _rendered_inline_fragment(source)
+        if rendered is None:
+            continue
+        rendered_match = re.match(r"^\s*-\s*(?P<label>[^:]+?)\s*:", rendered)
+        if rendered_match is None:
+            continue
+        canonical = canonical_by_visual_key.get(_visual_text_key(rendered_match.group("label")))
+        if canonical is None:
+            continue
+        source_match = re.match(r"^\s*-\s*(?P<label>[^:]+?)\s*:", source)
+        if source_match is None or _canonical_text_key(source_match.group("label")) != _canonical_text_key(canonical):
+            aliases.append((line_number, canonical))
+    return aliases
+
+
 def _metadata_field_value(text: str, field: str) -> str | None:
     matches = _metadata_field_matches(_metadata_section_lines(text), field)
     return matches[0][1] if len(matches) == 1 else None
@@ -540,23 +921,38 @@ def _overall_verdict_fields(text: str) -> list[tuple[int, str, str]]:
     """Return canonical and visibly callout-shaped verdict fields."""
     tokens = _markdown_tokens(text)
     fields: list[tuple[int, str, str]] = []
+    seen_fields: set[tuple[int, str]] = set()
 
     def add_field(line_number: int, line: str, *, trusted: bool) -> None:
         semantic_line = _semantic_text(line)
         match = _OVERALL_VERDICT_FIELD.fullmatch(semantic_line)
+        matched_confusable = False
         if match is None:
-            return
+            skeleton_line = publication_confusable_skeleton(semantic_line)
+            match = _OVERALL_VERDICT_SKELETON_FIELD.fullmatch(skeleton_line)
+            if match is None:
+                return
+            matched_confusable = True
         value = match.group("value").strip()
-        if value.casefold().startswith(("derived from", "pass only when every configured dimension passes")):
+        value_skeleton = publication_confusable_skeleton(value)
+        methodology_prefixes = tuple(
+            publication_confusable_skeleton(prefix)
+            for prefix in ("derived from", "pass only when every configured dimension passes")
+        )
+        if value_skeleton.startswith(methodology_prefixes):
             # This is the generated methodology definition, not a decision
             # field. Exact late PASS/FAIL/NEUTRAL/INCOMPLETE fields are still
             # counted so a second visible verdict cannot hide after metadata.
             return
+        field_key = (line_number, publication_confusable_skeleton(semantic_line))
+        if field_key in seen_fields:
+            return
+        seen_fields.add(field_key)
         status_match = re.match(r"(?P<status>[A-Za-z]+)\b", value)
         fields.append(
             (
                 line_number,
-                status_match.group("status").upper() if trusted and status_match else "",
+                status_match.group("status").upper() if trusted and not matched_confusable and status_match else "",
                 value,
             )
         )
@@ -564,8 +960,12 @@ def _overall_verdict_fields(text: str) -> list[tuple[int, str, str]]:
     raw_container_stack: list[str] = []
     for token in tokens:
         if token.type == "html_block" and token.map is not None:
-            for relative_line, line in _visible_html_lines(token.content):
-                add_field(token.map[0] + relative_line, line, trusted=False)
+            for suppress_visually_hidden in (True, False):
+                for relative_line, line in _visible_html_lines(
+                    token.content,
+                    suppress_visually_hidden=suppress_visually_hidden,
+                ):
+                    add_field(token.map[0] + relative_line, line, trusted=False)
             _update_raw_html_stack(token.content, raw_container_stack)
             continue
         if token.type != "inline" or token.map is None:
@@ -573,8 +973,15 @@ def _overall_verdict_fields(text: str) -> list[tuple[int, str, str]]:
         unsafe_markup = bool(raw_container_stack) or any(
             child.type in {"html_inline", "link_open", "image"} for child in token.children or []
         )
-        for offset, line in enumerate(_inline_visible_lines(token, include_code=False)):
-            add_field(token.map[0] + offset + 1, line, trusted=not unsafe_markup)
+        for suppress_visually_hidden in (True, False) if unsafe_markup else (True,):
+            for offset, line in enumerate(
+                _inline_visible_lines(
+                    token,
+                    include_code=False,
+                    suppress_visually_hidden=suppress_visually_hidden,
+                )
+            ):
+                add_field(token.map[0] + offset + 1, line, trusted=not unsafe_markup)
     return fields
 
 
@@ -584,7 +991,7 @@ def _section_occurrences(text: str, title: str) -> list[tuple[int, tuple[Token, 
     headings = _heading_entries(text)
     sections: list[tuple[int, tuple[Token, ...]]] = []
     for token_index, level, start_line, heading_title, trusted in headings:
-        if not trusted or level != 2 or _semantic_text(heading_title).casefold() != title.casefold():
+        if not trusted or level != 2 or _canonical_text_key(heading_title) != _canonical_text_key(title):
             continue
         end_index = len(tokens)
         # Even an untrusted linked/raw-markup heading ends the current section.
@@ -605,10 +1012,11 @@ def _section_occurrences(text: str, title: str) -> list[tuple[int, tuple[Token, 
 
 def _section_heading_lines(text: str, title: str) -> list[int]:
     """Return every matching level-two heading, including untrusted variants."""
+    title_key = _visual_text_key(title)
     return [
         start_line
         for _token_index, level, start_line, heading_title, _trusted in _heading_entries(text)
-        if level == 2 and _semantic_text(heading_title).casefold() == title.casefold()
+        if level == 2 and _visual_text_key(heading_title) == title_key
     ]
 
 
@@ -626,9 +1034,10 @@ def _heading_entries(text: str) -> tuple[tuple[int, int, int, str, bool], ...]:
     raw_container_stack: list[str] = []
     for index, token in enumerate(tokens):
         if token.type == "html_block":
-            if not raw_container_stack and token.map is not None:
+            if token.map is not None:
                 headings.extend(
-                    (index, level, token.map[0] + 1, title, False) for level, title in _html_structure(token.content)[1]
+                    (index, level, token.map[0] + relative_line, title, False)
+                    for level, relative_line, title in _html_structure(token.content)[1]
                 )
             _update_raw_html_stack(token.content, raw_container_stack)
             continue
@@ -639,15 +1048,91 @@ def _heading_entries(text: str) -> tuple[tuple[int, int, int, str, bool], ...]:
         inline = tokens[index + 1] if index + 1 < len(tokens) else None
         if inline is None or inline.type != "inline":
             continue
-        trusted = not any(child.type in {"html_inline", "link_open", "image"} for child in inline.children or [])
+        trusted = _is_plain_markdown_heading(inline)
         title = " ".join(_inline_visible_lines(inline, include_code=True)).strip()
         headings.append((index, int(token.tag.removeprefix("h")), token.map[0] + 1, title, trusted))
     return tuple(headings)
 
 
-def _inline_visible_lines(token: Token, *, include_code: bool) -> list[str]:
+@lru_cache(maxsize=256)
+def _raw_structural_heading_relative_lines(content: str) -> tuple[int, ...]:
+    """Return line numbers for every real raw-HTML h1/h2 start tag."""
+    parser = _RawStructuralHeadingParser()
+    try:
+        parser.feed(content)
+        parser.close()
+    except (AssertionError, ValueError):
+        # Malformed HTML is untrusted, but without a parsed start tag there is
+        # no reliable structural-heading location to report here.
+        return ()
+    return tuple(parser.lines)
+
+
+@lru_cache(maxsize=128)
+def _untrusted_structural_heading_lines(text: str) -> tuple[int, ...]:
+    """Return root heading lines whose rendered structure is ambiguous."""
+    lines: set[int] = set()
+    raw_container_stack: list[str] = []
+    tokens = _markdown_tokens(text)
+    for index, token in enumerate(tokens):
+        if token.map is None:
+            continue
+        if token.type == "html_block":
+            lines.update(
+                token.map[0] + relative_line for relative_line in _raw_structural_heading_relative_lines(token.content)
+            )
+            _update_raw_html_stack(token.content, raw_container_stack)
+            continue
+        if token.type == "heading_open" and token.tag in _STRUCTURAL_HTML_HEADING_TAGS:
+            inline = tokens[index + 1] if index + 1 < len(tokens) else None
+            if (
+                token.level != 0
+                or raw_container_stack
+                or inline is None
+                or inline.type != "inline"
+                or not _is_plain_markdown_heading(inline)
+            ):
+                lines.add(token.map[0] + 1)
+            continue
+        if token.type != "inline":
+            continue
+        for child in token.children or []:
+            if child.type == "html_inline":
+                lines.update(
+                    token.map[0] + relative_line
+                    for relative_line in _raw_structural_heading_relative_lines(child.content)
+                )
+    return tuple(sorted(lines))
+
+
+def _is_plain_markdown_heading(inline: Token) -> bool:
+    """Return whether a heading contains only undecorated rendered text."""
+    return bool(inline.children) and all(child.type == "text" for child in inline.children)
+
+
+def _inline_visible_lines(
+    token: Token,
+    *,
+    include_code: bool,
+    suppress_visually_hidden: bool = True,
+) -> list[str]:
     """Flatten inline Markdown into visible lines while excluding inert markup."""
+    return _inline_children_visible_lines(
+        token.children or [],
+        include_code=include_code,
+        suppress_visually_hidden=suppress_visually_hidden,
+    )
+
+
+def _inline_children_visible_lines(
+    children: list[Token],
+    *,
+    include_code: bool,
+    suppress_visually_hidden: bool,
+) -> list[str]:
+    """Flatten inline child tokens, including recursively rendered image alt text."""
     lines = [""]
+    element_stack: list[tuple[str, bool]] = []
     hidden_html_depth = 0
 
     def append_text(content: str) -> None:
@@ -655,30 +1140,56 @@ def _inline_visible_lines(token: Token, *, include_code: bool) -> list[str]:
         lines[-1] += parts[0]
         lines.extend(parts[1:])
 
-    for child in token.children or []:
+    for child in children:
         if child.type == "html_inline":
-            events, _headings = _html_structure(child.content)
-            for event, tag in events:
-                if tag not in _NON_RENDERED_HTML_TAGS:
-                    continue
+            attribute_parser = _HTMLAttributeParser()
+            try:
+                attribute_parser.feed(child.content)
+                attribute_parser.close()
+            except (AssertionError, ValueError):
+                continue
+            for event, tag, visually_hidden, alt, _line in attribute_parser.events:
                 if event == "end":
-                    hidden_html_depth = max(0, hidden_html_depth - 1)
-                elif tag not in _VOID_HTML_TAGS:
-                    hidden_html_depth += 1
+                    if tag == "br":
+                        if not hidden_html_depth:
+                            append_text(" ")
+                        continue
+                    hidden_before = hidden_html_depth
+                    hidden_count = _close_html_element_stack(element_stack, tag)
+                    if hidden_count:
+                        hidden_html_depth = max(0, hidden_html_depth - hidden_count)
+                    if not hidden_before and tag in _HTML_TEXT_SEPARATOR_TAGS:
+                        append_text(" ")
+                    continue
+                is_hidden = tag in _NON_RENDERED_HTML_TAGS or (suppress_visually_hidden and visually_hidden)
+                if tag not in _VOID_HTML_TAGS:
+                    element_stack.append((tag, is_hidden))
+                if is_hidden:
+                    if tag not in _VOID_HTML_TAGS:
+                        hidden_html_depth += 1
+                elif not hidden_html_depth and (tag == "br" or tag in _HTML_TEXT_SEPARATOR_TAGS):
+                    append_text(" ")
+                elif not hidden_html_depth and tag == "img" and alt is not None:
+                    append_text(f" {alt} ")
         elif hidden_html_depth:
             continue
-        elif child.type == "text":
+        elif child.type in {"text", "text_special"}:
             append_text(child.content)
         elif child.type == "code_inline":
             append_text(child.content if include_code else " ")
         elif child.type == "image":
-            alt_parts: list[str] = []
-            for alt_child in child.children or []:
-                if alt_child.type in {"text", "text_special", "code_inline"}:
-                    alt_parts.append(alt_child.content)
-                elif alt_child.type in {"softbreak", "hardbreak"}:
-                    alt_parts.append(" ")
-            append_text("".join(alt_parts) if child.children is not None else unescape(child.content))
+            alt_text = (
+                " ".join(
+                    _inline_children_visible_lines(
+                        child.children,
+                        include_code=True,
+                        suppress_visually_hidden=suppress_visually_hidden,
+                    )
+                )
+                if child.children is not None
+                else unescape(child.content)
+            )
+            append_text(f" {alt_text} ")
         elif child.type in {"softbreak", "hardbreak"}:
             lines.append("")
     return [" ".join(line.split()) for line in lines]
@@ -738,10 +1249,9 @@ def _update_raw_html_stack(content: str, stack: list[str]) -> None:
                 stack.pop()
             continue
         if event == "end":
-            # Python's generic HTMLParser does not implement browser tree-
-            # builder insertion modes. Trust only properly nested closures;
-            # a mismatched close must not expose evidence that a browser keeps
-            # inside an outer container.
+            # Trust only properly nested closures. A separate safety check
+            # rejects ambiguous markup rather than guessing HTML5 insertion
+            # modes that differ across raw-text/select/table contexts.
             if stack and stack[-1] == tag:
                 stack.pop()
             continue
@@ -753,9 +1263,13 @@ def _update_raw_html_stack(content: str, stack: list[str]) -> None:
 
 
 @lru_cache(maxsize=256)
-def _visible_html_lines(content: str) -> tuple[tuple[int, str], ...]:
+def _visible_html_lines(
+    content: str,
+    *,
+    suppress_visually_hidden: bool = True,
+) -> tuple[tuple[int, str], ...]:
     """Return line-relative text that a raw HTML block would visibly render."""
-    parser = _VisibleHTMLParser()
+    parser = _VisibleHTMLParser(suppress_visually_hidden=suppress_visually_hidden)
     try:
         parser.feed(content)
         parser.close()
@@ -823,6 +1337,7 @@ def _tier_status_rows(section_tokens: tuple[Token, ...], tier: int) -> list[tupl
     cell_parts: list[str] | None = None
     tier_column: int | None = None
     status_column: int | None = None
+    header_is_canonical = False
     cell_has_unsafe_markup = False
     cell_safety: list[bool] | None = None
     raw_container_stack: list[str] = []
@@ -837,6 +1352,7 @@ def _tier_status_rows(section_tokens: tuple[Token, ...], tier: int) -> list[tupl
             in_root_table = True
             tier_column = None
             status_column = None
+            header_is_canonical = False
             continue
         if token.type == "table_close" and token.level == 0:
             in_root_table = False
@@ -885,19 +1401,33 @@ def _tier_status_rows(section_tokens: tuple[Token, ...], tier: int) -> list[tupl
 
         if in_header:
             normalized_headers = [" ".join(cell.split()).casefold() for cell in cells]
-            tier_indexes = [index for index, header in enumerate(normalized_headers) if header == "tier"]
-            status_indexes = [index for index, header in enumerate(normalized_headers) if header == "status"]
+            tier_indexes = [
+                index for index, header in enumerate(normalized_headers) if _visual_text_key(header) == "tier"
+            ]
+            status_indexes = [
+                index for index, header in enumerate(normalized_headers) if _visual_text_key(header) == "status"
+            ]
             if len(tier_indexes) == len(status_indexes) == 1:
                 tier_column = tier_indexes[0]
                 status_column = status_indexes[0]
+                assert cell_safety is not None
+                header_is_canonical = bool(
+                    cell_safety[tier_column]
+                    and cell_safety[status_column]
+                    and normalized_headers[tier_column] == "tier"
+                    and normalized_headers[status_column] == "status"
+                )
         elif in_body and tier_column is not None and status_column is not None:
             if max(tier_column, status_column) < len(cells):
                 tier_label = " ".join(cells[tier_column].split())
-                if re.fullmatch(rf"Tier\s*{tier}", tier_label, flags=re.IGNORECASE):
+                if _visual_text_key(tier_label) == _visual_text_key(f"Tier {tier}"):
                     assert cell_safety is not None
                     status = (
                         " ".join(cells[status_column].split()).upper()
-                        if cell_safety[tier_column] and cell_safety[status_column]
+                        if header_is_canonical
+                        and cell_safety[tier_column]
+                        and cell_safety[status_column]
+                        and re.fullmatch(rf"Tier\s*{tier}", tier_label, flags=re.IGNORECASE)
                         else ""
                     )
                     rows.append((row_line, status))
@@ -907,17 +1437,120 @@ def _tier_status_rows(section_tokens: tuple[Token, ...], tier: int) -> list[tupl
     return rows
 
 
+def _non_ascii_tier_identifier_lines(section_tokens: tuple[Token, ...]) -> list[int]:
+    """Return rows whose Tier Status header or tier label is not ASCII.
+
+    Generated cards use fixed ASCII identifiers. Restricting only those
+    structural cells prevents Unicode lookalikes outside the deliberately
+    small identity-confusables table from creating a second visible table or
+    result row while leaving the canonical proof intact.
+    """
+    lines: list[int] = []
+    in_root_table = False
+    in_header = False
+    in_body = False
+    row_line = 1
+    cells: list[str] | None = None
+    cell_parts: list[str] | None = None
+    raw_container_stack: list[str] = []
+
+    for token in section_tokens:
+        if token.type == "html_block":
+            _update_raw_html_stack(token.content, raw_container_stack)
+            continue
+        if raw_container_stack:
+            continue
+        if token.type == "table_open" and token.level == 0:
+            in_root_table = True
+            continue
+        if token.type == "table_close" and token.level == 0:
+            in_root_table = False
+            in_header = False
+            in_body = False
+            continue
+        if not in_root_table:
+            continue
+        if token.type == "thead_open":
+            in_header = True
+            continue
+        if token.type == "thead_close":
+            in_header = False
+            continue
+        if token.type == "tbody_open":
+            in_body = True
+            continue
+        if token.type == "tbody_close":
+            in_body = False
+            continue
+        if token.type == "tr_open":
+            row_line = token.map[0] + 1 if token.map is not None else 1
+            cells = []
+            continue
+        if token.type in {"th_open", "td_open"} and cells is not None:
+            cell_parts = []
+            continue
+        if token.type == "inline" and cell_parts is not None:
+            cell_parts.extend(_inline_visible_lines(token, include_code=True))
+            continue
+        if token.type in {"th_close", "td_close"} and cells is not None and cell_parts is not None:
+            cells.append(" ".join(cell_parts).strip())
+            cell_parts = None
+            continue
+        if token.type != "tr_close" or cells is None:
+            continue
+        identifiers = cells if in_header else cells[:1] if in_body else []
+        if any(not identifier.isascii() for identifier in identifiers):
+            lines.append(row_line)
+        cells = None
+        cell_parts = None
+    return lines
+
+
+_DECISION_ALIAS_SENTINEL = "\x00"
+
+
+@lru_cache(maxsize=8)
+def _decision_alias_pattern(canonical_text: str) -> re.Pattern[str]:
+    """Match one decision phrase while failing closed on unmapped lookalikes."""
+    canonical = publication_confusable_skeleton(_semantic_text(canonical_text))
+    parts: list[str] = []
+    for character in canonical:
+        if character.isspace():
+            parts.append(r"\s+")
+        elif character.isascii() and character.isalnum():
+            parts.append(f"(?:{re.escape(character)}|{re.escape(_DECISION_ALIAS_SENTINEL)})")
+        else:
+            parts.append(re.escape(character))
+    return re.compile("".join(parts))
+
+
+def _has_decision_text_alias(value: str, canonical_text: str) -> bool:
+    """Return whether visible text contains a canonical or confusable decision phrase.
+
+    The shared publication skeleton is intentionally limited to the alphabet
+    needed by reserved identity placeholders. Decision prose has a wider
+    alphabet, so any non-ASCII character left unmapped by that skeleton is a
+    one-character wildcard for an ASCII letter in the protected phrase. This
+    is deliberately fail-closed and applies only to known decision phrases.
+    """
+    skeleton = publication_confusable_skeleton(_semantic_text(value))
+    surface = "".join(
+        " " if character.isspace() else character if character.isascii() else _DECISION_ALIAS_SENTINEL
+        for character in skeleton
+    )
+    return _decision_alias_pattern(canonical_text).search(surface) is not None
+
+
 def _has_publication_recommendation(text: str) -> bool:
     """Return whether rendered content recommends publication."""
-    needle = "recommended for publication"
     for token in _markdown_tokens(text):
         if token.type == "inline":
             visible = " ".join(_inline_visible_lines(token, include_code=False))
-            if needle in _semantic_text(visible).casefold():
+            if _has_decision_text_alias(visible, "recommended for publication"):
                 return True
         elif token.type == "html_block":
             visible = " ".join(line for _offset, line in _visible_html_lines(token.content))
-            if needle in _semantic_text(visible).casefold():
+            if _has_decision_text_alias(visible, "recommended for publication"):
                 return True
     return False
 
@@ -939,6 +1572,29 @@ def _semantic_text(value: str) -> str:
         canonical_character(character)
         for character in normalized
         if unicodedata.category(character)[0] not in {"C", "M"} and character not in _INVISIBLE_IDENTITY_CHARACTERS
+    )
+
+
+def _canonical_text_key(value: str) -> str:
+    """Normalize layout and case without accepting lookalike characters."""
+    return " ".join(value.split()).casefold()
+
+
+def _visual_text_key(value: str) -> str:
+    """Return a confusable-aware key used only to reject visual aliases."""
+    semantic = " ".join(_semantic_text(value).split())
+    return publication_confusable_skeleton(semantic)
+
+
+def _contains_disallowed_category_c(value: str, *, allow_layout_whitespace: bool) -> bool:
+    """Return whether text contains a disallowed control or line separator."""
+    return any(
+        (not allow_layout_whitespace or character not in {"\n", "\r", "\t"})
+        and (
+            unicodedata.category(character).startswith("C")
+            or unicodedata.category(character) in {"Zl", "Zp"}
+        )
+        for character in value
     )
 
 
@@ -969,6 +1625,8 @@ def _check_verdict_tier_consistency(path: Path, text: str, offenders: list[Offen
         offenders.append(Offender(path, tier_heading_lines[1], "duplicate Tier Status section"))
     elif tier_sections:
         section_tokens = tier_sections[0][1]
+        for line_number in _non_ascii_tier_identifier_lines(section_tokens):
+            offenders.append(Offender(path, line_number, "non-ASCII Tier Status identifier"))
         for tier in _TIER_COMPLETION_STATUSES:
             rows = _tier_status_rows(section_tokens, tier)
             if not rows:

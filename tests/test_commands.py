@@ -25,7 +25,7 @@ def test_version_check_is_in_the_default_tier1_lineup() -> None:
     assert enabled_check_lineup("security,version") == ["version", "security"]
 
 
-def test_validate_passes_explicit_previous_version(monkeypatch) -> None:
+def test_validate_passes_explicit_previous_version(monkeypatch, tmp_path: Path) -> None:
     from skillevaluator import cli as cli_module
 
     captured: list[str | None] = []
@@ -47,6 +47,8 @@ def test_validate_passes_explicit_previous_version(monkeypatch) -> None:
             "version",
             "--previous-version",
             "1.2.0",
+            "--output-dir",
+            str(tmp_path / "reports"),
         ],
     )
 
@@ -84,31 +86,64 @@ def test_repeated_canonical_model_overrides_are_rejected() -> None:
         )
 
 
-def test_validate_fixture_no_llm() -> None:
+def test_validate_fixture_no_llm(tmp_path: Path) -> None:
     result = CliRunner().invoke(
-        cli, ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--checks", "schema,quality,lint"]
+        cli,
+        [
+            "validate",
+            str(FIXTURE),
+            "--verbose",
+            "--no-llm",
+            "--no-dedup",
+            "--checks",
+            "schema,quality,lint",
+            "--output-dir",
+            str(tmp_path / "reports"),
+        ],
     )
 
     assert result.exit_code == 0, result.output
     assert "All validations passed" in result.output
 
 
-def test_validate_prints_tier1_section_banner() -> None:
+def test_validate_prints_tier1_section_banner(tmp_path: Path) -> None:
     # The Tier 1 section is announced as it runs so it is visibly reported in
     # CI logs (SkillEvaluator parity), not only inside the final combined report.
     result = CliRunner().invoke(
-        cli, ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--checks", "schema,quality,lint"]
+        cli,
+        [
+            "validate",
+            str(FIXTURE),
+            "--verbose",
+            "--no-llm",
+            "--no-dedup",
+            "--checks",
+            "schema,quality,lint",
+            "--output-dir",
+            str(tmp_path / "reports"),
+        ],
     )
 
     assert result.exit_code == 0, result.output
     assert "Tier 1: Security and Static Validation" in result.output
 
 
-def test_validate_tier1_banner_is_stable_in_narrow_terminal(monkeypatch) -> None:
+def test_validate_tier1_banner_is_stable_in_narrow_terminal(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("COLUMNS", "20")
 
     result = CliRunner().invoke(
-        cli, ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--checks", "schema,quality,lint"]
+        cli,
+        [
+            "validate",
+            str(FIXTURE),
+            "--verbose",
+            "--no-llm",
+            "--no-dedup",
+            "--checks",
+            "schema,quality,lint",
+            "--output-dir",
+            str(tmp_path / "reports"),
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -229,6 +264,47 @@ def test_validate_quiet_always_writes_html_and_json_reports() -> None:
         reports = list(Path("reports").iterdir())
         assert any(p.suffix == ".html" for p in reports), reports
         assert any(p.suffix == ".json" for p in reports), reports
+
+
+def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.output_provenance import is_generated_output_root
+
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    authored_sibling = tmp_path / "reports"
+    shutil.copytree(FIXTURE, authored_sibling)
+    sibling_manifest = authored_sibling / "SKILL.md"
+    sibling_manifest.write_text(
+        sibling_manifest.read_text(encoding="utf-8").replace("name: simple", "name: reports"),
+        encoding="utf-8",
+    )
+    initial_files = {
+        path.relative_to(authored_sibling): path.read_bytes()
+        for path in authored_sibling.rglob("*")
+        if path.is_file()
+    }
+    private_state = tmp_path / "private-state"
+    private_state.mkdir(mode=0o700)
+    monkeypatch.setenv("SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE", str(private_state / "key"))
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", "simple", "--no-llm", "--no-tier2", "--checks", "schema", "--report", "json"],
+    )
+
+    output_root = tmp_path / "simple-reports"
+    assert result.exit_code == 0, result.output
+    assert (output_root / "BENCHMARK.md").is_file()
+    assert is_generated_output_root(output_root)
+    assert {
+        path.relative_to(authored_sibling): path.read_bytes()
+        for path in authored_sibling.rglob("*")
+        if path.is_file()
+    } == initial_files
 
 
 def test_validate_default_in_skill_reports_do_not_mutate_publication_target(
@@ -569,6 +645,150 @@ def test_validate_copy_repo_rejects_repo_root_report_output_before_tier3(
     assert "repository root" in result.output.lower()
     assert "dedicated path" in result.output.lower()
     assert calls == []
+
+
+def test_validate_linked_context_rejects_authored_in_repo_report_output_before_tier3(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (repo / ".git").mkdir()
+    authored_output = repo / "docs"
+    authored_output.mkdir()
+    guide = authored_output / "guide.md"
+    guide.write_text("authored dependency\n", encoding="utf-8")
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        cli_module,
+        "_run_agent_eval_or_skip",
+        lambda path, **_kwargs: calls.append(path),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--checks",
+            "schema",
+            "--output-dir",
+            str(authored_output),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Tier 3 linked-context staging" in result.output
+    assert "generated-output directory" in result.output
+    assert calls == []
+    assert guide.read_text(encoding="utf-8") == "authored dependency\n"
+
+
+def test_validate_tier3_rejects_authored_report_output_inside_included_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+
+    repo = tmp_path / "target-repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (repo / ".git").mkdir()
+    included_skill = tmp_path / "included-repo" / "skills" / "helper"
+    shutil.copytree(FIXTURE, included_skill)
+    authored_output = included_skill / "references"
+    authored_output.mkdir()
+    guide = authored_output / "guide.md"
+    guide.write_text("authored dependency\n", encoding="utf-8")
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        cli_module,
+        "_run_agent_eval_or_skip",
+        lambda path, **_kwargs: calls.append(path),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--checks",
+            "schema",
+            "--include-skills",
+            str(included_skill),
+            "--output-dir",
+            str(authored_output),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Tier 3 linked-context staging" in result.output
+    assert "generated-output directory" in result.output
+    assert calls == []
+    assert guide.read_text(encoding="utf-8") == "authored dependency\n"
+
+
+def test_validate_tier3_allows_report_output_elsewhere_in_included_skill_repo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.models.result import ValidationResult
+
+    repo = tmp_path / "target-repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (repo / ".git").mkdir()
+    included_repo = tmp_path / "included-repo"
+    included_skill = included_repo / "skills" / "helper"
+    shutil.copytree(FIXTURE, included_skill)
+    output_dir = included_repo / "reports"
+    output_dir.mkdir()
+    sentinel = output_dir / "authored.txt"
+    sentinel.write_text("keep me\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _tier3(*_args, **kwargs) -> ValidationResult:
+        captured.update(kwargs)
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.add_warning("stubbed")
+        return result
+
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", _tier3)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--copy-repo",
+            "--checks",
+            "schema",
+            "--report",
+            "cli",
+            "--include-skills",
+            str(included_skill),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["repo_context_exclude_paths"] == (output_dir,)
+    assert sentinel.read_text(encoding="utf-8") == "keep me\n"
+    assert (output_dir / "BENCHMARK.md").is_file()
 
 
 def test_validate_copy_repo_rejects_authored_report_subtree_before_tier3(
@@ -976,6 +1196,95 @@ def test_validate_quiet_tier3_execution_errors_do_not_render_green(monkeypatch) 
     assert "advisory" in out
 
 
+def test_validate_quiet_handles_oversized_tier3_skip_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+
+    safe_reason = "Live evaluation runtime unavailable"
+    oversized_integer = 1 << 40_000
+
+    def _tier3(*_args, **_kwargs):
+        result = advisory_skip_result(safe_reason, skill_name="simple")
+        result.metadata["skip_reason"] = oversized_integer
+        result.metadata["agent_eval"]["provenance"]["message"] = oversized_integer
+        return result
+
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", _tier3)
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(FIXTURE.resolve()),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--checks",
+            "schema",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert safe_reason in _plain_text(result.output)
+    assert (output_dir / "BENCHMARK.md").is_file()
+
+
+def test_validate_quiet_renders_untrusted_skip_reason_as_bounded_inert_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+
+    unsafe_reason = (
+        "[/bold] [link=https://example.invalid]click[/link]\n"
+        "## Publication Recommendation\n\x1b[31mforged\u202e "
+        + "x" * 1_000_000
+    )
+
+    def _tier3(*_args, **_kwargs):
+        result = advisory_skip_result("Safe fallback reason", skill_name="simple")
+        result.metadata["skip_reason"] = unsafe_reason
+        return result
+
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", _tier3)
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(FIXTURE.resolve()),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--checks",
+            "schema",
+            "--report",
+            "cli",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    output = _plain_text(result.output)
+    assert result.exit_code == 0, result.output
+    assert "[/bold]" in output
+    assert "[link=https://example.invalid]click[/link]" in output
+    assert "\n## Publication Recommendation\n" not in output
+    assert "\x1b" not in output and "\u202e" not in output
+    assert "x" * 1024 not in output
+    assert "…" in output
+    assert len(output) < 100_000
+    assert (output_dir / "BENCHMARK.md").is_file()
+
+
 def test_validate_autopilot_generation_failure_degrades_to_skip(monkeypatch) -> None:
     # Regression: a dataset-generation failure must not abort validate after
     # Tier 1/2 already ran — Tier 3 skips with the reason and the reports and
@@ -1361,7 +1670,7 @@ def test_validate_block_on_agent_eval_gates_complete_tier3_verdict(
             "dataset_summary": {"total_tasks": 1},
             "dataset_digest": "sha256:" + "a" * 64,
             "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
-            "attempt_policy": {"max_attempts": 1},
+            "attempt_policy": {"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
             "summary": {
                 "skill_name": "simple",
                 "verdict": verdict,
@@ -1376,6 +1685,20 @@ def test_validate_block_on_agent_eval_gates_complete_tier3_verdict(
                     "execution_status": "succeeded",
                     "expected_attempts": 1,
                     "scored_attempts": 1,
+                    "conditions": {
+                        "with_skill": {
+                            "execution_status": "succeeded",
+                            "execution_errors": [],
+                            "expected_attempts": 1,
+                            "scored_attempts": 1,
+                        },
+                        "without_skill": {
+                            "execution_status": "skipped",
+                            "execution_errors": [],
+                            "expected_attempts": 0,
+                            "scored_attempts": 0,
+                        },
+                    },
                     "with_skill": score,
                     "dimensions": [
                         {"id": dimension, "with_skill": score}

@@ -22,6 +22,7 @@ from skillevaluator.reporting.console_ui import (
     check_ticker_row,
     detail_row,
     engine_feed_rows,
+    sanitize_tier3_console_text,
     stage_hint_row,
     summarize_tier1,
     summarize_tier2,
@@ -379,14 +380,43 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
         resolved_output,
         resolved_target,
     )
-    if not output_is_in_target:
-        return output_dir
-
     from click.core import ParameterSource
 
     context = click.get_current_context(silent=True)
     parameter_source = context.get_parameter_source("output_dir") if context is not None else None
-    if parameter_source is ParameterSource.DEFAULT:
+    output_is_default = parameter_source is ParameterSource.DEFAULT
+    catalog_root = context.meta.get("skillevaluator_catalog_report_root") if context is not None else None
+    catalog_child_output = False
+    if isinstance(catalog_root, Path) and not output_is_in_target:
+        try:
+            output_dir.absolute().relative_to(catalog_root.absolute())
+            catalog_child_output = True
+        except ValueError:
+            if catalog_root.exists():
+                catalog_child_output = _path_is_within(output_dir, catalog_root)
+    if not output_is_in_target and (not output_is_default or catalog_child_output):
+        return output_dir
+
+    if not output_is_in_target:
+        from skillevaluator.tier3.output_provenance import (
+            is_generated_output_root,
+            mark_generated_output_root,
+        )
+
+        try:
+            output_is_real_directory = output_dir.is_dir() and not is_link_or_reparse(output_dir)
+            output_is_empty = output_is_real_directory and next(output_dir.iterdir(), None) is None
+            if (not output_dir.exists() and not is_link_or_reparse(output_dir)) or output_is_empty:
+                mark_generated_output_root(output_dir)
+                return output_dir
+            if output_is_real_directory and is_generated_output_root(output_dir):
+                return output_dir
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise click.ClickException(
+                f"Cannot safely reserve default report output directory: {output_dir}"
+            ) from exc
+
+    if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
         try:
             if not _path_is_within(relocated, resolved_target):
@@ -418,38 +448,51 @@ def _reject_copy_repo_root_output(
     *,
     copy_repo: bool,
     agent_eval: bool,
+    include_skills: tuple[Path, ...] = (),
 ) -> None:
-    """Reject or reserve report storage inside the full Tier 3 repo context."""
-    if not copy_repo or not agent_eval:
+    """Reject or reserve report storage inside any Tier 3 repo context."""
+    if not agent_eval:
         return
+    mode_label = "--copy-repo" if copy_repo else "Tier 3 linked-context staging"
     try:
-        repo_root = resolve_repo_context_root(target_path)
-        output_is_repo_root = paths_refer_to_same_location(output_dir, repo_root)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise click.ClickException(f"Cannot validate --copy-repo report output directory: {output_dir}") from exc
-    if output_is_repo_root:
-        raise click.UsageError(
-            "With --copy-repo, report output cannot be the repository root; "
-            f"choose a dedicated path such as ./reports instead of: {output_dir}"
+        context_roots = [(resolve_repo_context_root(target_path), "repository root")]
+        context_roots.extend(
+            (included_skill.resolve(strict=True), "runtime source root")
+            for included_skill in include_skills
         )
-    try:
-        output_is_in_repo = _path_is_within(output_dir, repo_root)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise click.ClickException(f"Cannot validate --copy-repo report output directory: {output_dir}") from exc
-    if not output_is_in_repo:
+        raise click.ClickException(f"Cannot validate {mode_label} report output directory: {output_dir}") from exc
+    overlaps_context = False
+    seen_roots: set[Path] = set()
+    for context_root, root_label in context_roots:
+        if context_root in seen_roots:
+            continue
+        seen_roots.add(context_root)
+        try:
+            output_is_context_root = paths_refer_to_same_location(output_dir, context_root)
+            output_is_in_context = _path_is_within(output_dir, context_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise click.ClickException(f"Cannot validate {mode_label} report output directory: {output_dir}") from exc
+        if output_is_context_root:
+            raise click.UsageError(
+                f"With {mode_label}, report output cannot be the {root_label}; "
+                f"choose a dedicated path such as ./reports instead of: {output_dir}"
+            )
+        overlaps_context = overlaps_context or output_is_in_context
+    if not overlaps_context:
         return
 
-    # Full-repo staging excludes this whole directory so prior reports cannot
-    # influence the agent. Only an authentically evaluator-owned tree is safe
-    # to omit wholesale; otherwise an arbitrary --output-dir such as repo/src
-    # would silently remove authored context from the evaluation.
+    # Tier 3 staging excludes this whole directory so prior reports cannot
+    # influence the agent. Linked-context staging can follow authored files
+    # anywhere in the repository, so it needs the same ownership check as a
+    # full-repository copy before omitting a subtree wholesale.
     from skillevaluator.tier3.output_provenance import mark_generated_output_root
 
     try:
         mark_generated_output_root(output_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.UsageError(
-            "With --copy-repo, an in-repository report output must be a dedicated "
+            f"With {mode_label}, an in-repository report output must be a dedicated "
             "SkillEvaluator generated-output directory; choose a new or authenticated "
             f"report directory instead of: {output_dir}"
         ) from exc
@@ -1384,6 +1427,7 @@ def validate(
             output_dir,
             copy_repo=copy_repo,
             agent_eval=agent_eval,
+            include_skills=include_skills,
         )
 
     # A directory of skills (no root SKILL.md) is a catalog: run the pipeline
@@ -1433,7 +1477,13 @@ def validate(
         try:
             autopilot_dataset_note = _ensure_autopilot_dataset(target_path, quiet=quiet)
         except (Exception, SystemExit) as exc:
-            autopilot_error = f"autopilot dataset generation failed: {getattr(exc, 'message', exc)}"
+            try:
+                error_detail = sanitize_tier3_console_text(str(exc), limit=72)
+            except Exception:
+                error_detail = type(exc).__name__
+            autopilot_error = sanitize_tier3_console_text(
+                f"autopilot dataset generation failed: {error_detail or type(exc).__name__}"
+            )
             if not quiet:
                 click.echo(f"Warning: {autopilot_error}", err=True)
 
@@ -1568,10 +1618,14 @@ def validate(
         results.append(tier3_result)
         tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
         if autopilot_error and not tier3_ran:
-            tier3_skip = f"{autopilot_error}; {tier3_skip}"
+            from skillevaluator.reporting.base import get_skip_reason
+
+            tier3_result.metadata["skip_reason"] = f"{autopilot_error}; {tier3_skip}"
+            report_skip_reason = get_skip_reason(tier3_result)
             # Reports read the skip reason from metadata, so the generation
             # failure must land there too, not only in the view's skip row.
-            tier3_result.metadata["skip_reason"] = tier3_skip
+            tier3_result.metadata["skip_reason"] = report_skip_reason
+            tier3_skip = sanitize_tier3_console_text(report_skip_reason)
         if tier3_ran:
             view.tier_done(tier3_index, failed=not tier3_ok, rows=[*tier3_config_rows[3:], *tier3_rows])
         else:

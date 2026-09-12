@@ -27,6 +27,7 @@ from skillevaluator.evaluation.tier3_report import (
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
+from skillevaluator.reporting.base import agent_eval_publication_evidence_complete
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
@@ -895,8 +896,97 @@ def test_payload_prunes_oversized_non_best_conditions_before_best_evidence() -> 
     assert any(card["evidence"] for card in best_cards)
     assert any(card["evidence"] for card in payload["evaluator_cards"])
     assert payload["provenance"]["raw_trial_rewards"]["zzz"]
-    assert payload["agents"]["aaa"]["conditions"] == {}
+    assert payload["agents"]["aaa"]["conditions"] == {
+        "with_skill": {
+            "execution_status": None,
+            "execution_errors": None,
+            "expected_attempts": 0,
+            "scored_attempts": 0,
+        }
+    }
     assert payload["report_truncation"]["omitted"]["non_best_agent_details"] > 0
+
+
+def _publication_ready_oversized_condition_payload(*, extra_condition: bool = False) -> dict:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    conditions = {
+        "with_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+            "diagnostic": "x" * (3 * 1024 * 1024),
+        },
+        "without_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+    }
+    if extra_condition:
+        conditions["forged"] = {"execution_status": "succeeded"}
+    payload = build_agent_eval_payload(
+        "condition-budget",
+        {
+            "codex": {
+                "model": "test-model",
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": conditions,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                "lift": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "rewards": [{"entry_id": "case-1", **dict.fromkeys(DEFAULT_METRICS, 0.9)}],
+                "rewards_baseline": [{"entry_id": "case-1", **dict.fromkeys(DEFAULT_METRICS, 0.4)}],
+            }
+        },
+        dataset=[{"id": "case-1", "expected_skill": "condition-budget"}],
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
+        env_mode="docker",
+        evaluated_at="2026-09-12T12:00:00+00:00",
+        evaluator_version="1.0.0",
+        run_id="condition-budget-run",
+        publication_target={
+            "skill_name": "condition-budget",
+            "skill_digest": "sha256:" + "a" * 64,
+            "skill_digest_algorithm": "skill-evaluator-source-tree/2",
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    return payload
+
+
+def test_payload_budget_preserves_publication_condition_truth_fields() -> None:
+    payload = _publication_ready_oversized_condition_payload()
+
+    assert agent_eval_publication_evidence_complete(payload) is True
+    assert payload["agents"]["codex"]["conditions"] == {
+        "with_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+        "without_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        },
+    }
+
+
+def test_payload_budget_does_not_repair_extra_condition_keys() -> None:
+    payload = _publication_ready_oversized_condition_payload(extra_condition=True)
+
+    conditions = payload["agents"]["codex"]["conditions"]
+    assert "invalid_condition_shape" in conditions
+    assert agent_eval_publication_evidence_complete(payload) is False
 
 
 def test_non_finite_report_numbers_are_sanitized_before_canonical_json() -> None:
@@ -1305,6 +1395,51 @@ def test_rerender_rejects_canonical_target_when_run_marks_identity_conflict(tmp_
     assert assessment.reason == "Tier 3 source identity changed during evaluation."
     report = json.loads(JSONReporter(include_timestamp=False).render_all([tier3]))
     assert report["results"][0]["publication_target_conflict"] == "source changed during evaluation"
+
+
+def test_rerender_reports_runtime_context_conflict_without_claiming_source_mutation(tmp_path: Path) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.reporting.base import assess_tier3_evidence
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    run_start_target = publication_target_from_path(skill)
+    assert run_start_target is not None
+
+    run_dir = tmp_path / "results" / "20260709_120013"
+    _write_summary(run_dir)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "publication_target": None,
+                "publication_target_conflict": {
+                    "run_start": run_start_target,
+                    "run_end": None,
+                    "reason_code": "runtime_context_outside_publication_target",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    marker = "runtime context is not bound to publication target"
+    assert payload["publication_target"] is None
+    assert payload["summary"]["publication_target"] is None
+    assert payload["publication_target_conflict"] == marker
+    assert payload["summary"]["publication_target_conflict"] == marker
+    assert "publication_target" not in tier3.metadata
+    assert tier3.metadata["publication_target_conflict"] == marker
+    assessment = assess_tier3_evidence([tier3], payload, expected_skill_name="demo")
+    assert assessment.evidence_complete is False
+    assert assessment.reason == "Tier 3 runtime context is not bound to the publication target."
+    report = json.loads(JSONReporter(include_timestamp=False).render_all([tier3]))
+    assert report["results"][0]["publication_target_conflict"] == marker
 
 
 def test_rerender_does_not_replace_malformed_persisted_identity_with_engine_claim(tmp_path: Path) -> None:

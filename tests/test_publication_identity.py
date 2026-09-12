@@ -903,24 +903,34 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
         result.metadata["agent_eval"] = {
             "skill_name": "demo",
             "verdict": "pass",
+            "best_agent": "codex",
+            "agents_run": ["codex"],
+            "overall_score": 0.9,
+            "overall_lift": 0.5,
             "execution_status": "succeeded",
             "evaluated_at": "2026-08-25T12:00:00+00:00",
             "evaluator_version": "0.9.0",
-            "expected_attempts": 1,
-            "scored_attempts": 1,
+            "execution_errors": [],
+            "expected_attempts": 2,
+            "scored_attempts": 2,
             "dataset_summary": {"total_tasks": 1},
             "dataset_digest": "sha256:" + "a" * 64,
             "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
-            "attempt_policy": {"max_attempts": 1, "pass_threshold": 0.5},
+            "attempt_policy": {"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
             "run_id": run_id,
             "publication_target": dict(target),
             "summary": {
                 "skill_name": "demo",
                 "verdict": "pass",
+                "best_agent": "codex",
+                "agents_run": ["codex"],
+                "overall_score": 0.9,
+                "overall_lift": 0.5,
                 "execution_status": "succeeded",
                 "environment": "docker",
-                "expected_attempts": 1,
-                "scored_attempts": 1,
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
                 "run_id": run_id,
                 "publication_target": dict(target),
             },
@@ -928,11 +938,28 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
                 "codex": {
                     "model": "gpt-codex",
                     "execution_status": "succeeded",
-                    "expected_attempts": 1,
-                    "scored_attempts": 1,
+                    "execution_errors": [],
+                    "expected_attempts": 2,
+                    "scored_attempts": 2,
+                    "conditions": {
+                        "with_skill": {
+                            "execution_status": "succeeded",
+                            "execution_errors": [],
+                            "expected_attempts": 1,
+                            "scored_attempts": 1,
+                        },
+                        "without_skill": {
+                            "execution_status": "succeeded",
+                            "execution_errors": [],
+                            "expected_attempts": 1,
+                            "scored_attempts": 1,
+                        },
+                    },
+                    "baseline": 0.4,
                     "with_skill": 0.9,
+                    "lift": 0.5,
                     "dimensions": [
-                        {"id": dimension, "with_skill": 0.9}
+                        {"id": dimension, "with_skill": 0.9, "baseline": 0.4, "lift": 0.5}
                         for dimension in (
                             "security",
                             "correctness",
@@ -943,6 +970,16 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
                     ],
                 }
             },
+            "dimensions": [
+                {"id": dimension, "with_skill": 0.9, "baseline": 0.4, "lift": 0.5}
+                for dimension in (
+                    "security",
+                    "correctness",
+                    "discoverability",
+                    "effectiveness",
+                    "efficiency",
+                )
+            ],
         }
         return result
 
@@ -968,7 +1005,8 @@ def test_split_tier_aggregation_binds_every_result_to_one_source_snapshot(tmp_pa
     benchmark_path.write_text(benchmark, encoding="utf-8")
     _files, offenders = benchmark_gate.find_offenders([benchmark_path])
 
-    assert "Overall verdict: PASS" in benchmark
+    assert "> ✅ **Overall verdict: PASS — Recommended for publication**" in benchmark
+    assert "## Publication Recommendation" in benchmark
     assert offenders == []
     machine_report = json.loads(JSONReporter(include_timestamp=False).render_all([tier1, tier2, tier3]))
     assert [result["publication_target"] for result in machine_report["results"]] == [

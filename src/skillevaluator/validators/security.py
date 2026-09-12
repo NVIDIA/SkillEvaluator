@@ -22,6 +22,7 @@ import re
 import shutil
 import tempfile
 import tokenize
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -58,6 +59,21 @@ _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
+
+
+def _is_filesystem_safe_path_text(value: str) -> bool:
+    """Return whether an untrusted report path can be passed to OS path APIs."""
+    try:
+        encoded = os.fsencode(value)
+    except (ValueError, UnicodeError):
+        return False
+    return bool(encoded) and b"\x00" not in encoded and not any(
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in value
+    )
+
+
 _SKILLSPECTOR_SEMANTIC_ANALYZERS = frozenset(
     {
         "semantic_developer_intent",
@@ -1985,6 +2001,11 @@ class SecurityValidator(ValidatorBase):
         if file_path is not None and not isinstance(file_path, str):
             result.add_error(f"{prefix}.location.file' must be a string or null; security scan did not complete")
             return False
+        if isinstance(file_path, str) and file_path and not _is_filesystem_safe_path_text(file_path):
+            result.add_error(
+                f"{prefix}.location.file' must be a filesystem-safe string; security scan did not complete"
+            )
+            return False
         for field in ("start_line", "line", "end_line"):
             line_number = location.get(field)
             if line_number is not None and (
@@ -2094,6 +2115,8 @@ class SecurityValidator(ValidatorBase):
         if issue.get("id") == "SC8":
             return False
         file_path, _line_number = SecurityValidator._parse_issue_location(issue)
+        if not _is_filesystem_safe_path_text(file_path):
+            return False
         path = Path(file_path)
 
         if source_root is None:

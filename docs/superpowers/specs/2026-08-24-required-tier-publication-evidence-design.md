@@ -43,7 +43,13 @@ the gap by validating only Tier 3 consistency.
   three generated root publication files. Filesystem aliases follow actual
   filesystem identity, and a same-named nested authored file remains covered.
   Producer scans and Tier 3 agent-visible projections share this exclusion
-  contract. A missing, malformed, or different digest makes
+  contract. A Tier 3 projection that actually adds linked/full repository
+  context cannot certify publication until runtime context has its own
+  versioned identity; full-mode selection can depend on excluded Git/operator
+  state even when the repository root is the target. External reference or
+  workspace skills have the same restriction. The run remains usable but
+  carries a source-identity conflict and is `INCOMPLETE`. A missing, malformed,
+  or different digest makes
   publication `INCOMPLETE` even when the visible target names match.
 - Completed Tier 3 evidence carries its run-owned `run_id` in both the payload
   and summary. The runner persists the target identity at the execution

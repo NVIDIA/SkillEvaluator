@@ -60,7 +60,7 @@ def matches_filesystem_name(path: Path, canonical_names: Collection[str]) -> boo
         return False
     try:
         observed = path.lstat()
-    except OSError:
+    except (OSError, ValueError, UnicodeError):
         return False
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     if stat.S_ISLNK(observed.st_mode) or getattr(observed, "st_file_attributes", 0) & reparse_flag:
@@ -68,7 +68,7 @@ def matches_filesystem_name(path: Path, canonical_names: Collection[str]) -> boo
     for name in possible_aliases:
         try:
             canonical = path.with_name(name).lstat()
-        except OSError:
+        except (OSError, ValueError, UnicodeError):
             continue
         if (
             not stat.S_ISLNK(canonical.st_mode)

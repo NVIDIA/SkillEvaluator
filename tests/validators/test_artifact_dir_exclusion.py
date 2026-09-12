@@ -377,3 +377,33 @@ class TestSkillspectorArtifactIssueFilter:
         issue = {"location": {"file": "../BENCHMARK.md", "start_line": 1}}
 
         assert SecurityValidator._is_generated_artifact_issue(issue, source_root=skill) is False
+
+    @pytest.mark.parametrize(
+        "reported_path",
+        [
+            "bad\x00/BENCHMARK.md",
+            "/tmp/bad\x00/BENCHMARK.md",
+            "bad\ud800/BENCHMARK.md",
+            "/tmp/bad\ud800/BENCHMARK.md",
+            "bad\nforged/BENCHMARK.md",
+            "bad\x1b[31m/BENCHMARK.md",
+        ],
+        ids=[
+            "relative-nul",
+            "absolute-nul",
+            "relative-surrogate",
+            "absolute-surrogate",
+            "newline",
+            "terminal-escape",
+        ],
+    )
+    def test_malformed_reported_path_is_not_filtered_or_probed(
+        self,
+        tmp_path: Path,
+        reported_path: str,
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        issue = {"location": {"file": reported_path, "start_line": 1}}
+
+        assert SecurityValidator._is_generated_artifact_issue(issue, source_root=skill) is False

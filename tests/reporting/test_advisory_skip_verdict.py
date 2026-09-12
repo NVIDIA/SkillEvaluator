@@ -19,6 +19,7 @@ from scripts.ci import check_public_benchmarks as benchmark_gate
 from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, advisory_skip_result
 from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.reporting.base import agent_eval_publication_evidence_complete, get_skip_reason
 from skillevaluator.reporting.html import _sanitize_tier3_display_payload
 
 
@@ -119,21 +120,31 @@ def _complete_tier3_result(
         "run_id": run_id,
         "publication_target": dict(publication_target),
         "verdict": "pass",
+        "best_agent": "codex",
+        "agents_run": ["codex"],
+        "overall_score": score,
+        "overall_lift": score - 0.4,
         "execution_status": "succeeded",
         "evaluated_at": evaluated_at,
         "evaluator_version": "0.9.0",
-        "expected_attempts": 1,
-        "scored_attempts": 1,
+        "execution_errors": [],
+        "expected_attempts": 2,
+        "scored_attempts": 2,
         "dataset_summary": {"total_tasks": 1},
         "dataset_digest": "sha256:" + "a" * 64,
         "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
-        "attempt_policy": {"max_attempts": 1, "pass_threshold": 0.5},
+        "attempt_policy": {"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
         "summary": {
             "verdict": "pass",
+            "best_agent": "codex",
+            "agents_run": ["codex"],
+            "overall_score": score,
+            "overall_lift": score - 0.4,
             "execution_status": "succeeded",
             "environment": "docker",
-            "expected_attempts": 1,
-            "scored_attempts": 1,
+            "execution_errors": [],
+            "expected_attempts": 2,
+            "scored_attempts": 2,
             "run_id": run_id,
             "publication_target": dict(publication_target),
         },
@@ -142,11 +153,28 @@ def _complete_tier3_result(
             "codex": {
                 "model": "gpt-codex",
                 "execution_status": "succeeded",
-                "expected_attempts": 1,
-                "scored_attempts": 1,
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": {
+                    "with_skill": {
+                        "execution_status": "succeeded",
+                        "execution_errors": [],
+                        "expected_attempts": 1,
+                        "scored_attempts": 1,
+                    },
+                    "without_skill": {
+                        "execution_status": "succeeded",
+                        "execution_errors": [],
+                        "expected_attempts": 1,
+                        "scored_attempts": 1,
+                    },
+                },
+                "baseline": 0.4,
                 "with_skill": score,
+                "lift": score - 0.4,
                 "dimensions": [
-                    {"id": dimension, "with_skill": score}
+                    {"id": dimension, "with_skill": score, "baseline": 0.4, "lift": score - 0.4}
                     for dimension in ("security", "correctness", "discoverability", "effectiveness", "efficiency")
                 ],
             }
@@ -160,6 +188,8 @@ def _complete_tier3_result(
         },
         "trials": [],
     }
+    payload = result.metadata["agent_eval"]
+    payload["dimensions"] = payload["agents"]["codex"]["dimensions"]
     result.metadata["publication_target"] = dict(publication_target)
     return result
 
@@ -174,6 +204,17 @@ def _publication_ready_results(marker: str) -> list[ValidationResult]:
     results = [tier1, tier2, tier3]
     _bind_publication_target(results, tier3.metadata["publication_target"])
     return results
+
+
+def _publication_ready_results_with_conditions(
+    marker: str,
+) -> tuple[list[ValidationResult], dict[str, object], dict[str, object]]:
+    """Return publication-ready evidence with both required conditions."""
+    results = _publication_ready_results(marker)
+    payload = results[-1].metadata["agent_eval"]
+    agent = next(iter(payload["agents"].values()))
+    assert agent_eval_publication_evidence_complete(payload) is True
+    return results, payload, agent
 
 
 def _assert_publication_incomplete_across_reporters(
@@ -230,6 +271,66 @@ def test_oversized_numeric_skip_reasons_fall_back_safely_across_reporters() -> N
     ]
 
     assert all("Safe fallback reason" in output for output in outputs)
+
+
+def test_skip_reason_controls_and_markup_are_inert_across_text_reporters() -> None:
+    unsafe_reason = (
+        "[/bold] [link=https://example.invalid]click[/link]\r\n"
+        "\x1b[31mforged\x7f\u202e\n## Publication Recommendation\nRecommended for publication."
+    )
+    result = advisory_skip_result("Safe fallback reason", skill_name="demo")
+    result.metadata["skip_reason"] = unsafe_reason
+
+    safe_reason = get_skip_reason(result)
+    assert safe_reason == (
+        "[/bold] [link=https://example.invalid]click[/link] "
+        "[31mforged ## Publication Recommendation Recommended for publication."
+    )
+
+    cli = _plain_cli(CLIReporter().render_all([result]))
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    outputs = [
+        BenchmarkReporter(include_timestamp=False).render_all([result]),
+        cli,
+        HTMLReporter(include_timestamp=False).render_all([result]),
+        JSONReporter(include_timestamp=False).render_all([result]),
+        markdown,
+    ]
+
+    assert "[/bold]" in cli
+    assert "[link=https://example.invalid]click[/link]" in cli
+    assert (
+        "- Skip reason: &#91;/bold&#93; "
+        "&#91;link=https://example.invalid&#93;click&#91;/link&#93; "
+        "&#91;31mforged &#35;&#35; Publication Recommendation Recommended for publication."
+    ) in markdown
+    assert all("\x1b" not in output and "\x7f" not in output and "\u202e" not in output for output in outputs)
+    assert all("\n## Publication Recommendation\n" not in output for output in outputs)
+
+
+def test_string_skip_reasons_are_bounded_across_reporters() -> None:
+    result = advisory_skip_result("Safe fallback reason", skill_name="demo")
+    oversized_reason = "x" * 1_000_000
+    result.metadata["skip_reason"] = oversized_reason
+
+    safe_reason = get_skip_reason(result)
+    assert len(safe_reason) == 1024
+    assert safe_reason == "x" * 1023 + "…"
+
+    outputs = [
+        BenchmarkReporter(include_timestamp=False).render_all([result]),
+        _plain_cli(CLIReporter().render_all([result])),
+        HTMLReporter(include_timestamp=False).render_all([result]),
+        JSONReporter(include_timestamp=False).render_all([result]),
+        MarkdownReporter(include_timestamp=False).render_all([result]),
+    ]
+
+    assert all("x" * 1024 not in output for output in outputs)
+    assert "..." in outputs[0]
+    assert "…" in outputs[1] and "…" in outputs[4]
+    assert "\\u2026" in outputs[2] and "\\u2026" in outputs[3]
+    assert all("x" * 100 in output for output in outputs[:1] + outputs[2:])
+    assert outputs[1].count("x") >= 50
 
 
 def test_clean_tier2_skip_is_explicit_in_combined_outputs() -> None:
@@ -1040,8 +1141,18 @@ def test_html_displays_effective_dimension_verdict(
     tier2 = ValidationResult(validator_name="Similarity Check")
     tier2.add_success("similarity_check", "Similarity scan completed")
     tier3 = _complete_tier3_result("DIMENSIONS", score=0.9, runtime_seconds=1.0)
-    for dimension in tier3.metadata["agent_eval"]["agents"]["codex"]["dimensions"]:
+    payload = tier3.metadata["agent_eval"]
+    agent = payload["agents"]["codex"]
+    baseline = agent["baseline"]
+    agent["with_skill"] = dimension_score
+    agent["lift"] = dimension_score - baseline
+    payload["overall_score"] = dimension_score
+    payload["overall_lift"] = dimension_score - baseline
+    payload["summary"]["overall_score"] = dimension_score
+    payload["summary"]["overall_lift"] = dimension_score - baseline
+    for dimension in agent["dimensions"]:
         dimension["with_skill"] = dimension_score
+        dimension["lift"] = dimension_score - dimension["baseline"]
     results = [tier1, tier2, tier3]
     _bind_publication_target(results, tier3.metadata["publication_target"])
 
@@ -2188,6 +2299,9 @@ def test_unicode_identity_requires_recorded_letters_or_numbers(
     agent["model"] = identity
     payload["agents"][identity] = agent
     payload["evaluator_version"] = identity
+    for container in (payload, payload["summary"]):
+        container["best_agent"] = identity
+        container["agents_run"] = [identity]
     results = [tier1, tier2, tier3]
     _bind_publication_target(results, tier3.metadata["publication_target"])
 
@@ -2429,21 +2543,29 @@ def test_succeeded_under_scored_attempts_cannot_certify_publication(tmp_path: Pa
     _assert_publication_incomplete_across_reporters(results, tmp_path)
 
 
-@pytest.mark.parametrize("agent_status", ["failed", "skipped", "incomplete", None])
+@pytest.mark.parametrize("agent_status", ["failed", "skipped", "incomplete", "unknown", None])
 def test_non_succeeded_agent_peer_cannot_certify_publication(
     tmp_path: Path,
     agent_status: str | None,
 ) -> None:
     results = _publication_ready_results("NON-SUCCEEDED-PEER")
     payload = results[-1].metadata["agent_eval"]
-    peer: dict[str, object] = {
-        "model": "peer-model",
-        "expected_attempts": 0,
-        "scored_attempts": 0,
-    }
+    peer = deepcopy(next(iter(payload["agents"].values())))
+    peer["model"] = "peer-model"
+    peer["execution_status"] = "succeeded"
+    payload["expected_attempts"] = 4
+    payload["scored_attempts"] = 4
+    payload["summary"]["expected_attempts"] = 4
+    payload["summary"]["scored_attempts"] = 4
+    payload["agents"]["peer"] = peer
+    payload["agents_run"] = ["codex", "peer"]
+    payload["summary"]["agents_run"] = ["codex", "peer"]
+    assert agent_eval_publication_evidence_complete(payload) is True
+
     if agent_status is not None:
         peer["execution_status"] = agent_status
-    payload["agents"]["peer"] = peer
+    else:
+        peer.pop("execution_status")
 
     _assert_publication_incomplete_across_reporters(results, tmp_path)
 
@@ -2465,6 +2587,300 @@ def test_succeeded_evidence_with_invalid_execution_errors_cannot_certify_publica
     container["execution_errors"] = invalid_errors
 
     _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize("error_location", ["payload", "summary", "agent"])
+def test_succeeded_evidence_requires_explicit_empty_execution_errors(
+    tmp_path: Path,
+    error_location: str,
+) -> None:
+    results = _publication_ready_results("MISSING-EXECUTION-ERRORS")
+    payload = results[-1].metadata["agent_eval"]
+    agent = next(iter(payload["agents"].values()))
+    container = payload if error_location == "payload" else payload["summary"] if error_location == "summary" else agent
+    container.pop("execution_errors")
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize("condition_name", ["with_skill", "without_skill"])
+@pytest.mark.parametrize("condition_status", ["failed", "incomplete", "unknown", None])
+def test_non_succeeded_agent_condition_cannot_certify_publication(
+    tmp_path: Path,
+    condition_name: str,
+    condition_status: str | None,
+) -> None:
+    results, _payload, agent = _publication_ready_results_with_conditions("CONDITION-STATUS")
+    condition = agent["conditions"][condition_name]
+    if condition_status is None:
+        condition.pop("execution_status")
+    else:
+        condition["execution_status"] = condition_status
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "invalid_errors",
+    [["worker crashed"], (), {}, None],
+    ids=["nonempty", "tuple", "mapping", "null"],
+)
+@pytest.mark.parametrize("condition_name", ["with_skill", "without_skill"])
+def test_invalid_agent_condition_execution_errors_cannot_certify_publication(
+    tmp_path: Path,
+    condition_name: str,
+    invalid_errors: object,
+) -> None:
+    results, _payload, agent = _publication_ready_results_with_conditions("CONDITION-ERRORS")
+    agent["conditions"][condition_name]["execution_errors"] = invalid_errors
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize("condition_name", ["with_skill", "without_skill"])
+def test_missing_agent_condition_execution_errors_cannot_certify_publication(
+    tmp_path: Path,
+    condition_name: str,
+) -> None:
+    results, _payload, agent = _publication_ready_results_with_conditions("CONDITION-MISSING-ERRORS")
+    agent["conditions"][condition_name].pop("execution_errors")
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize("condition_shape", ["missing", "empty", "fake-only", "extra"])
+def test_noncanonical_agent_condition_identity_cannot_certify_publication(
+    tmp_path: Path,
+    condition_shape: str,
+) -> None:
+    results, _payload, agent = _publication_ready_results_with_conditions("CONDITION-IDENTITY")
+    canonical = agent["conditions"]
+    fake = deepcopy(canonical["with_skill"])
+    if condition_shape == "missing":
+        agent.pop("conditions")
+    elif condition_shape == "empty":
+        agent["conditions"] = {}
+    elif condition_shape == "fake-only":
+        agent["conditions"] = {"fake": fake}
+    else:
+        canonical["fake"] = fake
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize("invalid_conditions", [[], {"with_skill": []}], ids=["list", "malformed-entry"])
+def test_malformed_agent_conditions_cannot_certify_publication(
+    tmp_path: Path,
+    invalid_conditions: object,
+) -> None:
+    results, _payload, agent = _publication_ready_results_with_conditions("MALFORMED-CONDITIONS")
+    agent["conditions"] = invalid_conditions
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("condition_status", "expected_attempts", "scored_attempts"),
+    [
+        ("succeeded", 2, 1),
+        ("succeeded", 1, 2),
+        ("succeeded", "1", 1),
+        ("succeeded", 2, 2),
+        ("skipped", 1, 0),
+    ],
+    ids=["under-scored", "over-scored", "malformed", "aggregate-mismatch", "skipped-with-work"],
+)
+@pytest.mark.parametrize("condition_name", ["with_skill", "without_skill"])
+def test_invalid_agent_condition_attempt_coverage_cannot_certify_publication(
+    tmp_path: Path,
+    condition_name: str,
+    condition_status: str,
+    expected_attempts: object,
+    scored_attempts: object,
+) -> None:
+    results, _payload, agent = _publication_ready_results_with_conditions("CONDITION-ATTEMPTS")
+    condition = agent["conditions"][condition_name]
+    condition["execution_status"] = condition_status
+    condition["expected_attempts"] = expected_attempts
+    condition["scored_attempts"] = scored_attempts
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+def test_skipped_baseline_condition_cannot_certify_publication() -> None:
+    results, payload, agent = _publication_ready_results_with_conditions("CONDITION-SKIPPED")
+    agent["conditions"]["without_skill"].update(
+        {
+            "execution_status": "skipped",
+            "expected_attempts": 0,
+            "scored_attempts": 0,
+        }
+    )
+    for container in (agent, payload, payload["summary"]):
+        container["expected_attempts"] = 1
+        container["scored_attempts"] = 1
+
+    assert agent_eval_publication_evidence_complete(payload) is False
+    report = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert report["publication_status"] == "incomplete"
+
+
+def test_succeeded_baseline_condition_with_complete_counts_can_certify_publication() -> None:
+    results, payload, agent = _publication_ready_results_with_conditions("CONDITION-BASELINE")
+    agent["conditions"]["without_skill"].update(
+        {
+            "execution_status": "succeeded",
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        }
+    )
+    for container in (agent, payload, payload["summary"]):
+        container["expected_attempts"] = 2
+        container["scored_attempts"] = 2
+
+    assert agent_eval_publication_evidence_complete(payload) is True
+    report = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert report["publication_status"] == "pass"
+
+
+def test_tier3_attempt_coverage_is_bound_to_dataset_size() -> None:
+    _results, payload, _agent = _publication_ready_results_with_conditions("DATASET-COVERAGE")
+    payload["dataset_summary"]["total_tasks"] = 2
+
+    assert agent_eval_publication_evidence_complete(payload) is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        ("missing-pass-threshold", None),
+        ("pass-threshold", "0.5"),
+        ("pass-threshold", -0.1),
+        ("pass-threshold", 1.1),
+        ("pass-threshold", float("nan")),
+        ("missing-stop-on-pass", None),
+        ("stop-on-pass", "false"),
+        ("stop-with-one-attempt", True),
+    ],
+)
+def test_malformed_tier3_attempt_policy_cannot_certify_publication(
+    mutation: str,
+    value: object,
+) -> None:
+    _results, payload, _agent = _publication_ready_results_with_conditions("ATTEMPT-POLICY")
+    policy = payload["attempt_policy"]
+    if mutation == "missing-pass-threshold":
+        policy.pop("pass_threshold")
+    elif mutation == "pass-threshold":
+        policy["pass_threshold"] = value
+    elif mutation == "missing-stop-on-pass":
+        policy.pop("stop_on_pass")
+    else:
+        policy["stop_on_pass"] = value
+
+    assert agent_eval_publication_evidence_complete(payload) is False
+
+
+def test_full_attempt_count_is_required_without_early_stop() -> None:
+    _results, payload, _agent = _publication_ready_results_with_conditions("FULL-ATTEMPT-COUNT")
+    payload["attempt_policy"]["max_attempts"] = 3
+
+    assert agent_eval_publication_evidence_complete(payload) is False
+
+
+def test_early_stop_allows_bounded_completed_attempt_count() -> None:
+    _results, payload, _agent = _publication_ready_results_with_conditions("EARLY-STOP-COUNT")
+    payload["attempt_policy"].update({"max_attempts": 3, "stop_on_pass": True})
+
+    assert agent_eval_publication_evidence_complete(payload) is True
+
+
+def test_succeeded_baseline_requires_score_evidence() -> None:
+    results, payload, agent = _publication_ready_results_with_conditions("BASELINE-SCORES")
+    agent.pop("baseline")
+    for dimension in agent["dimensions"]:
+        dimension.pop("baseline")
+
+    assert agent_eval_publication_evidence_complete(payload) is False
+    report = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert report["publication_status"] == "incomplete"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "root-best-agent",
+        "summary-best-agent",
+        "root-agents-run",
+        "summary-agents-run",
+        "root-overall-score",
+        "summary-overall-score",
+        "root-overall-lift",
+        "summary-overall-lift",
+        "root-dimensions",
+        "oversized-overall-score",
+    ],
+)
+def test_inconsistent_tier3_publication_aggregates_cannot_certify_publication(mutation: str) -> None:
+    _results, payload, _agent = _publication_ready_results_with_conditions(f"AGGREGATE-{mutation}")
+    summary = payload["summary"]
+    if mutation == "root-best-agent":
+        payload["best_agent"] = "forged"
+    elif mutation == "summary-best-agent":
+        summary["best_agent"] = "forged"
+    elif mutation == "root-agents-run":
+        payload["agents_run"] = ["codex", "forged"]
+    elif mutation == "summary-agents-run":
+        summary["agents_run"] = ["codex", "forged"]
+    elif mutation == "root-overall-score":
+        payload["overall_score"] = 0.1
+    elif mutation == "summary-overall-score":
+        summary["overall_score"] = 0.1
+    elif mutation == "root-overall-lift":
+        payload["overall_lift"] = -0.3
+    elif mutation == "summary-overall-lift":
+        summary["overall_lift"] = -0.3
+    elif mutation == "root-dimensions":
+        payload["dimensions"] = deepcopy(payload["dimensions"])
+        payload["dimensions"][0]["with_skill"] = 0.1
+    else:
+        payload["overall_score"] = 1 << 40_000
+
+    assert agent_eval_publication_evidence_complete(payload) is False
+
+
+@pytest.mark.parametrize(
+    ("peer_score", "peer_lift", "reverse_mapping_order"),
+    [(0.8, 0.4, False), (0.9, 0.4, False), (0.9, 0.5, False), (0.9, 0.5, True)],
+    ids=["lower-score", "lower-lift", "later-tie", "reordered-later-tie"],
+)
+def test_forged_nonwinning_best_agent_cannot_certify_publication(
+    peer_score: float,
+    peer_lift: float,
+    reverse_mapping_order: bool,
+) -> None:
+    _results, payload, agent = _publication_ready_results_with_conditions("FORGED-BEST")
+    peer = deepcopy(agent)
+    peer["model"] = "peer-model"
+    peer["with_skill"] = peer_score
+    peer["baseline"] = peer_score - peer_lift
+    peer["lift"] = peer_lift
+    for dimension in peer["dimensions"]:
+        dimension["with_skill"] = peer_score
+        dimension["baseline"] = peer_score - peer_lift
+        dimension["lift"] = peer_lift
+    payload["agents"]["peer"] = peer
+    if reverse_mapping_order:
+        payload["agents"] = {"peer": peer, "codex": agent}
+    payload["expected_attempts"] = payload["summary"]["expected_attempts"] = 4
+    payload["scored_attempts"] = payload["summary"]["scored_attempts"] = 4
+    payload["best_agent"] = payload["summary"]["best_agent"] = "peer"
+    payload["agents_run"] = payload["summary"]["agents_run"] = ["codex", "peer"]
+    payload["overall_score"] = payload["summary"]["overall_score"] = peer_score
+    payload["overall_lift"] = payload["summary"]["overall_lift"] = peer_lift
+    payload["dimensions"] = peer["dimensions"]
+
+    assert agent_eval_publication_evidence_complete(payload) is False
 
 
 def test_aggregate_attempt_counts_must_match_agent_evidence() -> None:

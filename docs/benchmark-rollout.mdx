@@ -145,6 +145,12 @@ identities, any validation-profile metadata line, common absolute home paths,
 ambiguous legacy uplift cells, the old `Num` column, missing metadata/decision
 sections, and a publication `PASS` without completed required Tier 1, Tier 2,
 or Tier 3 evidence.
+Structural H1/H2 headings must be undecorated, root-level Markdown; raw HTML,
+formatted, quoted, and list-nested headings are rejected as ambiguous. Decision
+text is checked using its rendered form, including line breaks and image alt
+text. Unicode category C, Zl, and Zp characters are rejected whether literal or
+encoded as HTML character references, and confusable aliases of required
+headings, metadata labels, tier-table structure, and decision text fail closed.
 A clean result means none of those configured patterns matched; it is a fixture
 regression guard, not proof that a card is safe to publish. Keep human review
 and the repository's broader boundary and security checks in the promotion

@@ -9,10 +9,14 @@ the PyPI Advisory Database, OSV, and PyUp.io Safety DB.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from skillevaluator.utils.tool_runner import Severity, Tools, cvss_to_severity, parse_json_output
+from skillevaluator.utils.tool_runner import Severity, ToolResult, Tools, cvss_to_severity, parse_json_output
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
+
+_PIP_AUDIT_COMPLETED_EXIT_CODES = frozenset({0, 1})
+_PIP_AUDIT_SEVERITIES = frozenset(severity.value for severity in Severity)
 
 
 class DependencySecurityValidator(ValidatorBase):
@@ -56,7 +60,10 @@ class DependencySecurityValidator(ValidatorBase):
         # Find dependency files
         dep_files = self._find_dependency_files(skill_path)
         if not dep_files["requirements"] and not dep_files["pyproject"]:
-            result.add_message("No dependency files found - skipping vulnerability audit")
+            result.add_success(
+                check_name="dependency_file_discovery",
+                message="No dependency files found - vulnerability audit is not applicable",
+            )
             return result
 
         # Audit requirements.txt files
@@ -95,6 +102,7 @@ class DependencySecurityValidator(ValidatorBase):
 
         if not Tools.pip_audit.is_available:
             result.add_warning(f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}")
+            result.mark_scan_incomplete("pip-audit")
             return result
 
         tool_result = Tools.pip_audit.run(
@@ -103,10 +111,7 @@ class DependencySecurityValidator(ValidatorBase):
             timeout=180,
         )
 
-        if tool_result.error_message:
-            result.add_warning(tool_result.error_message)
-        else:
-            self._process_pip_audit(tool_result.stdout, result, pyproject.name)
+        self._process_pip_audit_result(tool_result, result, pyproject.name)
 
         return result
 
@@ -116,6 +121,7 @@ class DependencySecurityValidator(ValidatorBase):
 
         if not Tools.pip_audit.is_available:
             result.add_warning(f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}")
+            result.mark_scan_incomplete("pip-audit")
             return result
 
         tool_result = Tools.pip_audit.run(
@@ -123,43 +129,176 @@ class DependencySecurityValidator(ValidatorBase):
             timeout=180,
         )
 
-        if tool_result.error_message:
-            result.add_warning(f"{req_file.name}: {tool_result.error_message}")
-        else:
-            self._process_pip_audit(tool_result.stdout, result, req_file.name)
+        self._process_pip_audit_result(tool_result, result, req_file.name)
 
         return result
 
-    def _process_pip_audit(self, output: str, result: ValidationResult, source: str) -> None:
-        """Parse pip-audit output and report vulnerabilities."""
-        data = parse_json_output(output, on_error="No known vulnerabilities found")
-        if data is None:
+    def _process_pip_audit_result(
+        self,
+        tool_result: ToolResult,
+        result: ValidationResult,
+        source: str,
+    ) -> None:
+        """Accept a pip-audit run only when its process state can be trusted."""
+        if tool_result.success is not True or tool_result.error_message:
+            detail = tool_result.error_message or "pip-audit did not complete"
+            result.add_warning(f"{source}: {detail}")
+            result.mark_scan_incomplete("pip-audit")
             return
 
-        # Handle both list and dict output formats
-        dependencies = data if isinstance(data, list) else data.get("dependencies", [])
+        exit_code = tool_result.exit_code
+        if (
+            isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or exit_code not in _PIP_AUDIT_COMPLETED_EXIT_CODES
+        ):
+            result.add_warning(f"{source}: pip-audit exited with unexpected code {exit_code}; scan did not complete")
+            result.mark_scan_incomplete("pip-audit")
+            return
+
+        self._process_pip_audit(tool_result.stdout, result, source, exit_code=exit_code)
+
+    def _process_pip_audit(
+        self,
+        output: str,
+        result: ValidationResult,
+        source: str,
+        *,
+        exit_code: int,
+    ) -> None:
+        """Parse a completed pip-audit process and report trustworthy evidence."""
+        report = self._validated_pip_audit_report(output)
+        if report is None:
+            result.add_warning(f"{source}: pip-audit returned a malformed JSON report; scan did not complete")
+            result.mark_scan_incomplete("pip-audit")
+            return
+
+        dependencies, skipped_count = report
 
         vuln_count = 0
         for dep in dependencies:
-            if not isinstance(dep, dict):
-                continue
+            pkg_name = dep["name"]
+            pkg_version = dep["version"]
 
-            pkg_name = dep.get("name", "unknown")
-            pkg_version = dep.get("version", "unknown")
-
-            for vuln in dep.get("vulns", []):
+            for vuln in dep["vulns"]:
                 vuln_count += 1
                 self._report_vulnerability(
                     result,
                     pkg_name=pkg_name,
                     pkg_version=pkg_version,
-                    vuln_id=vuln.get("id", "Unknown"),
-                    fix_versions=vuln.get("fix_versions", []),
+                    vuln_id=vuln["id"],
+                    fix_versions=vuln["fix_versions"],
                     severity=self._get_vuln_severity(vuln),
                 )
 
+        if skipped_count:
+            result.add_warning(
+                f"{source}: pip-audit skipped {skipped_count} dependency(ies); scan coverage is incomplete"
+            )
+            result.mark_scan_incomplete("pip-audit")
+            return
+
+        expected_exit_code = 1 if vuln_count else 0
+        if exit_code != expected_exit_code:
+            result.add_warning(
+                f"{source}: pip-audit exit code {exit_code} contradicts its JSON report; scan did not complete"
+            )
+            result.mark_scan_incomplete("pip-audit")
+            return
+
         status = f"Found {vuln_count} vulnerability(ies)" if vuln_count else "No vulnerabilities found"
-        result.add_message(f"{source}: {status} (pip-audit)")
+        result.add_success(
+            check_name="pip_audit",
+            message=f"{source}: {status} (pip-audit)",
+            source=source,
+            vulnerability_count=vuln_count,
+        )
+
+    @staticmethod
+    def _validated_pip_audit_report(output: str) -> tuple[list[dict], int] | None:
+        """Return resolved dependencies and skipped count for canonical pip-audit JSON."""
+        try:
+            data = parse_json_output(output)
+        except (RecursionError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        dependencies = data.get("dependencies")
+        if not isinstance(dependencies, list):
+            return None
+        if "fixes" in data and not isinstance(data["fixes"], list):
+            return None
+
+        resolved: list[dict] = []
+        skipped_count = 0
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                return None
+
+            name = dependency.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return None
+
+            if "skip_reason" in dependency:
+                skip_reason = dependency["skip_reason"]
+                if not isinstance(skip_reason, str) or not skip_reason.strip():
+                    return None
+                skipped_count += 1
+                continue
+
+            version = dependency.get("version")
+            vulnerabilities = dependency.get("vulns")
+            if not isinstance(version, str) or not version.strip() or not isinstance(vulnerabilities, list):
+                return None
+
+            for vulnerability in vulnerabilities:
+                if not DependencySecurityValidator._valid_pip_audit_vulnerability(vulnerability):
+                    return None
+            resolved.append(dependency)
+
+        return resolved, skipped_count
+
+    @staticmethod
+    def _valid_pip_audit_vulnerability(vulnerability: object) -> bool:
+        """Validate fields consumed from one pip-audit vulnerability entry."""
+        if not isinstance(vulnerability, dict):
+            return False
+
+        vuln_id = vulnerability.get("id")
+        fix_versions = vulnerability.get("fix_versions")
+        if not isinstance(vuln_id, str) or not vuln_id.strip() or not isinstance(fix_versions, list):
+            return False
+        if any(not isinstance(version, str) or not version.strip() for version in fix_versions):
+            return False
+
+        severity = vulnerability.get("severity")
+        if severity is not None and (
+            not isinstance(severity, str) or severity.strip().casefold() not in _PIP_AUDIT_SEVERITIES
+        ):
+            return False
+        aliases = vulnerability.get("aliases", [])
+        if not isinstance(aliases, list):
+            return False
+        for alias in aliases:
+            if isinstance(alias, str):
+                if not alias.strip():
+                    return False
+                continue
+            if not isinstance(alias, dict):
+                return False
+            cvss = alias.get("cvss")
+            score = cvss.get("score") if isinstance(cvss, dict) else None
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, int | float)
+                or (isinstance(score, float) and not math.isfinite(score))
+                or not 0.0 <= score <= 10.0
+            ):
+                return False
+
+        description = vulnerability.get("description")
+        return description is None or isinstance(description, str)
 
     def _run_safety(self, req_file: Path) -> ValidationResult:
         """Run Safety check for supplementary coverage."""
@@ -229,7 +368,7 @@ class DependencySecurityValidator(ValidatorBase):
         """Extract severity from vulnerability data."""
         # Explicit severity field
         if "severity" in vuln:
-            sev = vuln["severity"].lower()
+            sev = vuln["severity"].strip().casefold()
             try:
                 return Severity(sev)
             except ValueError:

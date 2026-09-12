@@ -1892,6 +1892,239 @@ def test_runner_persists_run_owned_publication_identity_in_final_result(
     }
 
 
+@pytest.mark.parametrize(
+    ("context_mode", "source_is_target_bound"),
+    [("linked", False), ("full", False), ("full", True)],
+)
+def test_runner_fails_publication_closed_for_external_repo_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    context_mode: str,
+    source_is_target_bound: bool,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+
+    external_source = tmp_path / "shared-runtime.txt"
+    external_source.write_text("agent-visible external input\n", encoding="utf-8")
+
+    def emit_tasks(skill: Path, output: Path, **_kwargs: Any) -> list[Path]:
+        task = output / "case-1"
+        environment = task / "environment"
+        environment.mkdir(parents=True)
+        staged_source = skill / "SKILL.md" if source_is_target_bound else external_source
+        (environment / "repo-context.json").write_text(
+            json.dumps(
+                {
+                    "mode": context_mode,
+                    "repo_root": str(tmp_path),
+                    "files": [
+                        {
+                            "source": str(staged_source),
+                            "container": "/workspace/repo/shared-runtime.txt",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return [task]
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, task_emitter=emit_tasks)
+    (skill / "SKILL.md").write_text("# evaluated target\n", encoding="utf-8")
+    expected_target = publication_target_from_path(skill)
+    assert expected_target is not None
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert result["publication_target"] is None
+    assert result["publication_target_conflict"] == {
+        "run_start": expected_target,
+        "run_end": None,
+        "reason_code": "runtime_context_outside_publication_target",
+    }
+    assert persisted["publication_target"] is None
+    assert persisted["publication_target_conflict"] == result["publication_target_conflict"]
+
+
+def test_runtime_context_binding_rejects_external_reference_and_workspace_skills(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    references = tmp_path / "references"
+    (references / "reference-skill").mkdir(parents=True)
+    workspace = tmp_path / "workspace-skill"
+    workspace.mkdir()
+
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=references,
+        workspace_skill_paths=(),
+    )
+    (references / "reference-skill").rmdir()
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=references,
+        workspace_skill_paths=(),
+    )
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(workspace,),
+    )
+
+    internal_references = skill / "references"
+    (internal_references / "reference-skill").mkdir(parents=True)
+    internal_workspace = skill / "workspace-skill"
+    internal_workspace.mkdir()
+    assert _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=internal_references,
+        workspace_skill_paths=(internal_workspace,),
+    )
+
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=tmp_path / "missing-references",
+        workspace_skill_paths=(),
+    )
+
+    external_alias = tmp_path / "external-workspace-alias"
+    try:
+        external_alias.symlink_to(internal_workspace, target_is_directory=True)
+    except OSError:
+        pass
+    else:
+        assert not _runtime_context_is_bound_to_publication_target(
+            skill,
+            (),
+            reference_skills_dir=None,
+            workspace_skill_paths=(external_alias,),
+        )
+
+
+@pytest.mark.parametrize(
+    "excluded_parent",
+    [
+        Path("results"),
+        Path(".results"),
+        Path(".venv"),
+        Path("node_modules"),
+        Path("evals/results"),
+    ],
+)
+def test_runtime_context_binding_rejects_workspace_skill_excluded_from_target_digest(
+    tmp_path: Path,
+    excluded_parent: Path,
+) -> None:
+    from skillevaluator.publication_identity import publication_target_from_path
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = (tmp_path / "demo").resolve()
+    workspace = skill / excluded_parent / "workspace-skill"
+    workspace.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# evaluated target\n", encoding="utf-8")
+    workspace_manifest = workspace / "SKILL.md"
+    workspace_manifest.write_text("# runtime input v1\n", encoding="utf-8")
+
+    target_before = publication_target_from_path(skill)
+    assert target_before is not None
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(workspace.resolve(),),
+    )
+
+    workspace_manifest.write_text("# attacker-controlled runtime input v2\n", encoding="utf-8")
+
+    assert publication_target_from_path(skill) == target_before
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(workspace.resolve(),),
+    )
+
+
+def test_runtime_context_binding_rejects_reference_child_excluded_from_target_digest(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.runner import _runtime_context_is_bound_to_publication_target
+
+    skill = (tmp_path / "demo").resolve()
+    references = skill / "evals"
+    excluded_reference = references / "results" / "reference-skill"
+    excluded_reference.mkdir(parents=True)
+
+    assert not _runtime_context_is_bound_to_publication_target(
+        skill,
+        (),
+        reference_skills_dir=references,
+        workspace_skill_paths=(),
+    )
+
+
+def test_runtime_context_binding_fails_closed_for_unstable_relative_or_oversized_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator.tier3.harbor import runner
+
+    missing_skill = tmp_path / "missing-skill"
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        missing_skill,
+        (),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    missing_manifest_task = tmp_path / "missing-manifest-task"
+    (missing_manifest_task / "environment" / "repo").mkdir(parents=True)
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        skill,
+        (missing_manifest_task,),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+    task = tmp_path / "task"
+    environment = task / "environment"
+    environment.mkdir(parents=True)
+    (environment / "repo-context.json").write_text(
+        json.dumps(
+            {
+                "mode": "linked",
+                "repo_root": str(tmp_path),
+                "files": [{"source": "demo/SKILL.md", "container": "/workspace/repo/demo/SKILL.md"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        skill,
+        (task,),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+    monkeypatch.setattr(runner, "_MAX_REPO_CONTEXT_METADATA_BYTES", 32)
+    (environment / "repo-context.json").write_text("{" + " " * 32 + "}", encoding="utf-8")
+    assert not runner._runtime_context_is_bound_to_publication_target(
+        skill,
+        (task,),
+        reference_skills_dir=None,
+        workspace_skill_paths=(),
+    )
+
+
 def test_runner_rejects_source_change_after_private_snapshot_before_engine_launch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -3248,6 +3248,44 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert any("location.file" in error for error in result.errors)
 
     @pytest.mark.parametrize(
+        "file_path",
+        [
+            "bad\x00/BENCHMARK.md",
+            "bad\ud800/BENCHMARK.md",
+            "bad\nforged.py",
+            "bad\x1b[31m.py",
+        ],
+        ids=["embedded-nul", "lone-surrogate", "newline", "terminal-escape"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_report_rejects_non_filesystem_safe_issue_path(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        file_path: str,
+    ) -> None:
+        payload = _skillspector_json_report(
+            [
+                {
+                    "id": "M1",
+                    "severity": "MEDIUM",
+                    "finding": "advisory",
+                    "location": {"file": file_path, "start_line": 1},
+                }
+            ]
+        )
+        payload["risk_assessment"] = {
+            "score": 10,
+            "severity": "LOW",
+            "recommendation": "SAFE",
+        }
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert any("location.file" in error and "filesystem-safe" in error for error in result.errors)
+
+    @pytest.mark.parametrize(
         ("skillspector_version", "case"),
         [
             pytest.param("2.9.6", "not-applicable", id="2.9.6-not-applicable"),

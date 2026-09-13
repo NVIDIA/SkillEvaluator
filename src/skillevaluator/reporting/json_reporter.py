@@ -18,10 +18,40 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.publication_evidence import result_publication_evidence_dict
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    assess_publication,
+    get_skip_reason,
+    is_advisory_agent_eval_skip,
+    is_cleanly_skipped,
+    passes_required_gate,
+    result_publication_target_conflict_marker,
+    result_publication_target_dict,
+    select_agent_eval_payload,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
+
+
+def _json_safe_agent_eval(value: object) -> dict[str, Any]:
+    """Bound and normalize Tier 3 metadata before machine-readable embedding."""
+    from skillevaluator.reporting.html import _json_safe_tier3_payload
+
+    return _json_safe_tier3_payload(value)
+
+
+def _json_safe_benchmark_policy(value: object) -> dict[str, bool] | None:
+    """Project untrusted per-result policy metadata onto its two typed keys."""
+    if not isinstance(value, dict):
+        return None
+    policy = {
+        key: candidate
+        for key in ("tier2_required", "tier3_required")
+        if isinstance((candidate := value.get(key)), bool)
+    }
+    return policy or None
 
 
 class JSONReporter(ReporterBase):
@@ -31,7 +61,13 @@ class JSONReporter(ReporterBase):
     Supports both compact and pretty-printed output formats.
     """
 
-    def __init__(self, *, indent: int | None = 2, include_timestamp: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        indent: int | None = 2,
+        include_timestamp: bool = True,
+        expected_skill_name: str | None = None,
+    ) -> None:
         """Initialize JSON reporter.
 
         Args:
@@ -40,6 +76,7 @@ class JSONReporter(ReporterBase):
         """
         self.indent = indent
         self.include_timestamp = include_timestamp
+        self.expected_skill_name = expected_skill_name
 
     @property
     def name(self) -> str:
@@ -61,6 +98,7 @@ class JSONReporter(ReporterBase):
         from skillevaluator.reporting.html import HTMLReporter
 
         all_passed = all(passes_required_gate(r) for r in results)
+        skip_count = sum(1 for r in results if is_cleanly_skipped(r))
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         incomplete_scans = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
         overall_status = "incomplete" if incomplete_scans else "passed" if all_passed else "failed"
@@ -90,6 +128,7 @@ class JSONReporter(ReporterBase):
             "overall_status": overall_status,
             "incomplete_scans": incomplete_scans,
             "total_validators": len(results),
+            "total_skipped": skip_count,
             "total_advisory_skipped": advisory_skip_count,
             "total_errors": total_errors,
             "total_warnings": total_warnings,
@@ -104,12 +143,45 @@ class JSONReporter(ReporterBase):
             "results": [self._result_to_dict(r) for r in results],
         }
 
+        agent_eval = select_agent_eval_payload(results)
+        emitted_agent_eval = _json_safe_agent_eval(agent_eval) if agent_eval else None
+        # Publication claims must be supported by both the raw evidence and the
+        # normalized evidence actually emitted to consumers. Normalization must
+        # neither invent proof from malformed keys/values nor hide proof through
+        # truncation, so retain the more conservative assessment.
+        raw_publication = assess_publication(
+            results,
+            agent_eval,
+            expected_skill_name=self.expected_skill_name,
+        )
+        emitted_publication = assess_publication(
+            results,
+            emitted_agent_eval,
+            expected_skill_name=self.expected_skill_name,
+        )
+        status_rank = {"pass": 0, "neutral": 1, "incomplete": 2, "fail": 3}
+        publication = (
+            emitted_publication
+            if status_rank[emitted_publication.status] > status_rank[raw_publication.status]
+            else raw_publication
+        )
+        data["benchmark_policy"] = publication.benchmark_policy
+        data["publication_status"] = publication.status
+        data["publication"] = {
+            "status": publication.status,
+            "eligible": publication.status == "pass",
+            "reasons": list(publication.reasons),
+            "tier3": {
+                "status": publication.tier3.status,
+                "evidence_complete": publication.tier3.evidence_complete,
+                "execution_status": publication.tier3.execution_status,
+                "verdict": publication.tier3.verdict,
+                "reason": publication.tier3.reason,
+            },
+        }
+
         policy = next(
-            (
-                result.metadata.get("policy")
-                for result in results
-                if isinstance(result.metadata.get("policy"), dict)
-            ),
+            (result.metadata.get("policy") for result in results if isinstance(result.metadata.get("policy"), dict)),
             None,
         )
         if policy is not None:
@@ -140,9 +212,8 @@ class JSONReporter(ReporterBase):
             data["rubric_eval"] = rubric_results[0]
 
         # Tier 3: Agent evaluation summary
-        tier3_results = [r.metadata["agent_eval"] for r in results if r.metadata.get("agent_eval")]
-        if tier3_results:
-            data["tier3"] = tier3_results[0]
+        if emitted_agent_eval:
+            data["tier3"] = emitted_agent_eval
             applicability = next(
                 (
                     result.metadata.get("tier3_applicability")
@@ -161,11 +232,14 @@ class JSONReporter(ReporterBase):
 
     def _result_to_dict(self, result: ValidationResult) -> dict[str, Any]:
         """Convert ValidationResult to serializable dictionary."""
+        skipped = is_cleanly_skipped(result)
         data: dict[str, Any] = {
             "validator": result.validator_name,
             "description": result.validator_description,
             "passed": result.passed,
-            "status": "skipped" if is_advisory_agent_eval_skip(result) else result.status,
+            "status": "skipped" if skipped else result.status,
+            "skipped": skipped,
+            "skip_reason": get_skip_reason(result) if skipped else None,
             "incomplete_scans": result.incomplete_scans,
             "summary": {
                 "files_scanned": result.summary.files_scanned,
@@ -215,7 +289,7 @@ class JSONReporter(ReporterBase):
         # Tier 3: Agent evaluation data
         ae = result.metadata.get("agent_eval")
         if ae:
-            data["tier3"] = ae
+            data["tier3"] = _json_safe_agent_eval(ae)
 
         rubric = result.metadata.get("rubric_eval")
         if rubric:
@@ -224,6 +298,20 @@ class JSONReporter(ReporterBase):
         gating = result.metadata.get("gating")
         if isinstance(gating, dict):
             data["gating"] = gating
+
+        benchmark_policy = _json_safe_benchmark_policy(result.metadata.get("benchmark_policy"))
+        if benchmark_policy is not None:
+            data["benchmark_policy"] = benchmark_policy
+
+        publication_target = result_publication_target_dict(result)
+        if publication_target is not None:
+            data["publication_target"] = publication_target
+        publication_target_conflict = result_publication_target_conflict_marker(result)
+        if publication_target_conflict is not None:
+            data["publication_target_conflict"] = publication_target_conflict
+        publication_evidence = result_publication_evidence_dict(result)
+        if publication_evidence is not None:
+            data["publication_evidence"] = publication_evidence
 
         return data
 

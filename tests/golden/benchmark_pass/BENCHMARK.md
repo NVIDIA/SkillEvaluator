@@ -9,13 +9,16 @@ Recommended for publication based on the completed evaluation evidence in this r
 ## Evaluation Metadata
 
 - Skill: `demo-skill`
+- Source digest: `sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` (skill-evaluator-source-tree/2)
 - Evaluation date: 2026-07-24
 - Evaluator version: `0.8.2`
 - Agents: Claude Code (`claude-sonnet`), Codex (`gpt-codex`)
 - Tasks: 8 evaluation tasks (6 positive, 2 negative)
 - Dataset digest: `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` (skill-evaluator-dataset-snapshot/1)
+- Tier 3 run ID: `fixture-demo-skill-run`
 - Attempts per task: 3
 - Environment: `Isolated sandbox`
+- Tier 2 evidence: required for publication
 - Tier 3 evidence: required for publication
 
 Each task attempt ran in its own isolated sandbox.

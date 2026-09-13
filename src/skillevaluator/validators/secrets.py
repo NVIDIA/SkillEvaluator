@@ -138,11 +138,17 @@ tags = ["nvidia", "api-key"]
             # default exit 1, which is also used for operational failures.
             if tool_result.exit_code == 0:
                 if not tool_result.stdout.strip():
-                    result.add_message("No secrets detected by Gitleaks")
+                    result.add_success(
+                        check_name="gitleaks",
+                        message="No secrets detected by Gitleaks",
+                    )
                 else:
                     findings = parse_json_output(tool_result.stdout)
                     if findings == []:
-                        result.add_message("No secrets detected by Gitleaks")
+                        result.add_success(
+                            check_name="gitleaks",
+                            message="No secrets detected by Gitleaks",
+                        )
                     elif isinstance(findings, list) and findings and all(isinstance(item, dict) for item in findings):
                         self._process_findings(findings, result)
                         result.add_error(

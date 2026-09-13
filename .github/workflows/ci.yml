@@ -68,7 +68,7 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
       - name: Lint committed BENCHMARK.md fixtures for leak patterns
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
-        run: python scripts/ci/check_public_benchmarks.py --require-files tests/golden
+        run: uv run python scripts/ci/check_public_benchmarks.py --require-files tests/golden
       - name: Lint
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv run ruff check .
@@ -302,6 +302,7 @@ jobs:
           tests/test_cli.py
           tests/test_harbor_output_provenance.py
           tests/test_harbor_runtime_skill_isolation.py
+          tests/test_publication_identity.py
           tests/test_harbor_secure_copy.py::test_checked_windows_fallback_accepts_crt_descriptor_identity
           tests/test_harbor_secure_copy.py::test_checked_windows_fallback_verifies_portable_chmod_semantics
           tests/test_harbor_secure_copy.py::test_native_windows_fallback_copies_tree_and_file

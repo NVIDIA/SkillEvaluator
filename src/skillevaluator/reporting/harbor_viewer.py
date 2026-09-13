@@ -80,6 +80,7 @@ def normalize_agent_eval_harbor_links(agent_eval: dict[str, Any]) -> dict[str, A
             }
             normalized["summary"] = normalized_summary
     else:
+        normalized.pop("harbor_viewer", None)
         summary = normalized.get("summary")
         if isinstance(summary, dict) and "harbor_viewer" in summary:
             normalized_summary = dict(summary)

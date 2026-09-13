@@ -46,6 +46,7 @@ class EvaluationOptions:
     override_cpus: int | None = None
     override_memory_mb: int | None = None
     override_storage_mb: int | None = None
+    repo_context_exclude_paths: tuple[Path, ...] = ()
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""

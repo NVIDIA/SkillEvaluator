@@ -27,7 +27,12 @@ from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
 )
-from skillevaluator.reporting.base import ReporterBase, passes_required_gate
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    get_skip_reason,
+    is_advisory_agent_eval_skip,
+    passes_required_gate,
+)
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -36,6 +41,9 @@ from skillevaluator.reporting.harbor_viewer import (
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
+
+
+_SKIP_REASON_MAX_CHARS = 1024
 
 
 def _related_paths(finding: Finding) -> list[str]:
@@ -49,6 +57,14 @@ def _related_paths(finding: Finding) -> list[str]:
         if isinstance(value, str) and value and value not in paths:
             paths.append(value)
     return paths
+
+
+def _rich_skip_reason(result: ValidationResult) -> str:
+    """Return one bounded, single-line skip reason inert to Rich markup."""
+    reason = " ".join(get_skip_reason(result).replace("\r\n", "\n").replace("\r", "\n").split())
+    if len(reason) > _SKIP_REASON_MAX_CHARS:
+        reason = reason[: _SKIP_REASON_MAX_CHARS - 1] + "…"
+    return rich_escape(reason)
 
 
 class CLIReporter(ReporterBase):
@@ -533,9 +549,7 @@ class CLIReporter(ReporterBase):
             static_test_evidence = self._static_test_evidence_message(result)
 
             if advisory_skip:
-                agent_eval = result.metadata.get("agent_eval", {})
-                provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
-                details = str(provenance.get("message") or "Live evaluation did not run")
+                details = _rich_skip_reason(result)
             elif result.is_incomplete:
                 details = f"[bold yellow]{', '.join(result.incomplete_scans)} did not complete[/bold yellow]"
                 counts = []
@@ -584,10 +598,4 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
         """Return whether an AGENT_EVAL result records a skipped live run."""
-        if result.validator_name != "AGENT_EVAL":
-            return False
-        payload = result.metadata.get("agent_eval", {}) if result.metadata else {}
-        provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
-        return bool(
-            isinstance(provenance, dict) and provenance.get("advisory") and provenance.get("reason") == "skipped"
-        )
+        return is_advisory_agent_eval_skip(result)

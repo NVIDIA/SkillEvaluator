@@ -123,19 +123,44 @@ class TestSemgrepStructuredFindings:
 
     @patch.object(Tools.semgrep, "_path", "/usr/bin/semgrep")
     @patch.object(Tools.semgrep, "run")
-    def test_run_semgrep_excludes_uppercase_generated_benchmark(self, mock_run):
+    def test_run_semgrep_excludes_canonical_generated_benchmark(self, mock_run, tmp_path):
         mock_run.return_value = ToolResult(
             success=True,
             stdout=json.dumps({"results": [], "errors": []}),
             stderr="",
             exit_code=0,
         )
+        skill_path = tmp_path / "test"
+        skill_path.mkdir()
+        (skill_path / "BENCHMARK.md").write_text("generated", encoding="utf-8")
 
         v = CodeRiskValidator()
-        v._run_semgrep(Path("/tmp/test"))
+        v._run_semgrep(skill_path)
 
         args = mock_run.call_args.args[0]
         exclude_values = [args[i + 1] for i, arg in enumerate(args) if arg == "--exclude"]
-        assert "benchmark.md" in exclude_values
         assert "BENCHMARK.md" in exclude_values
+        assert "benchmark.md" not in exclude_values
         assert "benchmarks.md" not in exclude_values
+
+    @patch.object(Tools.semgrep, "_path", "/usr/bin/semgrep")
+    @patch.object(Tools.semgrep, "run")
+    def test_run_semgrep_follows_filesystem_case_aliases(self, mock_run, tmp_path):
+        mock_run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps({"results": [], "errors": []}),
+            stderr="",
+            exit_code=0,
+        )
+        skill_path = tmp_path / "test"
+        skill_path.mkdir()
+        lowercase = skill_path / "benchmark.md"
+        lowercase.write_text("case-sensitive authored or case-insensitive generated", encoding="utf-8")
+
+        CodeRiskValidator()._run_semgrep(skill_path)
+
+        args = mock_run.call_args.args[0]
+        exclude_values = [args[i + 1] for i, arg in enumerate(args) if arg == "--exclude"]
+        canonical = skill_path / "BENCHMARK.md"
+        aliases_canonical = canonical.exists() and lowercase.samefile(canonical)
+        assert ("benchmark.md" in exclude_values) is aliases_canonical

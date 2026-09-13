@@ -107,6 +107,46 @@ All notable changes to SkillEvaluator are documented in this file.
   conversion limit, preserves nonzero Wilson interval widths and paired-effect
   directions at large case counts, and documents exact-rational omission
   markers.
+- `BENCHMARK.md` publication verdicts now require completed Tier 1 and Tier 2
+  execution evidence by default, conservatively resolve conflicting peer
+  policy and Tier 3 result metadata, bind every tier and policy claim to one
+  versioned source-tree digest, preserve the Tier 3 run ID, persist an explicit
+  publication status in JSON and HTML, and reject
+  publication `PASS` cards whose decision evidence is missing, incomplete,
+  linked, or hidden in raw HTML. Tier 3 evidence now cross-checks complete
+  per-condition attempt and error records, and the public-card gate rejects
+  ambiguous structural headings, browser-rendered decision-text aliases, and
+  literal or entity-encoded Unicode control/format characters. Custom Tier 3
+  result roots inside the skill are rejected; use the canonical `evals/results`
+  path or an external results root.
+- Clean and not-applicable License, Code Risk, Secrets, and Dependency Audit
+  runs now record structured execution evidence, so legitimate built-in Tier 1
+  results can satisfy publication without relying on findings or errors.
+- Advisory skip reasons are bounded, flattened, control-free, and escaped for
+  terminal and Markdown output, preventing oversized metadata, Rich markup,
+  terminal escape sequences, or multiline text from corrupting reports.
+- Malformed SkillSpector issue paths containing NUL bytes or lone surrogates
+  now make the scan incomplete instead of crashing filesystem alias checks.
+- Publication source identity now seals forward, reverse, and final source reads,
+  normalizes filesystem case aliases, aligns Tier 1/Tier 2 and Tier 3 runtime
+  projections with the v2 generated-artifact exclusions, and carries a bounded
+  source-change marker through rerendered Tier 3 evidence. Tier 3 runs with any
+  staged repository projection or external reference/workspace skills remain
+  runnable but cannot certify publication until those inputs have their own
+  versioned identity.
+- Report output is required outside the publication target. A default
+  in-target `reports/` location relocates to an authenticated sibling
+  `<skill>-reports` (or `<catalog>-reports`), refuses unowned collisions, and is
+  excluded from Tier 3 runtime staging. Report roots inside the target repository
+  or an included-skill root are excluded from linked or full-repository context
+  only after they are reserved or authenticated as generated output, preventing
+  an authored subtree from being silently omitted.
+- Public benchmark provenance now rejects placeholder identities, malformed or
+  future calendar dates, missing duplicated run IDs, hostile benchmark-policy
+  metadata, and environment-label substitutions in required proof fields.
+- Hardened Tier 3 HTML and Markdown reporting against recursive or malformed
+  display metadata, Markdown structure injection, and inline-JavaScript
+  injection through untrusted agent or skill names.
 - Tier 3 now decodes bounded native Codex `exec` wrappers into their static
   tool calls. It preserves call order and outer-call provenance, maps an outer
   observation only when its rendered inner call is known, keeps ambiguous

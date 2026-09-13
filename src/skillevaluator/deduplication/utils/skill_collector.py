@@ -28,6 +28,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_DEDUP_SCANNABLE_EXTENSIONS,
 )
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tier2_paths import is_contained_compatibility_alias
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
@@ -454,7 +455,7 @@ def _collect_files_anchored(
             for name in dirnames:
                 directory = base / name
                 rel_path = directory.relative_to(root).as_posix()
-                if name in excluded:
+                if matches_filesystem_name(directory, excluded):
                     logger.debug("Skipping excluded path: %s", rel_path)
                     continue
                 # ``os.walk(..., followlinks=False)`` does not follow normal
@@ -555,7 +556,7 @@ def _collect_files_anchored(
         if ext not in CONTENT_DEDUP_SCANNABLE_EXTENSIONS:
             continue
 
-        if file_path.name.lower() in excluded_basenames:
+        if matches_filesystem_name(file_path, excluded_basenames):
             logger.debug("Skipping excluded file: %s", file_path)
             continue
 

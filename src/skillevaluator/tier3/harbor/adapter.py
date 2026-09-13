@@ -34,6 +34,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+from skillevaluator.publication_identity import (
+    publication_source_entry_is_excluded,
+    publication_source_path_is_excluded,
+)
 from skillevaluator.tier3.case_ids import safe_child, validate_case_ids, validate_output_directory_path
 from skillevaluator.tier3.harbor import DEFAULT_LLM_VERIFIER_TIMEOUT_SEC
 from skillevaluator.tier3.harbor.secure_copy import (
@@ -50,6 +54,10 @@ from skillevaluator.tier3.output_provenance import (
     write_generated_output_marker,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.utils.path_security import (
+    find_git_repo_root,
+    resolve_repo_context_root,
+)
 from skillevaluator.utils.process_environment import child_process_env
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
@@ -244,40 +252,6 @@ def _verifier_env_block(runtime_env: dict[str, str] | None = None, indent: str =
     return "\n".join(f'{indent}{name} = "${{{name}}}"' for name in _verifier_env_vars(runtime_env))
 
 
-def _find_repo_root(path: Path) -> Path | None:
-    """Return the git repo root for *path*, falling back to parent .git search."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip()).resolve()
-    except Exception:
-        pass
-
-    current = path.resolve()
-    if current.is_file():
-        current = current.parent
-    for parent in (current, *current.parents):
-        if (parent / ".git").exists():
-            return parent
-    return None
-
-
-def _repo_context_root(path: Path) -> Path:
-    """Return the exact source root used by repo-context staging."""
-    try:
-        repo_root = _find_repo_root(path)
-        resolved = path.resolve()
-        return repo_root or resolved.parent
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"Cannot resolve repository context root for: {path}") from exc
-
-
 def validate_output_provenance_key_location(
     skill_path: Path,
     output_dir: Path,
@@ -289,7 +263,7 @@ def validate_output_provenance_key_location(
     protected_roots = [skill_path, output_dir, *workspace_skill_paths]
     if reference_skills_dir is not None:
         protected_roots.append(reference_skills_dir)
-    repo_root = _find_repo_root(skill_path)
+    repo_root = find_git_repo_root(skill_path)
     if repo_root is not None:
         protected_roots.append(repo_root)
     for protected_root in protected_roots:
@@ -627,6 +601,24 @@ def validate_results_root_location(
     validate_output_directory_path(results_root)
     if _path_is_excluded(skill_path, (results_root,)):
         raise ValueError(f"Generated output root must not contain the runtime skill source: {results_root}")
+    evals_dir = skill_path / "evals"
+    canonical_in_skill_root = evals_dir / "results"
+    if _path_is_excluded(results_root, (evals_dir,)) and not _path_is_canonically_contained(
+        results_root,
+        canonical_in_skill_root,
+    ):
+        raise ValueError(
+            f"Generated output root must not be inside evaluator source directory '{evals_dir}': {results_root}"
+        )
+    if _path_is_excluded(results_root, (skill_path,)) and not _path_is_canonically_contained(
+        results_root,
+        canonical_in_skill_root,
+    ):
+        canonical_label = canonical_in_skill_root.relative_to(skill_path).as_posix()
+        raise ValueError(
+            "An in-skill Tier 3 results root must be contained by the canonical "
+            f"'{canonical_label}' directory; use an external --results-dir otherwise: {results_root}"
+        )
     _validate_output_roots_outside_evaluator_sources(skill_path, (results_root,))
     runtime_sources = [*(workspace_skill_paths or [])]
     if reference_skills_dir is not None:
@@ -687,13 +679,14 @@ def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] 
 
     def _ignore(directory: str, contents: list[str]) -> list[str]:
         current = Path(directory)
-        ignored = {name for name in contents if name in {"results", "__pycache__", ".git"}}
+        ignored: set[str] = set()
         if current.resolve() == resolved_root:
             ignored.update(name for name in contents if name.casefold() == "evals")
         for name in contents:
             candidate = current / name
             if (
-                _is_skill_evals_path(candidate, skill_root)
+                publication_source_entry_is_excluded(skill_root, candidate)
+                or _is_skill_evals_path(candidate, skill_root)
                 or _path_is_excluded(candidate, excluded_roots)
                 or _authenticated_generated_output_ancestor(
                     candidate,
@@ -738,7 +731,9 @@ def _runtime_skill_fingerprint(skill_root: Path, excluded_roots: Sequence[Path] 
             if entry.name in ignored:
                 continue
             path = Path(entry.path)
-            metadata = entry.stat(follow_symlinks=False)
+            # DirEntry.stat() exposes zero identity fields on Windows. Use a
+            # full path stat before enforcing link and hard-link policy.
+            metadata = path.lstat()
             if _path_is_link_or_reparse(path, metadata):
                 return None
             relative = path.relative_to(skill_root).as_posix().encode("utf-8")
@@ -1063,6 +1058,7 @@ def _iter_repo_context_files(
     root: Path,
     authenticated_output_roots: set[Path],
     excluded_roots: Sequence[Path] = (),
+    ignored_path_predicate: Callable[[Path], bool] | None = None,
 ) -> list[Path]:
     """Enumerate repository files without inspecting excluded output trees."""
     git_files = _git_context_files(root)
@@ -1071,6 +1067,7 @@ def _iter_repo_context_files(
             path
             for path in git_files
             if not _path_is_excluded(path, excluded_roots)
+            and not (ignored_path_predicate is not None and ignored_path_predicate(path))
             and path.is_file()
             and not _repo_context_ignore_file(path, root, authenticated_output_roots)
         )
@@ -1086,6 +1083,8 @@ def _iter_repo_context_files(
                 # descent: result trees can contain unsafe or unreadable user
                 # artifacts and are explicitly outside the staged context.
                 if _path_is_excluded(path, excluded_roots):
+                    continue
+                if ignored_path_predicate is not None and ignored_path_predicate(path):
                     continue
                 if _repo_context_ignore_file(path, root, authenticated_output_roots):
                     continue
@@ -1110,7 +1109,7 @@ def _stage_repo_context(
 
     source_skill_path = source_skill_path.resolve()
     skill_md = _skill_manifest(source_skill_path)
-    repo_root = _repo_context_root(source_skill_path)
+    repo_root = resolve_repo_context_root(source_skill_path)
     authenticated_output_roots: set[Path] = set()
     if (
         _authenticated_generated_output_ancestor(
@@ -1145,6 +1144,7 @@ def _stage_repo_context(
             repo_root,
             authenticated_output_roots,
             resolved_excluded_roots,
+            lambda path: publication_source_path_is_excluded(source_skill_path, path),
         ):
             if _is_excluded_output(src):
                 continue

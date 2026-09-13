@@ -20,7 +20,10 @@ FIXTURE = REPO / "tests" / "fixtures" / "skills" / "simple"
 
 _SUBPROCESS = r"""
 import os
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 
 BLOCKED = {
     "anthropic", "boto3", "botocore", "harbor", "openai", "litellm",
@@ -55,10 +58,34 @@ models_result = CliRunner().invoke(cli, ["models"])
 assert models_result.exit_code == 1, models_result.output
 assert "No provider is configured" in models_result.output, models_result.output
 
-validate_result = CliRunner().invoke(
-    cli, ["validate", FIXTURE, "--no-llm", "--checks", "schema,quality,lint"]
-)
-assert validate_result.exit_code == 0, validate_result.output
+with tempfile.TemporaryDirectory() as temporary_directory:
+    temporary_root = Path(temporary_directory)
+    skill = temporary_root / "simple"
+    shutil.copytree(FIXTURE, skill)
+    private_state = temporary_root / "private-state"
+    private_state.mkdir(mode=0o700)
+    os.environ["SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE"] = str(private_state / "key")
+    previous_directory = Path.cwd()
+    os.chdir(skill)
+    try:
+        validate_result = CliRunner().invoke(
+            cli,
+            [
+                "validate",
+                ".",
+                "--no-llm",
+                "--no-tier2",
+                "--checks",
+                "schema,quality,lint",
+                "--report",
+                "json",
+            ],
+        )
+    finally:
+        os.chdir(previous_directory)
+    assert validate_result.exit_code == 0, validate_result.output
+    assert not (skill / "reports").exists()
+    assert (temporary_root / "simple-reports" / "BENCHMARK.md").is_file()
 
 leaked = sorted(m for m in BLOCKED if m in sys.modules)
 assert not leaked, f"base path imported extras-only modules: {leaked}"

@@ -48,6 +48,7 @@ _HARBOR_KEYS = {
     "passthrough_env",
     "setup_commands",
     "agents",
+    "environment_kwargs",
 }
 HARBOR_TASK_SOURCES = {"auto", "evals_json", "native_harbor"}
 _AGENT_KEYS = {"model"}
@@ -55,6 +56,15 @@ _RESOURCE_KEYS = {"cpus", "memory_mb", "storage_mb"}
 _SKILL_WORKSPACE_KEYS = {"mode", "include"}
 _GRADING_KEYS = {"mode"}
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GKE_INFRASTRUCTURE_KWARGS: frozenset[str] = frozenset(
+    {
+        "cluster_name",
+        "region",
+        "namespace",
+        "registry_location",
+        "registry_name",
+    }
+)
 
 
 class EvalsConfigError(ValueError):
@@ -186,6 +196,8 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             harbor["pre_agent_setup"] = _pre_agent_setup(pre_agent_setup_value, config_path)
         if "agents" in harbor_raw:
             harbor["agents"] = _agents(harbor_raw["agents"], config_path)
+        if "environment_kwargs" in harbor_raw:
+            harbor["environment_kwargs"] = _environment_kwargs(harbor_raw["environment_kwargs"], config_path)
 
         out["harbor"] = harbor
 
@@ -399,4 +411,26 @@ def _grading(value: Any, config_path: Path) -> dict[str, str]:
     if "mode" in value:
         mode = _enum(value["mode"], GRADING_MODES, config_path, "grading.mode")
         out["mode"] = GRADING_MODE_ALIASES.get(mode, mode)
+    return out
+
+
+def _environment_kwargs(value: Any, config_path: Path) -> dict[str, str]:
+    """Validate Harbor environment kwargs mapping."""
+    field = "harbor.environment_kwargs"
+    if not isinstance(value, dict):
+        raise EvalsConfigError(f"{config_path}: {field} must be a mapping")
+
+    out: dict[str, str] = {}
+    for key, val in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise EvalsConfigError(f"{config_path}: {field} keys must be non-empty strings")
+        stripped_key = key.strip()
+        if stripped_key in _GKE_INFRASTRUCTURE_KWARGS:
+            raise EvalsConfigError(
+                f"{config_path}: {field}.{stripped_key} cannot be configured in skill evals/config.yml. "
+                "Infrastructure settings must be provided via CLI flags or host environment variables."
+            )
+        if not isinstance(val, str) or not val.strip():
+            raise EvalsConfigError(f"{config_path}: {field}.{stripped_key} must be a non-empty string")
+        out[stripped_key] = val.strip()
     return out

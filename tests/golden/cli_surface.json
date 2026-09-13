@@ -294,6 +294,16 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwargs",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         }
       ]
     },
@@ -553,6 +563,16 @@
             "--progress"
           ],
           "param_type": "option"
+        },
+        {
+          "multiple": true,
+          "name": "environment_kwargs",
+          "opts": [
+            "--ek",
+            "--environment-kwarg"
+          ],
+          "param_type": "option",
+          "type": "text"
         }
       ]
     },
@@ -2195,6 +2215,16 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwargs",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
             }
           ]
         },
@@ -2454,6 +2484,16 @@
                 "--progress"
               ],
               "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwargs",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
             }
           ]
         },

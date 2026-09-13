@@ -1848,6 +1848,7 @@ skills_dir = "/workspace/skills"
                 if not isinstance(key, str):
                     raise TypeError("MCP TOML keys must be strings")
                 content += f"{_toml_quote(key)} = {_toml_value(val)}\n"
+        (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers, indent=2), encoding="utf-8")
 
     tomllib.loads(content)
     (task_dir / "task.toml").write_text(content, encoding="utf-8")
@@ -1859,13 +1860,16 @@ def _toml_quote(value: str) -> str:
 
 
 def _toml_value(value: Any) -> str:
-    """Serialize the documented MCP TOML scalar and string-list values."""
+    """Serialize the documented MCP TOML scalar, string-list, and string-dict values."""
 
     if isinstance(value, str):
         return _toml_quote(value)
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return "[" + ", ".join(_toml_quote(item) for item in value) + "]"
-    raise TypeError("MCP TOML values must be strings or lists of strings")
+    if isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        items = [f"{_toml_quote(k)} = {_toml_quote(v)}" for k, v in value.items()]
+        return "{" + ", ".join(items) + "}"
+    raise TypeError("MCP TOML values must be strings, lists of strings, or dictionaries of strings")
 
 
 def _runtime_env_toml_block(runtime_env: dict[str, str] | None) -> str:

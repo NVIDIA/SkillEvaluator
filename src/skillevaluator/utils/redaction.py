@@ -80,6 +80,7 @@ _REDACTIONS = (
     (re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}"), "nvapi-<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}"), "crsr_<redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+"), "sha256~<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}"), "ya29.<redacted>"),
 )
 
 

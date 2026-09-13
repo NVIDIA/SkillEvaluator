@@ -196,7 +196,7 @@ def test_local_bridge_command_uses_custom_agent_import_path() -> None:
 
 
 def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
-    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker or local"):
+    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker, local, or gke"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="codex",
@@ -1281,3 +1281,4 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
 
     assert sdk_urls == [expected_url]
     assert verifier._anthropic_url() == expected_url
+

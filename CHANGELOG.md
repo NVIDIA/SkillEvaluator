@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 support for Harbor GKE execution mode (`--env-mode gke`) and `--ek`
+  argument forwarding. API keys, bearer tokens, and passwords passed in `--ek`
+  keys or values are rejected to keep credentials out of process listings, while
+  configuration such as rate limits and token counts is preserved. Cluster
+  infrastructure settings in skill configs are rejected to enforce security
+  boundaries in favor of host environment variables and CLI flags.
+- Claude Code live agent routing for Google Cloud Vertex AI
+  (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
+  with redirect-blocking preflight probes and case-insensitive model alias
+  resolution.
 - `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` names hosts whose model catalog may
   be read over plain HTTP. Catalog reads still require HTTPS for every other
   non-loopback host. Entries match one whole host as written, with no name

@@ -153,6 +153,7 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
             "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4iLCJhZG1pbiI6dHJ1ZX0."
             "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
         ),
+        "google ya29." + "a0AXooCgs-abcdefghijklmnopqrstuvwxyz12345",
         "runtime opaque-secret-value",
     ],
 )

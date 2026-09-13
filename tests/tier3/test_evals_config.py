@@ -4,7 +4,11 @@
 import pytest
 
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
-from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+from skillevaluator.tier3.evals_config import (
+    _GKE_INFRASTRUCTURE_KWARGS,
+    EvalsConfigError,
+    load_evals_config,
+)
 from skillevaluator.tier3.evals_spec import validate_skillevaluators as validate_skill_evals
 
 
@@ -118,6 +122,84 @@ harbor:
     )
 
     with pytest.raises(EvalsConfigError, match="pass_threshold"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_valid_environment_kwargs(tmp_path):
+    skill = tmp_path / "gke-skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        """\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    custom_setting: custom_val
+    workload_profile: memory-optimized
+""",
+        encoding="utf-8",
+    )
+
+    config, path = load_evals_config(skill)
+
+    assert path == skill / "evals" / "config.yml"
+    assert config["harbor"]["environment_kwargs"] == {
+        "custom_setting": "custom_val",
+        "workload_profile": "memory-optimized",
+    }
+
+
+def test_load_evals_config_invalid_environment_kwargs(tmp_path):
+    skill = tmp_path / "invalid-skill"
+    (skill / "evals").mkdir(parents=True)
+
+    # Not a mapping
+    (skill / "evals" / "config.yml").write_text(
+        """\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    - custom_setting
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvalsConfigError, match=r"harbor\.environment_kwargs must be a mapping"):
+        load_evals_config(skill)
+
+    # Non-string value
+    (skill / "evals" / "config.yml").write_text(
+        """\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    custom_setting: 12345
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        EvalsConfigError,
+        match=r"harbor\.environment_kwargs\.custom_setting must be a non-empty string",
+    ):
+        load_evals_config(skill)
+
+
+@pytest.mark.parametrize("blocked_key", sorted(_GKE_INFRASTRUCTURE_KWARGS))
+def test_load_evals_config_blocked_infrastructure_kwargs(tmp_path, blocked_key):
+    """Untrusted skills must not configure infrastructure keys in evals/config.yml."""
+    skill = tmp_path / "blocked-skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"""\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    {blocked_key}: forbidden-val
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        EvalsConfigError,
+        match=rf"harbor\.environment_kwargs\.{blocked_key} cannot be configured in skill evals/config\.yml",
+    ):
         load_evals_config(skill)
 
 
@@ -256,3 +338,4 @@ def test_legacy_evals_json_is_accepted_with_deprecation_warning(tmp_path):
 
     assert not any(r.status == "error" for r in results)
     assert any("Deprecated eval dataset format" in r.message for r in results)
+

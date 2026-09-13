@@ -184,11 +184,13 @@ _SECRET_PATTERNS = [
     re.compile(r"nvapi-" + _GLUED_KEY_BODY),
     re.compile(r"AKIA" + _GLUED_AKIA_BODY),
     re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----"),
+    re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}"),
 ]
 LOG_SK_RE = re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}|sk-" + _GLUED_KEY_BODY)
 LOG_NVAPI_RE = re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}|nvapi-" + _GLUED_KEY_BODY)
 LOG_CRSR_RE = re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}")
 OPENSHIFT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+")
+LOG_YA29_RE = re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}")
 LOG_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b")
 
 
@@ -201,6 +203,7 @@ def redact_secrets_in_log_line(line, *, extra_secret_values=None):
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
     line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
+    line = LOG_YA29_RE.sub("ya29.<redacted>", line)
     return LOG_JWT_RE.sub("jwt-<redacted>", line)
 
 
@@ -218,6 +221,9 @@ _UNAUTHORIZED_PATHS = [
     "/etc/shadow",
     "/root/.ssh",
     "/var/run/docker.sock",
+    "/var/run/secrets/kubernetes.io",
+    "169.254.169.254",
+    "metadata.google.internal",
     "~/.ssh",
     ".aws/credentials",
     ".config/gcloud",

@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import tomllib
 import webbrowser
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ from skillevaluator.tier3.harbor.runner import (
     _harbor_bin,
     _model_for_agent,
     _resolve_agent_runtime_plan,
+    _resolve_environment_kwargs,
     run_harbor_eval,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
@@ -366,6 +368,21 @@ def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, lis
     return overrides
 
 
+def parse_environment_kwargs(raw_kwargs: tuple[str, ...]) -> dict[str, str]:
+    """Parse repeatable ``--ek key=value`` CLI pairs."""
+    parsed: dict[str, str] = {}
+    for raw in raw_kwargs:
+        if "=" not in raw:
+            raise ValueError(f"--ek/--environment-kwarg must be in KEY=VALUE form, got: {raw}")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"--ek/--environment-kwarg key cannot be empty, got: {raw}")
+        parsed[key] = value
+    return parsed
+
+
 def validate_agents(agents: list[str]) -> list[str]:
     """Return unsupported agent names."""
     return [agent for agent in agents if agent not in HARBOR_AGENTS]
@@ -625,6 +642,7 @@ def evaluate(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     progress_reporter: ProgressReporter | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
@@ -692,6 +710,7 @@ def evaluate(
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
             progress_reporter=reporter,
+            environment_kwargs=environment_kwargs,
         )
     except Exception as exc:
         if not engine_started:
@@ -707,6 +726,7 @@ def doctor(
     env_mode: str,
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> int:
     """Check whether live evaluation dependencies are available."""
     env_mode = _engine_env_mode(env_mode)
@@ -780,7 +800,17 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    prereq_errors = _check_prerequisites(env_mode=env_mode, agents=agent_list)
+    resolved_env_kwargs = _resolve_environment_kwargs(
+        env_mode,
+        cli_kwargs=environment_kwargs,
+        environ=os.environ,
+    )
+    prereq_errors = _check_prerequisites(
+        env_mode=env_mode,
+        agents=agent_list,
+        environment_kwargs=resolved_env_kwargs,
+        verify_live_cluster=verify_models,
+    )
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))
@@ -1125,6 +1155,7 @@ __all__ = [
     "init_custom_grader",
     "init_harbor_task",
     "parse_agents",
+    "parse_environment_kwargs",
     "validate_evals",
     "view_results",
 ]

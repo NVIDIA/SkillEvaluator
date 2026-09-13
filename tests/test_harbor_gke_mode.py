@@ -1,0 +1,691 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for Harbor GKE execution mode in SkillEvaluator."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+from skillevaluator.provider_config import ProviderConfig
+from skillevaluator.tier3.commands import parse_environment_kwargs
+from skillevaluator.tier3.harbor import runner
+from skillevaluator.tier3.harbor.runner import (
+    _GKE_REQUIRED_KWARGS,
+    _check_prerequisites,
+    _missing_gke_kwargs,
+    _resolve_environment_kwargs,
+    _validate_agent_provider_credentials,
+    build_harbor_run_command,
+)
+from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_model_id
+
+
+@pytest.fixture(autouse=True)
+def _mock_kubernetes_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure kubernetes is available as a module for GKE prerequisite tests."""
+    monkeypatch.setitem(sys.modules, "kubernetes", types.ModuleType("kubernetes"))
+
+
+def _provider(name: str = "openai-compatible", model: str = "google/gemini-3.8-flash") -> ProviderConfig:
+    return ProviderConfig(name, model, "test-key", "https://example.com/v1", f"{name}/{model}")
+
+
+COMPLETE_GKE_KWARGS = {
+    "cluster_name": "skill-eval-cluster",
+    "region": "us-central1",
+    "namespace": "skill-eval",
+    "registry_location": "us-central1",
+    "registry_name": "harbor-evals",
+}
+
+
+def test_gke_required_kwargs_contains_expected_keys():
+    """Verify all 5 required GKE kwargs are defined."""
+    assert _GKE_REQUIRED_KWARGS == (
+        "cluster_name",
+        "region",
+        "namespace",
+        "registry_location",
+        "registry_name",
+    )
+
+
+def test_resolve_environment_kwargs_precedence():
+    """Verify CLI overrides environment variables, which override config.yml (infrastructure kwargs ignored from config)."""
+    environ = {
+        "SKILLEVALUATOR_GKE_CLUSTER": "env-cluster",
+        "SKILLEVALUATOR_GKE_REGION": "env-region",
+        "SKILLEVALUATOR_GKE_NAMESPACE": "env-ns",
+        "SKILLEVALUATOR_GKE_REGISTRY_LOCATION": "env-reg-loc",
+        "SKILLEVALUATOR_GKE_REGISTRY_NAME": "env-reg-name",
+    }
+    config_kwargs = {
+        "cluster_name": "config-cluster",
+        "region": "config-region",
+        "custom_config": "config-custom",
+    }
+    cli_kwargs = {
+        "cluster_name": "cli-cluster",
+    }
+
+    resolved = _resolve_environment_kwargs(
+        "gke",
+        config_kwargs=config_kwargs,
+        cli_kwargs=cli_kwargs,
+        environ=environ,
+    )
+
+    assert resolved["cluster_name"] == "cli-cluster"  # CLI won over env and config
+    assert resolved["region"] == "env-region"  # env won over config (and infra config filtered)
+    assert resolved["namespace"] == "env-ns"  # env fallback
+    assert resolved["registry_location"] == "env-reg-loc"
+    assert resolved["registry_name"] == "env-reg-name"
+    assert resolved["custom_config"] == "config-custom"  # non-infra config preserved
+
+
+def test_resolve_environment_kwargs_strict_missing():
+    """Strict explicit configuration: missing kwargs are flagged."""
+    environ = {
+        "SKILLEVALUATOR_GKE_CLUSTER": "env-cluster",
+    }
+    resolved = _resolve_environment_kwargs("gke", environ=environ)
+    missing = _missing_gke_kwargs(resolved)
+
+    assert "cluster_name" not in missing
+    assert set(missing) == {"region", "namespace", "registry_location", "registry_name"}
+
+
+def test_build_harbor_run_command_gke_includes_all_ek_flags():
+    """Command construction includes --env gke and sorted --ek key=value flags."""
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="claude-code",
+        job_name="gke-job",
+        env_mode="gke",
+        model="claude-sonnet-5",
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+    )
+
+    assert "--env" in command
+    env_idx = command.index("--env")
+    assert command[env_idx + 1] == "gke"
+
+    # Verify all 5 kwargs are emitted as --ek key=value
+    for key, val in COMPLETE_GKE_KWARGS.items():
+        assert "--ek" in command
+        assert f"{key}={val}" in command
+
+
+def test_build_harbor_run_command_gke_supports_agent_import_path():
+    """Support custom agent import path in GKE mode without emitting agent name flag."""
+    custom_import = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode"
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="claude-code",
+        job_name="gke-job",
+        env_mode="gke",
+        model="claude-sonnet-5",
+        agent_import_path=custom_import,
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+    )
+
+    assert "--agent-import-path" in command
+    idx = command.index("--agent-import-path")
+    assert command[idx + 1] == custom_import
+    assert "-a" not in command
+    assert "--agent" not in command
+
+
+def test_build_harbor_run_command_gke_defaults_claude_code_import_path():
+    """Default claude-code to SkillEvaluatorClaudeCode in GKE mode."""
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="claude-code",
+        job_name="gke-job",
+        env_mode="gke",
+        model="claude-sonnet-5",
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+    )
+
+    assert "--agent-import-path" in command
+    idx = command.index("--agent-import-path")
+    assert command[idx + 1] == "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode"
+    assert "-a" not in command
+    assert "--agent" not in command
+
+
+def test_check_prerequisites_gke_reports_missing_cli_tools(monkeypatch: pytest.MonkeyPatch):
+    """Fail prerequisites check if gcloud or kubectl is missing from PATH."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: None if cmd == "kubectl" else "/usr/bin/" + cmd)
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert any("kubectl" in err for err in errors)
+
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: None if cmd == "gcloud" else "/usr/bin/" + cmd)
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert any("gcloud" in err for err in errors)
+
+
+def test_check_prerequisites_gke_reports_missing_kubeconfig(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Prerequisites check fails if kubeconfig file does not exist."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    monkeypatch.setenv("KUBECONFIG", str(tmp_path / "nonexistent-config"))
+
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert any("Kubernetes credentials" in err or "kubeconfig" in err.lower() for err in errors)
+
+
+def test_check_prerequisites_gke_reports_missing_kwargs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Prerequisites check fails if any of the 5 required GKE kwargs are missing."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text("apiVersion: v1", encoding="utf-8")
+    monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+
+    partial_kwargs = {"cluster_name": "skill-eval-cluster"}
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=partial_kwargs)
+    assert any("region" in err and "namespace" in err for err in errors)
+
+
+def test_check_prerequisites_gke_ready(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Prerequisites check passes when tools, kubeconfig, and kwargs are all present."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text("apiVersion: v1", encoding="utf-8")
+    monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert errors == []
+
+
+def test_check_prerequisites_gke_live_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """When verify_live_cluster=True, runs a live probe and reports failure if unreachable."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text("apiVersion: v1", encoding="utf-8")
+    monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=1, stderr="Connection refused")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    errors = _check_prerequisites(
+        env_mode="gke",
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+        verify_live_cluster=True,
+    )
+    assert any("GKE cluster probe failed" in err for err in errors)
+
+
+def test_check_prerequisites_gke_reports_missing_kubernetes_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fail prerequisites check when kubernetes package is not installed."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text("apiVersion: v1", encoding="utf-8")
+    monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+    monkeypatch.setitem(sys.modules, "kubernetes", None)
+
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert any("GKE requires the 'kubernetes' Python package" in err for err in errors)
+
+
+def test_local_mode_strictly_rejects_vertex_ai(monkeypatch: pytest.MonkeyPatch):
+    """Following Bedrock precedent, local mode with Vertex AI is strictly rejected."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["claude-code"],
+        {"CLAUDE_CODE_USE_VERTEX": "1"},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="local",
+    )
+    assert len(errors) == 1
+    assert "vertex ai live agents do not support local mode" in errors[0]
+    assert "--env-mode gke" in errors[0]
+
+
+def test_gke_mode_accepts_vertex_ai_without_anthropic_api_key(monkeypatch: pytest.MonkeyPatch):
+    """GKE mode accepts Claude Code on Vertex AI with zero Anthropic API keys."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "test-project")
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["claude-code"],
+        {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "test-project"},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="gke",
+    )
+    assert errors == []
+
+
+def test_gke_mode_rejects_claude_code_without_vertex_or_anthropic_key(monkeypatch: pytest.MonkeyPatch):
+    """Reject Claude Code in GKE mode if neither Anthropic key nor Vertex flag is set."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["claude-code"],
+        {},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="gke",
+    )
+    assert len(errors) == 1
+    assert "requires an independent ANTHROPIC_API_KEY or CLAUDE_CODE_USE_VERTEX=1" in errors[0]
+
+
+def test_local_mode_strictly_rejects_vertex_ai_under_nv_build(monkeypatch: pytest.MonkeyPatch):
+    """Enforce strict rejection of Vertex AI in local mode even when using nv_build provider."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    errors = _validate_agent_provider_credentials(
+        _provider("nv_build", "meta/llama-3.1-70b-instruct"),
+        ["claude-code"],
+        {"CLAUDE_CODE_USE_VERTEX": "1"},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="local",
+    )
+    assert len(errors) == 1
+    assert "vertex ai live agents do not support local mode" in errors[0]
+
+
+def test_local_mode_allows_other_agents_when_vertex_flag_is_present(monkeypatch: pytest.MonkeyPatch):
+    """Allow non-Claude agents in local mode even if CLAUDE_CODE_USE_VERTEX=1 is set in environment."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["codex"],
+        {"CLAUDE_CODE_USE_VERTEX": "1", "OPENAI_API_KEY": "test-key"},
+        {"codex": "gpt-5.5"},
+        env_mode="local",
+    )
+    assert errors == []
+
+
+def test_gke_mode_suggests_vertex_suffix_when_anthropic_key_missing(monkeypatch: pytest.MonkeyPatch):
+    """Include Vertex AI suggestion suffix in GKE mode when Anthropic key is missing."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["claude-code"],
+        {},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="gke",
+    )
+    assert len(errors) == 1
+    assert "or CLAUDE_CODE_USE_VERTEX=1" in errors[0]
+
+
+def test_docker_mode_does_not_suggest_vertex_suffix(monkeypatch: pytest.MonkeyPatch):
+    """Do not include Vertex AI suggestion suffix in docker mode since Workload Identity is GKE-specific."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["claude-code"],
+        {},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="docker",
+    )
+    assert len(errors) == 1
+    assert "or CLAUDE_CODE_USE_VERTEX=1" not in errors[0]
+
+
+def test_gke_runtime_preflight_forwards_environment_kwargs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Forward environment kwargs in GKE runtime preflight so --ek flags are emitted."""
+    from skillevaluator.tier3.harbor import runtime_preflight
+
+    task_dir = tmp_path / "dataset" / "task-1"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.toml").write_text('name = "task-1"\n', encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runtime_preflight.subprocess, "run", run)
+    monkeypatch.setattr(
+        runtime_preflight,
+        "validate_harbor_agent_only_job_result",
+        lambda *_args, **_kwargs: (True, "ok"),
+    )
+
+    result = runtime_preflight.run_agent_runtime_preflight(
+        dataset=task_dir.parent,
+        agent="claude-code",
+        model="claude-sonnet-5",
+        env_mode="gke",
+        jobs_dir=tmp_path / "jobs",
+        run_env={},
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+    )
+
+    assert result.ok is True
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "--env" in command
+    assert command[command.index("--env") + 1] == "gke"
+    for key, val in COMPLETE_GKE_KWARGS.items():
+        assert f"{key}={val}" in command
+
+
+def test_gke_mode_rejects_vertex_ai_without_project_id(monkeypatch: pytest.MonkeyPatch):
+    """Reject Claude Code with Vertex AI if no project ID is configured."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+    monkeypatch.delenv("CLOUDSDK_CORE_PROJECT", raising=False)
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["claude-code"],
+        {"CLAUDE_CODE_USE_VERTEX": "1"},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="gke",
+    )
+    assert len(errors) == 1
+    assert "requires a Google Cloud project ID" in errors[0]
+
+
+def test_docker_mode_strictly_rejects_vertex_ai(monkeypatch: pytest.MonkeyPatch):
+    """Reject Claude Code with Vertex AI in docker mode."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    errors = _validate_agent_provider_credentials(
+        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        ["claude-code"],
+        {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "proj"},
+        {"claude-code": "claude-sonnet-5"},
+        env_mode="docker",
+    )
+    assert len(errors) == 1
+    assert "vertex ai live agents do not support docker mode" in errors[0]
+
+
+@pytest.mark.parametrize("sensitive_key", ["api_key", "secret_token", "access_password", "my_secret"])
+def test_build_harbor_run_command_rejects_sensitive_kwargs(sensitive_key: str):
+    """Reject environment kwargs containing credentials to protect the OS process table."""
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, sensitive_key: "forbidden"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "benign_value"),
+    [
+        ("cluster_name", "turnkey-ml"),
+        ("cluster_name", "monkey-cluster"),
+        ("cluster_name", "dev-tokens-cluster"),
+        ("registry_name", "key-registry"),
+        ("namespace", "token-eval-ns"),
+    ],
+)
+def test_build_harbor_run_command_permits_benign_substrings_in_values(key: str, benign_value: str) -> None:
+    """Permit valid non-sensitive infrastructure names containing words like turnkey, monkey, token."""
+    cmd = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="claude-code",
+        job_name="gke-job",
+        env_mode="gke",
+        environment_kwargs={**COMPLETE_GKE_KWARGS, key: benign_value},
+    )
+    assert f"--ek={key}={benign_value}" in cmd or f"{key}={benign_value}" in " ".join(cmd)
+
+
+def test_build_harbor_run_command_rejects_actual_secret_values() -> None:
+    """Reject actual secret tokens passed in values of environment kwargs."""
+    ya29_token = "ya29." + "a" * 25
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, "cluster_name": ya29_token},
+        )
+
+
+def test_check_prerequisites_gke_supports_colon_separated_kubeconfig(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Support colon-separated KUBECONFIG paths when at least one exists."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    valid_kc = tmp_path / "valid_config"
+    valid_kc.write_text("apiVersion: v1", encoding="utf-8")
+    missing_kc = tmp_path / "missing_config"
+
+    # Multi-path with one valid file succeeds
+    multi_path = f"{missing_kc}{os.pathsep}{valid_kc}"
+    monkeypatch.setenv("KUBECONFIG", multi_path)
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert errors == []
+
+    # Multi-path with all missing files fails
+    all_missing = f"{missing_kc}{os.pathsep}{tmp_path / 'another_missing'}"
+    monkeypatch.setenv("KUBECONFIG", all_missing)
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert any("Kubernetes credentials" in err or "kubeconfig" in err.lower() for err in errors)
+
+
+@pytest.mark.parametrize("benign_key", ["token-bucket", "token_bucket", "max_tokens", "prompt_tokens"])
+def test_build_harbor_run_command_permits_benign_token_keys(benign_key: str) -> None:
+    """Permit rate-limiting and token count keys in environment kwargs."""
+    cmd = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="claude-code",
+        job_name="gke-job",
+        env_mode="gke",
+        environment_kwargs={**COMPLETE_GKE_KWARGS, benign_key: "100"},
+    )
+    assert f"--ek={benign_key}=100" in cmd or f"{benign_key}=100" in " ".join(cmd)
+
+
+def test_check_prerequisites_gke_expands_user_in_kubeconfig(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Expand user home directory (tilde) in KUBECONFIG entries."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    mock_home = tmp_path / "mock_home"
+    mock_home.mkdir()
+    config_file = mock_home / ".kube" / "config"
+    config_file.parent.mkdir()
+    config_file.write_text("apiVersion: v1", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: mock_home)
+    monkeypatch.setenv("HOME", str(mock_home))
+    monkeypatch.setenv("KUBECONFIG", "~/.kube/config")
+
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert errors == []
+
+
+def test_parse_environment_kwargs_valid():
+    """Parse valid --ek key=value arguments with whitespace trimming."""
+    assert parse_environment_kwargs(()) == {}
+    assert parse_environment_kwargs(("key=value",)) == {"key": "value"}
+    assert parse_environment_kwargs(("  foo = bar  ", "baz=123", "multi=a=b=c")) == {
+        "foo": "bar",
+        "baz": "123",
+        "multi": "a=b=c",
+    }
+
+
+def test_parse_environment_kwargs_missing_equals():
+    """Reject arguments missing the equals separator."""
+    with pytest.raises(ValueError, match=r"--ek/--environment-kwarg must be in KEY=VALUE form"):
+        parse_environment_kwargs(("no_equals",))
+
+
+def test_parse_environment_kwargs_empty_key():
+    """Reject arguments with an empty key."""
+    with pytest.raises(ValueError, match=r"--ek/--environment-kwarg key cannot be empty"):
+        parse_environment_kwargs(("=value",))
+    with pytest.raises(ValueError, match=r"--ek/--environment-kwarg key cannot be empty"):
+        parse_environment_kwargs(("  =value",))
+
+
+@pytest.mark.parametrize(
+    "sensitive_camel",
+    [
+        "authToken",
+        "clientSecret",
+        "dbPassword",
+        "accessToken",
+        "myApiKey",
+        "jwtToken",
+    ],
+)
+def test_build_harbor_run_command_rejects_camel_case_sensitive_keys(sensitive_camel: str) -> None:
+    """Reject camelCase credential keys in environment kwargs."""
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, sensitive_camel: "value"},
+        )
+
+
+@pytest.mark.parametrize(
+    "benign_camel",
+    [
+        "maxTokens",
+        "promptTokens",
+        "completionTokens",
+        "tokenBucket",
+        "tokenRate",
+    ],
+)
+def test_build_harbor_run_command_permits_camel_case_benign_token_keys(benign_camel: str) -> None:
+    """Permit camelCase rate-limiting and token count keys."""
+    cmd = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="claude-code",
+        job_name="gke-job",
+        env_mode="gke",
+        environment_kwargs={**COMPLETE_GKE_KWARGS, benign_camel: "100"},
+    )
+    assert f"--ek={benign_camel}=100" in cmd or f"{benign_camel}=100" in " ".join(cmd)
+
+
+@pytest.mark.parametrize(
+    "secret_val",
+    [
+        "AKIA" + "NOTAREALKEY999",
+        "ASIA" + "NOTAREALKEY999",
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE...",
+    ],
+)
+def test_build_harbor_run_command_rejects_aws_and_private_key_values(secret_val: str) -> None:
+    """Reject AWS access keys and PEM private keys in environment kwarg values."""
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, "custom_setting": secret_val},
+        )
+
+
+def test_resolve_vertex_model_id_lowercases_unmapped_models() -> None:
+    """Ensure unmapped Claude model names without @ fall back to lowercase for Vertex endpoints."""
+    assert _resolve_vertex_model_id("Claude-3-8-Sonnet") == "claude-3-8-sonnet"
+    assert _resolve_vertex_model_id("Claude-Opus-4") == "claude-opus-4"
+    assert _resolve_vertex_model_id("Claude-Sonnet-5") == "claude-sonnet-5"
+
+
+@pytest.mark.parametrize(
+    "sensitive_key",
+    [
+        "api_key",
+        "auth_token",
+        "password",
+        "secret",
+        "access_token",
+        "api_token",
+        "session_token",
+    ],
+)
+def test_build_harbor_run_command_rejects_credential_keys(sensitive_key: str) -> None:
+    """Reject credential keys in environment kwargs."""
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, sensitive_key: "value123"},
+        )
+
+
+@pytest.mark.parametrize(
+    "sensitive_value",
+    [
+        ".".join(  # noqa: FLY002
+            [
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+                "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+                "do_not_leak_signature",
+            ]
+        ),
+        "ya29." + "a0AfH6SMBy1234567890abcdefghijklmnopqrstuvwxyz",
+        "Bearer " + "abcdefghijklmnopqrstuvwxyz123456",
+    ],
+)
+def test_build_harbor_run_command_rejects_token_values(sensitive_value: str) -> None:
+    """Reject token and credential values in environment kwargs."""
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, "custom_key": sensitive_value},
+        )
+
+
+@pytest.mark.parametrize(
+    ("flag_key", "flag_val"),
+    [
+        ("tokens", "4096"),
+        ("max_tokens", "4096"),
+        ("tokens_per_minute", "200"),
+        ("tokens_per_second", "10"),
+        ("request_token_limit", "100"),
+        ("cluster_name", "my-cluster"),
+    ],
+)
+def test_build_harbor_run_command_permits_valid_rate_and_token_flags(flag_key: str, flag_val: str) -> None:
+    """Permit valid rate limit, token budget, and cluster configuration flags."""
+    cmd = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="claude-code",
+        job_name="gke-job",
+        env_mode="gke",
+        environment_kwargs={**COMPLETE_GKE_KWARGS, flag_key: flag_val},
+    )
+    assert f"{flag_key}={flag_val}" in cmd
+
+
+
+

@@ -184,6 +184,43 @@ def test_runtime_preflight_runs_one_case_once_without_verification(monkeypatch, 
     assert run_kwargs["env"] == {"NVIDIA_API_KEY": "secret"}
 
 
+def test_runtime_preflight_forwards_environment_kwargs_to_build_harbor_run_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Forward environment_kwargs to build_harbor_run_command during preflight."""
+    captured: dict[str, object] = {}
+
+    def build(**kwargs):
+        captured.update(kwargs)
+        return ["harbor", "run"]
+
+    monkeypatch.setattr(runtime_preflight, "build_harbor_run_command", build)
+    monkeypatch.setattr(
+        runtime_preflight.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(
+        runtime_preflight,
+        "validate_harbor_agent_only_job_result",
+        lambda *_args, **_kwargs: (True, "ok"),
+    )
+
+    env_kwargs = {"cluster_name": "test-cluster", "region": "us-central1"}
+    result = runtime_preflight.run_agent_runtime_preflight(
+        dataset=_dataset(tmp_path),
+        agent="opencode",
+        model="nvidia/model",
+        env_mode="docker",
+        jobs_dir=tmp_path / "jobs",
+        run_env={},
+        environment_kwargs=env_kwargs,
+    )
+
+    assert result.ok is True
+    assert captured["environment_kwargs"] == env_kwargs
+
+
 def test_runtime_preflight_hands_nvidia_build_key_only_over_stdin(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
     secret = "nvidia-real-secret-value-for-test"
@@ -3525,6 +3562,279 @@ def test_bedrock_model_probe_releases_slot_when_worker_creation_fails(
     assert recovered.ok is True
 
 
+def test_resolve_vertex_model_id_aliases():
+    """Verify common Claude model names are mapped to Vertex versioned model IDs."""
+    from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_model_id
+
+    assert _resolve_vertex_model_id("Claude-3-7-Sonnet") == "claude-3-7-sonnet@20250219"
+    assert _resolve_vertex_model_id("Anthropic/claude-3-5-haiku") == "claude-3-5-haiku@20241022"
+    assert _resolve_vertex_model_id("Claude-3-7-Sonnet@20250219") == "claude-3-7-sonnet@20250219"
+    assert _resolve_vertex_model_id("claude-future-model") == "claude-future-model"
+
+
+def test_vertex_model_probe_success(monkeypatch: pytest.MonkeyPatch):
+    """Verify successful Vertex AI probe returns ok=True and disposition=VERIFIED."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-east5")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    class MockResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", lambda *_args, **_kwargs: MockResponse())
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is True
+    assert "available on Vertex AI" in result.detail
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "verified"
+
+
+def test_vertex_model_probe_auth_failure(monkeypatch: pytest.MonkeyPatch):
+    """Reject probe with authorization failure and disposition=FATAL on 403."""
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    def mock_urlopen(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://us-east5-aiplatform.googleapis.com/...",
+            403,
+            "PermissionDenied",
+            {},
+            io.BytesIO(b'{"error": "Caller lacks aiplatform.endpoints.predict"}'),
+        )
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "authorization"
+    assert result.http_status == 403
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+
+
+def test_vertex_model_probe_model_not_found(monkeypatch: pytest.MonkeyPatch):
+    """404 on Vertex rawPredict returns model_not_found and disposition=FATAL."""
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    def mock_urlopen(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://us-east5-aiplatform.googleapis.com/...",
+            404,
+            "NotFound",
+            {},
+            io.BytesIO(b'{"error": "Model not found"}'),
+        )
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+    provider = ProviderConfig("anthropic", "claude-nonexistent", None, None, "anthropic/claude-nonexistent")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "model_not_found"
+    assert result.http_status == 404
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+
+
+def test_vertex_model_probe_missing_project_id(monkeypatch: pytest.MonkeyPatch):
+    """Reject probe with invalid_configuration and disposition=FATAL when project ID is missing."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    for var in ("ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "CLOUDSDK_CORE_PROJECT"):
+        monkeypatch.delenv(var, raising=False)
+
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert "requires a Google Cloud project ID" in result.detail
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+
+
+def test_vertex_model_probe_missing_token(monkeypatch: pytest.MonkeyPatch):
+    """Inability to obtain access token returns invalid_configuration and disposition=FATAL."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: None)
+
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert "access token" in result.detail
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+
+
+def test_vertex_model_probe_network_timeout(monkeypatch: pytest.MonkeyPatch):
+    """Network timeout during Vertex probe returns unavailable and disposition=DEGRADED."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    def mock_urlopen(*_args, **_kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "unavailable"
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
+
+
+def test_reject_redirects_handler():
+    """_RejectRedirects returns None to reject all redirects."""
+    from skillevaluator.model_catalog import _RejectRedirects
+
+    handler = _RejectRedirects()
+    assert handler.redirect_request(None, None, 302, "Found", {}, "https://example.com") is None
+
+
+def test_vertex_model_probe_rejects_redirect(monkeypatch: pytest.MonkeyPatch):
+    """Redirect response during probe is rejected as invalid_configuration."""
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    def mock_redirect(*_args, **_kwargs):
+        raise urllib.error.HTTPError("https://...", 302, "Found", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_redirect)
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert "rejected unexpected redirect (302)" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("env_var", "bad_val", "expected_err"),
+    [
+        ("CLOUD_ML_REGION", "us/east5", "Invalid GCP region"),
+        ("CLOUD_ML_REGION", "../../etc", "Invalid GCP region"),
+        ("GOOGLE_CLOUD_PROJECT", "project/traversal", "Invalid GCP project ID"),
+        ("GOOGLE_CLOUD_PROJECT", "proj..bad", "Invalid GCP project ID"),
+    ],
+)
+def test_vertex_model_probe_rejects_invalid_identifiers(
+    monkeypatch: pytest.MonkeyPatch, env_var: str, bad_val: str, expected_err: str
+):
+    """Reject un-sanitized or traversal characters in GCP region or project ID."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "valid-project")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-east5")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+    monkeypatch.setenv(env_var, bad_val)
+
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert expected_err in result.detail
+
+
+def test_vertex_model_probe_rejects_invalid_model_id(monkeypatch: pytest.MonkeyPatch):
+    """Reject un-sanitized model ID strings with path separators."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "valid-project")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    provider = ProviderConfig("anthropic", "claude/../traversal", None, None, "anthropic/claude/../traversal")
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert "Invalid model ID" in result.detail
+
+
+def test_vertex_model_probe_success_2xx(monkeypatch: pytest.MonkeyPatch):
+    """Verify non-200 2xx responses (e.g. 204) are treated as successful probe."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-east5")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    class MockResponse204:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", lambda *_args, **_kwargs: MockResponse204())
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is True
+    assert "available on Vertex AI" in result.detail
+
+
+def test_vertex_model_probe_unexpected_status(monkeypatch: pytest.MonkeyPatch):
+    """Verify non-2xx status without HTTPError returns other_http failure kind."""
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-east5")
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "mock-token")
+
+    class MockResponse418:
+        status = 418
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", lambda *_args, **_kwargs: MockResponse418())
+    provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "other_http"
+    assert result.http_status == 418
+    assert "unexpected HTTP status 418" in result.detail
+
+
+def test_resolve_vertex_region_whitespace_resilience(monkeypatch: pytest.MonkeyPatch):
+    """Whitespace-only region evaluates to fallback, while padded region is stripped."""
+    from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_region
+
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+    assert _resolve_vertex_region("  us-east5  ") == "us-east5"
+    assert _resolve_vertex_region("   ") == "us-central1"
+
+
+def test_resolve_vertex_project_id_environ_dict():
+    """Verify _resolve_vertex_project_id respects an explicit environ dictionary."""
+    from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_project_id
+
+    assert _resolve_vertex_project_id({"ANTHROPIC_VERTEX_PROJECT_ID": "custom-proj"}) == "custom-proj"
+    assert _resolve_vertex_project_id({"GOOGLE_CLOUD_PROJECT": "gcp-proj"}) == "gcp-proj"
+    assert _resolve_vertex_project_id({}) is None
+
+
 def test_runtime_preflight_failure_stops_full_matrix(monkeypatch, tmp_path: Path) -> None:
     from skillevaluator.tier3.harbor import runner
 
@@ -3878,3 +4188,5 @@ def test_agent_only_validation_does_not_follow_symlinked_agent_subdirectories(tm
 
     assert ok is False
     assert "not visible to the Docker daemon" in detail
+
+

@@ -19,6 +19,22 @@ import re
 from pathlib import Path
 from typing import Any
 
+_OBSERVATION_CHAR_LIMIT = 8000
+
+
+def _bounded_tool_observation(*, prefix: str, body: str, suffix: str, limit: int = _OBSERVATION_CHAR_LIMIT) -> str:
+    """Keep status/error suffixes when tool output fills the observation budget."""
+    prefix = prefix.strip()
+    suffix = suffix.strip()
+    body = body or ""
+    fixed_parts = [part for part in (prefix, suffix) if part]
+    fixed_len = sum(len(part) for part in fixed_parts) + max(0, len(fixed_parts) - 1)
+    body_sep = 1 if body and fixed_parts else 0
+    body_limit = max(0, limit - fixed_len - body_sep)
+    trimmed_body = body[:body_limit]
+    segments = [segment for segment in (prefix, trimmed_body, suffix) if segment]
+    return "\n".join(segments)[:limit]
+
 
 def _stringify_tool_result_content(content: Any) -> str:
     if content is None:
@@ -385,6 +401,473 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
     }
 
 
+def _normalize_opencode_tool(tool_name: str, raw_input: Any) -> tuple[str, dict[str, Any]]:
+    """Map OpenCode tool names and inputs to ATIF tool-call fields."""
+    if not isinstance(raw_input, dict):
+        return tool_name, {}
+    name = str(tool_name or "").strip()
+    lowered = name.lower()
+    arguments = dict(raw_input)
+    if lowered in {"read", "read_file"}:
+        function_name = "read"
+        if "filePath" in arguments and "path" not in arguments:
+            arguments["path"] = arguments["filePath"]
+        if "file_path" in arguments and "path" not in arguments:
+            arguments["path"] = arguments["file_path"]
+    elif lowered in {"bash", "shell"}:
+        function_name = "bash"
+    elif lowered in {"write", "edit"}:
+        function_name = lowered
+        if "filePath" in arguments and "path" not in arguments:
+            arguments["path"] = arguments["filePath"]
+    else:
+        function_name = name or lowered or "tool"
+    return function_name, arguments
+
+
+def _opencode_output_payload(state: dict[str, Any]) -> str:
+    output = state.get("output")
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        message = output.get("message") or output.get("text")
+        if message is not None:
+            return str(message)
+        return json.dumps(output, ensure_ascii=False)
+    return str(output)
+
+
+def _opencode_error_text(state: dict[str, Any]) -> str:
+    error = state.get("error")
+    if error is None:
+        return ""
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict):
+        data = error.get("data")
+        if isinstance(data, dict):
+            message = data.get("message")
+            if message is not None:
+                return str(message)
+        message = error.get("message")
+        if message is not None:
+            return str(message)
+        return json.dumps(error, ensure_ascii=False)
+    return str(error)
+
+
+def _opencode_tool_observation(state: dict[str, Any]) -> str:
+    status = state.get("status")
+    prefix = f"status={status}" if status is not None and str(status).strip() else ""
+    return _bounded_tool_observation(
+        prefix=prefix,
+        body=_opencode_output_payload(state),
+        suffix=_opencode_error_text(state),
+    )
+
+
+def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
+    """Parse OpenCode ``run --format=json`` JSONL (tee'd to ``opencode.txt``)."""
+    if not text or not text.strip():
+        return None
+
+    steps: list[dict[str, Any]] = []
+    saw_content = False
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(evt, dict):
+            continue
+
+        et = str(evt.get("type") or "")
+        if et == "text":
+            part = evt.get("part")
+            if not isinstance(part, dict):
+                continue
+            msg = str(part.get("text") or "").strip()
+            if not msg:
+                continue
+            saw_content = True
+            if steps and not steps[-1].get("tool_calls"):
+                prev = (steps[-1].get("message") or "").strip()
+                steps[-1]["message"] = (prev + "\n" + msg).strip() if prev else msg
+            else:
+                steps.append(
+                    {
+                        "source": "agent",
+                        "message": msg,
+                        "tool_calls": [],
+                        "observation": {"results": []},
+                    }
+                )
+            continue
+
+        if et != "tool_use":
+            continue
+
+        part = evt.get("part")
+        if not isinstance(part, dict):
+            continue
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        status = str(state.get("status") or "").lower()
+        if status in {"pending", "running"}:
+            continue
+
+        tool_name = str(part.get("tool") or part.get("name") or "")
+        call_id = str(part.get("callID") or part.get("call_id") or part.get("id") or "")
+        function_name, arguments = _normalize_opencode_tool(tool_name, state.get("input"))
+        if not call_id:
+            call_id = f"opencode-{len(steps) + 1}"
+
+        saw_content = True
+        step = {
+            "source": "agent",
+            "message": "",
+            "tool_calls": [
+                {
+                    "tool_call_id": call_id,
+                    "function_name": function_name,
+                    "arguments": arguments,
+                }
+            ],
+            "observation": {"results": []},
+        }
+        observation_text = _opencode_tool_observation(state)
+        if observation_text:
+            step["observation"]["results"].append(
+                {
+                    "source_call_id": call_id,
+                    "content": observation_text,
+                }
+            )
+        steps.append(step)
+
+    if not saw_content or not steps:
+        return None
+    return {
+        "steps": steps,
+        "schema_version": "ATIF-v1.2-synthetic-opencode-log",
+        "final_metrics": {},
+    }
+
+
+def _iter_jsonl_dicts(text: str) -> list[dict[str, Any]]:
+    """Parse JSONL lines, skipping non-JSON noise (e.g. stderr mixed into tee logs)."""
+    events: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("{") or not line.endswith("}"):
+            continue
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(evt, dict):
+            events.append(evt)
+    return events
+
+
+def _codex_item_text(item: dict[str, Any]) -> str | None:
+    text = item.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    item_type = str(item.get("type") or "")
+    if item_type not in {"message", "agent_message"}:
+        return None
+    content = item.get("content")
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+    joined = "\n".join(parts).strip()
+    return joined or None
+
+
+def _codex_function_arguments(function_call: dict[str, Any]) -> dict[str, Any]:
+    args = function_call.get("arguments")
+    if isinstance(args, dict):
+        return dict(args)
+    return {}
+
+
+def _codex_thread_item(evt: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the Codex thread item payload from a completed event."""
+    if str(evt.get("type") or "") == "item.completed":
+        item = evt.get("item")
+        return item if isinstance(item, dict) else None
+    if str(evt.get("type") or "") == "item" and evt.get("item.completed", True):
+        item = evt.get("item")
+        return item if isinstance(item, dict) else None
+    return None
+
+
+def _codex_status_error_prefix(item: dict[str, Any]) -> str:
+    lines: list[str] = []
+    status = item.get("status")
+    if status is not None and str(status).strip():
+        lines.append(f"status={status}")
+    exit_code = item.get("exit_code")
+    if exit_code is not None:
+        lines.append(f"exit_code={exit_code}")
+    error = item.get("error")
+    if error is not None:
+        if isinstance(error, dict):
+            message = error.get("message")
+            lines.append(str(message) if message is not None else json.dumps(error, ensure_ascii=False))
+        else:
+            lines.append(str(error))
+    return "\n".join(lines)
+
+
+def _codex_observation_body(item: dict[str, Any], *, include_result: bool = False) -> str:
+    parts: list[str] = []
+    output = item.get("aggregated_output")
+    if output is not None and str(output).strip():
+        parts.append(str(output))
+    if include_result:
+        result_text = _codex_mcp_result_text(item)
+        if result_text:
+            parts.append(result_text)
+    return "\n".join(parts)
+
+
+def _codex_observation_content(item: dict[str, Any], *, include_result: bool = False) -> str:
+    return _bounded_tool_observation(
+        prefix=_codex_status_error_prefix(item),
+        body=_codex_observation_body(item, include_result=include_result),
+        suffix="",
+    )
+
+
+def _codex_mcp_result_text(item: dict[str, Any]) -> str:
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if isinstance(content, list):
+        blocks: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                blocks.append(str(text) if text is not None else json.dumps(block, ensure_ascii=False))
+            else:
+                blocks.append(str(block))
+        joined = "\n".join(part for part in blocks if part).strip()
+        if joined:
+            return joined
+    structured = result.get("structured_content")
+    if structured is not None:
+        return json.dumps(structured, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _codex_mcp_observation(item: dict[str, Any]) -> str:
+    return _codex_observation_content(item, include_result=True)
+
+
+def _codex_file_change_step(item: dict[str, Any], evt: dict[str, Any], tool_index: int) -> dict[str, Any] | None:
+    changes = item.get("changes")
+    if not isinstance(changes, list):
+        return None
+    tool_calls: list[dict[str, Any]] = []
+    base_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+    for idx, change in enumerate(changes):
+        if not isinstance(change, dict):
+            continue
+        path = str(change.get("path") or "").strip()
+        if not path:
+            continue
+        tool_calls.append(
+            {
+                "tool_call_id": f"{base_id}-{idx}",
+                "function_name": "write",
+                "arguments": {"path": path, "kind": str(change.get("kind") or "update")},
+            }
+        )
+    if not tool_calls:
+        return None
+    step: dict[str, Any] = {
+        "source": "agent",
+        "message": "",
+        "tool_calls": tool_calls,
+        "observation": {"results": []},
+    }
+    evidence = _codex_observation_content(item)
+    if evidence:
+        for tool_call in tool_calls:
+            step["observation"]["results"].append(
+                {
+                    "source_call_id": tool_call["tool_call_id"],
+                    "content": evidence,
+                }
+            )
+    return step
+
+
+def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
+    """Parse Codex ``exec --json`` ThreadEvent JSONL."""
+    if not text or not text.strip():
+        return None
+
+    steps: list[dict[str, Any]] = []
+    saw_content = False
+    tool_index = 0
+
+    for evt in _iter_jsonl_dicts(text):
+        item = _codex_thread_item(evt)
+        if item is None:
+            continue
+
+        item_type = str(item.get("type") or "")
+
+        if item_type in {"agent_message", "message"}:
+            message = _codex_item_text(item)
+            function_call = item.get("function_call")
+            if not message and not isinstance(function_call, dict):
+                continue
+            saw_content = True
+            step: dict[str, Any] = {
+                "source": "agent",
+                "message": message or "",
+                "tool_calls": [],
+                "observation": {"results": []},
+            }
+            if isinstance(function_call, dict):
+                call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+                function_name = str(function_call.get("name") or "tool")
+                if function_name.lower() in {"bash", "shell"}:
+                    function_name = "bash"
+                arguments = _codex_function_arguments(function_call)
+                step["tool_calls"] = [
+                    {
+                        "tool_call_id": call_id,
+                        "function_name": function_name,
+                        "arguments": arguments,
+                    }
+                ]
+                output = item.get("output")
+                if output is not None:
+                    step["observation"]["results"].append(
+                        {
+                            "source_call_id": call_id,
+                            "content": str(output)[:8000],
+                        }
+                    )
+                tool_index += 1
+            steps.append(step)
+            continue
+
+        if item_type == "command_execution":
+            command_raw = item.get("command")
+            command = "" if command_raw is None else str(command_raw).strip()
+            evidence = _codex_observation_content(item)
+            if not command and not evidence:
+                continue
+            saw_content = True
+            call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+            tool_index += 1
+            step = {
+                "source": "agent",
+                "message": "",
+                "tool_calls": [
+                    {
+                        "tool_call_id": call_id,
+                        "function_name": "bash",
+                        "arguments": {"command": command},
+                    }
+                ],
+                "observation": {"results": []},
+            }
+            if evidence:
+                step["observation"]["results"].append(
+                    {
+                        "source_call_id": call_id,
+                        "content": evidence,
+                    }
+                )
+            steps.append(step)
+            continue
+
+        if item_type == "file_change":
+            step = _codex_file_change_step(item, evt, tool_index)
+            if step is None:
+                continue
+            saw_content = True
+            tool_index += 1
+            steps.append(step)
+            continue
+
+        if item_type == "mcp_tool_call":
+            tool = str(item.get("tool") or "mcp_tool")
+            arguments = item.get("arguments")
+            if not isinstance(arguments, dict):
+                arguments = {}
+            call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+            saw_content = True
+            tool_index += 1
+            step = {
+                "source": "agent",
+                "message": "",
+                "tool_calls": [
+                    {
+                        "tool_call_id": call_id,
+                        "function_name": tool,
+                        "arguments": dict(arguments),
+                    }
+                ],
+                "observation": {"results": []},
+            }
+            observation = _codex_mcp_observation(item)
+            if observation:
+                step["observation"]["results"].append(
+                    {
+                        "source_call_id": call_id,
+                        "content": observation,
+                    }
+                )
+            steps.append(step)
+
+    if not saw_content or not steps:
+        return None
+    return {
+        "steps": steps,
+        "schema_version": "ATIF-v1.2-synthetic-codex-log",
+        "final_metrics": {},
+    }
+
+
+def synthetic_trajectory_from_codex_txt(text: str) -> dict[str, Any] | None:
+    """Reconstruct ATIF from Codex tee logs (``exec --json`` JSONL or OpenCode-shaped JSONL)."""
+    if not text or not text.strip():
+        return None
+
+    synth = synthetic_trajectory_from_codex_json(text)
+    if synth and synth.get("steps"):
+        return synth
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if all(line.startswith("{") and line.endswith("}") for line in lines):
+        synth = synthetic_trajectory_from_opencode_json(text)
+        if synth and synth.get("steps"):
+            synth["schema_version"] = "ATIF-v1.2-synthetic-codex-log"
+            return synth
+    return None
+
+
 def load_trajectory_with_fallback(
     trajectory_path: Path,
     logs_dir: Path | None = None,
@@ -434,6 +917,24 @@ def load_trajectory_with_fallback(
         if synth and synth.get("steps"):
             meta["source"] = "cline.txt"
             meta["note"] = "Synthetic ATIF from Cline CLI JSONL log"
+            return synth, meta
+
+    opencode_path = logs / "opencode.txt"
+    if opencode_path.exists():
+        raw = opencode_path.read_text(encoding="utf-8", errors="replace")
+        synth = synthetic_trajectory_from_opencode_json(raw)
+        if synth and synth.get("steps"):
+            meta["source"] = "opencode.txt"
+            meta["note"] = "Synthetic ATIF from OpenCode JSON stream"
+            return synth, meta
+
+    codex_path = logs / "codex.txt"
+    if codex_path.exists():
+        raw = codex_path.read_text(encoding="utf-8", errors="replace")
+        synth = synthetic_trajectory_from_codex_txt(raw)
+        if synth and synth.get("steps"):
+            meta["source"] = "codex.txt"
+            meta["note"] = "Synthetic ATIF from Codex structured log"
             return synth, meta
 
     return None, meta

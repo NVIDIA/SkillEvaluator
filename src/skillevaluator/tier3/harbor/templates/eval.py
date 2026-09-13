@@ -27,9 +27,11 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import shlex
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -1434,6 +1436,127 @@ def _anthropic_url():
     return _validate_http_url(url)
 
 
+_RETRIABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_BASE_DELAY = 1.0
+_DEFAULT_MAX_DELAY = 30.0
+
+
+def _parse_retry_after(header_value, fallback_delay):
+    """Parse a Retry-After header as seconds or HTTP date, falling back to default."""
+    if not header_value:
+        return fallback_delay
+    clean_val = str(header_value).strip()
+    try:
+        return max(0.0, float(clean_val))
+    except ValueError:
+        pass
+    try:
+        from datetime import UTC, datetime
+        from email.utils import parsedate_to_datetime
+
+        target = parsedate_to_datetime(clean_val)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
+        return max(0.0, (target - now).total_seconds())
+    except Exception:
+        return fallback_delay
+
+
+def _calculate_jitter_delay(attempt, base_delay=1.0, max_delay=30.0):
+    """Calculate exponential backoff with full jitter."""
+    calculated = min(max_delay, base_delay * (2.0**attempt))
+    return random.uniform(0.0, calculated)
+
+
+def _resolve_eval_retry_config():
+    """Resolve retry and backoff limits from environment variables with safe defaults."""
+
+    def _read_int(names, default):
+        """Read a non-negative integer from the first matching environment variable or return default."""
+        for name in names:
+            raw = str(os.environ.get(name, "")).strip()
+            if raw:
+                try:
+                    val = int(raw)
+                    return val if val >= 0 else default
+                except ValueError:
+                    return default
+        return default
+
+    def _read_float(names, default):
+        """Read a non-negative float from the first matching environment variable or return default."""
+        for name in names:
+            raw = str(os.environ.get(name, "")).strip()
+            if raw:
+                try:
+                    val = float(raw)
+                    return val if val >= 0.0 else default
+                except ValueError:
+                    return default
+        return default
+
+    max_retries = _read_int(
+        ("SKILL_EVAL_LLM_MAX_RETRIES", "LLM_JUDGE_MAX_RETRIES"),
+        _DEFAULT_MAX_RETRIES,
+    )
+    base_delay = _read_float(
+        ("SKILL_EVAL_LLM_RETRY_BASE_DELAY", "LLM_JUDGE_RETRY_BASE_DELAY"),
+        _DEFAULT_BASE_DELAY,
+    )
+    raw_max_delay = _read_float(
+        ("SKILL_EVAL_LLM_RETRY_MAX_DELAY", "LLM_JUDGE_RETRY_MAX_DELAY"),
+        _DEFAULT_MAX_DELAY,
+    )
+    return max_retries, base_delay, max(base_delay, raw_max_delay)
+
+
+def _urlopen_with_retry(request, timeout=90):
+    """Open a URL request with exponential backoff and full jitter on transient failures."""
+    max_retries, base_delay, max_delay = _resolve_eval_retry_config()
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
+                return response.read()
+        except Exception as error:
+            is_http = isinstance(error, urllib.error.HTTPError)
+            is_network = isinstance(error, (urllib.error.URLError, ConnectionError, OSError))
+            if (
+                attempt >= max_retries
+                or (not is_http and not is_network)
+                or (is_http and error.code not in _RETRIABLE_HTTP_CODES)
+            ):
+                raise
+
+            retry_after_str = None
+            if is_http:
+                if error.headers:
+                    retry_after_str = error.headers.get("retry-after") or error.headers.get("Retry-After")
+                error.close()
+
+            if retry_after_str is not None:
+                parsed = _parse_retry_after(retry_after_str, fallback_delay=base_delay)
+                if parsed > max_delay:
+                    raise
+                delay = parsed + random.uniform(0.1, 0.5)
+            else:
+                delay = _calculate_jitter_delay(attempt, base_delay=base_delay, max_delay=max_delay)
+
+            sleep_duration = min(delay, max_delay)
+            status_label = f"HTTP {error.code}" if is_http else type(error).__name__
+            logger.warning(
+                "LLM judge transient error (%s). Retrying in %.2fs (attempt %d/%d)...",
+                status_label,
+                sleep_duration,
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(sleep_duration)
+            attempt += 1
+
+
 def _call_anthropic(prompt, model, max_tokens, temperature):
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -1455,8 +1578,8 @@ def _call_anthropic(prompt, model, max_tokens, temperature):
         },
     )
     # _anthropic_url() validates the configured base URL before this request.
-    with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-        body = json.loads(response.read())
+    raw_response = _urlopen_with_retry(request, timeout=90)
+    body = json.loads(raw_response)
     content = "".join(
         str(block.get("text", ""))
         for block in body.get("content", [])
@@ -1546,8 +1669,8 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
             )
             # request_url was validated by _resolve_url() before this request.
-            with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-                body = json.loads(response.read())
+            raw_response = _urlopen_with_retry(request, timeout=90)
+            body = json.loads(raw_response)
             content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
             if content is None:
                 content = ""

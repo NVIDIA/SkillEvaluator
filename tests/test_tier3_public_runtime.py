@@ -1281,3 +1281,33 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
 
     assert sdk_urls == [expected_url]
     assert verifier._anthropic_url() == expected_url
+
+
+def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
+    """Verify that _write_task_toml stages LLM retry variables into [verifier.env]."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    runtime_env = {
+        "SKILL_EVAL_LLM_MAX_RETRIES": "5",
+        "SKILL_EVAL_LLM_RETRY_BASE_DELAY": "2.0",
+        "SKILL_EVAL_LLM_RETRY_MAX_DELAY": "40.0",
+        "LLM_JUDGE_MAX_RETRIES": "4",
+        "LLM_JUDGE_RETRY_BASE_DELAY": "1.5",
+        "LLM_JUDGE_RETRY_MAX_DELAY": "35.0",
+        "UNRELATED_CUSTOM_VAR": "secret",
+    }
+    _write_task_toml(
+        case_dir,
+        {"id": "case-001", "expected_skill": "demo"},
+        has_skill=True,
+        runtime_env=runtime_env,
+    )
+    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
+    verifier_env = task["verifier"]["env"]
+    assert verifier_env["SKILL_EVAL_LLM_MAX_RETRIES"] == "${SKILL_EVAL_LLM_MAX_RETRIES}"
+    assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
+    assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
+    assert verifier_env["LLM_JUDGE_MAX_RETRIES"] == "${LLM_JUDGE_MAX_RETRIES}"
+    assert verifier_env["LLM_JUDGE_RETRY_BASE_DELAY"] == "${LLM_JUDGE_RETRY_BASE_DELAY}"
+    assert verifier_env["LLM_JUDGE_RETRY_MAX_DELAY"] == "${LLM_JUDGE_RETRY_MAX_DELAY}"
+    assert "UNRELATED_CUSTOM_VAR" not in verifier_env

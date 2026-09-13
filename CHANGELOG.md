@@ -4,8 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Added
-
+- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
+  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
+  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
+  RFC-7231 `Retry-After` header parsing, defensive environment overrides
+  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`,
+  `SKILL_EVAL_LLM_RETRY_MAX_DELAY` and their `LLM_JUDGE_*` aliases), and
+  automatic container forwarding via Harbor `task.toml` without altering
+  benchmark metrics or scoring formulas.
 - `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` names hosts whose model catalog may
   be read over plain HTTP. Catalog reads still require HTTPS for every other
   non-loopback host. Entries match one whole host as written, with no name

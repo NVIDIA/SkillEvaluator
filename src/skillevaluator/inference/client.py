@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_MODEL, LLM_VERIFY_TEMPERATURE
+from skillevaluator.inference.retry import resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientError
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import (
@@ -132,12 +133,19 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        max_retries: int | None = None,
+        retry_base_delay: float | None = None,
+        retry_max_delay: float | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
         self._api_key = api_key
         self._max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         self._temperature = temperature if temperature is not None else self.default_temperature
+        retry_cfg = resolve_retry_config()
+        self._max_retries = max_retries if max_retries is not None else retry_cfg.max_retries
+        self._retry_base_delay = retry_base_delay if retry_base_delay is not None else retry_cfg.base_delay
+        self._retry_max_delay = retry_max_delay if retry_max_delay is not None else retry_cfg.max_delay
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
 
@@ -158,6 +166,21 @@ class LLMClient:
     @property
     def temperature(self) -> float | None:
         return self._temperature
+
+    @property
+    def max_retries(self) -> int:
+        """Return the maximum number of retry attempts for transient errors."""
+        return self._max_retries
+
+    @property
+    def retry_base_delay(self) -> float:
+        """Return the initial base backoff delay in seconds."""
+        return self._retry_base_delay
+
+    @property
+    def retry_max_delay(self) -> float:
+        """Return the maximum delay ceiling in seconds for a retry backoff."""
+        return self._retry_max_delay
 
     # -- client management ------------------------------------------------
 
@@ -243,55 +266,66 @@ class LLMClient:
         """
         config = self._resolved_config()
         client = self._get_client()
-        if config.provider == "anthropic":
+
+        def _invoke_provider() -> str:
+            if config.provider == "anthropic":
+                call_kwargs: dict[str, Any] = {
+                    "model": config.model,
+                    "max_tokens": self._max_tokens or 4096,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                    **_temperature_kwargs(config.model, self._temperature),
+                }
+                response = client.messages.create(**call_kwargs)
+                content = "".join(
+                    str(block.text) for block in response.content if getattr(block, "type", None) == "text"
+                )
+                if not content:
+                    raise EmptyLLMResponseError("LLM returned empty response content")
+                return content.strip()
+            if config.provider == "bedrock":
+                try:
+                    from litellm import completion
+                except ImportError as exc:
+                    raise LLMClientError(
+                        "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
+                    ) from exc
+                response = completion(
+                    model=config.litellm_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    aws_region_name=config.region,
+                    **_temperature_kwargs(config.model, self._temperature),
+                    **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
+                )
+                content = response.choices[0].message.content
+                if not content:
+                    raise EmptyLLMResponseError("LLM returned empty response content")
+                return str(content).strip()
             call_kwargs: dict[str, Any] = {
                 "model": config.model,
-                "max_tokens": self._max_tokens or 4096,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
-                **_temperature_kwargs(config.model, self._temperature),
-            }
-            response = client.messages.create(**call_kwargs)
-            content = "".join(str(block.text) for block in response.content if getattr(block, "type", None) == "text")
-            if not content:
-                raise EmptyLLMResponseError("LLM returned empty response content")
-            return content.strip()
-        if config.provider == "bedrock":
-            try:
-                from litellm import completion
-            except ImportError as exc:
-                raise LLMClientError(
-                    "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
-                ) from exc
-            response = completion(
-                model=config.litellm_model,
-                messages=[
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                aws_region_name=config.region,
                 **_temperature_kwargs(config.model, self._temperature),
-                **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
-            )
+                **_token_limit_kwargs(config, self._max_tokens),
+            }
+
+            response = client.chat.completions.create(**call_kwargs)
             content = response.choices[0].message.content
             if not content:
                 raise EmptyLLMResponseError("LLM returned empty response content")
-            return str(content).strip()
-        call_kwargs: dict[str, Any] = {
-            "model": config.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            **_temperature_kwargs(config.model, self._temperature),
-            **_token_limit_kwargs(config, self._max_tokens),
-        }
+            return content.strip()
 
-        response = client.chat.completions.create(**call_kwargs)
-        content = response.choices[0].message.content
-        if not content:
-            raise EmptyLLMResponseError("LLM returned empty response content")
-        return content.strip()
+        return retry_call_with_backoff(
+            _invoke_provider,
+            max_retries=self._max_retries,
+            base_delay=self._retry_base_delay,
+            max_delay=self._retry_max_delay,
+        )
 
     def extract_json_from_response(self, system_prompt: str, user_prompt: str) -> dict:
         """Send a completion and parse JSON from the response."""

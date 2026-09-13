@@ -395,6 +395,48 @@ def test_validate_records_json_report_name_for_catalog_binding(monkeypatch) -> N
     assert cli_module._consume_validate_json_report() is not None
 
 
+def test_validate_json_report_handoff_isolated_between_invocations(monkeypatch) -> None:
+    """Back-to-back validate runs must not leak JSON report names through a shared slot."""
+    from skillevaluator import cli as cli_module
+    from skillevaluator.models.result import ValidationResult
+
+    basenames = iter(["skillevaluator-output-alpha", "skillevaluator-output-beta"])
+
+    def _emit(results, *, report_formats, output_dir, basename, **_kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / f"{basename}.json").write_text(
+            json.dumps({"overall_passed": all(result.passed for result in results)}),
+            encoding="utf-8",
+        )
+        return all(result.passed for result in results)
+
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [ValidationResult(validator_name="Schema")])
+    monkeypatch.setattr(cli_module, "emit_reports", _emit)
+    monkeypatch.setattr(
+        "skillevaluator.utils.helpers.make_timestamped_basename",
+        lambda _prefix: next(basenames),
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        args = [
+            "validate",
+            str(FIXTURE),
+            "--no-llm",
+            "--no-tier2",
+            "--checks",
+            "schema",
+            "-r",
+            "json",
+            "-o",
+            "out",
+        ]
+        assert runner.invoke(cli, args).exit_code == 0
+        assert cli_module._consume_validate_json_report() == "skillevaluator-output-alpha.json"
+        assert runner.invoke(cli, args).exit_code == 0
+        assert cli_module._consume_validate_json_report() == "skillevaluator-output-beta.json"
+
+
 def test_catalog_summary_binds_exact_json_report_not_sarif_sidecar(monkeypatch) -> None:
     from skillevaluator.models.result import ValidationResult
 

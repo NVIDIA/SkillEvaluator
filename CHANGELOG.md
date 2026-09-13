@@ -5,7 +5,7 @@ All notable changes to SkillEvaluator are documented in this file.
 ## Unreleased
 
 ### Added
-
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
 - `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` names hosts whose model catalog may
   be read over plain HTTP. Catalog reads still require HTTPS for every other
   non-loopback host. Entries match one whole host as written, with no name

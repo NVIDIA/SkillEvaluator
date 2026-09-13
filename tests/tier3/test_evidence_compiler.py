@@ -89,3 +89,86 @@ def test_template_bundles_match_shared_helper() -> None:
     for metric in METRICS:
         assert shared[metric]["prompt_evidence"] == templated[metric]["prompt_evidence"], metric
         assert shared[metric]["omitted"] == templated[metric]["omitted"], metric
+
+
+def test_bundle_budgets_defaults_and_env_overrides(monkeypatch) -> None:
+    # Defaults
+    assert atif_helpers._accuracy_budget() == 8000
+    assert atif_helpers._goal_accuracy_budget() == 12000
+    budgets = atif_helpers._bundle_budgets()
+    assert budgets["accuracy"] == 8000
+    assert budgets["goal_accuracy"] == 12000
+    assert budgets["behavior_check"] == 8000
+
+    # Non-integer / invalid fallback
+    monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "invalid")
+    monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "-10")
+    assert atif_helpers._accuracy_budget() == 8000
+    assert atif_helpers._goal_accuracy_budget() == 1  # max(1, -10) is 1
+
+    # Valid environment overrides
+    monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "15000")
+    monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "25000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "10000")
+    assert atif_helpers._accuracy_budget() == 15000
+    assert atif_helpers._goal_accuracy_budget() == 25000
+    budgets_custom = atif_helpers._bundle_budgets()
+    assert budgets_custom["accuracy"] == 15000
+    assert budgets_custom["goal_accuracy"] == 25000
+    assert budgets_custom["behavior_check"] == 10000
+
+
+def test_harbor_template_bundle_budgets_match_shared(monkeypatch) -> None:
+    template_path = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "skillevaluator"
+        / "tier3"
+        / "harbor"
+        / "templates"
+        / "eval.py"
+    )
+    spec = importlib.util.spec_from_file_location("harbor_eval_template_budgets", template_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "9000")
+    monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "18000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "7000")
+
+    assert module._accuracy_budget() == atif_helpers._accuracy_budget() == 9000
+    assert module._goal_accuracy_budget() == atif_helpers._goal_accuracy_budget() == 18000
+    assert module._bundle_budgets() == atif_helpers._bundle_budgets()
+
+
+def test_verifier_env_vars_and_runner_include_budget_vars(monkeypatch) -> None:
+    from skillevaluator.tier3.harbor.adapter import _VERIFIER_PROVIDER_ENV_VARS
+    from skillevaluator.tier3.harbor.runner import ProviderConfig, _provider_environment
+
+    budget_vars = {
+        "SKILL_EVAL_ACCURACY_BUDGET",
+        "SKILL_EVAL_BEHAVIOR_CHECK_BUDGET",
+        "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT",
+        "SKILL_EVAL_GOAL_ACCURACY_BUDGET",
+    }
+    assert budget_vars.issubset(_VERIFIER_PROVIDER_ENV_VARS)
+
+    monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "10000")
+    monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "20000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "9000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "1200")
+
+    config = ProviderConfig(
+        provider="openai",
+        model="gpt-4o",
+        api_key="dummy",
+        base_url="https://api.openai.com/v1",
+        litellm_model="openai/gpt-4o",
+    )
+    env = _provider_environment(config)
+    assert env["SKILL_EVAL_ACCURACY_BUDGET"] == "10000"
+    assert env["SKILL_EVAL_GOAL_ACCURACY_BUDGET"] == "20000"
+    assert env["SKILL_EVAL_BEHAVIOR_CHECK_BUDGET"] == "9000"
+    assert env["SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT"] == "1200"
+

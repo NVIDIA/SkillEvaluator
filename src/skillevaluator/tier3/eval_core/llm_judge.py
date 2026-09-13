@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 from skillevaluator.inference.types import EmptyLLMResponseError
 from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, _model_leaf, _supports_custom_temperature
+from skillevaluator.tier3.eval_core.atif_helpers import _behavior_check_budget, _behavior_final_response_limit
 
 logger = logging.getLogger(__name__)
 
@@ -838,8 +839,10 @@ Respond with ONLY a JSON object:
 "score": <float between 0.0 and 1.0>, "summary": "<brief summary>"}}"""
 
 
-def _compact_behavior_conversation(conversation_text: str, limit: int = 8000) -> str:
+def _compact_behavior_conversation(conversation_text: str, limit: int | None = None) -> str:
     """Keep both setup context and late outcome evidence in behavior prompts."""
+    if limit is None:
+        limit = _behavior_check_budget()
     if len(conversation_text) <= limit:
         return conversation_text
 
@@ -847,8 +850,9 @@ def _compact_behavior_conversation(conversation_text: str, limit: int = 8000) ->
     if limit <= len(marker):
         return conversation_text[:limit]
 
-    head = max(1, (limit - len(marker)) * 2 // 3)
-    tail = max(1, limit - len(marker) - head)
+    final_limit = _behavior_final_response_limit()
+    tail = max(1, (limit - len(marker)) // 3, min(final_limit, limit - len(marker) - 1))
+    head = max(1, limit - len(marker) - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"
 
 

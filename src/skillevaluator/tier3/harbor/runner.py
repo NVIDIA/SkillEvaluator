@@ -476,6 +476,14 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
     environment.update(
         {name: value for name in _VERIFIER_JUDGE_MODEL_ENV_VARS if (value := os.environ.get(name, "").strip())}
     )
+    for name in (
+        "SKILL_EVAL_ACCURACY_BUDGET",
+        "SKILL_EVAL_BEHAVIOR_CHECK_BUDGET",
+        "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT",
+        "SKILL_EVAL_GOAL_ACCURACY_BUDGET",
+    ):
+        if value := os.environ.get(name, "").strip():
+            environment[name] = value
     if config.provider == "anthropic":
         environment["ANTHROPIC_API_KEY"] = config.api_key or ""
         if config.base_url:

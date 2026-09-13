@@ -164,6 +164,35 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
 
 
 _BEHAVIOR_EVIDENCE_MAX_CHARS = 4000
+_DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 800
+_DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
+_DEFAULT_TOOL_HISTORY_HEADROOM = 4000
+
+
+def _behavior_final_response_limit() -> int:
+    """Return the configured behavior final response section limit or default."""
+    raw = os.environ.get("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT
+
+
+def _behavior_check_budget() -> int:
+    """Return the configured behavior check evidence budget or reconciled default."""
+    final_limit = _behavior_final_response_limit()
+    raw = os.environ.get("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "").strip()
+    if raw:
+        try:
+            explicit_budget = max(1, int(raw))
+            return max(explicit_budget, final_limit)
+        except ValueError:
+            pass
+    return max(_DEFAULT_BEHAVIOR_CHECK_BUDGET, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
+
+
 _BEHAVIOR_WRITE_TOOLS = {
     "write",
     "write_file",
@@ -295,7 +324,8 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
 def build_behavior_evidence(
     traj: dict[str, Any],
     question: str,
-    max_chars: int = _BEHAVIOR_EVIDENCE_MAX_CHARS,
+    max_chars: int | None = None,
+    final_response_limit: int | None = None,
 ) -> str:
     """Build compact, behavior-check-specific evidence from an ATIF trajectory.
 
@@ -303,6 +333,19 @@ def build_behavior_evidence(
     Put final output and write/edit evidence before exploratory reads so a
     fixed-size judge prompt does not miss late file creation.
     """
+    effective_final_limit = (
+        _behavior_final_response_limit()
+        if final_response_limit is None
+        else max(1, int(final_response_limit))
+    )
+
+    if max_chars is None:
+        raw_budget = os.environ.get("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "").strip()
+        if raw_budget:
+            max_chars = _behavior_check_budget()
+        else:
+            max_chars = max(_BEHAVIOR_EVIDENCE_MAX_CHARS, effective_final_limit + 1600)
+
     parts: list[str] = []
     remaining = max_chars
 
@@ -317,7 +360,7 @@ def build_behavior_evidence(
             "FINAL RESPONSE",
             final,
             remaining,
-            section_limit=800,
+            section_limit=effective_final_limit,
         )
 
     remaining = _append_section_with_budget(
@@ -645,9 +688,46 @@ def attach_metric_evidence_refs(
 # ---------------------------------------------------------------------------
 
 _BUNDLE_ITEM_CHARS = 1500  # per-item excerpt for the judge prompt (refs use 300)
-_BUNDLE_BUDGETS = {"accuracy": 8000, "goal_accuracy": 12000, "behavior_check": 8000}
+_DEFAULT_ACCURACY_BUDGET = 8000
+_DEFAULT_GOAL_ACCURACY_BUDGET = 12000
+_BUNDLE_BUDGETS = {
+    "accuracy": _DEFAULT_ACCURACY_BUDGET,
+    "goal_accuracy": _DEFAULT_GOAL_ACCURACY_BUDGET,
+    "behavior_check": _DEFAULT_BEHAVIOR_CHECK_BUDGET,
+}
 _BUNDLE_ACCURACY_MAX_OBS = 6  # newest observations fed to accuracy (<= ~6x1500 <= budget)
 _BUNDLE_GOAL_MAX_OBS = 12  # newest observations fed to goal_accuracy (end-state)
+
+
+def _accuracy_budget() -> int:
+    """Return the configured accuracy evidence budget or default."""
+    raw = os.environ.get("SKILL_EVAL_ACCURACY_BUDGET", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_ACCURACY_BUDGET
+
+
+def _goal_accuracy_budget() -> int:
+    """Return the configured goal accuracy evidence budget or default."""
+    raw = os.environ.get("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_GOAL_ACCURACY_BUDGET
+
+
+def _bundle_budgets() -> dict[str, int]:
+    """Return effective bundle budgets taking into account runtime overrides."""
+    return {
+        "accuracy": _accuracy_budget(),
+        "goal_accuracy": _goal_accuracy_budget(),
+        "behavior_check": _behavior_check_budget(),
+    }
 
 
 def _clip(text: str, limit: int) -> str:
@@ -847,6 +927,7 @@ def build_metric_evidence_bundles(
         return facts_section
 
     bundles: dict[str, dict[str, Any]] = {}
+    budgets = _bundle_budgets()
 
     acc_text, acc_drop, acc_trunc = _assemble(
         [
@@ -854,10 +935,10 @@ def build_metric_evidence_bundles(
             ("PRODUCED FILES / WRITES", file_changes),
             ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
         ],
-        _BUNDLE_BUDGETS["accuracy"],
+        budgets["accuracy"],
     )
     bundles["accuracy"] = {
-        "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), _BUNDLE_BUDGETS["accuracy"])),
+        "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
         "evidence_refs": refs["accuracy"],
         "omitted": {
             "count": acc_drop,
@@ -873,10 +954,10 @@ def build_metric_evidence_bundles(
             ("END-STATE FILE CHANGES", file_changes),
             ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
         ],
-        _BUNDLE_BUDGETS["goal_accuracy"],
+        budgets["goal_accuracy"],
     )
     bundles["goal_accuracy"] = {
-        "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), _BUNDLE_BUDGETS["goal_accuracy"])),
+        "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),
         "evidence_refs": refs["goal_accuracy"],
         "omitted": {
             "count": goal_drop,
@@ -886,7 +967,7 @@ def build_metric_evidence_bundles(
         "verified": facts,
     }
 
-    bc_text = build_behavior_evidence(traj, question, max_chars=_BUNDLE_BUDGETS["behavior_check"])
+    bc_text = build_behavior_evidence(traj, question, max_chars=budgets["behavior_check"])
     bc_full = build_behavior_evidence(traj, question, max_chars=10**9)
     bc_trunc = len(bc_full) > len(bc_text)
     bundles["behavior_check"] = {

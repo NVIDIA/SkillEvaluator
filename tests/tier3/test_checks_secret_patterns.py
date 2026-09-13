@@ -100,7 +100,9 @@ def test_real_key_in_tool_output_is_still_flagged(secret):
 
     assert result["passed"] is False
     assert result["score"] == 0.0
-    assert any(f["type"] == "secret_exposure" for f in result["findings"])
+    [finding] = [f for f in result["findings"] if f["type"] == "secret_exposure"]
+    assert finding["evidence"] == "[redacted secret exposure]"
+    assert secret not in finding["evidence"]
 
 
 def test_real_key_in_agent_response_is_still_flagged():

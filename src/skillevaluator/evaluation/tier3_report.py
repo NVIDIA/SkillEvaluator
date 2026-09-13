@@ -26,12 +26,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from skillevaluator import __version__
 from skillevaluator.constants import (
     AGENT_EVAL_EVALUATORS,
     AGENT_EVAL_SCORE_DEFINITION,
     DIMENSION_HINTS,
     DIMENSION_MAPPING,
+    DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
+    DIMENSION_VERDICT_PASS_THRESHOLD,
+    TIER3_LIFT_FAIL_THRESHOLD,
+    TIER3_LIFT_PASS_THRESHOLD,
 )
+from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 
 # Verdict labels mirror SkillEvaluator's AGENT_EVAL_VERDICT_* values so the ported
@@ -39,10 +45,6 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_NEUTRAL = "neutral"
-
-# Lift thresholds mirror SkillEvaluator TIER3_LIFT_PASS_THRESHOLD / _FAIL_THRESHOLD.
-_VERDICT_PASS_THRESHOLD = 0.05
-_VERDICT_FAIL_THRESHOLD = -0.05
 
 _AGENT_EVAL_VALIDATOR = "AGENT_EVAL"
 _AGENT_EVAL_DESCRIPTION = "Tier 3: Live Agent Evaluation (Harbor)"
@@ -78,6 +80,7 @@ _MAX_RAW_TRIAL_REWARDS_TOTAL = 256
 _MAX_RAW_METRICS_PER_REWARD = 64
 _MAX_RAW_REWARD_FIELDS = 96
 _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD = 128
+_MAX_UNPAIRED_CASE_IDS_IN_REPORT = 64
 _MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
 
 
@@ -136,6 +139,7 @@ class _ReportBudget:
                 "raw_trial_rewards": _MAX_RAW_TRIAL_REWARDS_TOTAL,
                 "raw_metrics_per_reward": _MAX_RAW_METRICS_PER_REWARD,
                 "custom_metric_name_visits_per_reward": _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD,
+                "unpaired_case_id_samples": _MAX_UNPAIRED_CASE_IDS_IN_REPORT,
             },
             "omitted": dict(sorted(self.omitted.items())),
         }
@@ -184,7 +188,14 @@ def _artifact_loading_reasons(
     return reasons
 
 
-def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None) -> dict[str, Any]:
+def _advisory_agent_eval_payload(
+    message: str,
+    *,
+    skill_name: str | None = None,
+    n_attempts: int | None = None,
+    pass_threshold: float | None = None,
+    stop_on_pass: bool | None = None,
+) -> dict[str, Any]:
     """Build the canonical (but empty) ``agent_eval`` payload for a skipped Tier 3 run.
 
     The combined HTML/JSON report only renders a Tier 3 section when some
@@ -198,6 +209,15 @@ def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None)
     ``_tier3_dataset_required_result`` / ``_invalid_skill_evaluator_result``) even when the
     dataset/runtime is unavailable.
     """
+    attempt_policy = _default_attempt_policy()
+    if n_attempts is not None:
+        attempt_policy["max_attempts"] = n_attempts
+    if pass_threshold is not None:
+        attempt_policy["pass_threshold"] = pass_threshold
+    if stop_on_pass is not None:
+        attempt_policy["stop_on_pass"] = stop_on_pass
+    dataset_summary = _dataset_summary([], [])
+    verdict_policy = _verdict_policy(attempt_policy)
     summary = {
         "schema_version": _SCHEMA_VERSION,
         "verdict": VERDICT_NEUTRAL,
@@ -208,6 +228,12 @@ def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None)
         "overall_lift": None,
         "environment": None,
         "runtime_seconds": 0.0,
+        "evaluated_at": None,
+        "evaluator_version": __version__,
+        "dataset_summary": dataset_summary,
+        "dataset_digest": None,
+        "dataset_digest_algorithm": None,
+        "verdict_policy": verdict_policy,
         "execution_status": "skipped",
         "execution_errors": [message],
         "expected_attempts": 0,
@@ -229,6 +255,8 @@ def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None)
         "expected_attempts": 0,
         "scored_attempts": 0,
         "runtime_seconds": 0.0,
+        "evaluated_at": None,
+        "evaluator_version": __version__,
         "agents": {},
         "dimensions": [],
         "evaluators": {},
@@ -239,8 +267,12 @@ def _advisory_agent_eval_payload(message: str, *, skill_name: str | None = None)
         "suggestions_v2": [],
         "metric_ids": [],
         "metric_labels": {},
-        "attempt_policy": _default_attempt_policy(),
+        "attempt_policy": attempt_policy,
         "dataset": [],
+        "dataset_summary": dataset_summary,
+        "dataset_digest": None,
+        "dataset_digest_algorithm": None,
+        "verdict_policy": verdict_policy,
         "provenance": {
             "source": "advisory",
             "reason": "skipped",
@@ -406,6 +438,8 @@ def agent_eval_result_from_directory(
     env_mode: str | None = None,
     engine_result: dict[str, Any] | None = None,
     plugin_provenance: dict[str, Any] | None = None,
+    evaluated_at: str | None = None,
+    evaluator_version: str | None = None,
     use_llm_judge: bool = True,
 ) -> ValidationResult | None:
     """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run."""
@@ -413,6 +447,7 @@ def agent_eval_result_from_directory(
     from skillevaluator.tier3.harbor.report_data import (
         load_agent_data,
         load_dataset,
+        load_dataset_snapshot,
         load_staged_harbor_dataset,
     )
 
@@ -426,7 +461,12 @@ def agent_eval_result_from_directory(
     if not agents:
         return None
 
-    dataset = load_dataset(dataset_source or skill_path) or load_staged_harbor_dataset(run_dir)
+    run_truth = _run_truth_metadata(run_dir, engine_result, load_dataset_snapshot(run_dir))
+    dataset = (
+        run_truth.get("dataset")
+        or (load_dataset(dataset_source) if dataset_source is not None else None)
+        or load_staged_harbor_dataset(run_dir)
+    )
     payload = build_agent_eval_payload(
         skill_path.name,
         agents,
@@ -440,6 +480,11 @@ def agent_eval_result_from_directory(
         run_dir=run_dir,
         comparison=_read_comparison(run_dir),
         plugin_provenance=plugin_provenance,
+        evaluated_at=evaluated_at or _evaluated_at_from_run(run_dir, engine_result),
+        evaluator_version=evaluator_version or run_truth.get("evaluator_version"),
+        persisted_dataset_summary=run_truth.get("dataset_summary"),
+        dataset_digest=run_truth.get("dataset_digest"),
+        dataset_digest_algorithm=run_truth.get("dataset_digest_algorithm"),
         use_llm_judge=use_llm_judge,
     )
     return _validation_result_from_payload(payload)
@@ -548,6 +593,11 @@ def build_agent_eval_payload(
     run_dir: Path | None = None,
     comparison: dict[str, Any] | None = None,
     plugin_provenance: dict[str, Any] | None = None,
+    evaluated_at: str | None = None,
+    evaluator_version: str | None = __version__,
+    persisted_dataset_summary: dict[str, Any] | None = None,
+    dataset_digest: str | None = None,
+    dataset_digest_algorithm: str | None = None,
     use_llm_judge: bool = True,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
@@ -563,7 +613,11 @@ def build_agent_eval_payload(
     and ``provenance`` (raw evaluators, raw lift, raw trial rewards) feeds the
     Diagnostics tab.
     """
-    from skillevaluator.tier3.harbor.report_data import metrics_for_agents
+    from skillevaluator.tier3.harbor.report_data import (
+        build_dataset_snapshot,
+        deduplicate_dataset_entries,
+        metrics_for_agents,
+    )
 
     metrics = metrics_for_agents(agents)
     report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
@@ -604,13 +658,29 @@ def build_agent_eval_payload(
     raw_overall_score = best.get("with_skill")
     overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
     overall_lift = _finite_float(best.get("lift"))
-    verdict = _verdict_from_lift(overall_lift) if overall_score is not None else VERDICT_NEUTRAL
+    verdict = _overall_verdict_from_agents(agent_payloads) if overall_score is not None else VERDICT_NEUTRAL
 
     metric_ids = list(best.get("evaluators", {}).keys())
     metric_labels = _metric_labels(metric_ids)
 
     policy = attempt_policy or _default_attempt_policy()
     canonical_trials = _flatten_trials(agent_payloads)
+    public_dataset = deduplicate_dataset_entries([entry for entry in (dataset or []) if isinstance(entry, dict)])
+    computed_dataset_truth = (
+        build_dataset_snapshot(public_dataset, evaluator_version=evaluator_version or "") if public_dataset else None
+    )
+    dataset_summary = (
+        dict(persisted_dataset_summary)
+        if isinstance(persisted_dataset_summary, dict)
+        else _dataset_summary(public_dataset, canonical_trials)
+    )
+    effective_dataset_digest = dataset_digest or (
+        str(computed_dataset_truth["dataset_digest"]) if computed_dataset_truth else None
+    )
+    effective_dataset_digest_algorithm = dataset_digest_algorithm or (
+        str(computed_dataset_truth["dataset_digest_algorithm"]) if computed_dataset_truth else None
+    )
+    verdict_policy = _verdict_policy(policy)
     harbor_summary = _merge_harbor_viewer_summaries(
         _harbor_viewer_summary(canonical_trials),
         harbor_viewer,
@@ -628,6 +698,12 @@ def build_agent_eval_payload(
         "overall_lift": round(overall_lift, 4) if overall_lift is not None else None,
         "environment": env_mode,
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
+        "evaluated_at": evaluated_at,
+        "evaluator_version": evaluator_version,
+        "dataset_summary": dataset_summary,
+        "dataset_digest": effective_dataset_digest,
+        "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "verdict_policy": verdict_policy,
         "execution_status": execution_status,
         "execution_errors": execution_errors,
         "expected_attempts": sum(
@@ -686,6 +762,12 @@ def build_agent_eval_payload(
         "expected_attempts": summary["expected_attempts"],
         "scored_attempts": summary["scored_attempts"],
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
+        "evaluated_at": evaluated_at,
+        "evaluator_version": evaluator_version,
+        "dataset_summary": dataset_summary,
+        "dataset_digest": effective_dataset_digest,
+        "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "verdict_policy": verdict_policy,
         "agents": agent_payloads,
         "dimensions": best_dimensions,
         "dimension_hints": dict(DIMENSION_HINTS),
@@ -703,7 +785,7 @@ def build_agent_eval_payload(
         "supported_metric_ids": list(AGENT_EVAL_EVALUATORS),
         "metric_labels": metric_labels,
         "attempt_policy": policy,
-        "dataset": [d for d in (dataset or []) if isinstance(d, dict)],
+        "dataset": public_dataset,
         "provenance": _build_provenance(
             agent_payloads,
             agents,
@@ -729,6 +811,10 @@ def build_agent_eval_payload(
         use_llm_judge=use_llm_judge and overall_score is not None,
     )
     if evidence_links:
+        payload["conclusions"] = _attach_harbor_evidence_to_conclusions(
+            payload.get("conclusions") or [],
+            evidence_links,
+        )
         payload["recommendations"] = _attach_harbor_evidence_to_recommendations(
             payload.get("recommendations") or [],
             evidence_links,
@@ -899,6 +985,46 @@ def _prune_non_best_agent_details(payload: dict[str, Any], report_budget: _Repor
     report_budget.omit("non_best_agent_details", omitted)
 
 
+def _prune_pass_at_k_pairing_diagnostics(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Bound legacy full mismatch-ID arrays while preserving counts and samples."""
+    pass_at_k_payloads = [payload.get("pass_at_k")]
+    agents = payload.get("agents")
+    if isinstance(agents, dict):
+        pass_at_k_payloads.extend(agent.get("pass_at_k") for agent in agents.values() if isinstance(agent, dict))
+
+    seen: set[int] = set()
+    omitted = 0
+    for pass_at_k in pass_at_k_payloads:
+        if not isinstance(pass_at_k, dict):
+            continue
+        lift = pass_at_k.get("lift")
+        paired = lift.get("paired_comparison") if isinstance(lift, dict) else None
+        if not isinstance(paired, dict) or id(paired) in seen:
+            continue
+        seen.add(id(paired))
+
+        for condition in ("with_skill", "without_skill"):
+            ids_key = f"{condition}_unpaired_case_ids"
+            count_key = f"{condition}_unpaired_case_count"
+            truncated_key = f"{ids_key}_truncated"
+            case_ids = paired.get(ids_key)
+            if not isinstance(case_ids, list):
+                continue
+
+            declared_count = paired.get(count_key)
+            if not isinstance(declared_count, int) or isinstance(declared_count, bool) or declared_count < 0:
+                declared_count = 0
+            paired[count_key] = max(declared_count, len(case_ids))
+            if len(case_ids) > _MAX_UNPAIRED_CASE_IDS_IN_REPORT:
+                omitted += len(case_ids) - _MAX_UNPAIRED_CASE_IDS_IN_REPORT
+                paired[ids_key] = case_ids[:_MAX_UNPAIRED_CASE_IDS_IN_REPORT]
+                paired[truncated_key] = True
+            else:
+                paired[truncated_key] = bool(paired.get(truncated_key))
+
+    report_budget.omit("unpaired_case_ids", omitted)
+
+
 def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
     """Keep the complete self-contained payload within a hard serialized budget.
 
@@ -912,6 +1038,11 @@ def _enforce_report_payload_budget(payload: dict[str, Any], report_budget: _Repo
         if report_budget.truncated:
             payload["report_truncation"] = report_budget.signal()
 
+    # Older artifacts may contain every unmatched case identifier. Normalize
+    # them before the size check so a report cannot discard all agents and
+    # pass@k truth merely because diagnostic IDs were duplicated into the
+    # best-agent and top-level projections.
+    _prune_pass_at_k_pairing_diagnostics(payload, report_budget)
     refresh_signal()
     if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
         return
@@ -1070,6 +1201,16 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
 # ---------------------------------------------------------------------------
 
 
+def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
+    """Return whether a condition may contribute score-bearing report fields."""
+    conditions = info.get("conditions")
+    condition_info = conditions.get(condition) if isinstance(conditions, dict) else None
+    status = condition_info.get("execution_status") if isinstance(condition_info, dict) else None
+    if status is None:
+        status = info.get("execution_status")
+    return status not in {"failed", "unknown", "skipped"}
+
+
 def _build_agent(
     name: str,
     info: dict[str, Any],
@@ -1079,6 +1220,12 @@ def _build_agent(
     with_scores = info.get("with_skill") or {}
     without_scores = info.get("without_skill") or {}
     lift_data = info.get("lift") or {}
+    with_quality_available = _condition_quality_available(info, "with_skill")
+    baseline_quality_available = _condition_quality_available(info, "without_skill")
+    if not with_quality_available:
+        with_scores = {}
+    if not baseline_quality_available:
+        without_scores = {}
 
     evaluators = _build_evaluators(metrics, with_scores, without_scores, lift_data)
     dimensions = _build_dimensions(
@@ -1089,15 +1236,20 @@ def _build_agent(
     )
     overall_ws = _mean([d["with_skill"] for d in dimensions])
     overall_bl = _mean([d["baseline"] for d in dimensions])
-    if overall_ws is None and not metrics:
-        overall_ws = _mean([reward.get("overall") for reward in info.get("rewards", []) if isinstance(reward, dict)])
-    if overall_bl is None and not metrics:
-        overall_bl = _mean(
-            [reward.get("overall") for reward in info.get("rewards_baseline", []) if isinstance(reward, dict)]
-        )
+    if overall_ws is None and not metrics and with_quality_available:
+        overall_ws = _finite_float(info.get("overall_with_skill"))
+        if overall_ws is None and info.get("rewards_complete") is not False:
+            overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
+    if overall_bl is None and not metrics and baseline_quality_available:
+        overall_bl = _finite_float(info.get("overall_without_skill"))
+        if overall_bl is None and info.get("rewards_baseline_complete") is not False:
+            overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
     overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
 
+    sum_of_parts_quality_available = _condition_quality_available(info, "sum_of_parts")
     sum_of_parts_scores = info.get("sum_of_parts") or {}
+    if not sum_of_parts_quality_available:
+        sum_of_parts_scores = {}
     sum_of_parts_dimensions = _build_dimensions(
         sum_of_parts_scores,
         {},
@@ -1105,6 +1257,10 @@ def _build_agent(
         {},
     )
     sum_of_parts_overall = _mean([dimension["with_skill"] for dimension in sum_of_parts_dimensions])
+    if sum_of_parts_overall is None and not metrics and sum_of_parts_quality_available:
+        sum_of_parts_overall = _finite_float(info.get("overall_sum_of_parts"))
+        if sum_of_parts_overall is None and info.get("rewards_sum_of_parts_complete") is not False:
+            sum_of_parts_overall = _logical_reward_mean(info.get("rewards_sum_of_parts"), "overall")
     integration_lift = (
         round(overall_ws - sum_of_parts_overall, 4)
         if overall_ws is not None and sum_of_parts_overall is not None
@@ -1139,7 +1295,7 @@ def _build_agent(
         "integration_lift": integration_lift,
         "integration_completeness": info.get("integration_completeness") or {},
         "num_trials": int(info.get("num_trials", 0) or 0),
-        "num_trials_baseline": len(baseline_trials),
+        "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
         "trials_baseline": baseline_trials,
         "pass_at_k": {
@@ -1276,9 +1432,20 @@ def _deterministic_reasoning(
         value = _finite_float(with_scores.get(signal))
         if value is not None:
             parts.append(f"{signal}={value:.2f}")
+    numeric_with_skill = _finite_float(ws)
+    numeric_baseline = _finite_float(bl)
+    if numeric_with_skill is None:
+        bullets = ["With-skill score unavailable; no verdict was computed."]
+        if numeric_baseline is not None:
+            bullets.append(
+                f"Baseline score {numeric_baseline:.2f}; lift cannot be computed without a with-skill score."
+            )
+        else:
+            bullets.append("No baseline run available; lift cannot be computed.")
+        return bullets, " ".join(bullets)
     bullets = _human_reasoning_bullets(
-        with_skill=_finite_float(ws) or 0.0,
-        baseline=_finite_float(bl),
+        with_skill=numeric_with_skill,
+        baseline=numeric_baseline,
         lift=lift,
         parts=parts,
     )
@@ -1304,8 +1471,8 @@ def _compact_evidence_refs(raw_refs: object) -> list[str]:
             rendered = raw.strip()
         elif isinstance(raw, dict):
             source = str(raw.get("source") or "").strip()
-            pointer = str(raw.get("json_pointer") or raw.get("path") or "").strip()
-            rendered = f"{source}{pointer}" if source else pointer
+            identity = evidence_ref_identity(raw)
+            rendered = f"{source}{identity}" if source else identity
         else:
             continue
         if rendered and rendered not in refs:
@@ -1667,11 +1834,30 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     ``_normalize_harbor_trials`` so the ported Trials tab (per-evaluator
     drill-down, token/steps charts, warnings) renders identically.
     """
+    # Import lazily: ``skillevaluator.tier3`` imports report construction through
+    # its command module, so importing Harbor metrics at module load time creates
+    # a collector-first circular import.
+    from skillevaluator.tier3.harbor.metrics import (
+        DEFAULT_METRIC_SET,
+        LEGACY_METRIC_SET,
+        metric_set_for_reward,
+        metric_value,
+    )
+
     out: list[dict[str, Any]] = []
     for reward in rewards:
         if not isinstance(reward, dict):
             continue
-        scores = {m: numeric for m in metrics if (numeric := _finite_float(reward.get(m))) is not None}
+        declared_metric_set = reward.get("metric_set") or reward.get("metric_set_version")
+        standard_metric_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
+        metric_set, standard_metrics = metric_set_for_reward(reward)
+        is_declared_custom = bool(declared_metric_set) and str(declared_metric_set) not in standard_metric_sets
+        scores = {
+            m: numeric
+            for m in metrics
+            if not (is_declared_custom and m in {"skill_execution", "skill_routing"})
+            if (numeric := _finite_float(reward.get(m))) is not None
+        }
         trial: dict[str, Any] = {
             "trial_id": reward.get("trial_id"),
             "entry_id": reward.get("entry_id"),
@@ -1690,6 +1876,18 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             trial["warnings"] = list(reward["warnings"])
         if reward.get("error_recovery"):
             trial["error_recovery"] = reward["error_recovery"]
+        is_standard_reward = (
+            (not declared_metric_set or str(declared_metric_set) in standard_metric_sets)
+            and metric_set in standard_metric_sets
+            and "skill_execution" in standard_metrics
+            and metric_value(reward, "skill_execution") is not None
+        )
+        if is_standard_reward and reward.get("invocation_evidence_source") == "trajectory":
+            for key in ("skill_invoked", "routing_passed"):
+                if type(reward.get(key)) is bool:
+                    trial[key] = reward[key]
+            if "skill_invoked" in trial or "routing_passed" in trial:
+                trial["invocation_evidence_source"] = "trajectory"
         harbor_viewer = _normalize_harbor_viewer_metadata(reward.get("harbor_viewer"))
         if harbor_viewer:
             trial["harbor_viewer"] = harbor_viewer
@@ -2039,9 +2237,37 @@ def _attach_harbor_evidence_to_recommendations(
             linked.append(recommendation)
             continue
         entry = dict(recommendation)
-        evidence = entry.get("evidence")
-        if not isinstance(evidence, dict) or not _safe_harbor_viewer_url(evidence.get("url")):
-            entry["evidence"] = evidence_links[min(index, len(evidence_links) - 1)]
+        evidence = _grounded_or_positional_evidence(entry, entry.get("evidence"), evidence_links, index)
+        if evidence is None:
+            entry.pop("evidence", None)
+        else:
+            entry["evidence"] = evidence
+        linked.append(entry)
+    return linked
+
+
+def _attach_harbor_evidence_to_conclusions(
+    conclusions: list[dict[str, Any]],
+    evidence_links: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not conclusions or not evidence_links:
+        return conclusions
+
+    linked: list[dict[str, Any]] = []
+    for conclusion in conclusions:
+        if not isinstance(conclusion, dict):
+            linked.append(conclusion)
+            continue
+        entry = dict(conclusion)
+        case_ids = _evidence_case_ids(entry)
+        if case_ids:
+            evidence = _case_matched_evidence(case_ids, evidence_links)
+            if evidence is None:
+                entry.pop("evidence", None)
+            else:
+                entry["evidence"] = evidence
+        elif not _valid_evidence(entry.get("evidence")):
+            entry.pop("evidence", None)
         linked.append(entry)
     return linked
 
@@ -2059,11 +2285,54 @@ def _attach_harbor_evidence_to_suggestions_v2(
             linked.append(suggestion)
             continue
         entry = dict(suggestion)
-        evidence = entry.get("harbor_evidence") or entry.get("evidence")
-        if not isinstance(evidence, dict) or not _safe_harbor_viewer_url(evidence.get("url")):
-            entry["harbor_evidence"] = evidence_links[min(index, len(evidence_links) - 1)]
+        existing = entry.get("harbor_evidence") or entry.get("evidence")
+        evidence = _grounded_or_positional_evidence(entry, existing, evidence_links, index)
+        if evidence is None:
+            entry.pop("harbor_evidence", None)
+        else:
+            entry["harbor_evidence"] = evidence
         linked.append(entry)
     return linked
+
+
+def _valid_evidence(evidence: object) -> bool:
+    return isinstance(evidence, dict) and _safe_harbor_viewer_url(evidence.get("url")) is not None
+
+
+def _evidence_case_ids(item: dict[str, Any]) -> list[str]:
+    case_ids = item.get("evidence_case_ids")
+    if not isinstance(case_ids, list):
+        return []
+    return [case_id.strip() for case_id in case_ids if isinstance(case_id, str) and case_id.strip()]
+
+
+def _case_matched_evidence(
+    case_ids: list[str],
+    evidence_links: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for case_id in case_ids:
+        for evidence in evidence_links:
+            if (
+                isinstance(evidence, dict)
+                and str(evidence.get("entry_id") or "") == case_id
+                and _safe_harbor_viewer_url(evidence.get("url"))
+            ):
+                return evidence
+    return None
+
+
+def _grounded_or_positional_evidence(
+    item: dict[str, Any],
+    existing: object,
+    evidence_links: list[dict[str, Any]],
+    index: int,
+) -> dict[str, Any] | None:
+    case_ids = _evidence_case_ids(item)
+    if case_ids:
+        return _case_matched_evidence(case_ids, evidence_links)
+    if _valid_evidence(existing):
+        return existing
+    return evidence_links[min(index, len(evidence_links) - 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -2141,7 +2410,7 @@ def _build_conclusions(
             lift = _finite_float(best.get("lift"))
             conclusions.append(
                 {
-                    "severity": "pass" if best_score >= 0.7 else "warn",
+                    "severity": "pass" if best_score >= pass_threshold else "warn",
                     "title": "Best performing agent",
                     "message": (
                         f"{best_name} leads with overall score {best_score:.2f}"
@@ -2215,7 +2484,7 @@ def _suggestions_for_dimensions(dimensions: list[dict[str, Any]]) -> list[str]:
     pending: list[tuple[float, str]] = []
     for dim in dimensions:
         score = _finite_float(dim.get("with_skill", dim.get("score", 0.0)))
-        if score is not None and score < 0.7:
+        if score is not None and score < DIMENSION_VERDICT_PASS_THRESHOLD:
             pending.append((score, dim.get("id", "")))
     pending.sort()
 
@@ -2282,9 +2551,9 @@ def _verdict_from_lift(lift: float | None) -> str:
     numeric = _finite_float(lift)
     if numeric is None:
         return VERDICT_NEUTRAL
-    if numeric >= _VERDICT_PASS_THRESHOLD:
+    if numeric >= TIER3_LIFT_PASS_THRESHOLD:
         return VERDICT_PASS
-    if numeric <= _VERDICT_FAIL_THRESHOLD:
+    if numeric <= TIER3_LIFT_FAIL_THRESHOLD:
         return VERDICT_FAIL
     return VERDICT_NEUTRAL
 
@@ -2347,6 +2616,43 @@ def _build_integration_report(
         "completeness": completeness if isinstance(completeness, dict) else None,
         "interpretation": _INTEGRATION_INTERPRETATION[verdict],
     }
+
+
+def _agent_quality_verdict(agent: dict[str, Any]) -> str:
+    """Classify one supported agent by the canonical dimension gate."""
+    if agent.get("execution_status") != "succeeded":
+        return VERDICT_NEUTRAL
+
+    dimensions = {
+        str(dimension.get("id")): dimension
+        for dimension in agent.get("dimensions") or []
+        if isinstance(dimension, dict)
+    }
+    scores: list[float] = []
+    for dimension_id in _DIMENSION_IDS:
+        dimension = dimensions.get(dimension_id)
+        value = (dimension or {}).get("with_skill", (dimension or {}).get("score"))
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return VERDICT_NEUTRAL
+        scores.append(float(value))
+
+    if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
+        return VERDICT_FAIL
+    if any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
+        return VERDICT_NEUTRAL
+    return VERDICT_PASS
+
+
+def _overall_verdict_from_agents(agents: dict[str, dict[str, Any]]) -> str:
+    """PASS only when one supported agent passes every required dimension."""
+    verdicts = [
+        _agent_quality_verdict(agent) for agent in agents.values() if agent.get("execution_status") == "succeeded"
+    ]
+    if any(verdict == VERDICT_PASS for verdict in verdicts):
+        return VERDICT_PASS
+    if any(verdict == VERDICT_NEUTRAL for verdict in verdicts) or not verdicts:
+        return VERDICT_NEUTRAL
+    return VERDICT_FAIL
 
 
 def _pick_best_agent(agents: dict[str, dict[str, Any]]) -> str:
@@ -2432,6 +2738,64 @@ def _read_comparison(run_dir: Path) -> dict[str, Any]:
     return {}
 
 
+def _run_truth_metadata(
+    run_dir: Path,
+    engine_result: dict[str, Any] | None,
+    persisted_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Read dataset/evaluator truth owned by the evaluated run, never live source."""
+    persisted_result: dict[str, Any] | None = None
+    result_file = run_dir / "result.json"
+    if result_file.exists():
+        with contextlib.suppress(OSError, UnicodeError, ValueError):
+            loaded = json.loads(result_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                persisted_result = loaded
+
+    candidates: list[dict[str, Any]] = []
+    if isinstance(persisted_snapshot, dict):
+        candidates.append(persisted_snapshot)
+    for candidate in (engine_result, persisted_result):
+        if not isinstance(candidate, dict):
+            continue
+        nested = candidate.get("dataset_snapshot")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+        candidates.append(candidate)
+
+    truth: dict[str, Any] = {}
+    for candidate in candidates:
+        if "dataset" not in truth and isinstance(candidate.get("dataset"), list):
+            truth["dataset"] = [entry for entry in candidate["dataset"] if isinstance(entry, dict)]
+        if "dataset_summary" not in truth and isinstance(candidate.get("dataset_summary"), dict):
+            truth["dataset_summary"] = dict(candidate["dataset_summary"])
+        for field_name in ("evaluator_version", "dataset_digest", "dataset_digest_algorithm"):
+            value = candidate.get(field_name)
+            if field_name not in truth and isinstance(value, str) and value.strip():
+                truth[field_name] = value.strip()
+    return truth
+
+
+def _evaluated_at_from_run(run_dir: Path, engine_result: dict[str, Any] | None) -> str | None:
+    """Return the persisted UTC evaluation time, never a guessed legacy date."""
+    candidates: list[dict[str, Any]] = []
+    if isinstance(engine_result, dict):
+        candidates.append(engine_result)
+
+    result_file = run_dir / "result.json"
+    if result_file.exists():
+        with contextlib.suppress(OSError, UnicodeError, ValueError):
+            loaded = json.loads(result_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                candidates.append(loaded)
+
+    for candidate in candidates:
+        value = candidate.get("evaluated_at")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _load_suggestions_v2(run_dir: Path, agents: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Read evidence-backed suggestions from the best agent's findings.json."""
     suggestions: list[dict[str, Any]] = []
@@ -2477,9 +2841,63 @@ def _default_attempt_policy() -> dict[str, Any]:
     }
 
 
+def _dataset_summary(dataset: list[dict[str, Any]], trials: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a stable unique-task count and activation-intent summary."""
+    if dataset:
+        from skillevaluator.tier3.harbor.report_data import summarize_dataset_entries
+
+        return summarize_dataset_entries(dataset)
+
+    task_ids: set[str] = set()
+    for trial in trials:
+        for key in ("entry_id", "case_id", "task_id", "id"):
+            value = trial.get(key)
+            if value is not None and str(value).strip():
+                task_ids.add(str(value).strip())
+                break
+    return {
+        "total_tasks": len(task_ids),
+        "positive_tasks": 0,
+        "negative_tasks": 0,
+        "unclassified_tasks": len(task_ids),
+        "source": "trials" if task_ids else "unavailable",
+    }
+
+
+def _verdict_policy(attempt_policy: dict[str, Any]) -> dict[str, Any]:
+    """Expose the distinct task-attempt, dimension, and overall-lift gates."""
+    attempt_threshold = attempt_policy.get("pass_threshold")
+    return {
+        "attempt_pass_threshold": (
+            float(attempt_threshold)
+            if isinstance(attempt_threshold, (int, float)) and not isinstance(attempt_threshold, bool)
+            else None
+        ),
+        "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
+        "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
+        "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
+        "lift_fail_threshold": TIER3_LIFT_FAIL_THRESHOLD,
+        "overall_pass_rule": "one_supported_agent_all_dimensions_pass",
+    }
+
+
 def _mean(values: list[float]) -> float | None:
     numeric = [finite for value in values if (finite := _finite_float(value)) is not None]
     return round(sum(numeric) / len(numeric), 4) if numeric else None
+
+
+def _logical_reward_mean(rewards: Any, field: str) -> float | None:
+    """Average a persisted reward field once per logical Harbor trial."""
+    if not isinstance(rewards, list):
+        return None
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+
+    group_means = [
+        group_mean
+        for group in logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
+        if (group_mean := _mean([reward.get(field) for reward in group])) is not None
+    ]
+    return _mean(group_means)
 
 
 def _as_float(value: Any) -> float:

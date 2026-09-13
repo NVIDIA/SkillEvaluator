@@ -57,13 +57,30 @@ jobs:
       - name: Verify full Git checkout
         run: |
           test -d .git
-          test "$(git rev-list --count HEAD)" -gt 0
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          git rev-parse --verify "HEAD^{commit}" >/dev/null
       - name: Scan Git history
-        run: >-
-          docker run --rm
-          --volume "$PWD:/repo:ro"
-          ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
-          git --no-banner --redact --verbose /repo
+        # Pull requests and main pushes scan only history reachable from the
+        # checked-out commit. Audits keep --all so unmerged refs and tags stay
+        # covered. Re-derive these v8.30.0 options when bumping the image.
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            pull_request|push)
+              log_opts="--full-history --diff-filter=tuxdb HEAD --"
+              ;;
+            # Unknown future events deliberately receive the wider audit.
+            *)
+              log_opts="--full-history --all --diff-filter=tuxdb --"
+              ;;
+          esac
+
+          docker run --rm \
+            --volume "$PWD:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9 \
+            git --no-banner --redact --verbose \
+            --log-opts="$log_opts" /repo
 
   dependency-review:
     name: Dependency review

@@ -44,6 +44,7 @@ PACKAGED_NVIDIA_BUILD_RUNTIME_FILES = {
     "skillevaluator/tier3/harbor/local_agents.py",
     "skillevaluator/tier3/harbor/nvidia_build_bridge.py",
     "skillevaluator/tier3/harbor/secure_docker_environment.py",
+    "skillevaluator/tier3/harbor/sensitive_stdin.py",
 }
 SOURCE_SCAN_EXCLUDED_DIRS = {
     ".git",
@@ -182,6 +183,16 @@ def test_third_party_notices_do_not_list_removed_safety_dependency() -> None:
     notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 
     assert "Safety (MIT)" not in notices
+
+
+def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
+    dependencies = [Requirement(raw) for raw in _project()["project"]["dependencies"]]
+    idna_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "idna"]
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+
+    assert len(idna_requirements) == 1
+    assert str(idna_requirements[0].specifier) == "<4,>=3.10"
+    assert "IDNA (BSD-3-Clause)" in notices
 
 
 def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -> None:
@@ -503,7 +514,9 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
     public_docs = f"{readme}\n{configuration}\n{tier3}"
 
+    assert "gpt-5.6-sol" in public_docs
     assert "gpt-5.4-mini" in public_docs
+    assert "claude-opus-5" in public_docs
     assert "nvidia/nemotron-3-nano-30b-a3b" in public_docs
     assert "nvidia/nvidia/nemotron-3-nano-30b-a3b" in public_docs
     assert "Nemotron Super" in public_docs
@@ -582,6 +595,14 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "`SKILL_EVAL_*` covers provider and model configuration" in " ".join(environment.split())
     assert "`SKILLEVALUATOR_*` covers product-level validation" in " ".join(environment.split())
     assert "are not interchangeable" in environment
+
+
+def test_ci_sarif_merge_uses_uv_tool_python() -> None:
+    ci = (REPO_ROOT / "docs" / "ci-integration.mdx").read_text(encoding="utf-8")
+
+    assert 'skillevaluator_python="$(dirname "$(readlink -f "$(command -v skillevaluator)")")/python"' in ci
+    assert "\"$skillevaluator_python\" - <<'PY'" in ci
+    assert "python3 - <<'PY'" not in ci
 
 
 def test_harbor_atif_and_agent_eval_alias_are_defined() -> None:

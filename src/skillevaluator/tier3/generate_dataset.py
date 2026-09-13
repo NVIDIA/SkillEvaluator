@@ -51,7 +51,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
@@ -104,19 +108,31 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
     description = ""
     scripts: list[str] = []
 
-    # Parse frontmatter
-    fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+    # Parse frontmatter as YAML. A line-based scan would capture block-scalar
+    # indicators (``>-``, ``|``) verbatim and truncate multi-line quoted scalars,
+    # so both fields go through the same loader Tier 2 uses.
+    fm_match = FRONTMATTER_PATTERN.match(content)
     if fm_match:
-        for line in fm_match.group(1).split("\n"):
-            if line.startswith("name:"):
-                name = line.split(":", 1)[1].strip().strip("'\"")
-            elif line.startswith("description:"):
-                description = line.split(":", 1)[1].strip().strip("'\"")
+        try:
+            frontmatter = yaml.safe_load(fm_match.group(1))
+        except yaml.YAMLError:
+            frontmatter = None
+        if isinstance(frontmatter, dict):
+            if frontmatter.get("name"):
+                name = str(frontmatter["name"]).strip()
+            if frontmatter.get("description"):
+                description = str(frontmatter["description"]).strip()
 
-    # Find scripts
-    scripts_dir = skill_path / "scripts"
-    if scripts_dir.is_dir():
-        scripts = [f.name for f in scripts_dir.glob("*.py")]
+    # Find scripts in scripts/ (historical) and tools/ (agentskills.io)
+    seen_scripts: set[str] = set()
+    for dirname in EXECUTABLE_SKILL_DIRS:
+        directory = skill_path / dirname
+        if not directory.is_dir():
+            continue
+        for script_file in directory.glob("*.py"):
+            if script_file.name not in seen_scripts:
+                seen_scripts.add(script_file.name)
+                scripts.append(script_file.name)
 
     # Detect interactive scripts from SKILL.md content
     interactive_scripts: set[str] = set()
@@ -487,6 +503,46 @@ def _ensure_project_imports():
         sys.path.insert(0, src_dir)
 
 
+def _read_reward_entry_id(trial_dir: Path) -> str:
+    for reward_path in (trial_dir / "reward.json", trial_dir / "verifier" / "reward.json"):
+        if not reward_path.is_file():
+            continue
+        try:
+            payload = json.loads(reward_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            entry_id = str(payload.get("entry_id") or "").strip()
+            if entry_id:
+                return entry_id
+    return ""
+
+
+def _read_result_entry_id(trial_dir: Path) -> str:
+    """Resolve case id from Harbor ``result.json`` when reward metadata is absent."""
+    result_path = trial_dir / "result.json"
+    if not result_path.is_file():
+        return ""
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    from skillevaluator.tier3.harbor.collector import _entry_id_from_harbor_result
+
+    return _entry_id_from_harbor_result(payload)
+
+
+def _case_id_from_trial_dir(trial_dir: Path) -> str:
+    """Resolve eval case id from persisted Harbor metadata, else the folder name."""
+    if entry_id := _read_reward_entry_id(trial_dir):
+        return entry_id
+    if entry_id := _read_result_entry_id(trial_dir):
+        return entry_id
+    return trial_dir.name
+
+
 def _discover_trajectories(
     skill_path: Path,
     from_results: str | None = None,
@@ -525,7 +581,9 @@ def _discover_trajectories(
         for trial_dir in sorted(trials_dir.iterdir()):
             if not trial_dir.is_dir():
                 continue
-            case_id = trial_dir.name
+            case_id = _case_id_from_trial_dir(trial_dir)
+            if not case_id:
+                continue
             traj_path = trial_dir / "trajectory.json"
             traj, meta = load_trajectory_with_fallback(traj_path, logs_dir=trial_dir)
             if traj and traj.get("steps"):

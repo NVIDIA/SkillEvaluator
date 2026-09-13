@@ -90,6 +90,10 @@ def normalize_agent_eval_harbor_links(agent_eval: dict[str, Any]) -> dict[str, A
         normalized.get("recommendations"),
         evidence_keys=("evidence",),
     )
+    normalized["conclusions"] = _sanitize_items_with_evidence(
+        normalized.get("conclusions"),
+        evidence_keys=("evidence",),
+    )
     normalized["suggestions_v2"] = _sanitize_items_with_evidence(
         normalized.get("suggestions_v2"),
         evidence_keys=("harbor_evidence", "evidence"),

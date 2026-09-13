@@ -1212,8 +1212,9 @@
             box-shadow: var(--shadow);
         }
         .chart-card h3 { font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
-        .table-scroll { overflow-x: auto; margin: 1rem 0; border-radius: 10px; border: 1px solid var(--border-color); }
+        .table-scroll { max-width: 100%; overflow-x: auto; margin: 1rem 0; border-radius: 10px; border: 1px solid var(--border-color); -webkit-overflow-scrolling: touch; }
         .table-scroll .summary-table { margin: 0; }
+        .pass-at-k-table { min-width: 720px; }
         .metric-bar-cell { display: flex; align-items: center; gap: 0.6rem; min-width: 120px; }
         .metric-value { min-width: 2.5rem; font-weight: 700; }
         .mini-bar { width: 76px; height: 7px; background: var(--bg-tertiary); border-radius: 999px; overflow: hidden; }
@@ -2482,7 +2483,7 @@
                                 {% if d %}
                                     {% set d_score = d.score if d.score is not none else d.with_skill %}
                                     {% set d_lift = d.lift %}
-                                    {% set d_color = 'var(--success-color)' if d_score is not none and d_score >= 0.7 else ('var(--warning-color)' if d_score is not none and d_score >= 0.4 else 'var(--danger-color)') %}
+                                    {% set d_color = 'var(--text-secondary)' if d_score is none else ('var(--success-color)' if d_score >= 0.7 else ('var(--warning-color)' if d_score >= 0.4 else 'var(--danger-color)')) %}
                                     {% set lift_color = 'var(--success-color)' if d_lift is not none and d_lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if d_lift is not none and d_lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') %}
                                     <td>
                                         <div class="t3-mad-cell">
@@ -2490,7 +2491,7 @@
                                                 <span class="t3-mad-score" style="color:{{ d_color }};">{{ "%.2f" | format(d_score) if d_score is not none else "N/A" }}</span>
                                                 {% if d_score is not none %}<div class="t3-mad-bar"><span style="width:{{ (d_score * 100) | round(0) }}%; background:{{ d_color }};"></span></div>{% endif %}
                                             </div>
-                                            <span class="t3-mad-lift" style="color:{{ lift_color }};">{{ "%+.2f" | format(d_lift) if d_lift is not none else "no baseline" }} lift</span>
+                                            <span class="t3-mad-lift" style="color:{{ lift_color }};">{% if d_lift is not none %}{{ "%+.2f" | format(d_lift) }} lift{% elif d_score is none and d.baseline is not none %}with-skill unavailable{% elif d_score is none %}N/A lift{% else %}no baseline lift{% endif %}</span>
                                         </div>
                                     </td>
                                 {% else %}
@@ -2502,17 +2503,18 @@
                     <tr>
                         <td><strong>Overall</strong></td>
                         {% for name, agent in t3_agents.items() %}
-                            {% set ws = agent.with_skill or 0.0 %}
+                            {% set ws = agent.with_skill %}
+                            {% set bl = agent.baseline %}
                             {% set lf = agent.lift %}
-                            {% set ws_color = 'var(--success-color)' if ws >= 0.7 else ('var(--warning-color)' if ws >= 0.4 else 'var(--danger-color)') %}
+                            {% set ws_color = 'var(--text-secondary)' if ws is none else ('var(--success-color)' if ws >= 0.7 else ('var(--warning-color)' if ws >= 0.4 else 'var(--danger-color)')) %}
                             {% set lf_color = 'var(--success-color)' if lf is not none and lf >= tier3_lift_pass_threshold else ('var(--danger-color)' if lf is not none and lf <= tier3_lift_fail_threshold else 'var(--text-secondary)') %}
                             <td>
                                 <div class="t3-mad-cell">
                                     <div class="t3-mad-score-row">
-                                        <span class="t3-mad-score" style="color:{{ ws_color }};">{{ "%.2f" | format(ws) }}</span>
-                                        <div class="t3-mad-bar"><span style="width:{{ (ws * 100) | round(0) }}%; background:{{ ws_color }};"></span></div>
+                                        <span class="t3-mad-score" style="color:{{ ws_color }};">{{ "%.2f" | format(ws) if ws is not none else "N/A" }}</span>
+                                        {% if ws is not none %}<div class="t3-mad-bar"><span style="width:{{ (ws * 100) | round(0) }}%; background:{{ ws_color }};"></span></div>{% endif %}
                                     </div>
-                                    <span class="t3-mad-lift" style="color:{{ lf_color }};">{{ "%+.2f" | format(lf) if lf is not none else "no baseline" }} lift</span>
+                                    <span class="t3-mad-lift" style="color:{{ lf_color }};">{% if lf is not none %}{{ "%+.2f" | format(lf) }} lift{% elif ws is none and bl is not none %}with-skill unavailable{% elif ws is none %}N/A lift{% else %}no baseline lift{% endif %}</span>
                                 </div>
                             </td>
                         {% endfor %}
@@ -2533,9 +2535,10 @@
                 <div class="t3-agent-scorecards-row">
                     <div class="t3-agent-scorecard-list">
                     {% for name, agent in t3_agents.items() %}
-                        {% set with_skill = agent.with_skill or 0.0 %}
+                        {% set with_skill = agent.with_skill %}
                         {% set lift = agent.lift %}
-                        {% set score_color = 'var(--success-color)' if with_skill >= 0.7 else ('var(--warning-color)' if with_skill >= 0.4 else 'var(--danger-color)') %}
+                        {% set score_color = 'var(--text-secondary)' if with_skill is none else ('var(--success-color)' if with_skill >= 0.7 else ('var(--warning-color)' if with_skill >= 0.4 else 'var(--danger-color)')) %}
+                        {% set card_lift_color = 'var(--text-secondary)' if lift is none else ('var(--success-color)' if lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if lift <= tier3_lift_fail_threshold else 'var(--text-secondary)')) %}
                         <div class="t3-agent-card t3-agent-deeplink"
                              role="button"
                              tabindex="0"
@@ -2545,12 +2548,12 @@
                              aria-label="Open Agent Details for {{ name }}"
                              title="Open Agent Details for {{ name }}">
                             <div class="t3-agent-name">{{ name }}</div>
-                            <div class="t3-agent-score" style="color:{{ score_color }};">{{ "%.2f" | format(with_skill) }}</div>
-                            <div style="color:{{ 'var(--success-color)' if (lift or 0) >= tier3_lift_pass_threshold else ('var(--danger-color)' if (lift or 0) <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-size:0.85rem;">
-                                {% if lift is not none %}{{ "%+.2f" | format(lift) }} lift{% else %}no baseline{% endif %}
+                            <div class="t3-agent-score" style="color:{{ score_color }};">{{ "%.2f" | format(with_skill) if with_skill is not none else "N/A" }}</div>
+                            <div style="color:{{ card_lift_color }};font-size:0.85rem;">
+                                {% if lift is not none %}{{ "%+.2f" | format(lift) }} lift{% elif with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif with_skill is none %}N/A lift{% else %}no baseline{% endif %}
                             </div>
                             <div style="color:var(--text-secondary);font-size:0.75rem;margin-top:0.25rem;">{{ agent.num_trials or 0 }} trials</div>
-                            <div class="t3-mini-bar"><span style="width:{{ (with_skill * 100) | round(0) }}%; background:{{ score_color }};"></span></div>
+                            {% if with_skill is not none %}<div class="t3-mini-bar"><span style="width:{{ (with_skill * 100) | round(0) }}%; background:{{ score_color }};"></span></div>{% endif %}
                         </div>
                     {% endfor %}
                     </div>
@@ -2597,11 +2600,12 @@
                     {{ t3_max_attempts }} attempt{{ 's' if t3_max_attempts != 1 else '' }}, where a case counts as
                     "passed" only if the trial score reaches the configured pass threshold (currently
                     {{ "%.2f" | format(t3_attempt_policy.pass_threshold or 0.5) }}).
-                    Higher rates and a positive lift mean the skill consistently helps the agent reach the goal.
+                    Higher rates and a positive lift show better observed repeatability on these evaluated cases.
                 </p>
-                <table class="summary-table" style="width:100%;">
+                <div class="table-scroll" tabindex="0" role="region" aria-label="Pass at K summary table">
+                <table class="summary-table pass-at-k-table" style="width:100%;">
                     <thead><tr>
-                        <th>Agent</th><th>Condition</th><th>Pass Rate</th><th>Cases Passed</th><th>Scored Attempts</th><th>Lift</th>
+                        <th>Agent</th><th>Condition</th><th>Pass Rate</th><th>95% Interval</th><th>Cases Passed</th><th>Scored Attempts</th><th>Lift</th>
                     </tr></thead>
                     <tbody>
                     {% for name, agent in t3_agents.items() %}
@@ -2609,11 +2613,15 @@
                         {% set wp = pak.with_skill or {} %}
                         {% set bp = pak.without_skill or {} %}
                         {% set lf = pak.lift or {} %}
+                        {% set wi = wp.rate_interval or {} %}
+                        {% set bi = bp.rate_interval or {} %}
+                        {% set paired = lf.paired_comparison or {} %}
                         {% if wp %}
                         <tr>
                             <td><strong>{{ name }}</strong></td>
                             <td>With skill</td>
                             <td>{{ "%.0f%%" | format((wp.rate or 0.0) * 100) }}</td>
+                            <td>{% if wi %}{{ wi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ wp.passed_cases or 0 }} of {{ wp.total_cases or 0 }}</td>
                             <td>{{ wp.attempts_used or 0 }} of {{ wp.max_attempts_possible or 0 }}</td>
                             <td style="color:{{ 'var(--success-color)' if (lf.delta or 0) >= tier3_lift_pass_threshold else ('var(--danger-color)' if (lf.delta or 0) <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
@@ -2626,14 +2634,43 @@
                             <td></td>
                             <td>Without skill</td>
                             <td>{{ "%.0f%%" | format((bp.rate or 0.0) * 100) }}</td>
+                            <td>{% if bi %}{{ bi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ bp.passed_cases or 0 }} of {{ bp.total_cases or 0 }}</td>
                             <td>{{ bp.attempts_used or 0 }} of {{ bp.max_attempts_possible or 0 }}</td>
                             <td>baseline</td>
                         </tr>
                         {% endif %}
+                        {% if paired %}
+                        <tr>
+                            <td></td>
+                            <td colspan="6" style="color:var(--text-secondary);font-size:0.82rem;">
+                                {% if paired.paired_cases %}
+                                Paired cases: {{ paired.paired_cases or 0 }}
+                                (skill-only passes {{ paired.with_skill_only_pass or 0 }},
+                                baseline-only passes {{ paired.without_skill_only_pass or 0 }},
+                                both pass {{ paired.both_pass or 0 }}, neither pass {{ paired.neither_pass or 0 }}).
+                                Pairing: {{ paired.pairing_status or 'unavailable' }}.
+                                {% if paired.paired_rate_delta is defined and paired.paired_rate_delta is not none %}
+                                Paired pass-rate delta: {{ paired.paired_rate_delta | adaptive_percent(true) }}.
+                                {% endif %}
+                                {% if paired.mcnemar_exact %}
+                                Exact McNemar p={% if paired.mcnemar_exact.p_value_text is defined %}{{ paired.mcnemar_exact.p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.p_value) }}{% endif %}.
+                                {% if paired.mcnemar_exact.minimum_attainable_p_value is defined %}
+                                Minimum attainable p with {{ paired.discordant_cases or 0 }} observed discordant pair{{ 's' if (paired.discordant_cases or 0) != 1 else '' }}: {% if paired.mcnemar_exact.minimum_attainable_p_value_text is defined %}{{ paired.mcnemar_exact.minimum_attainable_p_value_text }}{% else %}{{ "%.4g" | format(paired.mcnemar_exact.minimum_attainable_p_value) }}{% endif %}{% if paired.mcnemar_exact.resolution_limited_at_alpha_0_05 %}
+                                (resolution-limited at α=0.05){% endif %}.
+                                {% endif %}
+                                Diagnostic only.
+                                {% endif %}
+                                {% else %}
+                                Paired comparison {{ paired.pairing_status or 'unavailable' }}; exact test not computed.
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endif %}
                     {% endfor %}
                     </tbody>
                 </table>
+                </div>
                 </div>
             </details>
             {% endif %}
@@ -2918,14 +2955,14 @@
                 {% for name, agent in t3_agents.items() %}
                 {% set agent_idx = loop.index0 %}
                 {% set agent_color = t3_palette[agent_idx % (t3_palette | length)] %}
-                {% set agent_score = agent.with_skill or 0.0 %}
+                {% set agent_score = agent.with_skill %}
                 <button class="t3-agent-tab-btn{% if loop.first %} active{% endif %}"
                         role="tab"
                         data-tier3-agent="{{ name }}"
                         style="--accent: {{ agent_color }};"
                         onclick="showTier3Agent('{{ name }}', this)">
                     <span class="t3-tab-dot"></span>{{ name }}
-                    <span class="t3-tab-score">{{ "%.2f" | format(agent_score) }}{% if agent.lift is not none %} ({{ "%+.2f" | format(agent.lift) }}){% endif %}</span>
+                    <span class="t3-tab-score">{{ "%.2f" | format(agent_score) if agent_score is not none else "N/A" }}{% if agent.lift is not none %} ({{ "%+.2f" | format(agent.lift) }}){% endif %}</span>
                 </button>
                 {% endfor %}
             </nav>
@@ -2933,8 +2970,8 @@
             {% for name, agent in t3_agents.items() %}
             {% set agent_idx = loop.index0 %}
             {% set agent_color = t3_palette[agent_idx % (t3_palette | length)] %}
-            {% set agent_score = agent.with_skill or 0.0 %}
-            {% set agent_score_color = 'var(--success-color)' if agent_score >= 0.7 else ('var(--warning-color)' if agent_score >= 0.4 else 'var(--danger-color)') %}
+            {% set agent_score = agent.with_skill %}
+            {% set agent_score_color = 'var(--text-secondary)' if agent_score is none else ('var(--success-color)' if agent_score >= 0.7 else ('var(--warning-color)' if agent_score >= 0.4 else 'var(--danger-color)')) %}
             {% set best_dim = none %}
             {% set worst_dim = none %}
             {% for d in agent.dimensions or [] %}
@@ -2958,7 +2995,7 @@
                 <div class="t3-kpi-strip">
                     <div class="t3-kpi-card" style="border-top:3px solid {{ agent_color }};">
                         <div class="t3-kpi-label">Overall Score</div>
-                        <div class="t3-kpi-value" style="color:{{ agent_score_color }};">{{ "%.2f" | format(agent_score) }}</div>
+                        <div class="t3-kpi-value" style="color:{{ agent_score_color }};">{{ "%.2f" | format(agent_score) if agent_score is not none else "N/A" }}</div>
                         <div class="t3-kpi-sub">baseline {{ "%.2f" | format(agent.baseline) if agent.baseline is not none else "N/A" }}</div>
                     </div>
                     <div class="t3-kpi-card">
@@ -2969,7 +3006,7 @@
                         <div class="t3-kpi-sub">{% if agent.lift >= tier3_lift_pass_threshold %}positive{% elif agent.lift <= tier3_lift_fail_threshold %}regression{% else %}neutral{% endif %}</div>
                         {% else %}
                         <div class="t3-kpi-value" style="color:var(--text-secondary);">N/A</div>
-                        <div class="t3-kpi-sub">no baseline</div>
+                        <div class="t3-kpi-sub">{% if agent.with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif agent.with_skill is none %}N/A lift{% else %}no baseline{% endif %}</div>
                         {% endif %}
                     </div>
                     <div class="t3-kpi-card">
@@ -3002,10 +3039,10 @@
                     {% for d in dim_source %}
                         {% set d_score = d.score if d.score is not none else d.with_skill %}
                         {% set d_id = d.id or d.dimension or d.label %}
-                        {% set d_color = 'var(--success-color)' if (d_score or 0) >= 0.7 else ('var(--warning-color)' if (d_score or 0) >= 0.4 else 'var(--danger-color)') %}
+                        {% set d_color = 'var(--text-secondary)' if d_score is none else ('var(--success-color)' if d_score >= 0.7 else ('var(--warning-color)' if d_score >= 0.4 else 'var(--danger-color)')) %}
                         <div class="t3-dim-pill" title="{{ t3_dim_hints.get(d_id) or d.explanation or '' }}">
                             <span class="t3-dim-name">{{ d_id | replace("_", " ") }}</span>
-                            <span class="t3-dim-score" style="color:{{ d_color }};">{{ "%.2f" | format(d_score or 0.0) }}</span>
+                            <span class="t3-dim-score" style="color:{{ d_color }};">{{ "%.2f" | format(d_score) if d_score is not none else "N/A" }}</span>
                             {% if d.lift is not none %}
                                 {% set lift_class = 'up' if d.lift >= tier3_lift_pass_threshold else ('down' if d.lift <= tier3_lift_fail_threshold else 'flat') %}
                                 <span class="t3-delta {{ lift_class }}">{{ "%+.2f" | format(d.lift) }} lift</span>
@@ -3223,6 +3260,9 @@
                                     <span class="t3-insight-source insight-source-{{ source }}">{{ source }}</span>
                                 </div>
                                 <div class="t3-sug-body">{{ conclusion.message }}</div>
+                                {% if conclusion.evidence and conclusion.evidence.url %}
+                                <a class="t3-evidence-link" href="{{ conclusion.evidence.url }}" target="_blank" rel="noopener">View {{ conclusion.evidence.label or 'evidence' }}</a>
+                                {% endif %}
                             </div>
                             <div class="t3-sug-actions">
                                 <button class="t3-copy-btn" onclick='tier3CopyText(this, {{ ((conclusion.title ~ ': ' ~ conclusion.message) | tojson) }})'>Copy</button>
@@ -3653,7 +3693,9 @@
                 (agent.dimensions || []).forEach(function(dim){ byId[dim.id] = dim; });
                 return dimensionIds.map(function(dimId){
                     var row = byId[dimId] || {};
-                    return Number(row.score || row.with_skill || 0);
+                    var raw = row.score;
+                    if (raw === null || raw === undefined) raw = row.with_skill;
+                    return raw === null || raw === undefined ? null : Number(raw);
                 });
             }
             function tokenTotalsByAgent() {

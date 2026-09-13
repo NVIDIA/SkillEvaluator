@@ -7,8 +7,8 @@ The pinned Harbor release serializes ``exec(env=...)`` values as
 ``docker compose exec -e NAME=value``. Process arguments are host-visible, so
 the compatibility backend passes only names on argv and values through the
 compose subprocess environment. SkillEvaluator's selected backend is stronger:
-it transfers values through a short-lived, file-backed handoff and removes the
-container copy before running the requested command.
+it receives the parent NVIDIA credential through stdin, then transfers values
+through a short-lived container handoff removed before the requested command.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import os
 import re
 import shlex
 import signal
-import tempfile
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,6 +26,11 @@ from typing import Any
 
 from harbor.environments.base import ExecResult
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
+
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_STDIN_SENTINEL,
+    read_nvidia_build_key_from_stdin,
+)
 
 SECURE_DOCKER_ENV_IMPORT_PATH = (
     "skillevaluator.tier3.harbor.secure_docker_environment:SkillEvaluatorSecureDockerEnvironment"
@@ -149,9 +153,12 @@ async def _terminate_process_tree(
     await _await_task_uninterruptibly(cleanup, preserve_cancellation=preserve_cancellation)
 
 
-def _file_backed_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Resolve the private NVIDIA Build sentinel without putting its value in argv."""
+def _host_handoff_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Resolve a private NVIDIA Build sentinel without putting its value in argv."""
     resolved = _validate_environment(environment)
+    if resolved.get("NVIDIA_API_KEY") == NVIDIA_BUILD_STDIN_SENTINEL:
+        resolved["NVIDIA_API_KEY"] = read_nvidia_build_key_from_stdin()
+        return resolved
     if resolved.get("NVIDIA_API_KEY") != _NVIDIA_BUILD_FILE_SENTINEL:
         return resolved
     key_file = os.environ.get(_NVIDIA_BUILD_KEY_FILE_ENV, "").strip()
@@ -176,6 +183,13 @@ def _render_environment_script(environment: Mapping[str, str]) -> str:
 
 class SkillEvaluatorDockerEnvironment(DockerEnvironment):
     """Pinned Harbor compatibility backend with host-visible argv safety."""
+
+    @classmethod
+    def preflight(cls) -> None:
+        """Consume the private stdin handoff before Docker can inherit it."""
+        if os.environ.get("NVIDIA_API_KEY", "").strip() == NVIDIA_BUILD_STDIN_SENTINEL:
+            read_nvidia_build_key_from_stdin()
+        super().preflight()
 
     async def _contain_main_container(self) -> None:
         """Stop and remove this Compose project's task container from the trusted host."""
@@ -272,9 +286,11 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         timeout_sec: int | None = None,
         *,
         env_overrides: Mapping[str, str] | None = None,
+        stdin_bytes: bytes | None = None,
+        redact_values: set[str] | None = None,
         stop_main_on_interrupt: bool = False,
     ) -> ExecResult:
-        """Run compose with sensitive exec overrides only in the child env."""
+        """Run compose with sensitive values only in child env or stdin."""
         full_command = [
             "docker",
             "compose",
@@ -290,15 +306,14 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         process_environment = self._compose_env_vars(include_os_env=True)
         process_environment.update(env_overrides or {})
         secret_values = {
-            value
-            for value in (env_overrides or {}).values()
-            if value and len(value) >= _MIN_EXACT_SECRET_LENGTH
+            value for value in (env_overrides or {}).values() if value and len(value) >= _MIN_EXACT_SECRET_LENGTH
         }
+        secret_values.update(redact_values or set())
         creation = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *full_command,
                 env=process_environment,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=os.name == "posix",
@@ -308,7 +323,9 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
             process = await asyncio.shield(creation)
         except asyncio.CancelledError:
             process = await _await_task_uninterruptibly(creation, preserve_cancellation=False)
-            communication = asyncio.create_task(process.communicate())
+            communication = asyncio.create_task(
+                process.communicate(stdin_bytes) if stdin_bytes is not None else process.communicate()
+            )
             cleanup = asyncio.create_task(
                 self._contain_main_and_reap_compose(
                     process,
@@ -324,7 +341,9 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 ) from exc
             raise
 
-        communication = asyncio.create_task(process.communicate())
+        communication = asyncio.create_task(
+            process.communicate(stdin_bytes) if stdin_bytes is not None else process.communicate()
+        )
         try:
             if timeout_sec:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -380,7 +399,7 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
 
 
 class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
-    """Transfer exec environments through short-lived container-only files."""
+    """Stream exec environments into short-lived container-only files."""
 
     async def _exec_without_environment(
         self,
@@ -433,15 +452,28 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
                 user=user,
             )
 
-        merged = _file_backed_environment(merged)
+        merged = _host_handoff_environment(merged)
         remote_path = f"/tmp/.skillevaluator-exec-env-{uuid.uuid4().hex}.sh"
         primary_error: BaseException | None = None
         try:
-            with tempfile.TemporaryDirectory(prefix="skillevaluator-docker-env-") as temp_dir:
-                host_path = Path(temp_dir) / "environment.sh"
-                host_path.write_text(_render_environment_script(merged), encoding="utf-8")
-                host_path.chmod(0o600)
-                await self.upload_file(host_path, remote_path)
+            secret_values = {value for value in merged.values() if value and len(value) >= _MIN_EXACT_SECRET_LENGTH}
+            await self._run_docker_compose_command(
+                [
+                    "exec",
+                    "-T",
+                    "-u",
+                    "root",
+                    "main",
+                    "sh",
+                    "-c",
+                    'umask 077; cat > "$1"',
+                    "sh",
+                    remote_path,
+                ],
+                check=True,
+                stdin_bytes=_render_environment_script(merged).encode("utf-8"),
+                redact_values=secret_values,
+            )
 
             if user is None:
                 await self._run_docker_compose_command(
@@ -467,9 +499,7 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
                 cwd=cwd,
                 timeout_sec=timeout_sec,
                 user=user,
-                secret_values={
-                    value for value in merged.values() if value and len(value) >= _MIN_EXACT_SECRET_LENGTH
-                },
+                secret_values=secret_values,
             )
         except BaseException as exc:
             primary_error = exc
@@ -488,3 +518,20 @@ class SkillEvaluatorSecureDockerEnvironment(SkillEvaluatorDockerEnvironment):
                         primary_error.add_note(f"{message}: {cleanup_error}")
                 else:
                     raise RuntimeError(message) from cleanup_error
+
+    async def exec_with_sensitive_env(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        """Execute with values streamed into a private, container-only handoff."""
+        return await self.exec(
+            command=command,
+            cwd=cwd,
+            env=env,
+            timeout_sec=timeout_sec,
+            user=user,
+        )

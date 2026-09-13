@@ -339,11 +339,20 @@ def test_validate_rejects_direct_hardlinked_manifest_in_tier1_only_mode(tmp_path
     assert "hard-linked" in result.output.lower()
 
 
-@pytest.mark.parametrize("extension", [".json", ".html", ".md"])
+@pytest.mark.parametrize(
+    ("extension", "report_formats"),
+    [
+        (".json", "json,html,markdown"),
+        (".html", "json,html,markdown"),
+        (".md", "json,html,markdown"),
+        (".sarif.json", "sarif"),
+    ],
+)
 def test_similarity_cli_rejects_catalog_collision_with_every_selected_report(
     tmp_path: Path,
     monkeypatch,
     extension: str,
+    report_formats: str,
 ) -> None:
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -365,7 +374,7 @@ def test_similarity_cli_rejects_catalog_collision_with_every_selected_report(
             "--save-catalog",
             str(catalog),
             "-r",
-            "json,html,markdown",
+            report_formats,
             "-o",
             str(reports),
         ],
@@ -599,6 +608,17 @@ def test_tier3_validate_help() -> None:
     assert "--harbor-contract" in result.output
 
 
+@pytest.mark.parametrize("args", [["doctor", "--help"], ["tier3", "doctor", "--help"]])
+def test_doctor_verify_models_help_describes_live_catalog_probe(args: list[str]) -> None:
+    result = CliRunner().invoke(cli, args, terminal_width=240)
+
+    assert result.exit_code == 0
+    assert "--verify-models" in result.output
+    normalized_output = " ".join(result.output.split()).lower()
+    assert "catalog reachability" in normalized_output
+    assert "authenticated" not in normalized_output
+
+
 def test_removed_benchmark_authoring_command_is_unavailable() -> None:
     removed_command = "convert" + "-benchmark"
 
@@ -779,7 +799,7 @@ def test_validate_code_integrity_reports_only_static_test_evidence(tmp_path: Pat
     benchmark_path = reports / "BENCHMARK.md"
     assert benchmark_path.is_file()
     benchmark = benchmark_path.read_text(encoding="utf-8")
-    assert "Evaluation of the `untrusted-skill` skill" in benchmark
+    assert "# Skill Benchmark: untrusted-skill" in benchmark
     assert "- Skill: `untrusted-skill`" in benchmark
     data = json.loads(next(reports.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
     hygiene = next(item for item in data["results"] if item["validator"] == "Code Integrity & Hygiene")

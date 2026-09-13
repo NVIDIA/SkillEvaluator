@@ -472,6 +472,11 @@ def test_harbor_template_main_persists_evidence_refs_in_reward_json(monkeypatch,
 
     monkeypatch.setattr(module, "_judge_goal_accuracy_ragas", fake_ragas)
     monkeypatch.setattr(module, "call_public_llm", fake_call_public_llm)
+    monkeypatch.setattr(
+        module,
+        "_call_public_llm_with_provenance",
+        lambda prompt, *args, **kwargs: (*fake_call_public_llm(prompt, *args, **kwargs), {}),
+    )
 
     module.main()
 

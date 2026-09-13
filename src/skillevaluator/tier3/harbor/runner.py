@@ -16,10 +16,10 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -28,10 +28,17 @@ from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
+from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
-from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_llm_provider
+from skillevaluator.provider_config import (
+    ProviderConfig,
+    ProviderConfigurationError,
+    _normalize_anthropic_base_url,
+    resolve_llm_provider,
+)
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
+    _VERIFIER_JUDGE_MODEL_ENV_VARS,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
     find_evals_file,
@@ -57,8 +64,18 @@ from skillevaluator.tier3.harbor.progress import (
     safe_progress_reporter,
     secret_values_from_environment,
 )
+from skillevaluator.tier3.harbor.report_data import (
+    build_dataset_snapshot,
+    load_staged_harbor_dataset,
+)
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import SECURE_DOCKER_ENV_IMPORT_PATH
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_KEY_STDIN_ENV as _NVIDIA_BUILD_KEY_STDIN_ENV,
+)
+from skillevaluator.tier3.harbor.sensitive_stdin import (
+    NVIDIA_BUILD_STDIN_SENTINEL as _NVIDIA_BUILD_STDIN_SENTINEL,
+)
 from skillevaluator.tier3.output_provenance import (
     mark_generated_output_root,
     remove_generated_output_root_if_owned,
@@ -69,6 +86,30 @@ from skillevaluator.tier3.results_location import publish_latest_results
 from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
 
 logger = logging.getLogger(__name__)
+
+
+def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> dict[str, Any]:
+    """Persist immutable dataset and evaluator identity before staging cleanup."""
+    entries = load_staged_harbor_dataset(run_dir)
+    if not entries:
+        entries = [{"id": task_id} for task_id in fallback_task_ids]
+    snapshot = build_dataset_snapshot(entries, evaluator_version=__version__)
+    target = run_dir / "dataset_snapshot.json"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=run_dir,
+        prefix=".dataset_snapshot.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        json.dump(snapshot, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(target)
+    return snapshot
+
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
@@ -232,6 +273,7 @@ _RUNTIME_ENV_HOST_CONTROL_NAMES = (
         }
     )
     | _BEDROCK_HOST_ENV_VARS
+    | _VERIFIER_JUDGE_MODEL_ENV_VARS
     | frozenset().union(*_HARBOR_ENV_MODE_VARS.values())
 )
 _RUNTIME_ENV_HOST_CONTROL_PREFIXES = (
@@ -291,33 +333,34 @@ def format_harbor_view_command(jobs_dir: Path | str, *, multiline: bool = False)
     return f"{command} {path}" if not multiline else f"{command} \\\n  {path}"
 
 
-@contextmanager
+@dataclass(frozen=True)
+class _NvidiaBuildKeyHandoff:
+    """Sanitized child environment plus an optional stdin credential payload."""
+
+    subprocess_env: dict[str, str] = field(repr=False)
+    stdin_text: str | None = field(default=None, repr=False, compare=False)
+
+
 def _nvidia_build_key_handoff(
     run_env: Mapping[str, str],
     *,
     env_mode: str,
-) -> Iterator[dict[str, str]]:
-    """Replace the host Build key with a temporary file-backed sentinel."""
+) -> _NvidiaBuildKeyHandoff:
+    """Replace the host Build key with a stdin-backed sentinel."""
     subprocess_env = dict(run_env)
-    key_handoff: tempfile.TemporaryDirectory[str] | None = None
+    subprocess_env.pop(_NVIDIA_BUILD_KEY_FILE_ENV, None)
+    subprocess_env.pop(_NVIDIA_BUILD_KEY_STDIN_ENV, None)
     api_key = subprocess_env.get("NVIDIA_API_KEY", "")
     if (
         env_mode == "docker"
         and subprocess_env.get("SKILL_EVAL_LLM_PROVIDER") == "nv_build"
         and api_key
-        and api_key != _NVIDIA_BUILD_FILE_SENTINEL
+        and api_key not in {_NVIDIA_BUILD_FILE_SENTINEL, _NVIDIA_BUILD_STDIN_SENTINEL}
     ):
-        key_handoff = tempfile.TemporaryDirectory(prefix="skillevaluator-nvidia-build-host-")
-        key_file = Path(key_handoff.name) / "nvidia-api-key"
-        key_file.write_text(api_key, encoding="utf-8")
-        key_file.chmod(0o600)
-        subprocess_env["NVIDIA_API_KEY"] = _NVIDIA_BUILD_FILE_SENTINEL
-        subprocess_env[_NVIDIA_BUILD_KEY_FILE_ENV] = str(key_file)
-    try:
-        yield subprocess_env
-    finally:
-        if key_handoff is not None:
-            key_handoff.cleanup()
+        subprocess_env["NVIDIA_API_KEY"] = _NVIDIA_BUILD_STDIN_SENTINEL
+        subprocess_env[_NVIDIA_BUILD_KEY_STDIN_ENV] = "1"
+        return _NvidiaBuildKeyHandoff(subprocess_env, api_key)
+    return _NvidiaBuildKeyHandoff(subprocess_env)
 
 
 def build_harbor_run_command(
@@ -337,6 +380,7 @@ def build_harbor_run_command(
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
     agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build a Harbor invocation for a built-in environment type or local mode."""
     if env_mode not in HARBOR_ENV_MODES:
@@ -416,17 +460,22 @@ def build_harbor_run_command(
         command.extend(["--override-memory-mb", str(override_memory_mb)])
     if override_storage_mb is not None:
         command.extend(["--override-storage-mb", str(override_storage_mb)])
+    for name, value in sorted((verifier_env or {}).items()):
+        command.extend(["--verifier-env", f"{name}={value}"])
     if _harbor_supports_yes():
         command.append("--yes")
     return command
 
 
 def _provider_environment(config: ProviderConfig) -> dict[str, str]:
-    """Map a public provider config to evaluator-owned verifier variables."""
+    """Build evaluator-owned verifier variables from provider config and host overrides."""
     environment = {
         "SKILL_EVAL_LLM_PROVIDER": config.provider,
         "SKILL_EVAL_LLM_MODEL": config.model,
     }
+    environment.update(
+        {name: value for name in _VERIFIER_JUDGE_MODEL_ENV_VARS if (value := os.environ.get(name, "").strip())}
+    )
     if config.provider == "anthropic":
         environment["ANTHROPIC_API_KEY"] = config.api_key or ""
         if config.base_url:
@@ -719,13 +768,15 @@ def _resolve_runtime_env(templates: dict[str, str] | None) -> tuple[dict[str, st
             errors.append(f"harbor.runtime_env.{name} controls the host process and is not allowed")
             continue
         template_value = str(template)
-        references = {
+        dollar_references = {
             braced or plain
             for braced, plain in re.findall(
-                r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)\b",
                 template_value,
             )
         }
+        percent_references = set(re.findall(r"%([A-Za-z_][A-Za-z0-9_]*)%", template_value))
+        references = dollar_references | percent_references
         owned_references = sorted(reference for reference in references if _is_operator_owned_runtime_name(reference))
         if owned_references:
             errors.append(
@@ -793,6 +844,82 @@ def _harbor_subprocess_environment(
     return environment
 
 
+def _independent_anthropic_agent_credentials() -> dict[str, str]:
+    """Resolve and validate a host-owned Anthropic credential pair."""
+    credentials = {
+        name: os.environ.get(name, "") for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL") if os.environ.get(name)
+    }
+    if base_url := credentials.get("ANTHROPIC_BASE_URL"):
+        normalized_base_url = _normalize_anthropic_base_url(
+            base_url,
+            variable="ANTHROPIC_BASE_URL",
+        )
+        if normalized_base_url is None:
+            credentials.pop("ANTHROPIC_BASE_URL")
+        else:
+            credentials["ANTHROPIC_BASE_URL"] = normalized_base_url
+    return credentials
+
+
+def _judge_model_config(
+    provider: ProviderConfig,
+    provider_env: Mapping[str, str],
+    grading_mode: str,
+) -> dict[str, str | bool]:
+    """Describe the configured standard-grading judge before any provider fallback."""
+    if grading_mode == "custom_only":
+        return {"enabled": False}
+    for name in ("LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"):
+        if model := provider_env.get(name):
+            return {
+                "enabled": True,
+                "provider": provider.provider,
+                "model": model,
+                "source": name,
+                "override_applied": True,
+            }
+    return {
+        "enabled": True,
+        "provider": provider.provider,
+        "model": provider.model,
+        "source": (
+            "SKILL_EVAL_LLM_MODEL" if os.environ.get("SKILL_EVAL_LLM_MODEL", "").strip() else "provider default"
+        ),
+        "override_applied": False,
+    }
+
+
+def _job_judge_override(provider_env: Mapping[str, str], grading_mode: str) -> tuple[str, str] | None:
+    """Return the selected dedicated host override name and value, if enabled."""
+    if grading_mode == "custom_only":
+        return None
+    for name in ("LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"):
+        if value := provider_env.get(name):
+            return name, value
+    return None
+
+
+def _job_judge_verifier_env(provider_env: Mapping[str, str], grading_mode: str) -> dict[str, str]:
+    """Return placeholder-based judge overrides for Harbor's verifier job layer."""
+    selected = _job_judge_override(provider_env, grading_mode)
+    if selected is None:
+        return {}
+    source, _value = selected
+    # Harbor resolves every task-authored placeholder before verifier startup.
+    # Override both spellings from the selected host source so a stale alias
+    # cannot fail resolution or survive task/step/job environment merging.
+    return dict.fromkeys(sorted(_VERIFIER_JUDGE_MODEL_ENV_VARS), f"${{{source}}}")
+
+
+def _job_judge_subprocess_env(provider_env: Mapping[str, str], grading_mode: str) -> dict[str, str]:
+    """Make both aliases resolvable while Harbor constructs verifier environments."""
+    selected = _job_judge_override(provider_env, grading_mode)
+    if selected is None:
+        return {}
+    _source, value = selected
+    return dict.fromkeys(_VERIFIER_JUDGE_MODEL_ENV_VARS, value)
+
+
 def _agent_credentials(
     *,
     provider: ProviderConfig,
@@ -811,11 +938,7 @@ def _agent_credentials(
             # sentinel and must not inherit NVIDIA_API_KEY in task env.
             return {}
         if agent == "claude-code":
-            return {
-                name: os.environ.get(name, "")
-                for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
-                if os.environ.get(name)
-            }
+            return _independent_anthropic_agent_credentials()
         if agent == "codex":
             return {
                 name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -823,11 +946,7 @@ def _agent_credentials(
         return {}
 
     if provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
-        return {
-            name: os.environ.get(name, "")
-            for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
-            if os.environ.get(name)
-        }
+        return _independent_anthropic_agent_credentials()
     if provider.provider == "anthropic" and agent == "codex":
         return {
             name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -966,7 +1085,14 @@ def _resolve_agent_runtime_plan(
         names = ", ".join(collisions)
         raise ValueError(f"harbor.runtime_env contains operator-owned credential name(s): {names}")
 
-    provider_env = _provider_environment(provider)
+    # Dedicated judge aliases are job-scoped. Standard grading adds the
+    # selected alias at launch time, while custom-only grading must not retain
+    # it in the reusable Harbor parent environment.
+    provider_env = {
+        name: value
+        for name, value in _provider_environment(provider).items()
+        if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
+    }
     plans: dict[str, AgentRuntimePlan] = {}
     for agent in agents:
         credentials = _agent_credentials(provider=provider, agent=agent, env_mode=env_mode)
@@ -1117,6 +1243,7 @@ def _run_harbor(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
@@ -1136,18 +1263,21 @@ def _run_harbor(
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
         agent_import_path=agent_import_path,
+        verifier_env=verifier_env,
     )
     try:
-        with _nvidia_build_key_handoff(run_env, env_mode=env_mode) as subprocess_env:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                env=subprocess_env,
-                timeout=7200,
-                check=False,
-            )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
+        # Harbor owns its phase deadlines, and native tasks may intentionally
+        # leave the agent unbounded. An outer deadline can preempt valid jobs.
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            input=handoff.stdin_text,
+            env=handoff.subprocess_env,
+            check=False,
+        )
+    except OSError as exc:
         return False, str(exc)
     if result.returncode == 0:
         return _validate_harbor_job_result(
@@ -1392,6 +1522,7 @@ def _run_stop_on_pass_variant(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
     errors: list[str] = []
@@ -1414,6 +1545,7 @@ def _run_stop_on_pass_variant(
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_path,
+                verifier_env=verifier_env,
                 expected_trials=1,
                 include_task_names=[task_name],
             )
@@ -1450,6 +1582,7 @@ def _run_agent_pair(
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
     task_names: list[str] | None = None,
+    verifier_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     jobs = [("with", with_skill)]
     if baseline is not None:
@@ -1478,6 +1611,7 @@ def _run_agent_pair(
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_path,
+                verifier_env=verifier_env,
             )
             if variant != "sumofparts":
                 sequential_errors.extend(variant_errors)
@@ -1509,6 +1643,7 @@ def _run_agent_pair(
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
                 agent_import_path=agent_import_path,
+                verifier_env=verifier_env,
                 expected_trials=expected_trials,
             ): variant
             for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
@@ -1808,6 +1943,23 @@ def _run_harbor_eval_impl(
         return {"error": prereq_errors}
     reporter.emit(ProgressEvent(stage="environment-preflight", state="complete", detail=env_mode))
 
+    # Resolve the effective source before constructing credential-probe targets.
+    # Native Harbor tasks can select the standard-grader judge model at task or
+    # step scope, so the provider fallback is not necessarily the runtime model.
+    evals_exists = find_evals_file(evaluator_skill_path) is not None
+    native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
+    if task_source == "auto":
+        task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
+    if task_source == "evals_json" and not evals_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
+        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
+    if task_source == "native_harbor" and not native_exists:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
+        return {"error": ["No native Harbor task source found at evals/harbor."]}
+    if task_source not in {"evals_json", "native_harbor"}:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
+        return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail="; ".join(runtime_errors)))
@@ -1829,12 +1981,186 @@ def _run_harbor_eval_impl(
         for agent in agents
         if (import_path := _nvidia_build_agent_import_path(provider, agent, env_mode)) is not None
     }
-    reporter.set_secret_values(
-        set().union(*(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values()))
+    runtime_secret_values = set().union(
+        *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )
-    reporter.emit(ProgressEvent(stage="credential-validation", state="complete", detail="credentials validated"))
+
+    # Probe each exact agent route before reserving output space, building images,
+    # or staging tasks. The runtime-preflight module imports runner helpers, so
+    # this import must remain lazy to avoid a module cycle.
+    from skillevaluator.tier3.harbor.runtime_preflight import (
+        CredentialProbeDisposition,
+        credential_probe_disposition,
+        probe_model,
+    )
+
+    probe_targets: dict[
+        tuple[str, str, str | None, str | None, str | None],
+        tuple[ProviderConfig, list[str]],
+    ] = {}
+    probe_degraded: list[str] = []
+    credential_validation_targets: list[dict[str, Any]] = []
+    judge_config = _judge_model_config(provider, provider_env, grading_mode)
+
+    def add_probe_target(label: str, selected_provider: ProviderConfig) -> None:
+        route_key = (
+            selected_provider.provider,
+            selected_provider.model,
+            selected_provider.api_key,
+            selected_provider.base_url,
+            selected_provider.region,
+        )
+        target = probe_targets.get(route_key)
+        if target is None:
+            probe_targets[route_key] = (selected_provider, [label])
+        else:
+            target[1].append(label)
+
+    for agent in agents:
+        add_probe_target(agent, runtime_plans[agent].provider)
+
+    if grading_mode != "custom_only":
+        if task_source == "native_harbor" and not bool(judge_config["override_applied"]):
+            detail = (
+                "native Harbor resolves the effective judge model at runtime; "
+                "task or step verifier env may supersede the configured fallback"
+            )
+            probe_degraded.append(f"standard grader: {detail}")
+            judge_config["catalog_verification"] = "inconclusive"
+            judge_config["effective_model_source"] = "native_harbor_runtime"
+            credential_validation_targets.append(
+                {
+                    "labels": ["standard grader"],
+                    "provider": provider.provider,
+                    "model": None,
+                    "fallback_model": provider.model,
+                    "status": "inconclusive",
+                    "detail": detail,
+                }
+            )
+        else:
+            judge_model = str(judge_config["model"])
+            litellm_model = str(getattr(provider, "litellm_model", f"{provider.provider}/{provider.model}"))
+            litellm_prefix = litellm_model.partition("/")[0] or provider.provider
+            add_probe_target(
+                "standard grader",
+                ProviderConfig(
+                    provider=provider.provider,
+                    model=judge_model,
+                    api_key=provider.api_key,
+                    base_url=provider.base_url,
+                    litellm_model=f"{litellm_prefix}/{judge_model}",
+                    region=getattr(provider, "region", None),
+                    credential_env=getattr(provider, "credential_env", None),
+                    base_url_env=getattr(provider, "base_url_env", None),
+                ),
+            )
+
+    runtime_secret_values.update(
+        selected_provider.api_key for selected_provider, _labels in probe_targets.values() if selected_provider.api_key
+    )
+    reporter.set_secret_values(runtime_secret_values)
+
+    with ThreadPoolExecutor(max_workers=min(len(probe_targets), 4)) as probe_pool:
+        probe_futures = {
+            route_key: probe_pool.submit(probe_model, selected_provider)
+            for route_key, (selected_provider, _labels) in probe_targets.items()
+        }
+
+    probe_errors: list[str] = []
+    for route_key, (selected_provider, selected_labels) in probe_targets.items():
+        label = ", ".join(selected_labels)
+        try:
+            probe = probe_futures[route_key].result()
+        except Exception as exc:
+            safe_detail = f"model catalog probe failed: {type(exc).__name__}"
+            probe_degraded.append(f"{label}: {safe_detail}")
+            credential_validation_targets.append(
+                {
+                    "labels": list(selected_labels),
+                    "provider": selected_provider.provider,
+                    "model": selected_provider.model,
+                    "status": "degraded",
+                    "detail": safe_detail,
+                }
+            )
+            if "standard grader" in selected_labels:
+                judge_config["catalog_verification"] = "degraded"
+            continue
+
+        safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
+        disposition = credential_probe_disposition(selected_provider, probe)
+        if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
+            safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
+        credential_validation_targets.append(
+            {
+                "labels": list(selected_labels),
+                "provider": selected_provider.provider,
+                "model": selected_provider.model,
+                "status": disposition.value,
+                "detail": safe_detail,
+            }
+        )
+        if "standard grader" in selected_labels:
+            judge_config["catalog_verification"] = disposition.value
+        if disposition == CredentialProbeDisposition.FATAL:
+            probe_errors.append(f"{label} provider verification failed: {safe_detail}")
+        elif disposition == CredentialProbeDisposition.DEGRADED:
+            probe_degraded.append(f"{label}: {safe_detail}")
+
+    if probe_errors:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="failed",
+                detail="; ".join(probe_errors),
+            )
+        )
+        return {"error": probe_errors}
+    if probe_degraded:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="degraded",
+                detail=(
+                    "credential configuration resolved; live catalog verification inconclusive: "
+                    f"{'; '.join(probe_degraded)}; continuing to evaluation"
+                ),
+            )
+        )
+    else:
+        reporter.emit(
+            ProgressEvent(
+                stage="credential-validation",
+                state="complete",
+                detail="credentials and selected models verified",
+            )
+        )
+    run_config = {
+        "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
+        "harbor": {
+            "environment": {"value": env_mode, "source": env_mode_source},
+            "n_attempts": n_attempts,
+            "stop_on_pass": bool(stop_on_pass),
+            "n_concurrent": n_concurrent,
+            "timeout_multiplier": timeout_multiplier,
+            "base_image_mode": base_image_mode,
+            "jobs_retained": keep_harbor_jobs,
+        },
+        "provider": {"name": provider.provider, "model": provider.model},
+        "judge": judge_config,
+        "credential_validation": {
+            "status": "degraded" if probe_degraded else "verified",
+            "targets": credential_validation_targets,
+        },
+        "task_source": task_source,
+        "grading": {"mode": grading_mode},
+        "agents": model_resolution,
+    }
     verifier_env = {**configured_runtime_env, **provider_env}
-    staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env}
+    staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}
+    job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
+    job_judge_subprocess_env = _job_judge_subprocess_env(provider_env, grading_mode)
 
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
@@ -1846,20 +2172,14 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
     run_sum_of_parts = bool(sum_of_parts_arm and not skip_baseline and workspace_skills)
-
-    evals_exists = find_evals_file(evaluator_skill_path) is not None
-    native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
-    if task_source == "auto":
-        task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
-    if task_source == "evals_json" and not evals_exists:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
-        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
-    if task_source == "native_harbor" and not native_exists:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
-        return {"error": ["No native Harbor task source found at evals/harbor."]}
-    if task_source not in {"evals_json", "native_harbor"}:
-        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
-        return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+    run_config["eval_target"] = {"kind": eval_target_kind or "skill"}
+    run_config["skill_workspace"] = {
+        "mode": workspace_mode,
+        "include": [str(path) for path in workspace_skills],
+        "staged_skills": [path.name for path in workspace_skills],
+        "baseline_includes_workspace_skills": workspace_skills_baseline,
+        "sum_of_parts_arm": run_sum_of_parts,
+    }
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
     try:
@@ -1905,6 +2225,29 @@ def _run_harbor_eval_impl(
                 ),
             )
         )
+
+    def _persist_pre_execution_failure(errors: list[str]) -> dict[str, Any]:
+        """Retain redacted probe provenance for failures after run reservation."""
+        failed_result: dict[str, Any] = {
+            "skill_name": skill_path.name,
+            "execution_status": "failed",
+            "execution_errors": errors,
+            "error": errors,
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "harbor_jobs_dir": str(jobs_dir),
+            "harbor_jobs_retained": jobs_dir.is_dir(),
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+            "result_path": str(result_path),
+            "agents": {},
+            "run_config": run_config,
+        }
+        write_output_file_atomically(
+            run_dir / "run_config.json",
+            json.dumps(run_config, indent=2).encode("utf-8"),
+        )
+        write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
+        return failed_result
 
     reservation_identity: tuple[int, int] | None = None
     try:
@@ -2053,7 +2396,7 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="skipped", detail="baseline disabled"))
     except (OSError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
-        return {"error": [str(exc)], "run_dir": str(run_dir)}
+        return _persist_pre_execution_failure([str(exc)])
 
     task_names = expected_task_names or []
     expected_trials = len(task_names) * n_attempts
@@ -2109,7 +2452,7 @@ def _run_harbor_eval_impl(
                 model=model_resolution[agent]["model"],
                 env_mode=env_mode,
                 jobs_dir=jobs_dir,
-                run_env=runtime_plans[agent].subprocess_env,
+                run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
                 timeout_multiplier=float(timeout_multiplier),
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
@@ -2121,20 +2464,7 @@ def _run_harbor_eval_impl(
         if preflight_errors:
             detail = "; ".join(preflight_errors)
             reporter.emit(ProgressEvent(stage="agent-runtime-preflight", state="failed", detail=detail))
-            failed_result: dict[str, Any] = {
-                "skill_name": skill_path.name,
-                "execution_status": "failed",
-                "execution_errors": preflight_errors,
-                "error": preflight_errors,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "harbor_jobs_dir": str(jobs_dir),
-                "harbor_jobs_retained": True,
-                "duration_seconds": round(time.monotonic() - started_at, 3),
-                "result_path": str(result_path),
-                "agents": {},
-            }
-            write_output_file_atomically(result_path, json.dumps(failed_result, indent=2).encode("utf-8"))
+            failed_result = _persist_pre_execution_failure(preflight_errors)
             _emit_run_finished("failed", "agent runtime preflight failed")
             return failed_result
         reporter.emit(
@@ -2160,7 +2490,7 @@ def _run_harbor_eval_impl(
             baseline=agent_task_dirs[agent][1],
             sum_of_parts=agent_task_dirs[agent][2],
             jobs_dir=jobs_dir,
-            run_env=dict(runtime_plans[agent].subprocess_env),
+            run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
             n_concurrent=n_concurrent,
             timeout_multiplier=float(timeout_multiplier),
@@ -2172,6 +2502,7 @@ def _run_harbor_eval_impl(
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
             task_names=task_names,
+            verifier_env=job_judge_verifier_env,
         )
 
     active_agents: set[str] = set()
@@ -2253,30 +2584,7 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
-    run_config = {
-        "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
-        "eval_target": {"kind": eval_target_kind or "skill"},
-        "harbor": {
-            "environment": {"value": env_mode, "source": env_mode_source},
-            "n_attempts": n_attempts,
-            "stop_on_pass": bool(stop_on_pass),
-            "n_concurrent": n_concurrent,
-            "timeout_multiplier": timeout_multiplier,
-            "base_image_mode": base_image_mode,
-            "jobs_retained": keep_harbor_jobs,
-        },
-        "provider": {"name": provider.provider, "model": provider.model},
-        "task_source": task_source,
-        "grading": {"mode": grading_mode},
-        "skill_workspace": {
-            "mode": workspace_mode,
-            "include": [str(path) for path in workspace_skills],
-            "staged_skills": [path.name for path in workspace_skills],
-            "baseline_includes_workspace_skills": workspace_skills_baseline,
-            "sum_of_parts_arm": run_sum_of_parts,
-        },
-        "agents": model_resolution,
-    }
+    dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=task_names)
     results.update(
         {
             "skill_name": skill_path.name,
@@ -2285,6 +2593,13 @@ def _run_harbor_eval_impl(
             "result_path": str(result_path),
             "harbor_jobs_dir": str(jobs_dir),
             "harbor_jobs_retained": keep_harbor_jobs,
+            "evaluated_at": datetime.now(UTC).isoformat(),
+            "evaluator_version": dataset_truth["evaluator_version"],
+            "dataset_snapshot": dataset_truth,
+            "dataset_snapshot_path": str(run_dir / "dataset_snapshot.json"),
+            "dataset_summary": dataset_truth["dataset_summary"],
+            "dataset_digest": dataset_truth["dataset_digest"],
+            "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
             "run_config": run_config,
             "attempt_policy": {
                 "max_attempts": n_attempts,

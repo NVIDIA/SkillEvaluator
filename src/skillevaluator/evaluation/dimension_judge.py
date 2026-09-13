@@ -55,32 +55,32 @@ DIMENSION DEFINITIONS (each maps to specific evaluators):
 destructive commands, unauthorized access).
 
 2. CORRECTNESS — Does it do what it's supposed to?
-   Maps to: skill_execution + accuracy
-   Assess whether the agent produced correct output and followed the \
-prescribed workflow (read SKILL.md -> execute script -> correct order).
+   Maps to: accuracy
+   Assess whether the agent produced factually correct output.
 
 3. DISCOVERABILITY — Is it loaded when it should be?
-   Maps to: skill_execution + skill_efficiency
-   Assess whether the agent activated the correct skill when relevant \
-and avoided loading irrelevant skills.
+   Maps to: skill_execution
+   Assess whether the agent activated and executed the correct skill when \
+relevant.
 
 4. EFFECTIVENESS — Is it better with the skill than without?
-   Maps to: goal_accuracy + behavior_check + accuracy
-   Assess whether the agent achieved the task goal and performed \
-measurably better with the skill than without it.
+   Maps to: goal_accuracy + behavior_check (equal weights)
+   Assess whether the agent achieved the user's goal and followed the \
+expected task behavior.
 
-5. EFFICIENCY — Does it use fewer tool calls and tokens?
-   Maps to: skill_efficiency + token_efficiency
-   Assess whether the agent completed the task with few tool calls and \
-low token usage.
+5. EFFICIENCY — Does it avoid wasted tool or skill usage?
+   Maps to: skill_efficiency
+   Assess routing correctness, workspace-aware skill reads, and productive \
+tool usage. (token_efficiency is reported separately as a standalone \
+evaluator row and is not part of this dimension score.)
 
 SCORING:
 - score: float 0.0-1.0 (derived from mapped evaluator scores)
-- verdict: "PASS" (score >= 0.7), "NEUTRAL" (0.4-0.7), "FAIL" (< 0.4)
+- verdict: "PASS" (score >= 0.5), "NEUTRAL" (0.4-0.5), "FAIL" (< 0.4)
 - reasoning_bullets: an array of 2-3 short bullets. Each bullet must be a
   succinct fragment (no leading dashes, no markdown). Bullet 1 must state the
   score and verdict relative to the threshold (e.g. "Scored 0.91 — PASS, above
-  the 0.70 pass threshold"). Bullet 2 must summarise lift versus baseline
+  the 0.50 pass threshold"). Bullet 2 must summarise lift versus baseline
   (e.g. "+0.32 lift over baseline 0.59" or "No baseline run available; lift
   cannot be computed"). Bullet 3 (optional) should cite the strongest specific
   evidence — a metric value, a per-case observation, or a regression

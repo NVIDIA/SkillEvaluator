@@ -70,6 +70,65 @@ def _reward_multi_metric(metric_score=0.1):
     }
 
 
+def _reward_with_normalized_tool_refs():
+    return {
+        "entry_id": "evaluator-plugin-004",
+        "goal_accuracy": 0.1,
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "behavior_check": 1.0,
+        "details": {
+            "goal_accuracy": {
+                "reason": "two commands need distinct remediation",
+                "evidence_refs": [
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/0/tool_calls/0",
+                        "evidence_id": "/steps/0/tool_calls/0/normalized/0",
+                        "kind": "tool_call",
+                        "excerpt": "first command",
+                    },
+                    {
+                        "source": "trajectory.json",
+                        "json_pointer": "/steps/0/tool_calls/0",
+                        "evidence_id": "/steps/0/tool_calls/0/normalized/1",
+                        "kind": "tool_call",
+                        "excerpt": "second command",
+                    },
+                ],
+            },
+        },
+    }
+
+
+def _reward_with_path_only_refs():
+    return {
+        "entry_id": "evaluator-plugin-005",
+        "goal_accuracy": 0.1,
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "behavior_check": 1.0,
+        "details": {
+            "goal_accuracy": {
+                "reason": "two artifacts need distinct remediation",
+                "evidence_refs": [
+                    {
+                        "source": "artifact.txt",
+                        "path": f"results/{name}.json",
+                        "kind": "artifact",
+                        "excerpt": f"{name} artifact",
+                    }
+                    for name in ("first", "second")
+                ],
+            },
+        },
+    }
+
+
 def test_findings_carry_evidence_refs():
     findings = report._extract_findings([_reward(0.1)])
     goal = next(f for f in findings if f["metric"] == "goal_accuracy")
@@ -204,6 +263,84 @@ def test_suggestions_evidence_refs_lookup_uses_all_metrics(monkeypatch):
     assert refs[0]["kind"] == "tool_call"
 
 
+def test_normalized_tool_evidence_refs_remain_distinct_and_resolve_by_compact_identity(monkeypatch):
+    compact_ref = "trajectory.json#/steps/0/tool_calls/0/normalized/1"
+    captured = {}
+
+    def fake_hub(prompt, **_kw):
+        captured["prompt"] = prompt
+        return (
+            f'[{{"suggestion": "Fix the second command", "dimension": "goal_accuracy", "evidence_refs": ["{compact_ref}"]}}]',
+            None,
+        )
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
+    reward = _reward_with_normalized_tool_refs()
+    findings = report._extract_findings([reward])
+
+    assert len(findings[0]["evidence_refs"]) == 2
+    result = report._generate_suggestions_structured("demo", findings, [reward])
+
+    assert compact_ref in captured["prompt"]
+    assert result[0]["evidence_refs"] == [
+        {
+            "source": "trajectory.json",
+            "json_pointer": "/steps/0/tool_calls/0",
+            "evidence_id": "/steps/0/tool_calls/0/normalized/1",
+            "kind": "tool_call",
+            "excerpt": "second command",
+        }
+    ]
+
+
+def test_whitespace_evidence_ids_fall_back_before_deduplication():
+    reward = _reward(0.1)
+    reward["details"]["goal_accuracy"]["evidence_refs"] = [
+        {
+            "source": "trajectory.json",
+            "evidence_id": whitespace,
+            "json_pointer": pointer,
+            "kind": "tool_call",
+        }
+        for whitespace, pointer in (("   ", "/steps/1"), ("\t", "/steps/2"))
+    ]
+
+    findings = report._extract_findings([reward])
+
+    assert [ref["json_pointer"] for ref in findings[0]["evidence_refs"]] == ["/steps/1", "/steps/2"]
+
+
+def test_path_only_evidence_refs_remain_distinct_in_prompt_and_lookup(monkeypatch):
+    compact_ref = "artifact.txt#results/second.json"
+    captured = {}
+
+    def fake_hub(prompt, **_kw):
+        captured["prompt"] = prompt
+        return (
+            f'[{{"suggestion": "Fix the second artifact", "dimension": "goal_accuracy", '
+            f'"evidence_refs": ["{compact_ref}"]}}]',
+            None,
+        )
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
+    reward = _reward_with_path_only_refs()
+    findings = report._extract_findings([reward])
+
+    assert len(findings[0]["evidence_refs"]) == 2
+    result = report._generate_suggestions_structured("demo", findings, [reward])
+
+    assert "artifact.txt#results/first.json" in captured["prompt"]
+    assert compact_ref in captured["prompt"]
+    assert result[0]["evidence_refs"] == [
+        {
+            "source": "artifact.txt",
+            "path": "results/second.json",
+            "kind": "artifact",
+            "excerpt": "second artifact",
+        }
+    ]
+
+
 def test_suggestions_structured_evidence_refs_are_dicts_not_strings(monkeypatch):
     """End-to-end: suggestions_v2 artifacts must have dict refs, never plain strings."""
     monkeypatch.setattr(
@@ -226,9 +363,33 @@ def test_display_findings_report_writes_artifact(tmp_path, monkeypatch):
     """Smoke the real findings report display path over a temporary run directory."""
     import json
 
-    trial_dir = tmp_path / "codex" / "with-skill" / "trials" / "case-001"
+    condition_dir = tmp_path / "codex" / "with-skill"
+    trial_dir = condition_dir / "trials" / "case-001"
     trial_dir.mkdir(parents=True)
     reward = _reward(0.1)
+    (condition_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "agent": "codex",
+                "scores": {
+                    metric: reward[metric]
+                    for metric in (
+                        "security",
+                        "skill_execution",
+                        "skill_efficiency",
+                        "accuracy",
+                        "goal_accuracy",
+                        "behavior_check",
+                    )
+                },
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
     (trial_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
     monkeypatch.setattr(
         report,
@@ -246,6 +407,7 @@ def test_display_findings_report_writes_artifact(tmp_path, monkeypatch):
             "env_mode": "local",
             "agents": {
                 "codex": {
+                    "execution_status": "succeeded",
                     "model": "gpt-test",
                     "model_source": "test",
                     "with_skill": {

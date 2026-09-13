@@ -75,6 +75,26 @@ class FindingVerifier(LLMClient):
 
     # -- Prompt construction ----------------------------------------------
 
+    @staticmethod
+    def _can_safely_open_under_skill(skill_path: Path, file_path: str) -> bool:
+        """Return whether *file_path* resolves to a regular file inside the skill."""
+        if not file_path:
+            return True
+        skill_root = skill_path.resolve()
+        for candidate in (skill_path / file_path, Path(file_path)):
+            if FindingVerifier._resolved_inside_skill(candidate, skill_root) is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _redacted_prompt_fields() -> tuple[str, str, str]:
+        """Message, line content, and line number placeholders for unsafe files."""
+        return (
+            "(redacted: file outside skill boundary)",
+            "(redacted)",
+            "?",
+        )
+
     def _build_prompt(self, findings: list[Finding], skill_path: Path) -> str:
         """Build a user prompt grouping findings by file with surrounding code context."""
         groups: dict[str, list[tuple[int, Finding]]] = {}
@@ -90,14 +110,19 @@ class FindingVerifier(LLMClient):
 
             for idx, finding in indexed_findings:
                 sev = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity)
+                if self._can_safely_open_under_skill(skill_path, finding.file_path or ""):
+                    message = finding.message
+                    line_content = finding.line_content or "(no content)"
+                    line_number = str(finding.line_number or "?")
+                else:
+                    message, line_content, line_number = self._redacted_prompt_fields()
                 parts.append(
                     f"\nFinding #{idx}:\n"
                     f"  Category: {finding.category}\n"
                     f"  Severity: {sev}\n"
                     f"  Check: {finding.check_name}\n"
-                    f"  Message: {finding.message}\n"
-                    f"  Line {finding.line_number or '?'}: "
-                    f"{finding.line_content or '(no content)'}\n"
+                    f"  Message: {message}\n"
+                    f"  Line {line_number}: {line_content}\n"
                     f"  Suggestion: {finding.suggestion or 'N/A'}"
                 )
 
@@ -107,12 +132,29 @@ class FindingVerifier(LLMClient):
         return "\n".join(parts)
 
     @staticmethod
+    def _resolved_inside_skill(path: Path, skill_root: Path) -> Path | None:
+        """Return *path* resolved only if it is a file inside *skill_root*."""
+        try:
+            resolved = path.resolve()
+            if not resolved.is_file() or not resolved.is_relative_to(skill_root):
+                return None
+            return resolved
+        except (OSError, ValueError, RuntimeError):
+            return None
+
+    @staticmethod
     def _read_file_context(skill_path: Path, file_path: str) -> str | None:
-        """Read up to 100 lines from a file for LLM context."""
+        """Read up to 100 lines from a file under the skill root for LLM context."""
+        if not file_path:
+            return None
+        skill_root = skill_path.resolve()
         candidates = [skill_path / file_path, Path(file_path)]
         for path in candidates:
+            resolved = FindingVerifier._resolved_inside_skill(path, skill_root)
+            if resolved is None:
+                continue
             try:
-                lines = path.read_text(encoding="utf-8", errors="ignore").split("\n")[:100]
+                lines = resolved.read_text(encoding="utf-8", errors="ignore").split("\n")[:100]
                 return "\n".join(lines)
             except (OSError, ValueError):
                 continue

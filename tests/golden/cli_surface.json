@@ -62,7 +62,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -213,7 +214,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1014,7 +1016,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1086,7 +1089,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1134,7 +1138,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1182,7 +1187,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1244,7 +1250,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1356,7 +1363,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1397,7 +1405,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -1446,7 +1455,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -1494,7 +1504,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -1542,7 +1553,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -1604,7 +1616,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2021,7 +2034,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2090,7 +2104,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2154,7 +2169,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2266,7 +2282,8 @@
                 "cli",
                 "json",
                 "html",
-                "markdown"
+                "markdown",
+                "sarif"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -3585,7 +3602,8 @@
             "cli",
             "json",
             "html",
-            "markdown"
+            "markdown",
+            "sarif"
           ],
           "default": "('cli',)",
           "multiple": true,

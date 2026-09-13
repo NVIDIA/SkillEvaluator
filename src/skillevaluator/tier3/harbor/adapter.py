@@ -35,6 +35,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from skillevaluator.tier3.case_ids import safe_child, validate_case_ids, validate_output_directory_path
+from skillevaluator.tier3.harbor import DEFAULT_LLM_VERIFIER_TIMEOUT_SEC
 from skillevaluator.tier3.harbor.secure_copy import (
     copy_file_secure,
     copytree_secure,
@@ -201,6 +202,7 @@ _COMPOSE_ALLOWED_BUILD_KEYS = frozenset(
 )
 _COMPOSE_ALLOWED_NETWORK_KEYS = frozenset({"attachable", "enable_ipv4", "enable_ipv6", "internal", "labels"})
 _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
+_VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
 _VERIFIER_PROVIDER_ENV_VARS = frozenset(
     {
         "SKILL_EVAL_LLM_PROVIDER",
@@ -1822,7 +1824,7 @@ has_skill = {str(has_skill).lower()}
 timeout_sec = 300.0
 
 [verifier]
-timeout_sec = 180.0
+timeout_sec = {DEFAULT_LLM_VERIFIER_TIMEOUT_SEC}
 
 [verifier.env]
 {_verifier_env_block(verifier_env if verifier_env is not None else runtime_env)}
@@ -1904,11 +1906,18 @@ def _write_entry_json(
     workspace_skill_names: list[str] | None = None,
     grading_mode: str = "default",
     custom_grader: bool = False,
+    evaluated_skill: str | None = None,
 ) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
+    trusted_identity: dict[str, str] = {}
+    if grading_mode in ("default", "default_plus_custom"):
+        if not evaluated_skill:
+            raise ValueError("SkillEvaluator default grading requires a trusted evaluated skill identity")
+        trusted_identity["evaluated_skill"] = evaluated_skill
     entry_with_flag = {
         **entry,
+        **trusted_identity,
         "has_skill": has_skill,
         "skill_workspace_mode": workspace_mode,
         "workspace_skill_names": workspace_skill_names or [],
@@ -1941,16 +1950,17 @@ def _copy_verifier(task_dir: Path) -> None:
     """Copy the standalone eval.py verifier into the task's tests/ directory."""
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
-    src = TEMPLATES_DIR / "eval.py"
-    if src.exists():
-        shutil.copy2(src, tests_dir / "eval.py")
-    else:
-        logger.warning("Verifier template not found at %s", src)
-    lc = _EVAL_CORE_DIR / "log_converters.py"
-    if lc.exists():
-        shutil.copy2(lc, tests_dir / "log_converters.py")
-    else:
-        logger.warning("log_converters helper not found at %s", lc)
+    sources = (
+        (TEMPLATES_DIR / "eval.py", "Verifier template"),
+        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
+        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
+        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
+    )
+    for src, label in sources:
+        if src.exists():
+            shutil.copy2(src, tests_dir / src.name)
+        else:
+            logger.warning("%s not found at %s", label, src)
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:
@@ -3068,7 +3078,7 @@ def _custom_compose_path(environment_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-_VERIFIER_DEPS = "ragas~=0.4.0 langchain-community<0.4.2 openai>=1.0 anthropic>=0.40 boto3>=1.34"
+_VERIFIER_DEPS = "ragas~=0.4.0 langchain-community<0.4.2 openai>=1.0 anthropic>=0.40 boto3>=1.34 idna>=3.10,<4"
 _VERIFIER_IMPORT_SMOKE = (
     "from ragas import SingleTurnSample; "
     "from ragas.llms.base import llm_factory; "
@@ -4216,6 +4226,43 @@ def _native_entry_id(task_dir: Path) -> str:
     return task_dir.name
 
 
+def _environment_reference_names(value: object) -> set[str]:
+    """Return portable shell-style environment references from a TOML value."""
+    if not isinstance(value, str):
+        return set()
+    dollar_references = {
+        braced or plain
+        for braced, plain in re.findall(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)\b",
+            value,
+        )
+    }
+    percent_references = set(re.findall(r"%([A-Za-z_][A-Za-z0-9_]*)%", value))
+    return dollar_references | percent_references
+
+
+def _judge_model_env_controls(environment: dict[str, Any]) -> set[str]:
+    """Return reserved judge-model names used as keys or value references."""
+    authored_keys = {name for name in environment if name.upper() in _VERIFIER_JUDGE_MODEL_ENV_VARS}
+    authored_references = {
+        reference
+        for value in environment.values()
+        for reference in _environment_reference_names(value)
+        if reference.upper() in _VERIFIER_JUDGE_MODEL_ENV_VARS
+    }
+    return authored_keys | authored_references
+
+
+def _validate_native_agent_judge_model_controls(task_toml: Path, environment_env: dict[str, Any]) -> None:
+    """Keep host judge controls out of the native task's agent environment."""
+    controls = sorted(_judge_model_env_controls(environment_env))
+    if controls:
+        raise ValueError(
+            f"Native Harbor task [environment.env] cannot name or reference evaluator-controlled judge model "
+            f"variable(s): {', '.join(controls)}: {task_toml}"
+        )
+
+
 def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) -> str | None:
     """Read and validate the workdir Harbor will use for a native task."""
     try:
@@ -4230,6 +4277,7 @@ def _native_task_workdir(task_dir: Path, *, allow_docker_image: bool = False) ->
     environment_env = environment.get("env", {})
     if not isinstance(environment_env, dict):
         raise ValueError(f"Native Harbor task [environment.env] must be a table: {task_dir / 'task.toml'}")
+    _validate_native_agent_judge_model_controls(task_dir / "task.toml", environment_env)
     _validate_runtime_discovery_env(environment_env)
     _validate_runtime_loader_env(environment_env)
     skills_dir = environment.get("skills_dir")
@@ -4302,7 +4350,13 @@ def _ensure_skill_evaluator_verifier_env(task_dir: Path, *, verifier_env: dict[s
         return
 
     insert_at = lines.index("[environment]") if "[environment]" in lines else len(lines)
-    lines[insert_at:insert_at] = ["[verifier]", "timeout_sec = 180.0", "", *env_block, ""]
+    lines[insert_at:insert_at] = [
+        "[verifier]",
+        f"timeout_sec = {DEFAULT_LLM_VERIFIER_TIMEOUT_SEC}",
+        "",
+        *env_block,
+        "",
+    ]
     task_toml.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -4619,6 +4673,7 @@ def _stage_native_harbor_tasks_into(
                 workspace_skill_names=workspace_skill_names,
                 grading_mode=grading_mode,
                 custom_grader=custom_grader,
+                evaluated_skill=skill_path.name,
             )
             _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=custom_grader)
         elif custom_grader:
@@ -4970,6 +5025,7 @@ def _generate_harbor_tasks_into(
             workspace_skill_names=workspace_skill_names,
             grading_mode=grading_mode,
             custom_grader=custom_grader,
+            evaluated_skill=(skill_path.name if grading_mode in ("default", "default_plus_custom") else None),
         )
         _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=custom_grader)
 

@@ -36,7 +36,7 @@ commands referenced below.
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
 | [doctor](#doctor) | Live-evaluation readiness check | Nothing |
 | [health-check](#health-check) | Quick CLI + backend readiness check | Nothing |
-| [models](#models) | List a filtered view of the selected provider's authenticated catalog | Provider key |
+| [models](#models) | List models visible through the selected provider's catalog | Provider configuration/key |
 | [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
 
 ## Global conventions
@@ -45,10 +45,10 @@ commands referenced below.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-r, --report [cli\|json\|html\|markdown]` | `cli` | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
+| `-r, --report [cli\|json\|html\|markdown\|sarif]` | `cli` | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
 | `-o, --output-dir DIRECTORY` | `reports` | Directory for generated reports. |
 
-In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The standalone commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Filename conventions and report anatomy live in [Reports & Results](reports.mdx).
+In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The standalone commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown` or `.sarif.json` with `-r sarif`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Filename conventions and report anatomy live in [Reports & Results](reports.mdx).
 
 **Exit codes.** Commands communicate through a small exit-code contract — this is what your CI gates on (see [Gate Your CI](ci-integration.mdx)):
 
@@ -317,7 +317,7 @@ spellings share the same flags and behavior.
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
 | `--model TEXT` | unset | Global agent model override. |
-| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-5.4-mini`. Accepts the `claude` alias for `claude-code`. |
+| `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-5.6-sol`. Accepts the `claude` alias for `claude-code`. |
 | `--custom-dockerfile-mode [preserve\|rebase]` | unset | How a custom `evals/environment/Dockerfile` is applied: `rebase` (built-in default) swaps its `FROM` line onto the eval base image; `preserve` keeps your `FROM` and appends the eval dependencies. |
 | `--skill-workspace-mode [isolated\|group]` | unset | `isolated` (built-in default) stages only the target skill in the agent workspace; `group` also stages the skills from `--include-skills` / `skill_workspace.include`. |
 | `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode (`--skill-workspace-mode group` or `skill_workspace.mode: group` in `evals/config.yml`). |
@@ -332,7 +332,7 @@ spellings share the same flags and behavior.
 | `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB (passed through to Harbor). |
 | `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
 
-Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.4-mini` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.
+Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.6-sol` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
 
@@ -483,7 +483,7 @@ skillevaluator doctor --agents codex --env-mode docker
 | `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
 | `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
-| `--verify-models` | off | Live per-agent model probe: verifies each agent's resolved model against the provider catalog and prints a pass/fail row per agent, so you can catch a bad model selection before a long run. |
+| `--verify-models` | off | Live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. |
 
 `skillevaluator tier3 doctor` takes the same flags, including `--agent-model` and `--verify-models`.
 
@@ -502,7 +502,7 @@ skillevaluator health-check
 
 ## models
 
-List a filtered view of the selected provider's authenticated catalog. Uses the same provider and credential resolution as evaluation (see [Providers & Credentials](configuration.mdx)), so it doubles as a quick check that your key works. A model appearing in the catalog is **not** proof it is compatible with the evaluation harness — use [doctor](#doctor) `--verify-models` for that. Top-level only; there is no tier-prefixed twin.
+List models visible through the selected provider's catalog. It uses the same provider and credential resolution as evaluation (see [Providers & Credentials](configuration.mdx)), so it checks catalog reachability and model membership. NVIDIA Build and some compatible gateways expose public catalogs, so a listed model does **not** prove that the inference key works or that the model is compatible with the evaluation harness. `doctor --verify-models` reports such successful but non-authoritative checks as warnings. Top-level only; there is no tier-prefixed twin.
 
 ```bash title="List the provider's models"
 skillevaluator models --limit 20

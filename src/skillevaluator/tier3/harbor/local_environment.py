@@ -589,6 +589,23 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         finally:
             self._active_processes.pop(proc, None)
 
+    async def exec_with_sensitive_env(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        """Execute with values delivered through the existing stdin-only bootstrap."""
+        return await self.exec(
+            command=command,
+            cwd=cwd,
+            env=env,
+            timeout_sec=timeout_sec,
+            user=user,
+        )
+
     @staticmethod
     async def _terminate_process_tree(
         proc: asyncio.subprocess.Process,
@@ -996,6 +1013,9 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         for key, value in env.items():
             normalized = key.upper()
             if normalized in _BLOCKED_COMMAND_ENV_NAMES or normalized.startswith(_BLOCKED_COMMAND_ENV_PREFIXES):
+                if value == "":
+                    # The adapter emits empty process-control values to clear inherited loader configuration.
+                    continue
                 raise ValueError(
                     f"environment variable {key} can execute or alter code before confinement and is not allowed"
                 )

@@ -10,6 +10,7 @@ for LLM-powered analysis tasks.
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.inference.finding_verifier import FindingVerifier
 from skillevaluator.inference.types import (
+    EmptyLLMResponseError,
     LLMClientError,
     LLMConfigError,
     LLMVerdict,
@@ -22,6 +23,7 @@ from skillevaluator.inference.types import (
 )
 
 __all__ = [
+    "EmptyLLMResponseError",
     "FindingVerifier",
     "LLMClient",
     "LLMClientError",

@@ -52,7 +52,9 @@ def test_models_help_exposes_catalog_options_without_runtime_verification() -> N
     assert "--json" in result.output
     assert "--verify" not in result.output
     assert "--agents" not in result.output
-    assert "catalog" in result.output.lower()
+    normalized_output = " ".join(result.output.split()).lower()
+    assert "catalog reachability" in normalized_output
+    assert "authenticated" not in normalized_output
 
 
 def test_models_missing_provider_uses_canonical_configuration_error(monkeypatch) -> None:

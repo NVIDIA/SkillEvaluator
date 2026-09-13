@@ -70,9 +70,12 @@ def _stable_read_metadata(
     return after
 
 
-def _fsync_directory(path: Path) -> None:
+def _fsync_directory(path: Path, *, directory_fd: int | None = None) -> None:
     """Durably publish a directory entry where the platform supports it."""
     if os.name != "posix":
+        return
+    if directory_fd is not None:
+        os.fsync(directory_fd)
         return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -81,10 +84,22 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _unlink_if_same_file(path: Path, expected: os.stat_result) -> bool:
+def _lstat_output_child(path: Path, *, directory_fd: int | None = None) -> os.stat_result:
+    """Inspect one immediate output child relative to a pinned directory."""
+    if directory_fd is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+
+
+def _unlink_if_same_file(
+    path: Path,
+    expected: os.stat_result,
+    *,
+    directory_fd: int | None = None,
+) -> bool:
     """Unlink only the exact regular file created by the current operation."""
     try:
-        observed = path.lstat()
+        observed = _lstat_output_child(path, directory_fd=directory_fd)
     except OSError:
         return False
     if _is_link_or_reparse(observed) or not stat.S_ISREG(observed.st_mode):
@@ -92,16 +107,19 @@ def _unlink_if_same_file(path: Path, expected: os.stat_result) -> bool:
     if not os.path.samestat(expected, observed):
         return False
     try:
-        path.unlink()
+        if directory_fd is None:
+            path.unlink()
+        else:
+            os.unlink(path.name, dir_fd=directory_fd)
     except OSError:
         return False
     return True
 
 
-def _inspect_atomic_destination(path: Path) -> os.stat_result | None:
+def _inspect_atomic_destination(path: Path, *, directory_fd: int | None = None) -> os.stat_result | None:
     """Return destination metadata after rejecting unsafe file types."""
     try:
-        metadata = path.lstat()
+        metadata = _lstat_output_child(path, directory_fd=directory_fd)
     except FileNotFoundError:
         return None
     if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
@@ -109,86 +127,127 @@ def _inspect_atomic_destination(path: Path) -> os.stat_result | None:
     return metadata
 
 
+def _assert_output_parent_still_declared(path: Path, expected: os.stat_result) -> None:
+    """Reject a lexical output parent that no longer names the pinned directory."""
+    try:
+        validate_output_directory_path(path)
+    except ValueError as exc:
+        raise ValueError(f"Generated output directory changed while writing: {path}") from exc
+    try:
+        observed = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"Generated output directory changed while writing: {path}") from exc
+    if _is_link_or_reparse(observed) or not stat.S_ISDIR(observed.st_mode) or not os.path.samestat(expected, observed):
+        raise ValueError(f"Generated output directory changed while writing: {path}")
+
+
 def write_output_file_atomically(path: Path, payload: bytes) -> None:
     """Durably replace one evaluator-owned output file with complete bytes."""
     validate_output_directory_path(path.parent)
-    existing = _inspect_atomic_destination(path)
-    existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
-    temporary: Path | None = None
-    temporary_named_metadata: os.stat_result | None = None
-    descriptor = -1
     try:
-        for _ in range(32):
-            candidate = path.parent / f".{path.name}.{os.getpid()}-{secrets.token_hex(8)}.tmp"
-            try:
-                descriptor = os.open(
-                    candidate,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-                    0o666,
-                )
-            except FileExistsError:
-                continue
-            temporary = candidate
-            break
-        if temporary is None or descriptor < 0:
-            raise OSError(f"Cannot allocate a temporary output artifact for: {path}")
+        parent_metadata = path.parent.lstat()
+    except OSError as exc:
+        raise ValueError(f"Cannot inspect generated output directory: {path.parent}") from exc
 
-        temporary_opened = os.fstat(descriptor)
-        temporary_named_metadata = temporary.lstat()
-        if (
-            _is_link_or_reparse(temporary_opened)
-            or _is_link_or_reparse(temporary_named_metadata)
-            or not stat.S_ISREG(temporary_opened.st_mode)
-            or not stat.S_ISREG(temporary_named_metadata.st_mode)
-            or temporary_opened.st_nlink != 1
-            or temporary_named_metadata.st_nlink != 1
-            or (
-                _PATH_DESCRIPTOR_IDENTITIES_COMPARABLE
-                and not os.path.samestat(temporary_opened, temporary_named_metadata)
-            )
-        ):
-            raise ValueError(f"Generated output temporary artifact is unsafe: {temporary}")
-        if existing_mode is not None and hasattr(os, "fchmod"):
-            os.fchmod(descriptor, existing_mode)
-
-        handle = os.fdopen(descriptor, "wb", closefd=True)
+    with SecureRoot(path.parent, expected=parent_metadata) as secure_parent:
+        directory_fd = secure_parent.duplicate_posix_root_descriptor() if os.name == "posix" else None
+        temporary: Path | None = None
+        temporary_named_metadata: os.stat_result | None = None
         descriptor = -1
-        with handle:
-            if handle.write(payload) != len(payload):
-                raise OSError(f"Short write while publishing generated output: {path}")
-            handle.flush()
-            os.fsync(handle.fileno())
-            written = os.fstat(handle.fileno())
+        try:
+            existing = _inspect_atomic_destination(path, directory_fd=directory_fd)
+            existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
+            for _ in range(32):
+                candidate = path.parent / f".{path.name}.{os.getpid()}-{secrets.token_hex(8)}.tmp"
+                try:
+                    descriptor = os.open(
+                        candidate.name if directory_fd is not None else candidate,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        0o666,
+                        **({"dir_fd": directory_fd} if directory_fd is not None else {}),
+                    )
+                except FileExistsError:
+                    continue
+                temporary = candidate
+                break
+            if temporary is None or descriptor < 0:
+                raise OSError(f"Cannot allocate a temporary output artifact for: {path}")
 
-        observed = temporary.lstat()
-        temporary_identity_matches = os.path.samestat(temporary_named_metadata, observed) and (
-            not _PATH_DESCRIPTOR_IDENTITIES_COMPARABLE or os.path.samestat(written, observed)
-        )
-        if (
-            _is_link_or_reparse(observed)
-            or not stat.S_ISREG(observed.st_mode)
-            or observed.st_nlink != 1
-            or written.st_size != len(payload)
-            or observed.st_size != len(payload)
-            or not temporary_identity_matches
-        ):
-            raise ValueError(f"Generated output temporary artifact changed while writing: {temporary}")
-        validate_output_directory_path(path.parent)
-        destination = _inspect_atomic_destination(path)
-        if (existing is None) != (destination is None) or (
-            existing is not None
-            and destination is not None
-            and _artifact_fingerprint(existing) != _artifact_fingerprint(destination)
-        ):
-            raise ValueError(f"Generated output destination changed while writing: {path}")
-        os.replace(temporary, path)  # noqa: PTH105 -- same-directory atomic replacement is the contract
-        temporary = None
-        _fsync_directory(path.parent)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary is not None and temporary_named_metadata is not None:
-            _unlink_if_same_file(temporary, temporary_named_metadata)
+            temporary_opened = os.fstat(descriptor)
+            temporary_named_metadata = _lstat_output_child(temporary, directory_fd=directory_fd)
+            if (
+                _is_link_or_reparse(temporary_opened)
+                or _is_link_or_reparse(temporary_named_metadata)
+                or not stat.S_ISREG(temporary_opened.st_mode)
+                or not stat.S_ISREG(temporary_named_metadata.st_mode)
+                or temporary_opened.st_nlink != 1
+                or temporary_named_metadata.st_nlink != 1
+                or (
+                    _PATH_DESCRIPTOR_IDENTITIES_COMPARABLE
+                    and not os.path.samestat(temporary_opened, temporary_named_metadata)
+                )
+            ):
+                raise ValueError(f"Generated output temporary artifact is unsafe: {temporary}")
+            if existing_mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(descriptor, existing_mode)
+
+            handle = os.fdopen(descriptor, "wb", closefd=True)
+            descriptor = -1
+            with handle:
+                if handle.write(payload) != len(payload):
+                    raise OSError(f"Short write while publishing generated output: {path}")
+                handle.flush()
+                os.fsync(handle.fileno())
+                written = os.fstat(handle.fileno())
+
+            observed = _lstat_output_child(temporary, directory_fd=directory_fd)
+            temporary_identity_matches = os.path.samestat(temporary_named_metadata, observed) and (
+                not _PATH_DESCRIPTOR_IDENTITIES_COMPARABLE or os.path.samestat(written, observed)
+            )
+            if (
+                _is_link_or_reparse(observed)
+                or not stat.S_ISREG(observed.st_mode)
+                or observed.st_nlink != 1
+                or written.st_size != len(payload)
+                or observed.st_size != len(payload)
+                or not temporary_identity_matches
+            ):
+                raise ValueError(f"Generated output temporary artifact changed while writing: {temporary}")
+            _assert_output_parent_still_declared(path.parent, parent_metadata)
+            destination = _inspect_atomic_destination(path, directory_fd=directory_fd)
+            if (existing is None) != (destination is None) or (
+                existing is not None
+                and destination is not None
+                and _artifact_fingerprint(existing) != _artifact_fingerprint(destination)
+            ):
+                raise ValueError(f"Generated output destination changed while writing: {path}")
+            if directory_fd is None:
+                os.replace(temporary, path)  # noqa: PTH105 -- pinned Windows parent prevents redirection
+            else:
+                os.replace(
+                    temporary.name,
+                    path.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                )
+            temporary = None
+            _fsync_directory(path.parent, directory_fd=directory_fd)
+            _assert_output_parent_still_declared(path.parent, parent_metadata)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None and temporary_named_metadata is not None:
+                _unlink_if_same_file(
+                    temporary,
+                    temporary_named_metadata,
+                    directory_fd=directory_fd,
+                )
+            if directory_fd is not None:
+                os.close(directory_fd)
 
 
 def _protect_key_for_storage(key: bytes) -> bytes:

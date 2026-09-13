@@ -41,6 +41,8 @@ RESERVED = {
     "behavior_check",
     "details",
     "entry_id",
+    "evaluation_errors",
+    "evaluation_status",
     "has_skill",
     "metric_set",
     "metrics",

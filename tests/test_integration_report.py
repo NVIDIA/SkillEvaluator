@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from skillevaluator.evaluation.tier3_report import _build_integration_report, _validation_result_from_payload
+from skillevaluator.evaluation.tier3_report import (
+    _build_agent,
+    _build_integration_report,
+    _validation_result_from_payload,
+)
 
 
 def test_integration_report_is_plugin_only_and_reconciles_operands() -> None:
@@ -39,6 +43,38 @@ def test_incomplete_sum_of_parts_never_claims_integration() -> None:
     assert report is not None
     assert report["verdict"] == "inconclusive"
     assert report["complete"] is False
+
+
+def test_custom_only_sum_of_parts_produces_integration_lift() -> None:
+    agent = _build_agent(
+        "codex",
+        {
+            "execution_status": "succeeded",
+            "conditions": {
+                "with_skill": {"execution_status": "succeeded"},
+                "without_skill": {"execution_status": "skipped"},
+                "sum_of_parts": {"execution_status": "succeeded"},
+            },
+            "overall_with_skill": 0.8,
+            "overall_sum_of_parts": 0.5,
+            "integration_completeness": {"complete": True},
+        },
+        [],
+        None,
+    )
+
+    assert agent["sum_of_parts"] == 0.5
+    assert agent["integration_lift"] == 0.3
+    report = _build_integration_report(
+        agent,
+        {
+            "eval_target": {"kind": "plugin"},
+            "skill_workspace": {"staged_skills": ["member"], "sum_of_parts_arm": True},
+        },
+    )
+    assert report is not None
+    assert report["complete"] is True
+    assert report["verdict"] == "real_integration"
 
 
 def test_partial_plugin_payload_is_never_reported_as_a_pass() -> None:

@@ -236,6 +236,7 @@ _FILE_REPORT_EXTENSIONS = {
     "json": ".json",
     "html": ".html",
     "markdown": ".md",
+    "sarif": ".sarif.json",
 }
 
 
@@ -327,7 +328,7 @@ def _report_options(func):
         "report_formats",
         cls=_MultiValueOption,
         multiple=True,
-        type=click.Choice(["cli", "json", "html", "markdown"]),
+        type=click.Choice(["cli", "json", "html", "markdown", "sarif"]),
         default=("cli",),
         show_default=True,
         help="Report format(s). Accepts comma- or space-separated values "
@@ -973,7 +974,7 @@ def _finish_pipeline_view(
     """Render the quiet-mode verdict panel and report footer."""
     from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
 
-    ext = {"html": ".html", "json": ".json", "markdown": ".md"}
+    ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
         ("report" if fmt == "html" else fmt, str(output_dir / f"{basename}{ext[fmt]}"))
         for fmt in report_formats
@@ -1397,7 +1398,7 @@ def validate(
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
-    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url
+    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
     from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
@@ -1738,6 +1739,9 @@ def validate(
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
+    sarif_repository_root = resolve_git_root(target_path)
+    if sarif_repository_root is None:
+        sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -1757,6 +1761,8 @@ def validate(
         target_path=target_display,
         content_label=content_label,
         announce_paths=not quiet,
+        sarif_scan_root=target_path,
+        sarif_repository_root=sarif_repository_root,
     )
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
@@ -2487,7 +2493,7 @@ def view(skill_path: Path, results_dir: Path | None) -> None:
 @click.option("--limit", type=click.IntRange(min=1, max=100), default=10, show_default=True)
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def models_command(limit: int, as_json: bool) -> None:
-    """List a filtered view of the selected provider's authenticated catalog."""
+    """Check catalog reachability and list visible provider models."""
     from skillevaluator.model_commands import run_models_command
 
     raise SystemExit(run_models_command(limit=limit, as_json=as_json))
@@ -2503,7 +2509,11 @@ def models_command(limit: int, as_json: bool) -> None:
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
-@click.option("--verify-models", is_flag=True, help="Show the configured public provider model.")
+@click.option(
+    "--verify-models",
+    is_flag=True,
+    help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
+)
 def doctor(agents: str, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor

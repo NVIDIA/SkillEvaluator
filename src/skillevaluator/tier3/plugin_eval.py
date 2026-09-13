@@ -39,7 +39,10 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import stat
+import tempfile
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -58,14 +61,17 @@ from skillevaluator.constants import (
 )
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Severity
-from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, find_eval_file, load_dataset_entries
+from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
 from skillevaluator.utils.helpers import find_bundled_plugin_skills, resolve_git_remote_url
 from skillevaluator.utils.secure_fs import (
     SecurePathError,
     SecureRoot,
     discover_secure_files,
+    secure_atomic_write_text,
     secure_read_path_text,
+    stat_is_link_or_reparse,
 )
 from skillevaluator.utils.structured_data import (
     StructuredDataError,
@@ -242,7 +248,7 @@ def prepare_plugin_eval_package(
     # Layer-1 intra-repo resolver: canonical skill/rule refs whose <repo> is the
     # plugin's own clone are resolved to real dirs/files under the clone root
     # (widened, slug-verified containment); everything else stays unresolved.
-    resolver = _make_intra_repo_resolver(plugin_dir, plugin_root, repo_root)
+    resolver = _make_intra_repo_resolver(plugin_dir, plugin_root, repo_root, stage_root)
 
     # Contained skills: symlink-safe discovery shared with Tier 1/2, plus any
     # caller-supplied local skills, plus intra-repo-resolved bundle skill refs.
@@ -385,12 +391,14 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
     """
     try:
         run_path = Path(run_dir)
-        if not run_path.is_dir():
-            return None
         target = run_path / "plugin_provenance.json"
-        target.write_text(json.dumps(provenance, indent=2), encoding="utf-8")
+        secure_atomic_write_text(
+            target,
+            json.dumps(provenance, indent=2),
+            CONTENT_DEDUP_MAX_TOTAL_BYTES,
+        )
         return target
-    except OSError:
+    except (OSError, SecurePathError):
         return None
 
 
@@ -502,7 +510,11 @@ def _slug_from_remote_url(url: str) -> str | None:
     if "/-/" in path:  # strip GitLab web suffixes like '/-/tree/main'
         path = path.split("/-/", 1)[0]
     path = path.removesuffix(".git")
-    return path.strip("/") or None
+    slug = path.strip("/")
+    # Canonical plugin refs are normalized to lowercase. Git hosting treats the
+    # owner/repository portion case-insensitively, so normalize the remote slug
+    # the same way before comparing identities.
+    return slug.lower() or None
 
 
 def _local_repo_slug(clone_root: Path) -> str | None:
@@ -523,38 +535,29 @@ class _IntraRepoResolver:
     * detection is active (there is an enclosing repo above the plugin), AND
     * the ref names a public remote source (github/git), AND
     * ``ref_kind`` is a recognized content root for the resolution kind, AND
-    * the ref ``<repo>`` matches the local clone's git-origin slug -- OR no git
-      origin is available, in which case path-existence under the content root is
-      the sole signal, AND
-    * the resolved path stays *inside* that content root.
+    * the ref ``<repo>`` matches the local clone's git-origin slug, AND
+    * every lexical component below the clone root is opened without following
+      links or reparse points.
 
     Containment is widened from the plugin root to the ref's content root
     (``<clone_root>/<ref_kind>``) for these slug-verified refs ONLY; symlink / ``..``
     escapes outside that content root are rejected, so a ref can only reach a
-    recognized skills/rules dir. Refs to other repos are never resolved *when the
-    local slug is known* (the CI path). When no git origin is available the slug
-    cannot be verified, so resolution falls back to path-existence -- a documented
-    fail-open in that degraded local case; see :meth:`_repo_matches`.
+    recognized skills/rules dir. Refs stay unresolved when the local origin slug
+    is unavailable because path existence alone cannot prove repository identity.
     """
 
     clone_root: Path
     local_slug: str | None
     active: bool
+    snapshot_root: Path
+    _snapshot_cache: dict[tuple[str, str, str], Path | None] = dataclass_field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     def _repo_matches(self, repo: str) -> bool:
-        # Fail-closed when the clone's slug is KNOWN: require an exact match so a
-        # foreign-repo ref (a different <group>/<repo>) never resolves intra-repo.
-        # This is the CI path -- a checked-out plugin repo has a git origin, so the
-        # slug is known and cross-repo refs correctly stay unresolved -> INCOMPLETE.
-        #
-        # KNOWN LIMITATION (accepted, not a bug): when the slug is INDETERMINATE (no
-        # git origin and no override) we fall back to path-existence under the clone
-        # root, so in that degraded local case a same-named local component can
-        # satisfy a foreign ref. A strictly fail-closed variant would require an
-        # explicit slug source, intentionally deferred to keep the CLI surface
-        # minimal. Containment (`_is_within`) still hard-gates every resolved path
-        # inside the clone root, so this can never read outside the clone.
-        return self.local_slug is None or repo == self.local_slug
+        return self.local_slug is not None and repo == self.local_slug
 
     def _resolve(self, ref: Any, *, kind: str, want_dir: bool) -> Path | None:
         if not self.active:
@@ -578,38 +581,69 @@ class _IntraRepoResolver:
         # Reject absolute names and any '..' traversal so a ref can never climb out of
         # its content root (e.g. ``team-rules::../private/credential.txt``). Legitimate
         # nested names (``team-skills::l4e/l4e-bringup/<skill>``) are preserved.
-        if rel.is_absolute() or ".." in rel.parts:
+        if rel.is_absolute() or not rel.parts or any(part in {"", ".", ".."} for part in rel.parts):
             return None
-        # Resolve under the ref's OWN content root (<clone_root>/<ref_kind>/<name>), so
-        # real team-skills/ and team-rules/ repo-relative layouts resolve -- not just a
-        # fixed <clone_root>/<kind> dir.
-        content_root = (self.clone_root / ref_kind).resolve()
+        cache_key = (kind, ref_kind, rel.as_posix())
+        if cache_key in self._snapshot_cache:
+            return self._snapshot_cache[cache_key]
+        content_root = self.clone_root / ref_kind
         try:
-            resolved = (content_root / rel).resolve()
-        except OSError:
+            content_root_metadata = content_root.lstat()
+        except FileNotFoundError:
             return None
-        # Containment: the resolved path must stay under its content root (itself under
-        # the clone root). ``_is_within`` resolves symlinks, so a component symlinked or
-        # '..'-ed outside its content root is rejected -- a ref can only reach a
-        # recognized skills/rules content dir, never .git/, secrets/, or a sibling.
-        if not _is_within(resolved, content_root):
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect intra-repo plugin content root safely: {content_root}: {exc}") from exc
+        if stat_is_link_or_reparse(content_root_metadata):
+            raise ValueError(f"Refusing symlink or reparse-point intra-repo plugin content root: {content_root}")
+        if not stat.S_ISDIR(content_root_metadata.st_mode):
             return None
+
+        candidate = content_root / rel
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError(f"Cannot inspect intra-repo plugin {kind} ref safely: {candidate}: {exc}") from exc
+        if stat_is_link_or_reparse(metadata):
+            raise ValueError(f"Refusing linked intra-repo plugin {kind} ref: {candidate}")
+
+        snapshot = self.snapshot_root / kind / ref_kind / rel
         if want_dir:
-            if not resolved.is_dir():
+            if not stat.S_ISDIR(metadata.st_mode):
                 return None
-            return resolved if (resolved / "SKILL.md").is_file() or (resolved / "skill.md").is_file() else None
-        return resolved if resolved.is_file() else None
+            try:
+                copytree_secure(candidate, snapshot, allowed_root=self.clone_root)
+            except (OSError, UnsafeStagingError) as exc:
+                raise ValueError(f"Refusing unsafe intra-repo plugin skill '{candidate}': {exc}") from exc
+            resolved = snapshot if (snapshot / "SKILL.md").is_file() or (snapshot / "skill.md").is_file() else None
+            self._snapshot_cache[cache_key] = resolved
+            return resolved
+
+        if not stat.S_ISREG(metadata.st_mode) or getattr(metadata, "st_nlink", 1) != 1:
+            raise ValueError(f"Refusing non-regular intra-repo plugin rule: {candidate}")
+        try:
+            copy_file_secure(candidate, snapshot, allowed_root=self.clone_root)
+        except (OSError, UnsafeStagingError) as exc:
+            raise ValueError(f"Refusing unsafe intra-repo plugin rule '{candidate}': {exc}") from exc
+        self._snapshot_cache[cache_key] = snapshot
+        return snapshot
 
     def resolve_skill(self, ref: Any) -> Path | None:
-        """Resolve an intra-repo ``skills`` ref to a local skill directory."""
+        """Resolve an intra-repo ``skills`` ref to a private local snapshot."""
         return self._resolve(ref, kind="skills", want_dir=True)
 
     def resolve_rule(self, ref: Any) -> Path | None:
-        """Resolve an intra-repo ``rules`` ref to a local rule file."""
+        """Resolve an intra-repo ``rules`` ref to a private local snapshot."""
         return self._resolve(ref, kind="rules", want_dir=False)
 
 
-def _make_intra_repo_resolver(plugin_dir: Path, plugin_root: Path, repo_root: Path | None) -> _IntraRepoResolver:
+def _make_intra_repo_resolver(
+    plugin_dir: Path,
+    plugin_root: Path,
+    repo_root: Path | None,
+    stage_root: Path,
+) -> _IntraRepoResolver:
     """Build the intra-repo resolver, honoring an optional ``--repo-root`` override.
 
     ``repo_root`` (CLI ``--repo-root``) is a determinism override for CI; when it
@@ -622,12 +656,15 @@ def _make_intra_repo_resolver(plugin_dir: Path, plugin_root: Path, repo_root: Pa
         override = repo_root.expanduser().resolve()
         if _is_within(plugin_root, override):
             clone_root = override
-    # Compare RESOLVED paths on both sides: clone_root is already resolved, so a
-    # symlinked standalone plugin_root must be resolved too, else `active` wrongly
-    # turns True and activates the resolver with no slug (fail-open). (Greptile P1)
     active = clone_root != plugin_root.resolve()
     local_slug = _local_repo_slug(clone_root) if active else None
-    return _IntraRepoResolver(clone_root=clone_root, local_slug=local_slug, active=active)
+    snapshot_root = stage_root.expanduser().absolute() / ".intra-repo-snapshots"
+    return _IntraRepoResolver(
+        clone_root=clone_root,
+        local_slug=local_slug,
+        active=active,
+        snapshot_root=snapshot_root,
+    )
 
 
 def _iter_raw_refs(section: Any) -> list[Any]:
@@ -1249,31 +1286,92 @@ def _copy_evals_source(source: Path, dest: Path) -> None:
     shutil.copytree(source, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns("results", "__pycache__", ".git"))
 
 
+def _load_member_eval_dataset(
+    skill_dir: Path,
+    *,
+    snapshot_dir: Path,
+    snapshot_index: int,
+) -> tuple[Path, list[dict[str, Any]]] | None:
+    """Snapshot and load one member dataset without following authored paths."""
+    layouts = (("evals", "evals"), ("eval", "dataset"))
+    for directory, stem in layouts:
+        for extension in DATASET_EXTENSIONS:
+            candidate = skill_dir / directory / f"{stem}{extension}"
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ValueError(f"Cannot inspect member dataset safely: {candidate}: {exc}") from exc
+            if stat_is_link_or_reparse(metadata):
+                raise ValueError(f"Refusing linked member dataset: {candidate}")
+            if not stat.S_ISREG(metadata.st_mode) or getattr(metadata, "st_nlink", 1) != 1:
+                raise ValueError(f"Refusing non-regular member dataset: {candidate}")
+            if metadata.st_size > CONTENT_DEDUP_MAX_FILE_BYTES:
+                raise ValueError(
+                    f"Member dataset exceeds the {CONTENT_DEDUP_MAX_FILE_BYTES}-byte limit: {candidate}"
+                )
+
+            snapshot = snapshot_dir / f"member-{snapshot_index}{extension}"
+            try:
+                copy_file_secure(candidate, snapshot, allowed_root=skill_dir)
+            except UnsafeStagingError as exc:
+                raise ValueError(f"Refusing unsafe member dataset '{candidate}': {exc}") from exc
+            try:
+                raw_text = secure_read_path_text(snapshot, CONTENT_DEDUP_MAX_FILE_BYTES)
+                return candidate, _parse_member_dataset_text(raw_text, extension)
+            except SecurePathError as exc:
+                raise ValueError(f"Cannot read snapshotted member dataset safely: {candidate}: {exc}") from exc
+    return None
+
+
+def _parse_member_dataset_text(raw_text: str, suffix: str) -> list[dict[str, Any]]:
+    """Parse a bounded member-dataset snapshot in its declared format."""
+    try:
+        if suffix == ".jsonl":
+            data: Any = [load_bounded_json(line) for raw_line in raw_text.splitlines() if (line := raw_line.strip())]
+        elif suffix == ".json":
+            data = load_bounded_json(raw_text)
+        elif suffix in {".yaml", ".yml"}:
+            data = load_bounded_yaml(raw_text)
+        else:
+            raise ValueError(f"Unsupported dataset format: {suffix}")
+    except StructuredDataError as exc:
+        raise ValueError(f"Invalid bounded member evaluation dataset: {exc}") from exc
+    return normalize_dataset_entries(data)
+
+
 def _write_combined_member_evals(evals_dir: Path, include_skills: tuple[Path, ...], *, plugin_name: str) -> None:
     evals_dir.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     staged_files: dict[str, tuple[str, Path]] = {}
-    for skill_dir in include_skills:
-        eval_file = find_eval_file(skill_dir)
-        if eval_file is None:
-            continue
-        skill_entries = load_dataset_entries(eval_file)
-        for idx, entry in enumerate(skill_entries, start=1):
-            combined = dict(entry)
-            source_id = str(combined.get("id") or f"case-{idx:03d}")
-            combined["id"] = _unique_eval_id(_safe_combined_eval_id(skill_dir.name, source_id), seen_ids)
-            combined.setdefault("expected_skill", skill_dir.name)
-            combined["plugin_eval_source_skill"] = skill_dir.name
-            combined["plugin_eval_target"] = plugin_name
-            entries.append(combined)
-        _stage_member_files(
-            eval_file.parent / "files",
-            evals_dir / "files",
-            skill_dir.name,
-            staged_files,
-            containment_root=skill_dir,
-        )
+    with tempfile.TemporaryDirectory(prefix="member-dataset-snapshots-", dir=evals_dir.parent) as temp_dir:
+        snapshot_dir = Path(temp_dir)
+        for skill_index, skill_dir in enumerate(include_skills):
+            loaded = _load_member_eval_dataset(
+                skill_dir,
+                snapshot_dir=snapshot_dir,
+                snapshot_index=skill_index,
+            )
+            if loaded is None:
+                continue
+            eval_file, skill_entries = loaded
+            for idx, entry in enumerate(skill_entries, start=1):
+                combined = dict(entry)
+                source_id = str(combined.get("id") or f"case-{idx:03d}")
+                combined["id"] = _unique_eval_id(_safe_combined_eval_id(skill_dir.name, source_id), seen_ids)
+                combined.setdefault("expected_skill", skill_dir.name)
+                combined["plugin_eval_source_skill"] = skill_dir.name
+                combined["plugin_eval_target"] = plugin_name
+                entries.append(combined)
+            _stage_member_files(
+                eval_file.parent / "files",
+                evals_dir / "files",
+                skill_dir.name,
+                staged_files,
+                containment_root=skill_dir,
+            )
 
     if not entries:
         raise ValueError(

@@ -30,9 +30,9 @@ def _provider(name: str, model: str) -> ProviderConfig:
 @pytest.mark.parametrize(
     ("provider", "agent", "expected"),
     [
-        (_provider("openai", "gpt-5.4-mini"), "codex", "gpt-5.4-mini"),
-        (_provider("openai", "gpt-5.4-mini"), "opencode", "openai/gpt-5.4-mini"),
-        (_provider("anthropic", "claude-sonnet-4-5"), "claude-code", "claude-sonnet-4-5"),
+        (_provider("openai", "gpt-5.5"), "codex", "gpt-5.5"),
+        (_provider("openai", "gpt-5.5"), "opencode", "openai/gpt-5.5"),
+        (_provider("anthropic", "claude-opus-5"), "claude-code", "claude-opus-5"),
         (
             _provider("nv_build", "nvidia/nemotron-3-nano-30b-a3b"),
             "opencode",
@@ -103,7 +103,7 @@ def test_docker_build_bridges_accept_the_provider_default(agent: str) -> None:
     [
         ("opencode", "nvidia/gpt-5"),
         ("codex", "gpt-5"),
-        ("claude-code", "claude-sonnet-4-5"),
+        ("claude-code", "claude-opus-4-8"),
     ],
 )
 def test_build_agents_reject_native_model_names_that_would_be_misrouted(
@@ -148,7 +148,7 @@ def test_cloud_build_vendor_clis_require_independent_native_credentials(
 
 def test_openai_provider_rejects_claude_without_an_independent_credential() -> None:
     errors = _validate_agent_provider_credentials(
-        _provider("openai", "gpt-5.4-mini"),
+        _provider("openai", "gpt-5.5"),
         ["claude-code"],
         {},
         {"claude-code": "public provider default"},
@@ -162,7 +162,7 @@ def test_openai_provider_rejects_claude_without_an_independent_credential() -> N
 
 def test_openai_provider_rejects_the_default_gpt_model_for_claude() -> None:
     errors = _validate_agent_provider_credentials(
-        _provider("openai", "gpt-5.4-mini"),
+        _provider("openai", "gpt-5.5"),
         ["claude-code"],
         {"ANTHROPIC_API_KEY": "anthropic-key"},
         {"claude-code": "public provider default"},
@@ -174,7 +174,7 @@ def test_openai_provider_rejects_the_default_gpt_model_for_claude() -> None:
 def test_openai_provider_accepts_an_explicit_independent_claude_route() -> None:
     assert (
         _validate_agent_provider_credentials(
-            _provider("openai", "gpt-5.4-mini"),
+            _provider("openai", "gpt-5.5"),
             ["claude-code"],
             {"ANTHROPIC_API_KEY": "anthropic-key"},
             {"claude-code": "CLI"},
@@ -187,7 +187,7 @@ def test_openai_provider_accepts_an_explicit_independent_claude_route() -> None:
 def test_openai_provider_accepts_mixed_routes_for_per_agent_isolation() -> None:
     assert (
         _validate_agent_provider_credentials(
-            _provider("openai", "gpt-5.4-mini"),
+            _provider("openai", "gpt-5.5"),
             ["codex", "claude-code"],
             {"ANTHROPIC_API_KEY": "anthropic-key"},
             {"codex": "public provider default", "claude-code": "CLI"},
@@ -199,12 +199,12 @@ def test_openai_provider_accepts_mixed_routes_for_per_agent_isolation() -> None:
 
 def test_openai_provider_rejects_an_anthropic_opencode_override() -> None:
     errors = _validate_agent_provider_credentials(
-        _provider("openai", "gpt-5.4-mini"),
+        _provider("openai", "gpt-5.5"),
         ["codex", "opencode"],
         {"ANTHROPIC_API_KEY": "anthropic-key"},
         {"codex": "public provider default", "opencode": "CLI"},
         env_mode="docker",
-        agent_models={"codex": "gpt-5.4-mini", "opencode": "anthropic/claude-sonnet-4-5"},
+        agent_models={"codex": "gpt-5.5", "opencode": "anthropic/claude-opus-4-8"},
     )
     assert errors and "must match the evaluator provider" in errors[0]
     assert "ANTHROPIC_API_KEY" not in errors[0]
@@ -212,7 +212,7 @@ def test_openai_provider_rejects_an_anthropic_opencode_override() -> None:
 
 def test_anthropic_provider_rejects_default_raw_model_for_opencode() -> None:
     errors = _validate_agent_provider_credentials(
-        _provider("anthropic", "claude-sonnet-4-5"),
+        _provider("anthropic", "claude-opus-4-8"),
         ["opencode"],
         {},
         {"opencode": "public provider default"},
@@ -239,7 +239,7 @@ def test_anthropic_provider_rejects_incomplete_or_default_codex_routes(
     expected_fragment: str,
 ) -> None:
     errors = _validate_agent_provider_credentials(
-        _provider("anthropic", "claude-sonnet-4-5"),
+        _provider("anthropic", "claude-opus-4-8"),
         ["codex"],
         runtime_env,
         {"codex": model_source},
@@ -251,19 +251,19 @@ def test_anthropic_provider_rejects_incomplete_or_default_codex_routes(
 def test_anthropic_provider_accepts_explicit_codex_and_opencode_routes() -> None:
     assert (
         _validate_agent_provider_credentials(
-            _provider("anthropic", "claude-sonnet-4-5"),
+            _provider("anthropic", "claude-opus-4-8"),
             ["codex", "opencode"],
             {"OPENAI_API_KEY": "openai-key", "OPENAI_BASE_URL": "https://api.openai.com/v1"},
             {"codex": "CLI", "opencode": "CLI"},
             env_mode="docker",
-            agent_models={"codex": "gpt-5.4-mini", "opencode": "anthropic/claude-sonnet-4-5"},
+            agent_models={"codex": "gpt-5.5", "opencode": "anthropic/claude-opus-4-8"},
         )
         == []
     )
 
 
 def test_anthropic_provider_accepts_explicit_single_agent_routes() -> None:
-    provider = _provider("anthropic", "claude-sonnet-4-5")
+    provider = _provider("anthropic", "claude-opus-4-8")
     assert (
         _validate_agent_provider_credentials(
             provider,
@@ -281,7 +281,7 @@ def test_anthropic_provider_accepts_explicit_single_agent_routes() -> None:
             {},
             {"opencode": "CLI"},
             env_mode="docker",
-            agent_models={"opencode": "anthropic/claude-sonnet-4-5"},
+            agent_models={"opencode": "anthropic/claude-opus-4-8"},
         )
         == []
     )
@@ -289,12 +289,12 @@ def test_anthropic_provider_accepts_explicit_single_agent_routes() -> None:
 
 def test_anthropic_provider_rejects_an_openai_opencode_override() -> None:
     errors = _validate_agent_provider_credentials(
-        _provider("anthropic", "claude-sonnet-4-5"),
+        _provider("anthropic", "claude-opus-4-8"),
         ["claude-code", "opencode"],
         {"OPENAI_API_KEY": "openai-key", "OPENAI_BASE_URL": "https://api.openai.com/v1"},
         {"claude-code": "public provider default", "opencode": "CLI"},
         env_mode="docker",
-        agent_models={"claude-code": "claude-sonnet-4-5", "opencode": "openai/gpt-5.4-mini"},
+        agent_models={"claude-code": "claude-opus-4-8", "opencode": "openai/gpt-5.5"},
     )
     assert errors and "must match the evaluator provider" in errors[0]
     assert "OPENAI_API_KEY" not in errors[0]

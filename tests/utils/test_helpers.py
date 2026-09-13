@@ -3,6 +3,7 @@
 
 """Tests for skillevaluator.utils module."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_p
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
     resolve_git_remote_url,
+    resolve_git_root,
 )
 
 
@@ -202,6 +204,37 @@ def _clean_ci_env(**overrides: str) -> dict[str, str]:
     return env
 
 
+def _init_git_repo(path: Path, remote_url: str) -> str:
+    """Create a repository with one commit and return its HEAD revision."""
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
+    (path / "README.md").write_text("test repository\n")
+    subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "Initial commit"], check=True)
+    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", remote_url], check=True)
+    return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+
+
+class TestResolveGitRoot:
+    """Tests for lightweight repository-root discovery used by base reports."""
+
+    def test_resolves_nested_directory_and_file(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root, "git@github.com:example/project.git")
+        nested = repo_root / "skills" / "demo"
+        nested.mkdir(parents=True)
+        manifest = nested / "SKILL.md"
+        manifest.write_text("---\nname: demo\n---\n", encoding="utf-8")
+
+        assert resolve_git_root(nested) == repo_root.resolve()
+        assert resolve_git_root(manifest) == repo_root.resolve()
+
+    def test_returns_none_outside_git_repository(self, tmp_path: Path) -> None:
+        assert resolve_git_root(tmp_path) is None
+
+
 class TestResolveGitRemoteUrl:
     """Tests for the Git remote URL resolver used in HTML report links."""
 
@@ -245,3 +278,38 @@ class TestResolveGitRemoteUrl:
             url = resolve_git_remote_url(sub_dir)
         # Branch wins over the SHA because the scan is same-repo.
         assert url == "https://github.com/g/r/tree/feature/x/src"
+
+    def test_pull_request_merge_ref_uses_local_head_without_valid_github_sha(self, tmp_path: Path):
+        """A missing or malformed workflow SHA cannot replace the checked-out revision."""
+        repo_root = tmp_path / "repo"
+        head = _init_git_repo(repo_root, "git@github.com:g/r.git")
+        sub_dir = repo_root / "src"
+        sub_dir.mkdir()
+
+        for github_sha in (None, "not-a-commit"):
+            env = _clean_ci_env(GITHUB_REF_NAME="58/merge", GITHUB_REPOSITORY="g/r")
+            if github_sha is not None:
+                env["GITHUB_SHA"] = github_sha
+            with patch.dict("os.environ", env, clear=True):
+                url = resolve_git_remote_url(sub_dir)
+
+            assert url == f"https://github.com/g/r/tree/{head}/src"
+
+    def test_pull_request_merge_ref_uses_secondary_checkout_head(self, tmp_path: Path):
+        """Source links use the target checkout even when workflow metadata describes another repository."""
+        repo_root = tmp_path / "secondary"
+        head = _init_git_repo(repo_root, "https://github.com/example/secondary.git")
+        skill_dir = repo_root / "skills" / "demo"
+        skill_dir.mkdir(parents=True)
+        workflow_sha = "a" * 40
+        assert head != workflow_sha
+        env = _clean_ci_env(
+            GITHUB_REF_NAME="58/merge",
+            GITHUB_SHA=workflow_sha,
+            GITHUB_REPOSITORY="NVIDIA/SkillEvaluator",
+        )
+
+        with patch.dict("os.environ", env, clear=True):
+            url = resolve_git_remote_url(skill_dir)
+
+        assert url == f"https://github.com/example/secondary/tree/{head}/skills/demo"

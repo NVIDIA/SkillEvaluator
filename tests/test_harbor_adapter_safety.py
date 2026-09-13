@@ -483,3 +483,75 @@ def test_task_modes_reject_custom_grader_symlink_before_copy(tmp_path: Path, tas
             stage_native_harbor_tasks(skill, output_dir, with_skill=False, grading_mode="custom_only")
 
     assert not (output_dir / "case-001" / "tests" / "grader.py").exists()
+
+
+@pytest.mark.parametrize("grading_mode", ("default", "default_plus_custom"))
+@pytest.mark.parametrize("task_source", ("generated", "native"))
+def test_standard_grading_stages_trusted_evaluated_skill_after_authored_entry(
+    tmp_path: Path,
+    grading_mode: str,
+    task_source: str,
+) -> None:
+    skill = tmp_path / "trusted-target"
+    evals_dir = skill / "evals"
+    evals_dir.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Trusted target\n", encoding="utf-8")
+    entry = {
+        "id": "case-001",
+        "question": "Do not use the target skill",
+        "expected_skill": None,
+        "evaluated_skill": "authored-spoof",
+    }
+    (evals_dir / "evals.json").write_text(json.dumps([entry]), encoding="utf-8")
+
+    output_dir = tmp_path / "tasks"
+    if task_source == "generated":
+        generate_harbor_tasks(skill, output_dir, with_skill=False, grading_mode=grading_mode)
+    else:
+        native_task = evals_dir / "harbor" / "case-001"
+        native_task.mkdir(parents=True)
+        (native_task / "task.toml").write_text(
+            'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
+            encoding="utf-8",
+        )
+        stage_native_harbor_tasks(skill, output_dir, with_skill=False, grading_mode=grading_mode)
+
+    staged = json.loads((output_dir / "case-001" / "tests" / "entry.json").read_text(encoding="utf-8"))
+
+    assert staged["evaluated_skill"] == skill.name
+
+
+@pytest.mark.parametrize("task_source", ("generated", "native"))
+@pytest.mark.parametrize("authored_value", (None, "authored-value"))
+def test_custom_only_staging_does_not_inject_or_overwrite_evaluated_skill(
+    tmp_path: Path,
+    task_source: str,
+    authored_value: str | None,
+) -> None:
+    skill = tmp_path / "trusted-target"
+    evals_dir = skill / "evals"
+    evals_dir.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Trusted target\n", encoding="utf-8")
+    entry = {"id": "case-001", "question": "Run custom grading"}
+    if authored_value is not None:
+        entry["evaluated_skill"] = authored_value
+    (evals_dir / "evals.json").write_text(json.dumps([entry]), encoding="utf-8")
+    (evals_dir / "grader.py").write_text("def grade():\n    return 1\n", encoding="utf-8")
+
+    output_dir = tmp_path / "tasks"
+    if task_source == "generated":
+        generate_harbor_tasks(skill, output_dir, with_skill=False, grading_mode="custom_only")
+    else:
+        native_task = evals_dir / "harbor" / "case-001"
+        native_task.mkdir(parents=True)
+        (native_task / "task.toml").write_text(
+            'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
+            encoding="utf-8",
+        )
+        stage_native_harbor_tasks(skill, output_dir, with_skill=False, grading_mode="custom_only")
+    staged = json.loads((output_dir / "case-001" / "tests" / "entry.json").read_text(encoding="utf-8"))
+
+    if authored_value is None:
+        assert "evaluated_skill" not in staged
+    else:
+        assert staged["evaluated_skill"] == authored_value

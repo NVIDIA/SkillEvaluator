@@ -11,7 +11,10 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
-from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.collector import (
+    _agent_runtime_failure_reason,
+    collect_harbor_results,
+)
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
 
 
@@ -128,6 +131,30 @@ def test_agent_timeout_invalidates_reward_and_is_reported_as_trial_failure(tmp_p
     assert opencode["trial_failures"]["with_skill"] == [
         {"trial": "case-001__attempt", "reason": "AgentTimeoutError: Agent timed out after 600 seconds"}
     ]
+
+
+def test_verifier_exception_does_not_scan_plain_agent_transcript(tmp_path: Path) -> None:
+    """Correct agent prose must not turn a verifier failure into an agent failure."""
+    trial_dir = tmp_path / "case-001__attempt"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "exception_info": {
+                    "exception_type": "VerifierError",
+                    "exception_message": "verifier exited nonzero",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (agent_dir / "opencode.txt").write_text(
+        "Troubleshooting: an invalid credential can produce 401 Unauthorized.\n",
+        encoding="utf-8",
+    )
+
+    assert _agent_runtime_failure_reason(trial_dir) == ""
 
 
 def test_errored_job_stats_suppress_rewards_without_trial_exception(tmp_path: Path) -> None:
@@ -490,6 +517,58 @@ def test_native_multistep_rewards_count_as_one_logical_attempt(tmp_path: Path) -
     assert results["agents"]["opencode"]["num_trials_with"] == 2
 
 
+def test_sum_of_parts_custom_only_overall_uses_logical_attempts(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    with_job = jobs_dir / "demo-opencode-with"
+    sum_job = jobs_dir / "demo-opencode-sumofparts"
+
+    for attempt in (1, 2):
+        trial_name = f"case-001__attempt{attempt:03d}"
+        verifier = with_job / trial_name / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.json").write_text(
+            json.dumps({"metric_set": "custom-only", "overall": 0.8, "entry_id": "case-001"}),
+            encoding="utf-8",
+        )
+
+    first_trial = "case-001__attempt001"
+    for step, score in (("prepare", 0.0), ("finish", 1.0)):
+        verifier = sum_job / first_trial / "steps" / step / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.json").write_text(
+            json.dumps({"metric_set": "custom-only", "overall": score, "entry_id": "case-001"}),
+            encoding="utf-8",
+        )
+    second_trial = "case-001__attempt002"
+    verifier = sum_job / second_trial / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(
+        json.dumps({"metric_set": "custom-only", "overall": 0.9, "entry_id": "case-001"}),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(with_job, ["case-001__attempt001", "case-001__attempt002"])
+    _write_complete_job_result(sum_job, [first_trial, second_trial])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        sum_of_parts_arm=True,
+        n_attempts=2,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=2,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert agent["conditions"]["sum_of_parts"]["execution_status"] == "succeeded"
+    assert agent["overall_sum_of_parts"] == 0.7
+    summary = json.loads((tmp_path / "results/opencode/sum-of-parts/summary.json").read_text(encoding="utf-8"))
+    assert summary["overall_score"] == 0.7
+
+
 def test_unexpected_case_fails_execution_coverage(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"
@@ -529,11 +608,12 @@ def _write_reward(
     score: float = 0.25,
     steps: tuple[str, ...] = (),
     trial_name: str | None = None,
+    include_entry_id: bool = True,
+    result_task_name: str | None = None,
 ) -> None:
     trial = jobs_dir / f"demo-opencode-{variant}" / (trial_name or f"{case_id}_attempt{attempt:03d}")
     verifier_dirs = [trial / "steps" / step / "verifier" for step in steps] or [trial / "verifier"]
     reward = {
-        "entry_id": case_id,
         "overall": score,
         "security": score,
         "skill_execution": score,
@@ -542,9 +622,16 @@ def _write_reward(
         "goal_accuracy": score,
         "behavior_check": score,
     }
+    if include_entry_id:
+        reward["entry_id"] = case_id
     for verifier_dir in verifier_dirs:
         verifier_dir.mkdir(parents=True, exist_ok=True)
         (verifier_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    if result_task_name is not None:
+        (trial / "result.json").write_text(
+            json.dumps({"trial_name": trial.name, "task_name": result_task_name}),
+            encoding="utf-8",
+        )
 
 
 def _write_variant_job_results(jobs_dir: Path, variants: tuple[str, ...] = ("with", "without")) -> None:
@@ -584,6 +671,88 @@ def test_stop_on_pass_does_not_report_intentionally_skipped_attempts(tmp_path: P
     assert result["execution_status"] == "succeeded"
     assert result["expected_attempts"] == 4
     assert result["scored_attempts"] == 4
+
+
+def test_complete_ab_run_records_paired_pass_evidence(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=1.0)
+    _write_reward(jobs_dir, variant="with", case_id="case-b", attempt=1, score=1.0)
+    _write_reward(jobs_dir, variant="without", case_id="case-a", attempt=1, score=0.0)
+    _write_reward(jobs_dir, variant="without", case_id="case-b", attempt=1, score=1.0)
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path, n_attempts=1)
+
+    assert result["execution_status"] == "succeeded"
+    pass_at_k = result["agents"]["opencode"]["pass_at_k"]
+    assert pass_at_k["with_skill"]["rate_interval"]["confidence_level"] == 0.95
+    paired = pass_at_k["lift"]["paired_comparison"]
+    assert paired["pairing_status"] == "complete"
+    assert paired["paired_cases"] == 2
+    assert paired["with_skill_only_pass"] == 1
+    assert paired["without_skill_only_pass"] == 0
+    assert paired["paired_rate_delta"] == 0.5
+    assert paired["mcnemar_exact"]["p_value"] == 1.0
+
+    persisted = json.loads((tmp_path / "results/opencode/pass_at_k_lift.json").read_text(encoding="utf-8"))
+    assert persisted["delta"] == 0.5
+    assert persisted["count_derived_delta"] == 0.5
+    assert persisted["paired_comparison"] == paired
+
+
+def test_result_derived_case_ids_exercise_partial_pairing_through_collector(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="unused",
+        attempt=1,
+        score=1.0,
+        trial_name="opaque-with-shared",
+        include_entry_id=False,
+        result_task_name="suite/shared",
+    )
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="unused",
+        attempt=1,
+        score=1.0,
+        trial_name="opaque-with-only",
+        include_entry_id=False,
+        result_task_name="suite/with-only",
+    )
+    _write_reward(
+        jobs_dir,
+        variant="without",
+        case_id="unused",
+        attempt=1,
+        score=0.0,
+        trial_name="opaque-without-shared",
+        include_entry_id=False,
+        result_task_name="suite/shared",
+    )
+    _write_reward(
+        jobs_dir,
+        variant="without",
+        case_id="unused",
+        attempt=1,
+        score=0.0,
+        trial_name="opaque-without-only",
+        include_entry_id=False,
+        result_task_name="suite/without-only",
+    )
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path, n_attempts=1, expected_cases=2, expected_case_ids=None)
+
+    assert result["execution_status"] == "succeeded"
+    paired = result["agents"]["opencode"]["pass_at_k"]["lift"]["paired_comparison"]
+    assert paired["pairing_status"] == "partial"
+    assert paired["paired_cases"] == 1
+    assert paired["with_skill_unpaired_case_ids"] == ["with-only"]
+    assert paired["without_skill_unpaired_case_ids"] == ["without-only"]
+    assert "mcnemar_exact" not in paired
 
 
 def test_stop_on_pass_records_skipped_attempts_in_pass_summary(tmp_path: Path) -> None:
@@ -697,7 +866,7 @@ def test_multistep_stop_on_pass_uses_authoritative_root_reward(tmp_path: Path) -
     assert result["execution_status"] == "failed"
     assert result["expected_attempts"] == 2
     assert result["scored_attempts"] == 1
-    assert agent["pass_at_k"]["with_skill"]["rate"] == 0.0
+    assert agent["pass_at_k"]["with_skill"] == {}
 
 
 def test_duplicate_logical_attempt_ordinals_fail(tmp_path: Path) -> None:

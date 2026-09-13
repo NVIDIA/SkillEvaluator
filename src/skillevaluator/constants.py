@@ -102,13 +102,14 @@ OPTIONAL_WORKFLOWS_METADATA_FIELDS = [
 # SHARED CONSTANTS
 # =============================================================================
 
-# Field length constraints per SkillEvaluator specification
+# Field limits for serialized metadata
 NAME_MIN_LENGTH = 1
 NAME_MAX_LENGTH = 64
 TITLE_MIN_LENGTH = 1
 TITLE_MAX_LENGTH = 256
 DESCRIPTION_MIN_LENGTH = 1
 DESCRIPTION_MAX_LENGTH = 1024
+DESCRIPTION_MAX_BYTES = 1024
 COMPATIBILITY_MAX_LENGTH = 500
 
 # Maximum recommended line counts

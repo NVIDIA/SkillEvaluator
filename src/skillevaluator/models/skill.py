@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from skillevaluator.constants import (
     COMPATIBILITY_MAX_LENGTH,
+    DESCRIPTION_MAX_BYTES,
     DESCRIPTION_MAX_LENGTH,
     DESCRIPTION_MIN_LENGTH,
     FORBIDDEN_SKILL_FIELDS,
@@ -161,7 +162,13 @@ class SkillFrontmatter(BaseModel):
     @field_validator("description")
     @classmethod
     def validate_description_content(cls, v: str) -> str:
-        """Reject descriptions that contain XML tags."""
+        """Reject descriptions that exceed the serialized limit or contain XML tags."""
+        byte_length = len(v.encode("utf-8"))
+        if byte_length > DESCRIPTION_MAX_BYTES:
+            raise ValueError(
+                f"Description must be at most {DESCRIPTION_MAX_BYTES} UTF-8 bytes "
+                f"(got {byte_length} bytes)"
+            )
         if XML_TAG_RE.search(v):
             raise ValueError("Skill description must not contain XML tags")
         return v

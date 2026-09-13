@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import shutil
 import stat
 import sys
@@ -13,6 +14,7 @@ import pytest
 from skillevaluator.tier3 import generate_dataset
 from skillevaluator.tier3.generate_dataset import (
     _discover_trajectories,
+    _generate_full,
     _run_agent_collect_trajectories,
     _to_agentskills_dataset,
 )
@@ -461,6 +463,83 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
+
+
+
+def test_no_llm_negative_case_does_not_name_the_skill():
+    """Author-provided negatives must stay off-skill and must not name the skill."""
+    skill = {
+        "name": "pdf-extractor",
+        "description": "Extracts tables from PDF files",
+        "scripts": [],
+        "eval_prompt": "## Negative Cases\n- What is the capital of Peru?",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "pdf-extractor-neg-001")
+    assert negative["expected_skill"] is None
+    assert "pdf-extractor" not in negative["question"]
+    assert "pdf-extractor" not in negative["ground_truth"]
+    for behavior in negative["expected_behavior"]:
+        assert "pdf-extractor" not in behavior
+    assert "without reading or applying this skill" in negative["expected_behavior"][0]
+    domain = {"pdf", "extractor", "extracts", "tables"}
+    question_tokens = set(re.findall(r"[a-z0-9]+", negative["question"].lower()))
+    assert not domain & question_tokens
+
+
+def test_no_llm_negative_case_omits_planning_skills_without_author_negative():
+    """Planning skills omit the negative bucket unless eval guidance supplies one."""
+    for skill in (
+        {
+            "name": "errand-planner",
+            "description": "Organizes weekend errands efficiently in a new city",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+        {
+            "name": "day-planner",
+            "description": "Plans grocery runs and appointments across a busy week",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+    ):
+        cases = _generate_full(skill)
+        assert all(not c["id"].endswith("-neg-001") for c in cases)
+        assert len(cases) == 3
+
+
+def test_no_llm_negative_case_uses_author_provided_negative_section():
+    skill = {
+        "name": "errand-planner",
+        "description": "Organizes weekend errands efficiently in a new city",
+        "scripts": [],
+        "eval_prompt": "## Negative Cases\n- What is the capital of Peru?",
+    }
+    cases = _generate_full(skill)
+    negative = next(c for c in cases if c["id"] == "errand-planner-neg-001")
+    assert negative["expected_skill"] is None
+    assert negative["question"] == "What is the capital of Peru?"
+
+
+def test_no_llm_negative_case_omits_without_author_negative():
+    """Template mode omits the negative bucket unless eval guidance supplies one."""
+    for skill in (
+        {
+            "name": "media-transcoder",
+            "description": "Changes sound recordings between lossless formats while retaining tags",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+        {
+            "name": "music-reencoder",
+            "description": "Changes songs between codecs while keeping tags",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+    ):
+        cases = _generate_full(skill)
+        assert all(not c["id"].endswith("-neg-001") for c in cases)
+        assert len(cases) == 3
 
 
 def test_parse_skill_includes_tools_dir_scripts(tmp_path):

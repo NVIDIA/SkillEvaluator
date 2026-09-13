@@ -1794,6 +1794,7 @@ def _write_task_toml(
     pre_agent_setup: list[str] | None = None,
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
+    arm_suffix: str = "",
 ) -> None:
     entry_id = entry.get("id", "unknown")
     expected_skill = entry.get("expected_skill") or "none"
@@ -1809,10 +1810,11 @@ def _write_task_toml(
     storage_mb = _task_resource_value(task_resources, "storage_mb", 2048)
     workdir_line = f"workdir = {_toml_quote(agent_workdir)}\n" if agent_workdir else ""
 
+    task_name = f"nvidia/skillevaluator-{entry_id}{arm_suffix}"
     content = f"""schema_version = "1.3"
 
 [task]
-name = {_toml_quote(f"nvidia/skillevaluator-{entry_id}")}
+name = {_toml_quote(task_name)}
 description = {_toml_quote(f"Skill evaluation task for {expected_skill}")}
 
 [metadata]
@@ -4579,6 +4581,7 @@ def _stage_native_harbor_tasks_into(
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Build native Harbor tasks inside a private, caller-owned directory.
 
@@ -4608,6 +4611,7 @@ def _stage_native_harbor_tasks_into(
         _native_task_workdir(source_task_dir)
     _ = task_resources
     _ = agent_workdir
+    _ = arm_suffix
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
@@ -4767,6 +4771,7 @@ def stage_native_harbor_tasks(
     agent_workdir: str | None = None,
     evaluator_skill_path: Path | None = None,
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Stage native tasks privately, then publish one exact output snapshot."""
 
@@ -4791,6 +4796,7 @@ def stage_native_harbor_tasks(
                 agent_workdir=agent_workdir,
                 evaluator_skill_path=private_skill_path,
                 _baseline_alias_validation=_baseline_alias_validation,
+                arm_suffix=arm_suffix,
             )
 
     baseline_aliases_prevalidated = False
@@ -4857,6 +4863,7 @@ def stage_native_harbor_tasks(
             task_resources=task_resources,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            arm_suffix=arm_suffix,
         )
         relative_tasks = [task.relative_to(private_output) for task in private_tasks]
         if output_requires_provenance:
@@ -4915,6 +4922,7 @@ def _generate_harbor_tasks_into(
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Generate Harbor task directories inside a private output directory.
 
@@ -5011,6 +5019,7 @@ def _generate_harbor_tasks_into(
             pre_agent_setup=pre_agent_setup,
             task_resources=task_resources,
             agent_workdir=agent_workdir,
+            arm_suffix=arm_suffix,
         )
         _copy_verifier(task_dir)
         custom_grader = _copy_custom_grader(task_dir, skill_path, grading_mode, evals_dir=evals_dir)
@@ -5446,6 +5455,7 @@ def generate_harbor_tasks(
     agent_workdir: str | None = None,
     evaluator_skill_path: Path | None = None,
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Generate tasks from one private evals snapshot, then publish exactly."""
 
@@ -5472,6 +5482,7 @@ def generate_harbor_tasks(
                 agent_workdir=agent_workdir,
                 evaluator_skill_path=private_skill_path,
                 _baseline_alias_validation=_baseline_alias_validation,
+                arm_suffix=arm_suffix,
             )
     if find_evals_file(evaluator_skill_path) is None:
         raise FileNotFoundError(f"No evals dataset found in {evaluator_skill_path / 'evals'}")
@@ -5540,6 +5551,7 @@ def generate_harbor_tasks(
             task_resources=task_resources,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            arm_suffix=arm_suffix,
         )
         relative_tasks = [task.relative_to(private_output) for task in private_tasks]
         if output_requires_provenance:

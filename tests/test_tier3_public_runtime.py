@@ -1281,3 +1281,63 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
 
     assert sdk_urls == [expected_url]
     assert verifier._anthropic_url() == expected_url
+
+
+def test_write_task_toml_dual_arm_suffix(tmp_path: Path) -> None:
+    """Verify that arm suffix is appended only when provided for dual-arm runs."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    # Default: no suffix (single-arm / standalone case)
+    _write_task_toml(case_dir, {"id": "case-001", "expected_skill": "demo"}, has_skill=True)
+    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
+    assert task["task"]["name"] == "nvidia/skillevaluator-case-001"
+
+    # Dual-arm with-skill
+    _write_task_toml(case_dir, {"id": "case-001", "expected_skill": "demo"}, has_skill=True, arm_suffix="-with-skill")
+    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
+    assert task["task"]["name"] == "nvidia/skillevaluator-case-001-with-skill"
+
+    # Dual-arm without-skill (baseline)
+    _write_task_toml(case_dir, {"id": "case-001", "expected_skill": "demo"}, has_skill=False, arm_suffix="-without-skill")
+    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
+    assert task["task"]["name"] == "nvidia/skillevaluator-case-001-without-skill"
+
+
+def test_canonical_case_id_arm_stripping() -> None:
+    """Verify that _canonical_case_id strips arm suffixes whether expected_case_ids is supplied or not."""
+    from skillevaluator.tier3.harbor.collector import _canonical_case_id, _strip_arm_suffix
+
+    # Direct helper behavior
+    assert _strip_arm_suffix("case-001-with-skill") == "case-001"
+    assert _strip_arm_suffix("case-001-without-skill") == "case-001"
+    assert _strip_arm_suffix("case-001-with") == "case-001"
+    assert _strip_arm_suffix("case-001-without") == "case-001"
+    assert _strip_arm_suffix("case-001") == "case-001"
+
+    # Clean ID without suffix
+    assert _canonical_case_id("case-001") == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001") == "case-001"
+
+    # With expected_case_ids matching: canonical -with-skill / -without-skill
+    expected = {"case-001", "case-002"}
+    assert _canonical_case_id("case-001-with-skill", expected) == "case-001"
+    assert _canonical_case_id("case-001-without-skill", expected) == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-with-skill", expected) == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-without-skill", expected) == "case-001"
+
+    # With expected_case_ids matching: shorthand -with / -without
+    assert _canonical_case_id("case-001-with", expected) == "case-001"
+    assert _canonical_case_id("case-001-without", expected) == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-with", expected) == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-without", expected) == "case-001"
+
+    # Without expected_case_ids (fallback)
+    assert _canonical_case_id("case-001-with-skill") == "case-001"
+    assert _canonical_case_id("case-001-without-skill") == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-with-skill") == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-without-skill") == "case-001"
+    assert _canonical_case_id("case-001-with") == "case-001"
+    assert _canonical_case_id("case-001-without") == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-with") == "case-001"
+    assert _canonical_case_id("skillevaluator-case-001-without") == "case-001"

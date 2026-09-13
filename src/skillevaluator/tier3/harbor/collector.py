@@ -1848,6 +1848,11 @@ def _strip_attempt_suffix(value: str) -> str:
     return re.sub(r"(?:[-_])attempt\d+$", "", value)
 
 
+def _strip_arm_suffix(value: str) -> str:
+    """Remove SkillEvaluator dual-arm suffixes (-with-skill, -without-skill, or shorthand) from an identifier."""
+    return re.sub(r"-(?:with|without)(?:-skill)?$", "", value)
+
+
 def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) -> str:
     value = str(value or "").strip()
     if not value:
@@ -1858,9 +1863,12 @@ def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) ->
     if expected_case_ids and stripped in expected_case_ids:
         return stripped
     generated_prefix_stripped = stripped.removeprefix("skillevaluator-")
-    if expected_case_ids and generated_prefix_stripped in expected_case_ids:
-        return generated_prefix_stripped
-    return stripped
+    arm_stripped = _strip_arm_suffix(generated_prefix_stripped)
+    if expected_case_ids and arm_stripped in expected_case_ids:
+        return arm_stripped
+    if expected_case_ids:
+        return stripped
+    return arm_stripped
 
 
 def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None) -> str:

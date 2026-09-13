@@ -24,7 +24,14 @@ from skillevaluator.model_catalog import ModelCatalogFailureKind
 from skillevaluator.provider_config import ProviderConfig, resolve_llm_provider
 from skillevaluator.tier3 import commands as tier3_commands
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
-from skillevaluator.tier3.harbor.adapter import _EVALUATOR_MANAGED_RUNTIME_ENV, _write_task_toml
+from skillevaluator.tier3.harbor.adapter import (
+    _EVALUATOR_MANAGED_RUNTIME_ENV,
+    _generate_harbor_tasks_into,
+    _stage_native_harbor_tasks_into,
+    _write_task_toml,
+    generate_harbor_tasks,
+    stage_native_harbor_tasks,
+)
 from skillevaluator.tier3.harbor.runner import (
     _model_for_agent,
     _nvidia_build_agent_import_path,
@@ -1283,61 +1290,245 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
     assert verifier._anthropic_url() == expected_url
 
 
-def test_write_task_toml_dual_arm_suffix(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("has_skill", "arm_suffix", "expected_task_name"),
+    [
+        (True, "", "nvidia/skillevaluator-case-001"),
+        (True, "-with-skill", "nvidia/skillevaluator-case-001-with-skill"),
+        (False, "-without-skill", "nvidia/skillevaluator-case-001-without-skill"),
+    ],
+)
+def test_write_task_toml_dual_arm_suffix(
+    tmp_path: Path,
+    has_skill: bool,
+    arm_suffix: str,
+    expected_task_name: str,
+) -> None:
     """Verify that arm suffix is appended only when provided for dual-arm runs."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-
-    # Default: no suffix (single-arm / standalone case)
-    _write_task_toml(case_dir, {"id": "case-001", "expected_skill": "demo"}, has_skill=True)
+    _write_task_toml(
+        case_dir,
+        {"id": "case-001", "expected_skill": "demo"},
+        has_skill=has_skill,
+        arm_suffix=arm_suffix,
+    )
     task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
-    assert task["task"]["name"] == "nvidia/skillevaluator-case-001"
+    assert task["task"]["name"] == expected_task_name
 
-    # Dual-arm with-skill
-    _write_task_toml(case_dir, {"id": "case-001", "expected_skill": "demo"}, has_skill=True, arm_suffix="-with-skill")
-    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
+
+def test_write_task_toml_type_safety(tmp_path: Path) -> None:
+    """Verify that _write_task_toml rejects non-string arm_suffix values."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    with pytest.raises(TypeError, match="arm_suffix must be a string"):
+        _write_task_toml(case_dir, {"id": "case-001"}, has_skill=True, arm_suffix=123)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("case-001-with-skill", "case-001"),
+        ("case-001-without-skill", "case-001"),
+        ("case-001-with", "case-001-with"),
+        ("case-001-without", "case-001-without"),
+        ("case-001", "case-001"),
+    ],
+)
+def test_strip_arm_suffix(value: str, expected: str) -> None:
+    """Verify _strip_arm_suffix trims exact dual-arm suffixes."""
+    from skillevaluator.tier3.harbor.collector import _strip_arm_suffix
+
+    assert _strip_arm_suffix(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("case-001-with-skill-attempt1", "case-001"),
+        ("case-001-without-skill_attempt2", "case-001"),
+        ("case-001-attempt1-with-skill", "case-001"),
+        ("case-001_attempt2-without-skill", "case-001"),
+        ("case-001-with-skill", "case-001"),
+        ("case-001-without-skill", "case-001"),
+        ("case-001-attempt1", "case-001"),
+        ("case-001", "case-001"),
+    ],
+)
+def test_strip_arm_and_attempt_suffixes(value: str, expected: str) -> None:
+    """Verify _strip_arm_and_attempt_suffixes removes both suffixes regardless of ordering."""
+    from skillevaluator.tier3.harbor.collector import _strip_arm_and_attempt_suffixes
+
+    assert _strip_arm_and_attempt_suffixes(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw_input", "expected_ids", "expected_output"),
+    [
+        # Bare case IDs without suffixes
+        ("case-001", None, "case-001"),
+        ("skillevaluator-case-001", None, "case-001"),
+        ("skillevaluator-case-001", {"case-001", "case-002"}, "case-001"),
+        # Dual-arm suffixes without expected_case_ids (fallback)
+        ("case-001-with-skill", None, "case-001"),
+        ("case-001-without-skill", None, "case-001"),
+        ("skillevaluator-case-001-with-skill", None, "case-001"),
+        ("skillevaluator-case-001-without-skill", None, "case-001"),
+        # Dual-arm suffixes with expected_case_ids matching
+        ("case-001-with-skill", {"case-001", "case-002"}, "case-001"),
+        ("case-001-without-skill", {"case-001", "case-002"}, "case-001"),
+        ("skillevaluator-case-001-with-skill", {"case-001", "case-002"}, "case-001"),
+        ("skillevaluator-case-001-without-skill", {"case-001", "case-002"}, "case-001"),
+        # Namespaced task names (e.g., nvidia/...)
+        ("nvidia/skillevaluator-case-001", None, "case-001"),
+        ("nvidia/skillevaluator-case-001", {"case-001"}, "case-001"),
+        ("nvidia/skillevaluator-case-001-with-skill", None, "case-001"),
+        ("nvidia/skillevaluator-case-001-with-skill", {"case-001"}, "case-001"),
+        ("nvidia/skillevaluator-case-001-without-skill", None, "case-001"),
+        ("nvidia/skillevaluator-case-001-without-skill", {"case-001"}, "case-001"),
+        ("custom/repo/skillevaluator-case-002-with-skill", {"case-002"}, "case-002"),
+        # Attempt suffixes combined with dual-arm suffixes in both orderings
+        ("case-001-with-skill-attempt1", None, "case-001"),
+        ("case-001-with-skill-attempt1", {"case-001"}, "case-001"),
+        ("case-001-without-skill_attempt2", None, "case-001"),
+        ("case-001-without-skill_attempt2", {"case-001"}, "case-001"),
+        ("case-001-attempt1-with-skill", None, "case-001"),
+        ("case-001-attempt1-with-skill", {"case-001"}, "case-001"),
+        ("case-001_attempt2-without-skill", None, "case-001"),
+        ("case-001_attempt2-without-skill", {"case-001"}, "case-001"),
+        ("skillevaluator-case-001-with-skill-attempt1", None, "case-001"),
+        ("skillevaluator-case-001-with-skill-attempt1", {"case-001"}, "case-001"),
+        ("skillevaluator-case-001-attempt1-with-skill", None, "case-001"),
+        ("skillevaluator-case-001-attempt1-with-skill", {"case-001"}, "case-001"),
+        ("nvidia/skillevaluator-case-001-with-skill-attempt3", {"case-001"}, "case-001"),
+        ("nvidia/skillevaluator-case-001-attempt3-with-skill", {"case-001"}, "case-001"),
+        ("nvidia/skillevaluator-case-001-without-skill_attempt4", None, "case-001"),
+        ("nvidia/skillevaluator-case-001_attempt4-without-skill", None, "case-001"),
+        # Legitimate case IDs ending with -with or -without preserved when in expected_case_ids
+        ("case-with", {"case-with"}, "case-with"),
+        ("case-without", {"case-without"}, "case-without"),
+        ("nvidia/case-with", {"case-with"}, "case-with"),
+        ("nvidia/case-without", {"case-without"}, "case-without"),
+        ("skillevaluator-case-with", {"case-with"}, "case-with"),
+        ("skillevaluator-case-without", {"case-without"}, "case-without"),
+        ("case-with-attempt1", {"case-with"}, "case-with"),
+        ("case-without-attempt2", {"case-without"}, "case-without"),
+        # Dual-arm runs on legitimate -with / -without IDs
+        ("case-with-with-skill", {"case-with"}, "case-with"),
+        ("case-without-without-skill", {"case-without"}, "case-without"),
+        ("skillevaluator-case-with-with-skill", {"case-with"}, "case-with"),
+        ("skillevaluator-case-without-without-skill", {"case-without"}, "case-without"),
+        ("nvidia/skillevaluator-case-with-with-skill", {"case-with"}, "case-with"),
+        ("nvidia/skillevaluator-case-without-without-skill", {"case-without"}, "case-without"),
+        ("case-with-with-skill-attempt1", {"case-with"}, "case-with"),
+        ("case-with-attempt1-with-skill", {"case-with"}, "case-with"),
+        ("case-without-without-skill_attempt2", {"case-without"}, "case-without"),
+        ("case-without_attempt2-without-skill", {"case-without"}, "case-without"),
+        # Case IDs that retain the skillevaluator- prefix in expected_case_ids
+        ("skillevaluator-case-001-with-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
+        ("skillevaluator-case-001-without-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
+        ("nvidia/skillevaluator-case-001-with-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
+        ("skillevaluator-case-001-with-skill-attempt1", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
+        ("skillevaluator-case-001-attempt1-with-skill", {"skillevaluator-case-001"}, "skillevaluator-case-001"),
+        # Empty and blank strings
+        ("", None, ""),
+        ("   ", None, ""),
+        ("", {"case-001"}, ""),
+    ],
+)
+def test_canonical_case_id_arm_stripping(
+    raw_input: str,
+    expected_ids: set[str] | None,
+    expected_output: str,
+) -> None:
+    """Verify _canonical_case_id normalizes task identifiers across naming and attempt variants."""
+    from skillevaluator.tier3.harbor.collector import _canonical_case_id
+
+    assert _canonical_case_id(raw_input, expected_ids) == expected_output
+
+
+@pytest.mark.parametrize(
+    ("arm_suffix", "expected_task_name"),
+    [
+        ("-with-skill", "nvidia/case-001-with-skill"),
+        ("-without-skill", "nvidia/case-001-without-skill"),
+    ],
+)
+def test_stage_native_harbor_tasks_dual_arm_suffix(
+    tmp_path: Path,
+    arm_suffix: str,
+    expected_task_name: str,
+) -> None:
+    """Verify that stage_native_harbor_tasks appends arm suffix to native task.toml name."""
+    skill_dir = tmp_path / "target-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
+    evals_dir = skill_dir / "evals" / "harbor"
+    task_dir = evals_dir / "case-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
+    (task_dir / "task.toml").write_text(
+        'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
+        encoding="utf-8",
+    )
+    tests_dir = task_dir / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+
+    out_dir = tmp_path / f"out{arm_suffix}"
+    staged = stage_native_harbor_tasks(
+        skill_dir,
+        out_dir,
+        grading_mode="custom_only",
+        arm_suffix=arm_suffix,
+    )[0]
+    task = tomllib.loads((staged / "task.toml").read_text(encoding="utf-8"))
+    assert task["task"]["name"] == expected_task_name
+
+
+def test_stage_native_harbor_tasks_type_safety(tmp_path: Path) -> None:
+    """Verify that native staging functions reject non-string arm_suffix values."""
+    skill_dir = tmp_path / "target-skill"
+    skill_dir.mkdir()
+
+    with pytest.raises(TypeError, match="arm_suffix must be a string"):
+        stage_native_harbor_tasks(skill_dir, tmp_path / "err", arm_suffix=123)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="arm_suffix must be a string"):
+        _stage_native_harbor_tasks_into(
+            skill_dir,
+            tmp_path / "err",
+            evaluator_skill_path=skill_dir,
+            arm_suffix=123,  # type: ignore[arg-type]
+        )
+
+
+def test_generate_harbor_tasks_dual_arm_suffix(tmp_path: Path) -> None:
+    """Verify that generate_harbor_tasks propagates arm suffix into task.toml name."""
+    skill_dir = tmp_path / "gen-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Gen Skill\n", encoding="utf-8")
+    evals_dir = skill_dir / "evals"
+    evals_dir.mkdir()
+    (evals_dir / "evals.json").write_text(
+        json.dumps([{"id": "case-001", "prompt": "test prompt"}]),
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "gen_out"
+    staged = generate_harbor_tasks(skill_dir, out, arm_suffix="-with-skill")[0]
+    task = tomllib.loads((staged / "task.toml").read_text(encoding="utf-8"))
     assert task["task"]["name"] == "nvidia/skillevaluator-case-001-with-skill"
 
-    # Dual-arm without-skill (baseline)
-    _write_task_toml(case_dir, {"id": "case-001", "expected_skill": "demo"}, has_skill=False, arm_suffix="-without-skill")
-    task = tomllib.loads((case_dir / "task.toml").read_text(encoding="utf-8"))
-    assert task["task"]["name"] == "nvidia/skillevaluator-case-001-without-skill"
+    with pytest.raises(TypeError, match="arm_suffix must be a string"):
+        generate_harbor_tasks(skill_dir, tmp_path / "err", arm_suffix=123)  # type: ignore[arg-type]
 
+    with pytest.raises(TypeError, match="arm_suffix must be a string"):
+        _generate_harbor_tasks_into(
+            skill_dir,
+            tmp_path / "err",
+            evaluator_skill_path=skill_dir,
+            arm_suffix=123,  # type: ignore[arg-type]
+        )
 
-def test_canonical_case_id_arm_stripping() -> None:
-    """Verify that _canonical_case_id strips arm suffixes whether expected_case_ids is supplied or not."""
-    from skillevaluator.tier3.harbor.collector import _canonical_case_id, _strip_arm_suffix
-
-    # Direct helper behavior
-    assert _strip_arm_suffix("case-001-with-skill") == "case-001"
-    assert _strip_arm_suffix("case-001-without-skill") == "case-001"
-    assert _strip_arm_suffix("case-001-with") == "case-001"
-    assert _strip_arm_suffix("case-001-without") == "case-001"
-    assert _strip_arm_suffix("case-001") == "case-001"
-
-    # Clean ID without suffix
-    assert _canonical_case_id("case-001") == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001") == "case-001"
-
-    # With expected_case_ids matching: canonical -with-skill / -without-skill
-    expected = {"case-001", "case-002"}
-    assert _canonical_case_id("case-001-with-skill", expected) == "case-001"
-    assert _canonical_case_id("case-001-without-skill", expected) == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-with-skill", expected) == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-without-skill", expected) == "case-001"
-
-    # With expected_case_ids matching: shorthand -with / -without
-    assert _canonical_case_id("case-001-with", expected) == "case-001"
-    assert _canonical_case_id("case-001-without", expected) == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-with", expected) == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-without", expected) == "case-001"
-
-    # Without expected_case_ids (fallback)
-    assert _canonical_case_id("case-001-with-skill") == "case-001"
-    assert _canonical_case_id("case-001-without-skill") == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-with-skill") == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-without-skill") == "case-001"
-    assert _canonical_case_id("case-001-with") == "case-001"
-    assert _canonical_case_id("case-001-without") == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-with") == "case-001"
-    assert _canonical_case_id("skillevaluator-case-001-without") == "case-001"

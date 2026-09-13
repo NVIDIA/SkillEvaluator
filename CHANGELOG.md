@@ -19,6 +19,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 Harbor dual-arm evaluation propagates arm suffixes (`-with-skill`,
+  `-without-skill`) to `[task] name` in staged native `task.toml` files,
+  normalizes external repository and namespace prefixes, and commutatively
+  resolves canonical case IDs across attempt and arm suffix combinations
+  while preserving expected case IDs.
 - Malformed, non-UTF-8, or unreadable bundled and custom policy files now
   produce path-specific CLI errors instead of leaking raw parser or I/O errors
   ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).

@@ -467,12 +467,12 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
 
 
 def test_no_llm_negative_case_does_not_name_the_skill():
-    """Default --no-llm negative prompt must stay off-skill, not ask what the skill does."""
+    """Author-provided negatives must stay off-skill and must not name the skill."""
     skill = {
         "name": "pdf-extractor",
         "description": "Extracts tables from PDF files",
         "scripts": [],
-        "eval_prompt": "",
+        "eval_prompt": "## Negative Cases\n- What is the capital of Peru?",
     }
     cases = _generate_full(skill)
     negative = next(c for c in cases if c["id"] == "pdf-extractor-neg-001")
@@ -521,33 +521,25 @@ def test_no_llm_negative_case_uses_author_provided_negative_section():
     assert negative["question"] == "What is the capital of Peru?"
 
 
-def test_no_llm_negative_case_omits_media_transcoder_without_author_negative():
-    skill = {
-        "name": "media-transcoder",
-        "description": "Changes sound recordings between lossless formats while retaining tags",
-        "scripts": [],
-        "eval_prompt": "",
-    }
-    cases = _generate_full(skill)
-    assert all(not c["id"].endswith("-neg-001") for c in cases)
-    assert len(cases) == 3
-
-
-def test_no_llm_omits_negative_when_every_candidate_overlaps():
-    """If every canned negative would be on-skill, drop the negative bucket."""
-    skill = {
-        "name": "kitchen-helper",
-        "description": (
-            "Converts WAV files to FLAC without losing metadata, proofs bread dough overnight, "
-            "cites preprints in BibTeX for ACS journals, tracks Europa's orbital period, and "
-            "replaces ceramic washers on compression faucets"
-        ),
-        "scripts": [],
-        "eval_prompt": "",
-    }
-    cases = _generate_full(skill)
-    assert all(not c["id"].endswith("-neg-001") for c in cases)
-    assert len(cases) == 3
+def test_no_llm_negative_case_omits_without_author_negative():
+    """Template mode omits the negative bucket unless eval guidance supplies one."""
+    for skill in (
+        {
+            "name": "media-transcoder",
+            "description": "Changes sound recordings between lossless formats while retaining tags",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+        {
+            "name": "music-reencoder",
+            "description": "Changes songs between codecs while keeping tags",
+            "scripts": [],
+            "eval_prompt": "",
+        },
+    ):
+        cases = _generate_full(skill)
+        assert all(not c["id"].endswith("-neg-001") for c in cases)
+        assert len(cases) == 3
 
 
 def test_parse_skill_includes_tools_dir_scripts(tmp_path):

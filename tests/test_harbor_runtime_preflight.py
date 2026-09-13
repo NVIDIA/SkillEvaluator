@@ -4190,3 +4190,258 @@ def test_agent_only_validation_does_not_follow_symlinked_agent_subdirectories(tm
     assert "not visible to the Docker daemon" in detail
 
 
+def test_is_vertex_openapi_endpoint():
+    """Verify detection of Vertex AI Agent Platform OpenAPI base URLs."""
+    from skillevaluator.tier3.harbor.runtime_preflight import _is_vertex_openapi_endpoint
+
+    assert _is_vertex_openapi_endpoint(
+        "https://aiplatform.googleapis.com/v1beta1/projects/proj-123/locations/global/endpoints/openapi"
+    ) is True
+    assert _is_vertex_openapi_endpoint(
+        "https://aiplatform.googleapis.com/v1beta1/projects/proj-123/locations/global/endpoints/openapi/"
+    ) is True
+    assert _is_vertex_openapi_endpoint(
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-123/locations/us-central1/endpoints/openapi"
+    ) is True
+    assert _is_vertex_openapi_endpoint(
+        "https://europe-west4-aiplatform.googleapis.com/v1beta1/projects/p/locations/europe-west4/endpoints/openapi"
+    ) is True
+
+    # Negative cases
+    assert _is_vertex_openapi_endpoint("https://api.openai.com/v1") is False
+    assert _is_vertex_openapi_endpoint("https://integrate.api.nvidia.com/v1") is False
+    assert _is_vertex_openapi_endpoint("https://generativelanguage.googleapis.com/v1beta/openai") is False
+    assert _is_vertex_openapi_endpoint(
+        "http://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    ) is False
+    assert _is_vertex_openapi_endpoint(
+        "https://evil-aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    ) is False
+    assert _is_vertex_openapi_endpoint(
+        "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/other"
+    ) is False
+    assert _is_vertex_openapi_endpoint(None) is False
+    assert _is_vertex_openapi_endpoint("") is False
+
+
+def test_parse_vertex_openapi_metadata():
+    """Verify extraction of project and location from Vertex OpenAPI base URL."""
+    from skillevaluator.tier3.harbor.runtime_preflight import _parse_vertex_openapi_metadata
+
+    proj, loc = _parse_vertex_openapi_metadata(
+        "https://aiplatform.googleapis.com/v1beta1/projects/vertical-datum-418119/locations/global/endpoints/openapi"
+    )
+    assert proj == "vertical-datum-418119"
+    assert loc == "global"
+
+    proj, loc = _parse_vertex_openapi_metadata(
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/endpoints/openapi"
+    )
+    assert proj == "my-project"
+    assert loc == "us-central1"
+
+    proj, loc = _parse_vertex_openapi_metadata("https://api.openai.com/v1")
+    assert proj is None
+    assert loc is None
+
+
+def test_vertex_openapi_probe_success_with_api_key(monkeypatch: pytest.MonkeyPatch):
+    """Verify successful 1-token probe returns ok=True and disposition=VERIFIED."""
+    from http import HTTPStatus
+
+    captured_requests = []
+
+    class MockResponse:
+        status = HTTPStatus.OK
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    def mock_urlopen(req, *_args, **_kwargs):
+        captured_requests.append(req)
+        return MockResponse()
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+
+    provider = ProviderConfig(
+        "openai-compatible",
+        "google/gemini-3.8-flash",
+        "mock-token-123",
+        "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi",
+        "openai-compatible/google/gemini-3.8-flash",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is True
+    assert "available on Vertex AI OpenAPI" in result.detail
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "verified"
+
+    assert len(captured_requests) == 1
+    req = captured_requests[0]
+    assert (
+        req.full_url
+        == "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi/chat/completions"
+    )
+    assert req.headers["Authorization"] == "Bearer mock-token-123"
+    body = json.loads(req.data.decode("utf-8"))
+    assert body["model"] == "google/gemini-3.8-flash"
+    assert body["max_tokens"] == 1
+
+
+def test_vertex_openapi_probe_success_falls_back_to_google_adc(monkeypatch: pytest.MonkeyPatch):
+    """Verify probe acquires token via _get_google_access_token if provider api_key is None."""
+    from http import HTTPStatus
+
+    captured_requests = []
+
+    class MockResponse:
+        status = HTTPStatus.OK
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    def mock_urlopen(req, *_args, **_kwargs):
+        captured_requests.append(req)
+        return MockResponse()
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: "adc-token-456")
+
+    provider = ProviderConfig(
+        "openai-compatible",
+        "google/gemini-3.8-flash",
+        None,
+        "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi",
+        "openai-compatible/google/gemini-3.8-flash",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is True
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "verified"
+    assert len(captured_requests) == 1
+    assert captured_requests[0].headers["Authorization"] == "Bearer adc-token-456"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_failure_kind", "expected_disposition"),
+    [
+        (401, "authentication", "fatal"),
+        (403, "authorization", "fatal"),
+        (404, "model_not_found", "fatal"),
+        (429, "unavailable", "degraded"),
+        (503, "other_http", "degraded"),
+    ],
+)
+def test_vertex_openapi_probe_http_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    expected_failure_kind: str,
+    expected_disposition: str,
+):
+    """Verify HTTP error classification on Vertex AI OpenAPI probe."""
+    import io
+    import urllib.error
+
+    def mock_urlopen(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://aiplatform.googleapis.com/...",
+            status_code,
+            "Error",
+            {},
+            io.BytesIO(b'{"error": {"message": "Test error detail"}}'),
+        )
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+
+    provider = ProviderConfig(
+        "openai-compatible",
+        "google/gemini-3.8-flash",
+        "mock-token",
+        "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi",
+        "openai-compatible/google/gemini-3.8-flash",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == expected_failure_kind
+    assert result.http_status == status_code
+    assert runtime_preflight.credential_probe_disposition(provider, result) == expected_disposition
+
+
+def test_vertex_openapi_probe_rejects_redirect(monkeypatch: pytest.MonkeyPatch):
+    """Verify redirect on Vertex AI OpenAPI probe fails fast as invalid configuration."""
+    import io
+    import urllib.error
+
+    def mock_urlopen(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://aiplatform.googleapis.com/...",
+            302,
+            "Found",
+            {},
+            io.BytesIO(b"Redirected"),
+        )
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+
+    provider = ProviderConfig(
+        "openai-compatible",
+        "google/gemini-3.8-flash",
+        "mock-token",
+        "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi",
+        "openai-compatible/google/gemini-3.8-flash",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert result.http_status == 302
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+
+
+def test_vertex_openapi_probe_missing_token(monkeypatch: pytest.MonkeyPatch):
+    """Verify probe fails when no token can be acquired."""
+    monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: None)
+
+    provider = ProviderConfig(
+        "openai-compatible",
+        "google/gemini-3.8-flash",
+        None,
+        "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi",
+        "openai-compatible/google/gemini-3.8-flash",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "invalid_configuration"
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+
+
+def test_vertex_openapi_probe_timeout(monkeypatch: pytest.MonkeyPatch):
+    """Verify timeout during Vertex OpenAPI probe returns unavailable and disposition=DEGRADED."""
+    def mock_urlopen(*_args, **_kwargs):
+        raise TimeoutError("Connection timed out")
+
+    monkeypatch.setattr(runtime_preflight, "_urlopen_without_redirects", mock_urlopen)
+
+    provider = ProviderConfig(
+        "openai-compatible",
+        "google/gemini-3.8-flash",
+        "mock-token",
+        "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi",
+        "openai-compatible/google/gemini-3.8-flash",
+    )
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    assert result.ok is False
+    assert result.failure_kind == "unavailable"
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
+
+
+

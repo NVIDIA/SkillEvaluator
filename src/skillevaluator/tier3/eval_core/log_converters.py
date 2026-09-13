@@ -19,6 +19,22 @@ import re
 from pathlib import Path
 from typing import Any
 
+_OBSERVATION_CHAR_LIMIT = 8000
+
+
+def _bounded_tool_observation(*, prefix: str, body: str, suffix: str, limit: int = _OBSERVATION_CHAR_LIMIT) -> str:
+    """Keep status/error suffixes when tool output fills the observation budget."""
+    prefix = prefix.strip()
+    suffix = suffix.strip()
+    body = body or ""
+    fixed_parts = [part for part in (prefix, suffix) if part]
+    fixed_len = sum(len(part) for part in fixed_parts) + max(0, len(fixed_parts) - 1)
+    body_sep = 1 if body and fixed_parts else 0
+    body_limit = max(0, limit - fixed_len - body_sep)
+    trimmed_body = body[:body_limit]
+    segments = [segment for segment in (prefix, trimmed_body, suffix) if segment]
+    return "\n".join(segments)[:limit]
+
 
 def _stringify_tool_result_content(content: Any) -> str:
     if content is None:
@@ -443,17 +459,13 @@ def _opencode_error_text(state: dict[str, Any]) -> str:
 
 
 def _opencode_tool_observation(state: dict[str, Any]) -> str:
-    parts: list[str] = []
     status = state.get("status")
-    if status is not None and str(status).strip():
-        parts.append(f"status={status}")
-    output_text = _opencode_output_payload(state)
-    if output_text.strip():
-        parts.append(output_text)
-    error_text = _opencode_error_text(state)
-    if error_text.strip():
-        parts.append(error_text)
-    return "\n".join(parts).strip()[:8000]
+    prefix = f"status={status}" if status is not None and str(status).strip() else ""
+    return _bounded_tool_observation(
+        prefix=prefix,
+        body=_opencode_output_payload(state),
+        suffix=_opencode_error_text(state),
+    )
 
 
 def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
@@ -601,7 +613,7 @@ def _codex_thread_item(evt: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _codex_terminal_evidence_lines(item: dict[str, Any]) -> list[str]:
+def _codex_status_error_prefix(item: dict[str, Any]) -> str:
     lines: list[str] = []
     status = item.get("status")
     if status is not None and str(status).strip():
@@ -616,19 +628,27 @@ def _codex_terminal_evidence_lines(item: dict[str, Any]) -> list[str]:
             lines.append(str(message) if message is not None else json.dumps(error, ensure_ascii=False))
         else:
             lines.append(str(error))
+    return "\n".join(lines)
+
+
+def _codex_observation_body(item: dict[str, Any], *, include_result: bool = False) -> str:
+    parts: list[str] = []
     output = item.get("aggregated_output")
     if output is not None and str(output).strip():
-        lines.append(str(output))
-    return lines
-
-
-def _codex_observation_content(item: dict[str, Any], *, include_result: bool = False) -> str:
-    parts = _codex_terminal_evidence_lines(item)
+        parts.append(str(output))
     if include_result:
         result_text = _codex_mcp_result_text(item)
         if result_text:
             parts.append(result_text)
-    return "\n".join(part for part in parts if part).strip()[:8000]
+    return "\n".join(parts)
+
+
+def _codex_observation_content(item: dict[str, Any], *, include_result: bool = False) -> str:
+    return _bounded_tool_observation(
+        prefix=_codex_status_error_prefix(item),
+        body=_codex_observation_body(item, include_result=include_result),
+        suffix="",
+    )
 
 
 def _codex_mcp_result_text(item: dict[str, Any]) -> str:
@@ -686,12 +706,13 @@ def _codex_file_change_step(item: dict[str, Any], evt: dict[str, Any], tool_inde
     }
     evidence = _codex_observation_content(item)
     if evidence:
-        step["observation"]["results"].append(
-            {
-                "source_call_id": tool_calls[0]["tool_call_id"],
-                "content": evidence,
-            }
-        )
+        for tool_call in tool_calls:
+            step["observation"]["results"].append(
+                {
+                    "source_call_id": tool_call["tool_call_id"],
+                    "content": evidence,
+                }
+            )
     return step
 
 

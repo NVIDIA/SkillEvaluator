@@ -256,6 +256,38 @@ def test_codex_mcp_tool_call_string_error():
     assert "status=failed" in obs
 
 
+def test_opencode_tool_error_retained_when_output_fills_budget():
+    long_output = "o" * 9000
+    log = (
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c-long",'
+        f'"state":{{"status":"error","output":"{long_output}",'
+        '"error":{"message":"command aborted"}}}}\n'
+    )
+    traj = synthetic_trajectory_from_opencode_json(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    obs = tcs[0]["observation"]
+    assert "status=error" in obs
+    assert "command aborted" in obs
+    assert len(obs) <= 8000
+
+
+def test_codex_multi_file_change_terminal_evidence_on_each_write():
+    log = (
+        '{"type":"item.completed","item":{"type":"file_change","id":"fc-2",'
+        '"changes":[{"path":"/workspace/a.py","kind":"add"},'
+        '{"path":"/workspace/b.py","kind":"add"}],'
+        '"status":"failed","error":{"message":"disk full"}}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 2
+    for call in tcs:
+        assert "status=failed" in call["observation"]
+        assert "disk full" in call["observation"]
+
+
 def test_opencode_tool_error_retains_status_with_partial_output():
     log = (
         '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c-err",'

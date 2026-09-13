@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/openclaw/agent-skills",
+  "commit": "2a409d348a4bcf6f15e41e9a20efd0b298a32528",
+  "path": "skills/autoreview",
+  "fixture_kind": "exact-pinned-files",
+  "files": {
+    "SKILL.md": {
+      "mode": "100644",
+      "blob": "2690ee3f6bb54a5630e8d2ba19139ce08ca07707",
+      "bytes": 37913,
+      "sha256": "53d9676e35ce0a13ac3b9ff6e33f83d9998c24e08ab2fe626521425c65d12986"
+    },
+    "AGENTS.md": {
+      "mode": "100644",
+      "blob": "5a0173d73d39a8b1e2e66ae1d54b47f960b25e43",
+      "bytes": 437,
+      "sha256": "d413df783f69b238904fb2b2428f313c99bcfaae7f5992412506bf09aac9ee2f"
+    }
+  },
+  "alias": {
+    "name": "CLAUDE.md",
+    "target": "AGENTS.md",
+    "mode": "120000",
+    "blob": "47dc3e3d863cfb5727b87d785d09abf9743c0a72",
+    "bytes": 9,
+    "sha256": "a54ff182c7e8acf56acfd6e4b9c3ff41e2c41a31c9b211b2deb9df75d9a478f9"
+  }
+}

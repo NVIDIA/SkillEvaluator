@@ -16,9 +16,29 @@ All notable changes to SkillEvaluator are documented in this file.
 - SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
   consumers. Findings map to rule IDs, severity levels, and file locations from
   Tier 1 validation results.
+- Added public plugin evaluation across all tiers: static schema and MCP checks,
+  advisory offline dependency/context deduplication, and Harbor-backed live
+  evaluation with effectiveness and optional sum-of-parts Integration arms.
+
+### Security
+
+- Hardened plugin input handling with descriptor-anchored, no-follow discovery
+  and reads so linked, hard-linked, reparse-point, escaping, and special files
+  are rejected before provider calls or sandbox staging.
 
 ### Fixed
 
+- Kept Tier 3's interactive progress frame at a stable height, bounded visible
+  stage history, serialized terminal redraws, and safely disabled a reporter
+  when initialization or background refresh fails.
+- Made the `evaluate` workflow visible in top-level CLI help while retaining
+  the documented `skillevaluator tier3 evaluate` spelling.
+- Tier 3 preserves completed rewards from partially errored jobs only when each
+  aggregate error maps to a concrete failed trial; explicit failed statuses and
+  non-zero aggregate exit codes still suppress ambiguous scores.
+- Plugin manifest discovery is now root-bounded across all tiers, and Integration
+  evaluation requires explicit cross-component dataset evidence instead of
+  reporting unsupported composition claims.
 - Malformed, non-UTF-8, or unreadable bundled and custom policy files now
   produce path-specific CLI errors instead of leaking raw parser or I/O errors
   ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).

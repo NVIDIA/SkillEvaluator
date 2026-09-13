@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from skillevaluator.deduplication.intra_skill import semantic_clustering
 from skillevaluator.deduplication.intra_skill.semantic_clustering import (
     UnionFind,
     build_clusters,
@@ -53,6 +54,24 @@ class TestUnionFind:
 
 
 class TestBuildClusters:
+    @pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -0.1, 1.1, True])
+    def test_rejects_invalid_threshold(self, make_chunk, threshold: object) -> None:
+        chunks = [make_chunk(embedding=[1.0, 0.0]), make_chunk(embedding=[1.0, 0.0])]
+        with pytest.raises(ValueError, match=r"threshold|finite|\[0, 1\]"):
+            build_clusters(chunks, threshold=threshold)  # type: ignore[arg-type]
+
+    def test_rejects_scalar_work_before_cosine_loop(self, make_chunk, monkeypatch) -> None:
+        chunks = [make_chunk(embedding=[1.0, 0.0]), make_chunk(embedding=[1.0, 0.0])]
+        monkeypatch.setattr(
+            semantic_clustering.EmbeddingClient,
+            "cosine_similarity",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("cosine must not run")),
+        )
+        monkeypatch.setattr(semantic_clustering, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1)
+
+        with pytest.raises(ValueError, match=r"scalar.*limit|scalar.*exceeds"):
+            build_clusters(chunks)
+
     def test_fewer_than_2_chunks_returns_empty(self, make_chunk) -> None:
         assert build_clusters([make_chunk(embedding=[1.0, 0.0])]) == []
         assert build_clusters([]) == []

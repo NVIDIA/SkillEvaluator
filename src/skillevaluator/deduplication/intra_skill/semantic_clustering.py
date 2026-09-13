@@ -13,8 +13,18 @@ from dataclasses import dataclass, field
 from itertools import combinations
 from typing import TYPE_CHECKING
 
-from skillevaluator.constants import CONTENT_DEDUP_SIMILARITY_THRESHOLD
-from skillevaluator.embedding.client import EmbeddingClient
+from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_CHUNKS,
+    CONTENT_DEDUP_MAX_PAIR_COMPARISONS,
+    CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
+    CONTENT_DEDUP_SIMILARITY_THRESHOLD,
+)
+from skillevaluator.embedding.client import (
+    EmbeddingClient,
+    SimilarityConfigError,
+    validate_embedding_vector,
+    validate_similarity_threshold,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.deduplication.utils.chunker import ContentChunk
@@ -69,6 +79,28 @@ def build_clusters(
     n = len(chunks)
     if n < 2:
         return []
+    if n > CONTENT_DEDUP_MAX_CHUNKS:
+        raise ValueError(f"Content chunk count exceeds {CONTENT_DEDUP_MAX_CHUNKS}")
+    pair_count = n * (n - 1) // 2
+    if pair_count > CONTENT_DEDUP_MAX_PAIR_COMPARISONS:
+        raise ValueError(f"Content pair comparison count exceeds {CONTENT_DEDUP_MAX_PAIR_COMPARISONS}")
+    threshold = validate_similarity_threshold(threshold, context="Content deduplication")
+    vector_dimension: int | None = None
+    try:
+        for index, chunk in enumerate(chunks):
+            dimension = validate_embedding_vector(
+                chunk.embedding,
+                vector_dimension,
+                context=f"Content chunk {index}",
+                allow_zero=True,
+            )
+            if vector_dimension is None:
+                vector_dimension = dimension
+    except SimilarityConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    scalar_work = pair_count * (vector_dimension or 0)
+    if scalar_work > CONTENT_DEDUP_MAX_SCALAR_COMPARISONS:
+        raise ValueError(f"Content scalar comparison work exceeds {CONTENT_DEDUP_MAX_SCALAR_COMPARISONS}")
 
     uf = UnionFind(n)
     pair_scores: dict[tuple[int, int], float] = {}

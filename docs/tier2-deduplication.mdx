@@ -188,6 +188,27 @@ Catalogs stay local unless you explicitly share them. Because they contain
 embeddings and other data derived from skill content, review them before
 sharing like any other generated project artifact.
 
+## Plugin deduplication
+
+`validate` also accepts bundle-reference and contained plugins:
+
+```bash title="Run offline and contextual checks for a plugin"
+skillevaluator validate ./my-plugin --type plugin
+```
+
+Plugin Tier 2 is advisory and public/offline by design. It always checks for
+duplicate skill and rule references in `agent_plugin.yaml`. When an embeddings
+provider is available, it also runs context deduplication independently over
+each safely discovered skill under `skills/`. Missing optional embedding access
+skips only that contextual check; the offline reference check still runs.
+Ordinary duplicate findings remain advisory, but unsafe linked, hard-linked, or
+special plugin inputs are refused as blocking execution failures because the
+requested check cannot run safely.
+
+The public implementation does not connect to a remote vector database, fetch
+remote component catalogs, or compare a plugin against a private plugin index.
+It preserves the external repository's local-catalog-only Tier 2 contract.
+
 ## Inside validate
 
 `validate` runs the intra-skill deduplication pass by default as part of a full
@@ -224,17 +245,20 @@ you intend to skip Tier 2 entirely.
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
 provider call, it rejects linked roots, linked directories and manifests,
-hard-linked selected files, non-regular files, paths outside the verified scan
-root, and all file redirects except the exact contained
-`CLAUDE.md -> AGENTS.md` compatibility alias. That alias is validated but never
-followed; its exactly named, independently discovered, single-link regular
-sibling target is scanned once. Explicit limits bound
+hard-linked selected files, reparse points, non-regular files, and paths outside
+the verified scan root. The only redirect exception is the exact, contained
+`CLAUDE.md -> AGENTS.md` compatibility alias used by public agent-skill layouts;
+the alias is validated but never followed, and its independently discovered,
+single-link regular sibling target is scanned once. Native descriptor- or
+handle-anchored reads on POSIX and Windows verify that a selected file did not
+change between discovery and use. Explicit limits bound
 discovered paths, file counts, per-file and total input bytes, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
-matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
-keys, unexpected fields, invalid identities, non-finite vectors, and
-incompatible provider metadata. If a collection exceeds a limit, split it into
-intentional batches rather than scanning an unbounded directory tree.
+matches, pairwise scalar work, structured-data depth and scalar volume, and LLM
+prompt/response budgets. Manifest and catalog loading rejects duplicate keys,
+unexpected fields, invalid identities, non-finite values, and incompatible
+provider metadata. If a collection exceeds a limit, split it into intentional
+batches rather than scanning an unbounded directory tree.
 
 ### What leaves your machine
 

@@ -410,6 +410,8 @@ Example.
         skill_md.write_text("""---
 name: xml-desc
 description: "A skill <script>alert('xss')</script> with injected tags"
+metadata:
+  author: Test User <test@nvidia.com>
 ---
 
 # XML Description Skill
@@ -427,7 +429,7 @@ Example.
         result = validator.validate(skill_dir)
 
         assert not result.passed
-        assert any("xml" in err.lower() or "description" in err.lower() for err in result.errors)
+        assert any("xml" in err.lower() for err in result.errors)
 
     def test_unclosed_xml_tag_in_description_rejected(self, tmp_path: Path):
         """Test validation fails when description contains an unclosed tag-like value."""
@@ -438,6 +440,8 @@ Example.
         skill_md.write_text("""---
 name: unclosed-xml-desc
 description: "A skill with an unclosed <script foo tag in the description"
+metadata:
+  author: Test User <test@nvidia.com>
 ---
 
 # Unclosed XML Description Skill
@@ -455,7 +459,7 @@ Example.
         result = validator.validate(skill_dir)
 
         assert not result.passed
-        assert any("xml" in err.lower() or "description" in err.lower() for err in result.errors)
+        assert any("xml" in err.lower() for err in result.errors)
 
     def test_closing_xml_tag_in_description_rejected(self, tmp_path: Path):
         """Opening and closing XML tags use the same schema and quality definition."""

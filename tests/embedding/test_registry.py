@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -81,6 +82,20 @@ def _make_mock_client(vectors: list[list[float]]) -> EmbeddingClient:
     )
     client.cosine_similarity = EmbeddingClient.cosine_similarity
     return client
+
+
+def _populated_registry() -> EmbeddingRegistry:
+    registry = EmbeddingRegistry(_make_mock_client([]))
+    registry._entries["skill:skills/test-skill"] = RegistryEntry(
+        name="test-skill",
+        description="A test skill",
+        path="skills/test-skill",
+        content_type="skill",
+        embedding=[0.1, 0.2, 0.3],
+        entry_id="skill:skills/test-skill",
+        content_fingerprint="a" * 64,
+    )
+    return registry
 
 
 class TestBuildFromDirectory:
@@ -393,6 +408,79 @@ class TestCachePersistence:
         assert "vector_dimension" in data
         assert "created_at" in data
         assert "mode" in data
+
+    def test_load_rejects_symlink_hardlink_and_linked_parent(self, tmp_path: Path) -> None:
+        source = tmp_path / "source.json"
+        _populated_registry().save_cache(source)
+
+        linked = tmp_path / "linked.json"
+        try:
+            linked.symlink_to(source.name)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            _populated_registry().load_cache(linked)
+
+        hardlinked = tmp_path / "hardlinked.json"
+        try:
+            os.link(source, hardlinked)
+        except OSError:
+            pytest.skip("hardlinks are unavailable")
+        with pytest.raises(ValueError, match=r"hard.?link|link count|regular"):
+            _populated_registry().load_cache(hardlinked)
+
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        nested = real_parent / "cache.json"
+        _populated_registry().save_cache(nested)
+        linked_parent = tmp_path / "linked-parent"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            _populated_registry().load_cache(linked_parent / "cache.json")
+
+    def test_save_rejects_linked_or_hardlinked_destination_without_overwrite(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside.json"
+        outside.write_text("SECRET_CANARY", encoding="utf-8")
+
+        linked = tmp_path / "linked.json"
+        try:
+            linked.symlink_to(outside.name)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            _populated_registry().save_cache(linked)
+        assert outside.read_text(encoding="utf-8") == "SECRET_CANARY"
+
+        hardlinked = tmp_path / "hardlinked.json"
+        try:
+            os.link(outside, hardlinked)
+        except OSError:
+            pytest.skip("hardlinks are unavailable")
+        with pytest.raises(ValueError, match=r"hard.?link|link count|regular"):
+            _populated_registry().save_cache(hardlinked)
+        assert outside.read_text(encoding="utf-8") == "SECRET_CANARY"
+
+    def test_load_rejects_excessive_json_nesting(self, tmp_path: Path) -> None:
+        cache = tmp_path / "deep.json"
+        cache.write_text("[" * 1_500 + "0" + "]" * 1_500, encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"Malformed catalog JSON|depth|nest"):
+            _populated_registry().load_cache(cache)
+
+    def test_save_rejects_cumulative_vector_budget_before_serialization(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        registry = _populated_registry()
+        monkeypatch.setattr(registry_module, "MAX_CATALOG_VECTOR_VALUES", 2)
+        dumps = MagicMock(side_effect=AssertionError("json.dumps must not run"))
+        monkeypatch.setattr(registry_module.json, "dumps", dumps)
+
+        with pytest.raises(ValueError, match=r"vector scalar limit"):
+            registry.save_cache(tmp_path / "oversized.json")
+
+        dumps.assert_not_called()
 
 
 class TestQuery:

@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.tier3.harbor.collector import (
     _agent_runtime_failure_reason,
@@ -319,6 +321,61 @@ def test_partial_rewards_stay_suppressed_when_not_every_job_error_maps_to_a_tria
     assert results["agents"]["opencode"]["num_trials_with"] == 0
 
 
+@pytest.mark.parametrize(("field", "value"), [("status", "failed"), ("exit_code", 17), ("returncode", 9)])
+def test_partial_rewards_stay_suppressed_for_aggregate_job_failure(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    job_dir.mkdir(parents=True)
+    payload: dict[str, object] = {
+        "n_total_trials": 2,
+        "stats": {
+            "n_completed_trials": 2,
+            "n_errored_trials": 1,
+            "n_running_trials": 0,
+            "n_pending_trials": 0,
+            "n_cancelled_trials": 0,
+            "n_retries": 0,
+            "evals": {},
+        },
+        field: value,
+    }
+    (job_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    for case_id in ("case-001", "case-002"):
+        trial_dir = job_dir / f"{case_id}__attempt"
+        (trial_dir / "verifier").mkdir(parents=True)
+        result: dict[str, object] = {"trial_name": trial_dir.name}
+        if case_id == "case-002":
+            result["exception_info"] = {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out",
+            }
+        (trial_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        (trial_dir / "verifier" / "reward.json").write_text(
+            json.dumps({"entry_id": case_id, "overall": 1.0}),
+            encoding="utf-8",
+        )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=2,
+        expected_case_ids=["case-001", "case-002"],
+        expected_trials=2,
+    )
+
+    assert results["execution_status"] == "failed"
+    assert results["scored_attempts"] == 0
+    assert results["agents"]["opencode"]["num_trials_with"] == 0
+
+
 def test_complete_low_score_is_execution_success(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     job_dir = jobs_dir / "demo-opencode-with"
@@ -458,6 +515,58 @@ def test_native_multistep_rewards_count_as_one_logical_attempt(tmp_path: Path) -
     assert results["execution_status"] == "succeeded"
     assert results["scored_attempts"] == 1
     assert results["agents"]["opencode"]["num_trials_with"] == 2
+
+
+def test_sum_of_parts_custom_only_overall_uses_logical_attempts(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    with_job = jobs_dir / "demo-opencode-with"
+    sum_job = jobs_dir / "demo-opencode-sumofparts"
+
+    for attempt in (1, 2):
+        trial_name = f"case-001__attempt{attempt:03d}"
+        verifier = with_job / trial_name / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.json").write_text(
+            json.dumps({"metric_set": "custom-only", "overall": 0.8, "entry_id": "case-001"}),
+            encoding="utf-8",
+        )
+
+    first_trial = "case-001__attempt001"
+    for step, score in (("prepare", 0.0), ("finish", 1.0)):
+        verifier = sum_job / first_trial / "steps" / step / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.json").write_text(
+            json.dumps({"metric_set": "custom-only", "overall": score, "entry_id": "case-001"}),
+            encoding="utf-8",
+        )
+    second_trial = "case-001__attempt002"
+    verifier = sum_job / second_trial / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(
+        json.dumps({"metric_set": "custom-only", "overall": 0.9, "entry_id": "case-001"}),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(with_job, ["case-001__attempt001", "case-001__attempt002"])
+    _write_complete_job_result(sum_job, [first_trial, second_trial])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        sum_of_parts_arm=True,
+        n_attempts=2,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=2,
+    )
+
+    agent = results["agents"]["opencode"]
+    assert agent["conditions"]["sum_of_parts"]["execution_status"] == "succeeded"
+    assert agent["overall_sum_of_parts"] == 0.7
+    summary = json.loads((tmp_path / "results/opencode/sum-of-parts/summary.json").read_text(encoding="utf-8"))
+    assert summary["overall_score"] == 0.7
 
 
 def test_unexpected_case_fails_execution_coverage(tmp_path: Path) -> None:

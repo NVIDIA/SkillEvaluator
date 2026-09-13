@@ -8,9 +8,12 @@ Pure helpers with no Click/console/logging dependencies, shared by the
 Click command group itself lives in :mod:`skillevaluator.cli`.
 """
 
+import os
+import stat
 from pathlib import Path
 
 from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     CONTENT_TYPE_PLUGIN,
     CONTENT_TYPE_RULES,
     CONTENT_TYPE_SKILL,
@@ -21,8 +24,10 @@ from skillevaluator.constants import (
     PLUGIN_MANIFEST_FILES,
     RULES_FILE_EXTENSION,
     SKILL_MANIFEST_FILE,
+    SKILL_MANIFEST_VARIANTS,
     WORKFLOWS_MANIFEST_FILE,
 )
+from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
 # ---------------------------------------------------------------------------
 # Content-type detection
@@ -50,19 +55,55 @@ def _detect_from_file(path: Path) -> str | None:
 
 def _detect_from_directory(path: Path) -> str | None:
     """Detect content type from directory contents."""
+    try:
+        root_metadata = path.lstat()
+    except OSError:
+        return None
+    if stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
+        return None
+    plugin = skill = workflows = rules = False
+    contained = False
+    try:
+        with os.scandir(path) as iterator:
+            for count, entry in enumerate(iterator, start=1):
+                if count > CONTENT_DEDUP_MAX_DISCOVERED_PATHS:
+                    return None
+                interesting = (
+                    entry.name in PLUGIN_MANIFEST_FILES
+                    or entry.name in SKILL_MANIFEST_VARIANTS
+                    or entry.name in {WORKFLOWS_MANIFEST_FILE, PLUGIN_CONTAINED_MANIFEST_DIR}
+                    or entry.name.endswith(RULES_FILE_EXTENSION)
+                )
+                if not interesting:
+                    continue
+                metadata = entry.stat(follow_symlinks=False)
+                non_directory = not stat.S_ISDIR(metadata.st_mode)
+                if entry.name in PLUGIN_MANIFEST_FILES and non_directory:
+                    plugin = True
+                elif entry.name == PLUGIN_CONTAINED_MANIFEST_DIR:
+                    # Presence is enough for auto-detection. The secure plugin
+                    # locator later distinguishes a real contained manifest
+                    # from an empty, linked, or malformed marker directory.
+                    contained = True
+                elif entry.name in SKILL_MANIFEST_VARIANTS and non_directory:
+                    skill = True
+                elif entry.name == WORKFLOWS_MANIFEST_FILE and non_directory:
+                    workflows = True
+                elif entry.name.endswith(RULES_FILE_EXTENSION) and non_directory:
+                    rules = True
+    except OSError:
+        return None
     # Plugin detection must win before the SKILL.md / nested-structure checks:
-    # a plugin dir may also contain skills/**/SKILL.md, but an agent_plugin.yaml
-    # at the root makes it a plugin (prevents a false-green skill detection).
-    if (
-        any((path / manifest).exists() for manifest in PLUGIN_MANIFEST_FILES)
-        or (path / PLUGIN_CONTAINED_MANIFEST_DIR / PLUGIN_CONTAINED_MANIFEST_FILE).exists()
-    ):
+    # a plugin dir may also contain skills/**/SKILL.md, but a plugin manifest at
+    # the root -- either agent_plugin.yaml/.yml (bundle-reference) or
+    # .claude-plugin/plugin.json (contained) -- makes it a plugin.
+    if plugin or contained:
         return CONTENT_TYPE_PLUGIN
-    if (path / SKILL_MANIFEST_FILE).exists() or (path / SKILL_MANIFEST_FILE.lower()).exists():
+    if skill:
         return CONTENT_TYPE_SKILL
-    if (path / WORKFLOWS_MANIFEST_FILE).exists():
+    if workflows:
         return CONTENT_TYPE_WORKFLOWS
-    if any(path.glob(f"*{RULES_FILE_EXTENSION}")):
+    if rules:
         return CONTENT_TYPE_RULES
     return None
 
@@ -80,17 +121,32 @@ def _detect_from_path_parts(path: Path) -> str | None:
 
 
 def _detect_from_nested_structure(path: Path) -> str | None:
-    """Detect content type from nested directory structure."""
-    skills_dir = path / "skills"
-    team_skills_dir = path / "team-skills"
-    if (skills_dir.exists() and any(skills_dir.rglob(SKILL_MANIFEST_FILE))) or (
-        team_skills_dir.exists() and any(team_skills_dir.rglob(SKILL_MANIFEST_FILE))
-    ):
+    """Detect content type from a bounded, shallow structural marker scan."""
+    try:
+        root_metadata = path.lstat()
+    except OSError:
+        return None
+    if stat_is_link_or_reparse(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
+        return None
+
+    markers: set[str] = set()
+    try:
+        with os.scandir(path) as iterator:
+            for count, entry in enumerate(iterator, start=1):
+                if count > CONTENT_DEDUP_MAX_DISCOVERED_PATHS:
+                    return None
+                if entry.name not in {"skills", "team-skills", "team-rules", "workflows", "team-workflows"}:
+                    continue
+                metadata = entry.stat(follow_symlinks=False)
+                if not stat_is_link_or_reparse(metadata) and stat.S_ISDIR(metadata.st_mode):
+                    markers.add(entry.name)
+    except OSError:
+        return None
+    if markers & {"skills", "team-skills"}:
         return CONTENT_TYPE_SKILL
-    team_rules_dir = path / "team-rules"
-    if team_rules_dir.exists() and any(team_rules_dir.rglob(f"*{RULES_FILE_EXTENSION}")):
+    if "team-rules" in markers:
         return CONTENT_TYPE_RULES
-    if (path / "workflows").exists() or (path / "team-workflows").exists():
+    if markers & {"workflows", "team-workflows"}:
         return CONTENT_TYPE_WORKFLOWS
     return None
 
@@ -99,18 +155,22 @@ def detect_content_type(path: Path) -> str:
     """Auto-detect whether path contains a skill, rules, workflows, or plugin.
 
     Detection order: file type -> directory manifests -> path patterns -> nested structure.
-    A plugin manifest (agent_plugin.yaml/.yml) at the root wins over a nested
-    skills tree.
+    A plugin manifest at the root -- agent_plugin.yaml/.yml (bundle-reference) or
+    .claude-plugin/plugin.json (contained) -- wins over a nested skills tree.
     """
-    if path.is_file() and (detected := _detect_from_file(path)):
+    try:
+        metadata = path.lstat()
+    except OSError:
+        metadata = None
+    if metadata is not None and not stat.S_ISDIR(metadata.st_mode) and (detected := _detect_from_file(path)):
         return detected
-    if path.is_dir() and (detected := _detect_from_directory(path)):
+    if metadata is not None and stat.S_ISDIR(metadata.st_mode) and (detected := _detect_from_directory(path)):
         return detected
 
     if detected := _detect_from_path_parts(path):
         return detected
 
-    if path.is_dir() and (detected := _detect_from_nested_structure(path)):
+    if metadata is not None and stat.S_ISDIR(metadata.st_mode) and (detected := _detect_from_nested_structure(path)):
         return detected
 
     return CONTENT_TYPE_UNKNOWN
@@ -123,7 +183,12 @@ def detect_content_type(path: Path) -> str:
 
 def resolve_skill_path(skill_path: Path) -> Path:
     """Convert SKILL.md file path to its parent directory."""
-    return skill_path.parent if skill_path.is_file() else skill_path
+    try:
+        metadata = skill_path.lstat()
+    except OSError:
+        return skill_path
+    is_manifest_link = stat_is_link_or_reparse(metadata) and skill_path.name in SKILL_MANIFEST_VARIANTS
+    return skill_path.parent if stat.S_ISREG(metadata.st_mode) or is_manifest_link else skill_path
 
 
 def resolve_rules_path(rules_path: Path) -> Path:
@@ -133,16 +198,36 @@ def resolve_rules_path(rules_path: Path) -> Path:
 
 def resolve_workflows_path(workflows_path: Path) -> Path:
     """Convert workflow-rules.mdc path to its parent directory."""
-    if workflows_path.is_file() and workflows_path.name == WORKFLOWS_MANIFEST_FILE:
+    try:
+        metadata = workflows_path.lstat()
+    except OSError:
+        return workflows_path
+    if not stat.S_ISDIR(metadata.st_mode) and workflows_path.name == WORKFLOWS_MANIFEST_FILE:
         return workflows_path.parent
     return workflows_path
 
 
 def resolve_plugin_path(path: Path) -> Path:
-    """Convert a plugin manifest file path to its plugin root directory."""
-    if path.is_file():
+    """Convert a plugin manifest file path to the plugin root directory."""
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return path
+    if not stat.S_ISDIR(metadata.st_mode):
         if path.name in PLUGIN_MANIFEST_FILES:
             return path.parent
         if _is_contained_plugin_manifest(path):
             return path.parent.parent
     return path
+
+
+def resolve_content_path(path: Path, content_type: str) -> Path:
+    """Normalize a direct manifest path for the selected content type."""
+    resolvers = {
+        CONTENT_TYPE_SKILL: resolve_skill_path,
+        CONTENT_TYPE_RULES: resolve_rules_path,
+        CONTENT_TYPE_WORKFLOWS: resolve_workflows_path,
+        CONTENT_TYPE_PLUGIN: resolve_plugin_path,
+    }
+    resolver = resolvers.get(content_type)
+    return resolver(path) if resolver else path

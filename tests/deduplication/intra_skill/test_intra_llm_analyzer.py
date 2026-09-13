@@ -123,6 +123,47 @@ class TestAnalyzeCluster:
         assert result.suggestion == "The suggestion text"
         assert result.confidence == 0.77
 
+    @pytest.mark.parametrize(
+        "confidence",
+        [float("nan"), float("inf"), -0.1, 1.1, True, "0.5", 10**400],
+    )
+    def test_invalid_confidence_is_normalized_to_llm_error(self, make_cluster, confidence: object) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": confidence,
+            "reasoning": "Reason",
+            "suggestion": "Suggestion",
+        }
+
+        with pytest.raises(LLMClientError, match=r"confidence|finite|\[0, 1\]|number"):
+            analyze_cluster(mock_client, make_cluster())
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("verdict", ["DUPLICATE"]),
+            ("reasoning", ["Reason"]),
+            ("suggestion", {"text": "Suggestion"}),
+            ("reasoning", "x" * 8_193),
+        ],
+    )
+    def test_invalid_or_oversized_response_scalars_are_rejected(
+        self, make_cluster, field: str, value: object
+    ) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        response: dict[str, object] = {
+            "verdict": "DUPLICATE",
+            "confidence": 0.9,
+            "reasoning": "Reason",
+            "suggestion": "Suggestion",
+        }
+        response[field] = value
+        mock_client.extract_json_from_response.return_value = response
+
+        with pytest.raises(LLMClientError, match=r"verdict|reasoning|suggestion|string|limit"):
+            analyze_cluster(mock_client, make_cluster())
+
 
 class TestVerdictToSeverity:
     def test_duplicate_high_confidence(self) -> None:

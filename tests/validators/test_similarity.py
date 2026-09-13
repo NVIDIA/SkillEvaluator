@@ -25,6 +25,16 @@ class TestSimilarityValidatorProperties:
     def test_description(self) -> None:
         assert SimilarityValidator().description
 
+    @pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -0.1, 1.1, True, "0.8"])
+    def test_invalid_threshold_is_rejected_before_provider_construction(self, threshold: object) -> None:
+        with (
+            patch("skillevaluator.validators.similarity.EmbeddingClient") as mock_client,
+            pytest.raises(ValueError, match=r"threshold|finite|\[0, 1\]"),
+        ):
+            SimilarityValidator(threshold=threshold)  # type: ignore[arg-type]
+
+        mock_client.assert_not_called()
+
     def test_no_model_flag_defers_to_provider_resolution(self) -> None:
         """Without --model, the validator must not pin a default model.
 
@@ -264,6 +274,34 @@ class TestValidateCacheWorkflow:
         mock_registry.load_catalog.assert_called_once_with(cache_file)
         mock_registry.query_entry.assert_called_once_with(target, 0.75)
         assert result.passed
+
+    @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
+    @patch("skillevaluator.validators.similarity.EmbeddingClient")
+    def test_broken_catalog_link_reaches_secure_loader_without_target_exists_probe(
+        self,
+        _mock_client_cls,
+        mock_registry_cls,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        catalog_file = tmp_path / "catalog.json"
+        catalog_file.symlink_to("missing-target")
+        real_exists = Path.exists
+
+        def guarded_exists(path: Path) -> bool:
+            if path == catalog_file:
+                raise AssertionError("catalog target metadata must not be queried")
+            return real_exists(path)
+
+        monkeypatch.setattr(Path, "exists", guarded_exists)
+        mock_registry = MagicMock()
+        mock_registry.size = 0
+        mock_registry.query_entry.return_value = []
+        mock_registry_cls.return_value = mock_registry
+
+        SimilarityValidator(content_type="skill", catalog_path=catalog_file).validate(tmp_path)
+
+        mock_registry.load_catalog.assert_called_once_with(catalog_file)
 
     @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
     @patch("skillevaluator.validators.similarity.EmbeddingClient")

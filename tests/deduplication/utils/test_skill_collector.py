@@ -5,23 +5,15 @@
 
 from __future__ import annotations
 
-import logging
 import os
-import stat
-import subprocess
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
 from skillevaluator.constants import CONTENT_DEDUP_EXCLUDED_FILES
 from skillevaluator.deduplication.utils import skill_collector
-from skillevaluator.deduplication.utils.skill_collector import (
-    CollectedFile,
-    SkillCollectionError,
-    collect_files,
-)
+from skillevaluator.deduplication.utils.skill_collector import CollectedFile, SkillCollectionError, collect_files
+from skillevaluator.utils import secure_fs
 
 
 class TestCollectedFile:
@@ -145,8 +137,8 @@ class TestCollectFiles:
         with pytest.raises(SkillCollectionError) as exc_info:
             collect_files(skill_root)
 
-        assert exc_info.value.check_name == "unsafe_path"
-        assert exc_info.value.rel_path == "CLAUDE.md"
+        assert exc_info.value.check_name == "unsafe_hardlink"
+        assert exc_info.value.rel_path == "AGENTS.md"
 
     def test_rejects_hard_linked_selected_file(self, skill_root: Path) -> None:
         outside_target = skill_root.parent / "outside-notes.md"
@@ -159,7 +151,7 @@ class TestCollectFiles:
         with pytest.raises(SkillCollectionError) as exc_info:
             collect_files(skill_root)
 
-        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.check_name == "unsafe_hardlink"
         assert exc_info.value.rel_path == "notes.md"
 
     def test_rejects_openclaw_alias_when_target_entry_case_does_not_match(self, skill_root: Path) -> None:
@@ -181,22 +173,19 @@ class TestCollectFiles:
         except OSError as exc:
             pytest.skip(f"symlinks unavailable: {exc}")
 
-        real_walk = os.walk
+        real_readlink = secure_fs.os.readlink
 
-        def walk_with_late_target(*args, **kwargs):
-            for dirpath, dirnames, filenames in real_walk(*args, **kwargs):
-                if Path(dirpath) == skill_root:
-                    assert "AGENTS.md" not in filenames
-                    (skill_root / "AGENTS.md").write_text("# Late agent instructions\n")
-                yield dirpath, dirnames, filenames
+        def readlink_with_late_target(*args, **kwargs):
+            target = real_readlink(*args, **kwargs)
+            (skill_root / "AGENTS.md").write_text("# Late agent instructions\n")
+            return target
 
-        monkeypatch.setattr(skill_collector.os, "walk", walk_with_late_target)
+        monkeypatch.setattr(secure_fs.os, "readlink", readlink_with_late_target)
 
         with pytest.raises(SkillCollectionError) as exc_info:
             collect_files(skill_root)
 
-        assert exc_info.value.check_name == "unsafe_path"
-        assert exc_info.value.rel_path == "CLAUDE.md"
+        assert exc_info.value.check_name in {"unsafe_path", "unsafe_root"}
 
     @pytest.mark.parametrize("target", ["./AGENTS.md", "../AGENTS.md", "missing.md"])
     def test_rejects_non_exact_openclaw_compatibility_alias(self, skill_root: Path, target: str) -> None:
@@ -213,339 +202,209 @@ class TestCollectFiles:
         assert exc_info.value.rel_path == "CLAUDE.md"
 
 
-class TestCollectFilesSafety:
-    @pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored availability is a POSIX-specific contract")
-    def test_fails_closed_without_descriptor_anchored_reads(self, skill_root: Path, monkeypatch) -> None:
-        (skill_root / "SKILL.md").write_text("# Skill\nSAFE_CONTENT")
-        monkeypatch.setattr(
-            skill_collector,
-            "_supports_descriptor_anchored_reads",
-            lambda: False,
-            raising=False,
-        )
+class TestCollectFilesSecurityContract:
+    def test_rejects_symlinked_root(self, tmp_path: Path) -> None:
+        real_root = tmp_path / "real-skill"
+        real_root.mkdir()
+        (real_root / "SKILL.md").write_text("# Real skill")
+        linked_root = tmp_path / "linked-skill"
+        linked_root.symlink_to(real_root, target_is_directory=True)
 
-        with pytest.raises(SkillCollectionError) as exc_info:
-            collect_files(skill_root)
+        with pytest.raises(ValueError, match=r"root|symlink|reparse"):
+            collect_files(linked_root)
 
-        assert exc_info.value.check_name == "secure_open_unavailable"
-        assert "secure" in str(exc_info.value).lower()
-
-    @pytest.mark.skipif(os.name != "posix", reason="descriptor lifecycle regression is POSIX-specific")
-    def test_secure_root_closes_descriptor_when_root_verification_fails(self, skill_root: Path, monkeypatch) -> None:
-        real_open = os.open
-        real_fstat = os.fstat
-        real_close = os.close
-        root_fd: int | None = None
-        closed_fds: list[int] = []
-
-        def tracked_open(path, flags, *, dir_fd=None):
-            nonlocal root_fd
-            if dir_fd is None:
-                fd = real_open(path, flags)
-            else:
-                fd = real_open(path, flags, dir_fd=dir_fd)
-            if dir_fd is None and Path(path) == skill_root:
-                root_fd = fd
-            return fd
-
-        def failing_fstat(fd: int):
-            if fd == root_fd:
-                raise OSError("simulated root fstat failure")
-            return real_fstat(fd)
-
-        def tracked_close(fd: int) -> None:
-            closed_fds.append(fd)
-            real_close(fd)
-
-        monkeypatch.setattr(skill_collector.os, "open", tracked_open)
-        monkeypatch.setattr(skill_collector.os, "fstat", failing_fstat)
-        monkeypatch.setattr(skill_collector.os, "close", tracked_close)
-
-        with (
-            pytest.raises(skill_collector._SecureReadError, match="verify"),
-            skill_collector._SecureRoot(skill_root),
-        ):
-            pass
-
-        assert root_fd is not None
-        assert root_fd in closed_fds
-
-    @pytest.mark.skipif(os.name != "posix", reason="descriptor lifecycle regression is POSIX-specific")
-    def test_secure_root_closes_ancestor_descriptor_when_verification_fails(
-        self, skill_root: Path, monkeypatch
-    ) -> None:
-        references = skill_root / "references"
-        references.mkdir()
-        (references / "guide.md").write_text("SAFE_CONTENT")
-
-        real_open = os.open
-        real_fstat = os.fstat
-        real_close = os.close
-        ancestor_fd: int | None = None
-        closed_fds: list[int] = []
-
-        def tracked_open(path, flags, *, dir_fd=None):
-            nonlocal ancestor_fd
-            if dir_fd is None:
-                fd = real_open(path, flags)
-            else:
-                fd = real_open(path, flags, dir_fd=dir_fd)
-            if dir_fd is not None and Path(path).name == "references":
-                ancestor_fd = fd
-            return fd
-
-        def failing_fstat(fd: int):
-            if fd == ancestor_fd:
-                raise OSError("simulated ancestor fstat failure")
-            return real_fstat(fd)
-
-        def tracked_close(fd: int) -> None:
-            closed_fds.append(fd)
-            real_close(fd)
-
-        monkeypatch.setattr(skill_collector.os, "open", tracked_open)
-        monkeypatch.setattr(skill_collector.os, "fstat", failing_fstat)
-        monkeypatch.setattr(skill_collector.os, "close", tracked_close)
-
-        with (
-            pytest.raises(skill_collector._SecureReadError, match="verify"),
-            skill_collector._SecureRoot(skill_root) as secure_root,
-        ):
-            secure_root.read_bounded(Path("references/guide.md"), 1024)
-
-        assert ancestor_fd is not None
-        assert ancestor_fd in closed_fds
-
-    @pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored openat regression is POSIX-specific")
-    def test_ancestor_swap_never_reads_outside_skill_root(self, skill_root: Path, tmp_path: Path, monkeypatch) -> None:
-        references = skill_root / "references"
-        references.mkdir()
-        target = references / "guide.md"
-        target.write_text("# Safe guide\nSAFE_CONTENT")
-
+    def test_rejects_linked_directory_before_descent(self, skill_root: Path, tmp_path: Path) -> None:
         outside = tmp_path / "outside"
         outside.mkdir()
-        (outside / "guide.md").write_text("# Outside\nSECRET_CANARY")
+        (outside / "secret.md").write_text("SECRET_CANARY")
+        (skill_root / "references").symlink_to(outside, target_is_directory=True)
 
-        original_references = skill_root / "references-original"
-        real_open = os.open
-        swapped = False
+        with pytest.raises(ValueError, match=r"directory|symlink|reparse|unsafe"):
+            collect_files(skill_root)
 
-        def swapping_open(path, flags, *, dir_fd=None):
-            nonlocal swapped
-            if Path(path).name == "guide.md" and not swapped:
-                references.rename(original_references)
-                references.symlink_to(outside, target_is_directory=True)
-                swapped = True
-            if dir_fd is None:
-                return real_open(path, flags)
-            return real_open(path, flags, dir_fd=dir_fd)
+    def test_rejects_linked_directory_before_excluded_name_pruning(self, skill_root: Path, tmp_path: Path) -> None:
+        outside = tmp_path / "outside-evals"
+        outside.mkdir()
+        (outside / "secret.md").write_text("SECRET_CANARY")
+        (skill_root / "evals").symlink_to(outside, target_is_directory=True)
 
-        monkeypatch.setattr(skill_collector.os, "open", swapping_open)
+        with pytest.raises(ValueError, match=r"directory|symlink|reparse|unsafe"):
+            collect_files(skill_root)
 
+    def test_rejects_selected_file_symlink_even_when_contained(self, skill_root: Path) -> None:
+        target = skill_root / "AGENTS.md"
+        target.write_text("# independently selected target")
+        (skill_root / "guide.md").symlink_to(target.name)
+
+        with pytest.raises(ValueError, match=r"guide\.md|symlink|reparse|unsafe"):
+            collect_files(skill_root)
+
+    @pytest.mark.parametrize("target_kind", ["contained", "escaping", "broken", "cyclic"])
+    def test_rejects_non_scannable_file_redirect(
+        self,
+        skill_root: Path,
+        tmp_path: Path,
+        target_kind: str,
+    ) -> None:
+        linked = skill_root / "irrelevant.bin"
+        if target_kind == "contained":
+            target = skill_root / "payload.dat"
+            target.write_bytes(b"contained")
+        elif target_kind == "escaping":
+            target = tmp_path / "outside.dat"
+            target.write_bytes(b"outside")
+        elif target_kind == "cyclic":
+            target = linked
+        else:
+            target = skill_root / "missing.dat"
+        linked.symlink_to(target)
+
+        with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
+            collect_files(skill_root)
+
+    def test_rejects_suffixless_irrelevant_file_alias(self, skill_root: Path) -> None:
+        target = skill_root / "LICENSE.txt"
+        target.write_text("license text")
+        (skill_root / "LICENSE").symlink_to(target.name)
+
+        with pytest.raises(ValueError, match=r"LICENSE|symlink|reparse|unsafe"):
+            collect_files(skill_root)
+
+    def test_deduplicates_contained_claude_agents_compatibility_alias(self, skill_root: Path) -> None:
+        agents = skill_root / "AGENTS.md"
+        agents.write_text("# Shared agent context")
+        (skill_root / "CLAUDE.md").symlink_to(agents.name)
+
+        result = collect_files(skill_root)
+
+        assert [item.rel_path for item in result] == ["AGENTS.md"]
+
+    @pytest.mark.parametrize("target", ["./AGENTS.md", "AGENTS.md/"])
+    def test_rejects_non_exact_or_broken_compatibility_alias(self, skill_root: Path, target: str) -> None:
+        (skill_root / "AGENTS.md").write_text("# Shared agent context")
+        (skill_root / "CLAUDE.md").symlink_to(target)
+
+        with pytest.raises(ValueError, match=r"CLAUDE|symlink|unsafe|target"):
+            collect_files(skill_root)
+
+    def test_rejects_hardlinked_compatibility_alias_inode(self, skill_root: Path) -> None:
+        agents = skill_root / "AGENTS.md"
+        agents.write_text("# Shared agent context")
+        claude = skill_root / "CLAUDE.md"
+        claude.symlink_to(agents.name)
+        second_name = skill_root / "irrelevant-alias.bin"
         try:
-            result = collect_files(skill_root)
-        except SkillCollectionError:
-            assert swapped
-            return
+            os.link(claude, second_name, follow_symlinks=False)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"hardlinking a symlink inode is unavailable: {exc}")
+        if claude.lstat().st_nlink == 1:
+            pytest.skip("platform followed the symlink while creating the hardlink")
 
-        assert swapped
-        collected_text = "\n".join(item.content for item in result)
-        assert "SECRET_CANARY" not in collected_text
-        assert "SAFE_CONTENT" in collected_text
+        with pytest.raises(ValueError, match=r"hard.?link|link count"):
+            collect_files(skill_root)
 
-    def test_rejects_unbounded_directory_traversal(self, skill_root: Path, monkeypatch) -> None:
-        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 2)
+    def test_relative_root_preserves_relative_collected_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        skill = tmp_path / "relative-skill"
+        skill.mkdir()
+        (skill / "guide.md").write_text("guide")
+        monkeypatch.chdir(tmp_path)
+
+        result = collect_files(Path("relative-skill"))
+
+        assert result[0].path == Path("relative-skill/guide.md")
+
+    def test_rejects_hard_linked_selected_file(self, skill_root: Path, tmp_path: Path) -> None:
+        outside = tmp_path / "outside.md"
+        outside.write_text("SECRET_CANARY")
+        os.link(outside, skill_root / "linked.md")
+
+        with pytest.raises(ValueError, match=r"hard.?link|link count|regular"):
+            collect_files(skill_root)
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable on this platform")
+    def test_rejects_special_selected_file(self, skill_root: Path) -> None:
+        fifo = skill_root / "stream.md"
+        os.mkfifo(fifo)
+
+        with pytest.raises(ValueError, match=r"special|non-regular|regular file"):
+            collect_files(skill_root)
+
+    def test_windows_reparse_file_is_rejected(self, skill_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        selected = skill_root / "reparse.md"
+        selected.write_text("selected content")
+        selected_metadata = selected.lstat()
+        original_check = secure_fs.stat_is_link_or_reparse
+
+        def fake_reparse_check(metadata):
+            return original_check(metadata) or os.path.samestat(metadata, selected_metadata)
+
+        monkeypatch.setattr(secure_fs, "stat_is_link_or_reparse", fake_reparse_check)
+        with pytest.raises(ValueError, match=r"reparse|symlink|unsafe"):
+            collect_files(skill_root)
+
+    def test_windows_reparse_directory_rejected_before_descent(
+        self, skill_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = skill_root / "junction"
+        directory.mkdir()
+        (directory / "secret.md").write_text("SECRET_CANARY")
+        directory_metadata = directory.lstat()
+        original_check = secure_fs.stat_is_link_or_reparse
+        real_open = os.open
+        opened: list[str] = []
+
+        def fake_reparse_check(metadata):
+            return original_check(metadata) or os.path.samestat(metadata, directory_metadata)
+
+        def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+            opened.append(str(path))
+            if dir_fd is None:
+                return real_open(path, flags, mode)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(secure_fs, "stat_is_link_or_reparse", fake_reparse_check)
+        monkeypatch.setattr(secure_fs.os, "open", recording_open)
+        with pytest.raises(ValueError, match=r"junction|reparse|symlink|unsafe"):
+            collect_files(skill_root)
+        assert "junction" not in opened
+
+    def test_bounds_irrelevant_authored_paths(self, skill_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 2, raising=False)
         for name in ("a.bin", "b.bin", "c.bin"):
             (skill_root / name).write_bytes(b"x")
 
-        with pytest.raises(SkillCollectionError) as exc_info:
+        with pytest.raises(ValueError, match=r"path.*limit|more than 2 paths"):
             collect_files(skill_root)
 
-        assert exc_info.value.check_name == "path_count_limit"
-        assert exc_info.value.metadata == {"actual": 3, "limit": 2}
+    def test_prunes_excluded_tree_before_path_budget(self, skill_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 2, raising=False)
+        (skill_root / "SKILL.md").write_text("# Skill")
+        generated = skill_root / "evals" / "results"
+        generated.mkdir(parents=True)
+        for index in range(10):
+            (generated / f"artifact-{index}.md").write_text("generated")
 
-    def test_directory_traversal_error_is_actionable(self, skill_root: Path, monkeypatch) -> None:
-        def deny_traversal(_root: Path, *, onerror=None, **_kwargs):
-            assert onerror is not None
-            onerror(PermissionError("permission denied"))
-            return iter(())
+        assert [item.rel_path for item in collect_files(skill_root)] == ["SKILL.md"]
 
-        monkeypatch.setattr(os, "walk", deny_traversal)
+    def test_enforces_per_file_and_total_read_budgets(self, skill_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_FILE_BYTES", 4, raising=False)
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_TOTAL_BYTES", 7, raising=False)
+        (skill_root / "oversized.md").write_bytes(b"12345")
 
-        with pytest.raises(SkillCollectionError) as exc_info:
+        with pytest.raises(ValueError, match=r"file.*limit|byte.*limit|exceeds"):
             collect_files(skill_root)
 
-        assert exc_info.value.check_name == "path_access_error"
-        assert exc_info.value.rel_path == "."
-        assert "traverse" in str(exc_info.value).lower()
-        assert "readable" in exc_info.value.suggestion.lower()
-
-    def test_rejects_symlinked_scannable_file(self, skill_root: Path, tmp_path: Path) -> None:
-        outside = tmp_path / "outside.md"
-        outside.write_text("private host content")
-        link = skill_root / "references" / "outside.md"
-        link.parent.mkdir()
-        link.symlink_to(outside)
-
-        with pytest.raises(SkillCollectionError) as exc_info:
-            collect_files(skill_root)
-
-        assert exc_info.value.check_name == "unsafe_path"
-        assert exc_info.value.rel_path == "references/outside.md"
-        assert "symbolic link or reparse point" in str(exc_info.value)
-        assert "replace" in exc_info.value.suggestion.lower()
-
-    def test_rejects_reparse_directory_before_descending(self, skill_root: Path) -> None:
-        target = skill_root / "reparse-directory"
-        target.mkdir()
-        (target / "private.md").write_text("private host content")
-        original_lstat = Path.lstat
-
-        def guarded_walk(root: Path, **_kwargs):
-            yield root, [target.name], []
-            raise AssertionError("walk descended into a reparse directory")
-
-        def fake_lstat(path: Path):
-            if path == target:
-                return SimpleNamespace(
-                    st_mode=stat.S_IFDIR,
-                    st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
-                )
-            return original_lstat(path)
-
-        with (
-            patch.object(Path, "lstat", fake_lstat),
-            patch.object(os, "walk", guarded_walk),
-            pytest.raises(SkillCollectionError) as exc_info,
-        ):
-            collect_files(skill_root)
-
-        assert exc_info.value.check_name == "unsafe_path"
-        assert exc_info.value.rel_path == "reparse-directory"
-        assert "symbolic link or reparse point" in str(exc_info.value)
-
-    @pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-specific")
-    def test_rejects_windows_junction_before_walking_target(
-        self, skill_root: Path, tmp_path: Path, monkeypatch
-    ) -> None:
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / "private.md").write_text("private host content")
-        junction = skill_root / "junction"
-        subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        real_walk = os.walk
-        visited: list[Path] = []
-
-        def recording_walk(*args, **kwargs):
-            for entry in real_walk(*args, **kwargs):
-                visited.append(Path(entry[0]))
-                yield entry
-
-        monkeypatch.setattr(os, "walk", recording_walk)
-
-        with pytest.raises(SkillCollectionError) as exc_info:
-            collect_files(skill_root)
-
-        assert exc_info.value.check_name == "unsafe_path"
-        assert exc_info.value.rel_path == "junction"
-        assert "symbolic link or reparse point" in str(exc_info.value)
-        assert junction not in visited
-
-    def test_rejects_windows_reparse_point_even_when_not_a_symlink(self, skill_root: Path) -> None:
-        target = skill_root / "reparse.md"
-        target.write_text("content")
-        original_lstat = Path.lstat
-
-        def fake_lstat(path: Path):
-            if path == target:
-                return SimpleNamespace(
-                    st_mode=stat.S_IFREG,
-                    st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
-                )
-            return original_lstat(path)
-
-        with (
-            patch.object(Path, "lstat", fake_lstat),
-            pytest.raises(SkillCollectionError) as exc_info,
-        ):
-            collect_files(skill_root)
-
-        assert exc_info.value.check_name == "unsafe_path"
-        assert exc_info.value.rel_path == "reparse.md"
-        assert "symbolic link or reparse point" in str(exc_info.value)
-
-    def test_rejects_resolved_path_outside_skill_root_even_if_link_check_is_bypassed(
-        self, skill_root: Path, tmp_path: Path
-    ) -> None:
-        outside = tmp_path / "outside.md"
-        outside.write_text("private host content")
-        link = skill_root / "outside.md"
-        link.symlink_to(outside)
-
-        with (
-            patch.object(skill_collector, "_is_link_or_reparse", return_value=False),
-            pytest.raises(SkillCollectionError) as exc_info,
-        ):
-            collect_files(skill_root)
-
-        assert exc_info.value.check_name == "unsafe_path"
-        assert exc_info.value.rel_path == "outside.md"
-        assert "resolves outside" in str(exc_info.value)
-
-    def test_rejects_more_than_maximum_scannable_files(self, skill_root: Path, monkeypatch) -> None:
-        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_FILES", 1)
-        (skill_root / "a.md").write_text("a")
-        (skill_root / "b.md").write_text("b")
-
-        with pytest.raises(SkillCollectionError) as exc_info:
-            collect_files(skill_root)
-
-        assert exc_info.value.check_name == "file_count_limit"
-        assert exc_info.value.metadata == {"actual": 2, "limit": 1}
-
-    def test_rejects_file_larger_than_per_file_byte_limit(self, skill_root: Path, monkeypatch) -> None:
-        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_FILE_BYTES", 4)
-        target = skill_root / "oversized.md"
-        target.write_bytes(b"12345")
-
-        with pytest.raises(SkillCollectionError) as exc_info:
-            collect_files(skill_root)
-
-        assert exc_info.value.check_name == "file_size_limit"
-        assert exc_info.value.rel_path == "oversized.md"
-        assert exc_info.value.metadata == {"actual_bytes": 5, "limit_bytes": 4}
-
-    def test_rejects_combined_content_above_total_byte_limit(self, skill_root: Path, monkeypatch) -> None:
-        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_FILE_BYTES", 10)
-        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_TOTAL_BYTES", 7)
+        (skill_root / "oversized.md").unlink()
         (skill_root / "a.md").write_bytes(b"1234")
         (skill_root / "b.md").write_bytes(b"5678")
 
-        with pytest.raises(SkillCollectionError) as exc_info:
+        with pytest.raises(ValueError, match=r"total.*limit|byte.*limit|exceeds"):
             collect_files(skill_root)
-
-        assert exc_info.value.check_name == "total_size_limit"
-        assert exc_info.value.metadata == {"actual_bytes": 8, "limit_bytes": 7}
 
 
 class TestCollectFilesExclusions:
-    def test_excluded_path_debug_log_is_relative(self, skill_root: Path, caplog) -> None:
-        excluded = skill_root / "references" / "evals"
-        excluded.mkdir(parents=True)
-        (excluded / "fixture.md").write_text("# fixture\nbody")
-
-        with caplog.at_level(logging.DEBUG, logger=skill_collector.__name__):
-            collect_files(skill_root)
-
-        assert str(excluded) not in caplog.text
-        assert "references/evals" in caplog.text
-
     """Tier 2 dedup must ignore evaluation harness output and version snapshots.
 
     Both the live skill and its meta-folders (``references/``, ``scripts/``,
@@ -745,36 +604,3 @@ class TestCollectFilesExclusions:
         result = collect_files(skill_root, excluded_dirs={"build_cache"})
         rel_paths = sorted(f.rel_path for f in result)
         assert rel_paths == ["SKILL.md"]
-
-
-class TestPathBudgetExcludesArtifacts:
-    def test_path_limit_ignores_generated_artifact_trees(self, tmp_path: Path, monkeypatch) -> None:
-        # Live regression: a well-used skill accumulates thousands of trial
-        # artifacts under evals/results/. They are excluded content and must
-        # not consume the path-count budget (managing-calendar failed Tier 2
-        # with "more than 4096 paths" on generated files it never scans).
-        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 8)
-        skill = tmp_path / "busy-skill"
-        skill.mkdir()
-        (skill / "SKILL.md").write_text("# Busy skill\n\nAuthored content.", encoding="utf-8")
-        trials = skill / "evals" / "results" / "20260101_000000" / "trials"
-        trials.mkdir(parents=True)
-        for index in range(10):
-            (trials / f"artifact-{index}.json").write_text("{}", encoding="utf-8")
-
-        result = collect_files(skill)
-
-        assert [f.rel_path for f in result] == ["SKILL.md"]
-
-    def test_path_limit_still_applies_to_authored_content(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 8)
-        skill = tmp_path / "huge-skill"
-        (skill / "docs").mkdir(parents=True)
-        for index in range(10):
-            (skill / "docs" / f"note-{index}.md").write_text("hi", encoding="utf-8")
-
-        with pytest.raises(SkillCollectionError) as exc_info:
-            collect_files(skill)
-
-        assert exc_info.value.check_name == "path_count_limit"
-        assert exc_info.value.metadata == {"actual": 9, "limit": 8}

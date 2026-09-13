@@ -14,7 +14,7 @@ import logging
 import re
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import monotonic
 from typing import Literal, Protocol, TextIO, runtime_checkable
@@ -35,6 +35,7 @@ _SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|creden
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_LIVE_MIN_EVENT_ROWS = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,7 @@ class PlainProgressReporter:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._plan_rendered = False
+        self._failure_callback: Callable[[], None] | None = None
 
     @property
     def is_active(self) -> bool:
@@ -149,6 +151,10 @@ class PlainProgressReporter:
     def set_secret_values(self, values: list[str] | tuple[str, ...] | set[str]) -> None:
         with self._lock:
             self._secret_values.update(value for value in values if value)
+
+    def set_failure_callback(self, callback: Callable[[], None] | None) -> None:
+        """Notify a safety wrapper when the reporter's own thread fails."""
+        self._failure_callback = callback
 
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
@@ -239,7 +245,19 @@ class PlainProgressReporter:
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(self._refresh_interval):
-            self.heartbeat()
+            try:
+                self.heartbeat()
+            except Exception:
+                logger.debug("Tier 3 progress heartbeat failed", exc_info=True)
+                callback = self._failure_callback
+                if callback is not None:
+                    try:
+                        callback()
+                    except Exception:
+                        logger.debug("Tier 3 progress failure callback failed", exc_info=True)
+                else:
+                    self._stop.set()
+                return
 
     def _safe_text(self, value: object) -> str:
         return redact_progress_detail(value, secret_values=self._secret_values)
@@ -265,6 +283,7 @@ class RichProgressReporter(PlainProgressReporter):
         self._live = None
         self._live_plan: Tier3RunPlan | None = None
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
+        self._live_event_slots = _LIVE_MIN_EVENT_ROWS
 
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
@@ -280,6 +299,7 @@ class RichProgressReporter(PlainProgressReporter):
             else:
                 self._active.pop(event.stage, None)
                 finished_at = self._elapsed()
+            self._live_events.pop(event.stage, None)
             self._live_events[event.stage] = (safe_event, finished_at)
             self._refresh_live()
 
@@ -294,13 +314,15 @@ class RichProgressReporter(PlainProgressReporter):
             super().close()
         finally:
             with self._lock:
-                if live is not None and live is self._live:
-                    try:
+                try:
+                    if live is not None and live is self._live:
                         live.stop()
-                    finally:
+                finally:
+                    if live is self._live:
                         self._live = None
-                        self._live_plan = None
-                        self._live_events.clear()
+                    self._live_plan = None
+                    self._live_events.clear()
+                    self._live_event_slots = _LIVE_MIN_EVENT_ROWS
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan
@@ -309,8 +331,7 @@ class RichProgressReporter(PlainProgressReporter):
             self._live = self._live_factory(
                 table,
                 console=self._console,
-                auto_refresh=True,
-                refresh_per_second=8,
+                auto_refresh=False,
                 transient=False,
             )
             self._live.start(refresh=True)
@@ -333,12 +354,14 @@ class RichProgressReporter(PlainProgressReporter):
             (self._safe_text(plan.skill_name), "bold"),
             "  ·  ",
             (mode_label, "magenta"),
+            overflow="ellipsis",
+            no_wrap=True,
         )
         table = Table(title=title, box=box.ROUNDED, expand=True, show_lines=False)
-        table.add_column("Stage", style="bold", no_wrap=True)
-        table.add_column("State", width=12, no_wrap=True)
-        table.add_column("Detail", ratio=1)
-        table.add_column("Elapsed", justify="right", no_wrap=True)
+        table.add_column("Stage", style="bold", no_wrap=True, overflow="ellipsis")
+        table.add_column("State", width=12, no_wrap=True, overflow="ellipsis")
+        table.add_column("Detail", ratio=1, no_wrap=True, overflow="ellipsis")
+        table.add_column("Elapsed", justify="right", no_wrap=True, overflow="ellipsis")
 
         table.add_row("Environment", Text("configured", style="cyan"), Text(self._safe_text(plan.environment)), "")
         model_map = dict(plan.agent_models)
@@ -349,13 +372,12 @@ class RichProgressReporter(PlainProgressReporter):
             for agent in plan.agents
         )
         table.add_row("Agents / models", Text("configured", style="cyan"), Text(agents or "none"), "")
-        if plan.provider:
-            table.add_row(
-                "Provider",
-                Text("configured", style="cyan"),
-                Text(self._safe_text(plan.provider)),
-                "",
-            )
+        table.add_row(
+            "Provider",
+            Text("configured" if plan.provider else "pending", style="cyan" if plan.provider else "dim"),
+            Text(self._safe_text(plan.provider or "resolving")),
+            "",
+        )
         values = (
             ("Tasks", plan.task_count),
             ("Cases", plan.case_count),
@@ -373,8 +395,12 @@ class RichProgressReporter(PlainProgressReporter):
             ),
         )
         known = " · ".join(f"{label} {value}" for label, value in values if value is not None)
-        if known:
-            table.add_row("Run plan", Text("configured", style="cyan"), Text(known), "")
+        table.add_row(
+            "Run plan",
+            Text("configured" if known else "pending", style="cyan" if known else "dim"),
+            Text(known or "preparing"),
+            "",
+        )
         state_styles = {
             "ready": "green",
             "complete": "green",
@@ -383,7 +409,10 @@ class RichProgressReporter(PlainProgressReporter):
             "delegated": "yellow",
             "skipped": "dim",
         }
-        for stage, (event, finished_at) in self._live_events.items():
+        self._live_event_slots = max(self._live_event_slots, len(plan.agents))
+        event_slots = self._live_event_slots
+        recent_events = list(self._live_events.items())[-event_slots:]
+        for stage, (event, finished_at) in recent_events:
             label = (
                 f"Agent {stage.removeprefix('agent:')}"
                 if stage.startswith("agent:")
@@ -400,6 +429,8 @@ class RichProgressReporter(PlainProgressReporter):
                 Text(event.detail or ""),
                 Text(finished_at or self._elapsed()),
             )
+        for _ in range(event_slots - len(recent_events)):
+            table.add_row("", "", "", "")
         return table
 
     def _refresh_live(self) -> None:
@@ -440,6 +471,9 @@ class SafeProgressReporter:
         self._reporter = reporter
         self._disabled = False
         self._started = False
+        set_failure_callback = getattr(reporter, "set_failure_callback", None)
+        if callable(set_failure_callback):
+            set_failure_callback(self._disable)
 
     @property
     def is_active(self) -> bool:
@@ -452,8 +486,12 @@ class SafeProgressReporter:
             return self._started
 
     def start(self, plan: Tier3RunPlan) -> None:
+        if self._disabled:
+            return
         self._started = True
         self._call(self._reporter.start, plan)
+        if self._disabled:
+            self._started = False
 
     def set_secret_values(self, values: list[str] | tuple[str, ...] | set[str]) -> None:
         self._call(self._reporter.set_secret_values, values)
@@ -490,6 +528,8 @@ class SafeProgressReporter:
             self._reporter.close()
         except Exception:
             logger.debug("Tier 3 progress reporter cleanup failed", exc_info=True)
+        finally:
+            self._started = False
 
 
 def safe_progress_reporter(reporter: ProgressReporter | None) -> SafeProgressReporter:

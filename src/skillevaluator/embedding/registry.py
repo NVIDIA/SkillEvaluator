@@ -45,6 +45,7 @@ from skillevaluator.embedding.extractor import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
+from skillevaluator.utils.structured_data import StructuredDataLimitError, preflight_json_structure
 from skillevaluator.utils.tier2_paths import safe_path_label
 
 logger = get_logger(__name__)
@@ -54,6 +55,7 @@ MAX_CATALOG_BYTES = 32 * 1024 * 1024
 MAX_CATALOG_ENTRIES = 5_000
 MAX_VECTOR_DIMENSION = 65_536
 MAX_CATALOG_TEXT_LENGTH = 16_384
+MAX_CATALOG_VECTOR_VALUES = 1_000_000
 EMBEDDING_BATCH_SIZE = 64
 MAX_DESCRIPTION_EMBEDDING_TEXT_CHARS = 16_384
 MAX_FULL_BODY_EMBEDDING_TEXT_BYTES = MAX_MANIFEST_BYTES
@@ -368,6 +370,8 @@ class EmbeddingRegistry:
 
         if vector_dimension is None:
             raise ValueError("Cannot save a catalog without embedding vectors")
+        if len(entries) * vector_dimension > MAX_CATALOG_VECTOR_VALUES:
+            raise ValueError(f"Catalog vector scalar limit exceeded ({MAX_CATALOG_VECTOR_VALUES})")
         data = {
             "schema_version": CATALOG_SCHEMA_VERSION,
             "provider": _client_provider(self._client),
@@ -388,6 +392,16 @@ class EmbeddingRegistry:
         """Load and validate a versioned local embedding catalog."""
         try:
             serialized = _read_catalog_text(catalog_path)
+            preflight_json_structure(
+                serialized,
+                max_depth=100,
+                max_tokens=(MAX_CATALOG_VECTOR_VALUES * 2) + (MAX_CATALOG_ENTRIES * 20),
+                max_collection_items=MAX_VECTOR_DIMENSION,
+                # Leave room for duplicate/unknown keys so the schema layer can
+                # report them precisely while still bounding object materialization.
+                max_mapping_items=2 * max(len(_CATALOG_ROOT_FIELDS), len(_CATALOG_ENTRY_FIELDS)),
+                max_string_chars=MAX_CATALOG_TEXT_LENGTH,
+            )
             raw = json.loads(
                 serialized,
                 object_pairs_hook=_catalog_object,
@@ -395,7 +409,7 @@ class EmbeddingRegistry:
             )
         except _DuplicateCatalogKeyError as exc:
             raise ValueError(f"Catalog JSON contains duplicate key: {exc.key}") from exc
-        except (UnicodeError, json.JSONDecodeError) as exc:
+        except (UnicodeError, json.JSONDecodeError, StructuredDataLimitError, RecursionError) as exc:
             raise ValueError(f"Malformed catalog JSON: {exc}") from exc
         if not isinstance(raw, dict):
             raise ValueError("Catalog root must be a JSON object")
@@ -442,6 +456,8 @@ class EmbeddingRegistry:
             raise ValueError("Catalog entries must be a non-empty list")
         if len(raw_entries) > MAX_CATALOG_ENTRIES:
             raise ValueError(f"Catalog entry limit exceeded ({MAX_CATALOG_ENTRIES})")
+        if len(raw_entries) * vector_dimension > MAX_CATALOG_VECTOR_VALUES:
+            raise ValueError(f"Catalog vector scalar limit exceeded ({MAX_CATALOG_VECTOR_VALUES})")
 
         loaded: dict[str, RegistryEntry] = {}
         for index, entry_data in enumerate(raw_entries):
@@ -745,6 +761,8 @@ def _inspect_posix_catalog_file(
         raise ValueError(f"Catalog path is a symlink or reparse point: {catalog_path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"Catalog path is not a regular file: {catalog_path}")
+    if getattr(metadata, "st_nlink", 1) != 1:
+        raise ValueError(f"Catalog path is hard-linked (link count > 1): {catalog_path}")
     return metadata
 
 
@@ -778,16 +796,28 @@ def _write_catalog_atomically_posix(catalog_path: Path, payload: bytes) -> None:
             raise ValueError("Unable to allocate a unique catalog temporary file")
 
         opened_metadata = os.fstat(descriptor)
-        if _stat_is_link_or_reparse(opened_metadata) or not stat.S_ISREG(opened_metadata.st_mode):
+        if (
+            _stat_is_link_or_reparse(opened_metadata)
+            or not stat.S_ISREG(opened_metadata.st_mode)
+            or getattr(opened_metadata, "st_nlink", 1) != 1
+        ):
             raise ValueError("Catalog temporary path is not a regular file")
         current_metadata = os.stat(temporary_name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if _stat_is_link_or_reparse(current_metadata) or not os.path.samestat(opened_metadata, current_metadata):
+        if (
+            _stat_is_link_or_reparse(current_metadata)
+            or getattr(current_metadata, "st_nlink", 1) != 1
+            or not os.path.samestat(opened_metadata, current_metadata)
+        ):
             raise ValueError("Catalog temporary path changed during creation")
 
         _write_all(descriptor, payload)
         os.fsync(descriptor)
         current_metadata = os.stat(temporary_name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if _stat_is_link_or_reparse(current_metadata) or not os.path.samestat(opened_metadata, current_metadata):
+        if (
+            _stat_is_link_or_reparse(current_metadata)
+            or getattr(current_metadata, "st_nlink", 1) != 1
+            or not os.path.samestat(opened_metadata, current_metadata)
+        ):
             raise ValueError("Catalog temporary path changed while saving")
         _inspect_posix_catalog_file(parent_descriptor, name, catalog_path, missing_ok=True)
         os.replace(
@@ -798,7 +828,11 @@ def _write_catalog_atomically_posix(catalog_path: Path, payload: bytes) -> None:
         )
         temporary_name = None
         published = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if _stat_is_link_or_reparse(published) or not os.path.samestat(opened_metadata, published):
+        if (
+            _stat_is_link_or_reparse(published)
+            or getattr(published, "st_nlink", 1) != 1
+            or not os.path.samestat(opened_metadata, published)
+        ):
             raise ValueError("Catalog publication changed during atomic replacement")
     finally:
         if descriptor >= 0:
@@ -860,6 +894,8 @@ def _inspect_windows_catalog_file(
         raise ValueError(f"Catalog path is a symlink or reparse point: {catalog_path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"Catalog path is not a regular file: {catalog_path}")
+    if getattr(metadata, "st_nlink", 1) != 1:
+        raise ValueError(f"Catalog path is hard-linked (link count > 1): {catalog_path}")
     return metadata
 
 
@@ -907,10 +943,18 @@ def _write_catalog_atomically_windows(catalog_path: Path, payload: bytes) -> Non
         )
         temporary_path = Path(temporary_name)
         opened_metadata = os.fstat(descriptor)
-        if _stat_is_link_or_reparse(opened_metadata) or not stat.S_ISREG(opened_metadata.st_mode):
+        if (
+            _stat_is_link_or_reparse(opened_metadata)
+            or not stat.S_ISREG(opened_metadata.st_mode)
+            or getattr(opened_metadata, "st_nlink", 1) != 1
+        ):
             raise ValueError("Catalog temporary path is not a regular file")
         current_metadata = temporary_path.lstat()
-        if _stat_is_link_or_reparse(current_metadata) or not os.path.samestat(opened_metadata, current_metadata):
+        if (
+            _stat_is_link_or_reparse(current_metadata)
+            or getattr(current_metadata, "st_nlink", 1) != 1
+            or not os.path.samestat(opened_metadata, current_metadata)
+        ):
             raise ValueError("Catalog temporary path changed during creation")
 
         _write_all(descriptor, payload)
@@ -920,13 +964,21 @@ def _write_catalog_atomically_windows(catalog_path: Path, payload: bytes) -> Non
 
         _validate_windows_catalog_parent(absolute, create=False)
         current_metadata = temporary_path.lstat()
-        if _stat_is_link_or_reparse(current_metadata) or not os.path.samestat(opened_metadata, current_metadata):
+        if (
+            _stat_is_link_or_reparse(current_metadata)
+            or getattr(current_metadata, "st_nlink", 1) != 1
+            or not os.path.samestat(opened_metadata, current_metadata)
+        ):
             raise ValueError("Catalog temporary path changed while saving")
         _inspect_windows_catalog_file(absolute, missing_ok=True)
         temporary_path.replace(absolute)
         temporary_path = None
         published = absolute.lstat()
-        if _stat_is_link_or_reparse(published) or not os.path.samestat(opened_metadata, published):
+        if (
+            _stat_is_link_or_reparse(published)
+            or getattr(published, "st_nlink", 1) != 1
+            or not os.path.samestat(opened_metadata, published)
+        ):
             raise ValueError("Catalog publication changed during atomic replacement")
     finally:
         if descriptor >= 0:
@@ -947,7 +999,11 @@ def _write_catalog_atomically(catalog_path: Path, payload: bytes) -> None:
 
 def _read_bounded_catalog_descriptor(descriptor: int, catalog_path: Path) -> str:
     opened_metadata = os.fstat(descriptor)
-    if _stat_is_link_or_reparse(opened_metadata) or not stat.S_ISREG(opened_metadata.st_mode):
+    if (
+        _stat_is_link_or_reparse(opened_metadata)
+        or not stat.S_ISREG(opened_metadata.st_mode)
+        or getattr(opened_metadata, "st_nlink", 1) != 1
+    ):
         raise ValueError(f"Catalog path is not a regular file: {catalog_path}")
     if opened_metadata.st_size > MAX_CATALOG_BYTES:
         raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)")
@@ -984,6 +1040,7 @@ def _read_catalog_text_posix(catalog_path: Path) -> str:
         if (
             _stat_is_link_or_reparse(opened_metadata)
             or not stat.S_ISREG(opened_metadata.st_mode)
+            or getattr(opened_metadata, "st_nlink", 1) != 1
             or not os.path.samestat(before, opened_metadata)
         ):
             raise ValueError("Catalog changed or is not a regular file while being opened")
@@ -1017,6 +1074,7 @@ def _read_catalog_text_windows(catalog_path: Path) -> str:
         if (
             _stat_is_link_or_reparse(opened_metadata)
             or not stat.S_ISREG(opened_metadata.st_mode)
+            or getattr(opened_metadata, "st_nlink", 1) != 1
             or not os.path.samestat(before, opened_metadata)
         ):
             raise ValueError("Catalog changed or is not a regular file while being opened")

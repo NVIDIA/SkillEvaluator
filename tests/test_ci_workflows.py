@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,13 @@ def _load(name: str) -> dict[str, Any]:
     return yaml.load((WORKFLOWS / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+def _workflow_names() -> list[str]:
+    """Every workflow on disk, so a new one is covered the day it lands."""
+    names = sorted(path.name for pattern in ("*.yml", "*.yaml") for path in WORKFLOWS.glob(pattern))
+    assert names, "no workflows found"
+    return names
+
+
 def _assert_no_path_filter(workflow: dict[str, Any], event: str = "pull_request") -> None:
     trigger = workflow["on"][event]
     if isinstance(trigger, dict):
@@ -49,7 +57,10 @@ def _runs(job: dict[str, Any]) -> str:
 
 
 def _all_uses(workflow: dict[str, Any]) -> list[str]:
-    return [step["uses"] for job in workflow["jobs"].values() for step in job.get("steps", []) if "uses" in step]
+    """Every action reference: step-level actions and job-level reusable workflows."""
+    step_uses = [step["uses"] for job in workflow["jobs"].values() for step in job.get("steps", []) if "uses" in step]
+    job_uses = [job["uses"] for job in workflow["jobs"].values() if "uses" in job]
+    return step_uses + job_uses
 
 
 def _all_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
@@ -111,9 +122,8 @@ def test_ci_docs_lane_uses_the_required_python_312_context() -> None:
     assert node_step["if"] == DOCS_ONLY_IF
     assert len(node_step["uses"].split("@", 1)[1]) == 40
     assert docs_step["if"] == DOCS_ONLY_IF
-    assert "fern/fern.config.json" in docs_step["run"]
-    assert 'npm install --global "fern-api@$FERN_VERSION"' in docs_step["run"]
-    assert "fern check" in docs_step["run"]
+    assert "npm ci --prefix fern --ignore-scripts --omit=optional" in docs_step["run"]
+    assert "./fern/node_modules/.bin/fern check" in docs_step["run"]
     assert "GITHUB_STEP_SUMMARY" in docs_step["run"]
 
 
@@ -224,14 +234,119 @@ def test_non_pr_workflow_triggers_are_preserved() -> None:
     assert "workflow_dispatch" in security["on"]
 
 
-def test_changed_workflows_pin_every_action_to_a_commit() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
+def _is_local_reference(uses: str) -> bool:
+    """A same-repo composite action or reusable workflow, e.g. ``./.github/actions/x``.
+
+    GitHub always resolves these from the caller's own commit, so nothing about
+    them can float and there is no ``@ref`` syntax for one. A reference that is
+    both ``./``-prefixed and carries an ``@`` is therefore not this syntax --
+    treat it as a normal reference so it still has to satisfy the SHA-pin check.
+    """
+    return uses.startswith("./") and "@" not in uses
+
+
+def _local_reference_escapes_repo(uses: str) -> bool:
+    return ".." in Path(uses).parts
+
+
+def test_every_workflow_pins_every_action_to_a_commit() -> None:
+    for workflow_name in _workflow_names():
         for uses in _all_uses(_load(workflow_name)):
-            assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), uses
+            if _is_local_reference(uses):
+                assert not _local_reference_escapes_repo(uses), f"{workflow_name}: {uses}"
+                continue
+            assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), f"{workflow_name}: {uses}"
 
 
-def test_changed_workflows_do_not_persist_checkout_credentials() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
-        checkout_steps = [step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")]
-        assert checkout_steps
-        assert all(step.get("with", {}).get("persist-credentials") == "false" for step in checkout_steps)
+def test_every_workflow_does_not_persist_checkout_credentials() -> None:
+    checkout_steps = [
+        (workflow_name, step)
+        for workflow_name in _workflow_names()
+        for step in _all_steps(_load(workflow_name))
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert checkout_steps
+    for workflow_name, step in checkout_steps:
+        assert step.get("with", {}).get("persist-credentials") == "false", workflow_name
+
+
+def test_publish_docs_installs_the_fern_cli_from_the_committed_lockfile() -> None:
+    """The secret-bearing job runs a CLI whose whole tree was reviewed, not resolved.
+
+    ``npm ci`` reproduces ``fern/package-lock.json`` exactly -- every version and
+    integrity hash -- so nothing between the commit and the run can change what
+    executes next to ``FERN_TOKEN``.
+    """
+    job = _load("publish-docs.yml")["jobs"]["run"]
+    install_step = next((step for step in job["steps"] if "npm ci" in step.get("run", "")), None)
+
+    assert install_step is not None, "publish-docs.yml no longer installs the Fern CLI from the lockfile"
+    assert "--ignore-scripts" in install_step["run"]
+    assert not re.search(r"fern-api@", install_step["run"]), "the version belongs in fern/package.json"
+
+    publish_step = next(step for step in job["steps"] if "fern generate" in step.get("run", ""))
+    assert "fern/node_modules/.bin/fern" in publish_step["run"], "run the installed CLI, not one from PATH"
+
+
+def test_every_workflow_declares_explicit_permissions() -> None:
+    """A job-level permissions: block overrides the workflow-level one, so check both.
+
+    This rejects the write-all shorthand and the inherited-default token scope, not
+    every broad grant -- a granular write like `contents: write` is a legitimate
+    choice for a release workflow and is not this test's concern.
+    """
+    for workflow_name in _workflow_names():
+        workflow = _load(workflow_name)
+        assert workflow.get("permissions") is not None, (
+            f"{workflow_name} inherits the repository default token scope"
+        )
+        for scope, permissions in [("workflow", workflow["permissions"])] + [
+            (f"job {job_id}", job["permissions"]) for job_id, job in workflow["jobs"].items() if "permissions" in job
+        ]:
+            assert permissions != "write-all", f"{workflow_name}: {scope}"
+
+
+# Anchored at the start of a line so a comment mentioning npm is not a command.
+NPM_COMMAND_LINE = re.compile(r"^[ \t]*npm (?:install|ci|i|add)\b.*$", re.MULTILINE)
+NPM_REGISTRY_INSTALL = re.compile(r"^[ \t]*npm (?:install|i|add)\b(?!.*--package-lock-only).*$", re.MULTILINE)
+
+
+def test_every_workflow_npm_command_ignores_lifecycle_scripts() -> None:
+    """A dependency must not get to run install-time code in a CI job.
+
+    ``--ignore-scripts`` is the only half of this that a global install honours,
+    so it is asserted on every npm command regardless of how the tree is resolved.
+    """
+    for workflow_name in _workflow_names():
+        for step in _all_steps(_load(workflow_name)):
+            for line in NPM_COMMAND_LINE.findall(step.get("run", "")):
+                assert "--ignore-scripts" in line, f"{workflow_name}: {line.strip()}"
+
+
+def test_no_workflow_resolves_a_node_dependency_tree_from_the_registry() -> None:
+    """Only ``npm ci`` against the committed lockfile may install into a job.
+
+    ``npm install`` re-resolves every transitive dependency from semver ranges on
+    each run, so pinning the top-level version pins nothing beneath it. ``npm ci``
+    installs exactly the versions and integrity hashes in ``fern/package-lock.json``.
+    """
+    for workflow_name in _workflow_names():
+        for step in _all_steps(_load(workflow_name)):
+            for line in NPM_REGISTRY_INSTALL.findall(step.get("run", "")):
+                raise AssertionError(f"{workflow_name}: use `npm ci` against the lockfile, not `{line.strip()}`")
+
+
+def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
+    """``fern/package.json`` and ``fern/fern.config.json`` both name a CLI version.
+
+    They are two declarations of one fact. If they drift, docs are validated and
+    published by a different CLI than the one Fern itself is configured for.
+    """
+    manifest = json.loads((ROOT / "fern" / "package.json").read_text(encoding="utf-8"))
+    fern_config = json.loads((ROOT / "fern" / "fern.config.json").read_text(encoding="utf-8"))
+    lockfile = json.loads((ROOT / "fern" / "package-lock.json").read_text(encoding="utf-8"))
+
+    declared = manifest["dependencies"]["fern-api"]
+    assert declared == fern_config["version"], "fern/package.json and fern/fern.config.json disagree"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", declared), f"pin an exact version, not {declared!r}"
+    assert lockfile["packages"]["node_modules/fern-api"]["version"] == declared, "lockfile is stale"

@@ -64,11 +64,12 @@ Navigation order, page titles, and slugs are defined in
 
 ## Verify before committing
 
-Requires **Node.js 22+** and the Fern CLI (`npm install -g fern-api`).
+Requires **Node.js 22+**. Install the pinned CLI from the committed lockfile with
+`npm ci --prefix fern --ignore-scripts --omit=optional`.
 
 ```bash
-fern check       # validate docs.yml config and all links — must pass
-fern docs dev    # optional live preview at http://localhost:3000
+./fern/node_modules/.bin/fern check       # validate docs.yml config and all links — must pass
+./fern/node_modules/.bin/fern docs dev    # optional live preview at http://localhost:3000
 ```
 
 `fern check` must pass; it is the same gate the site build relies on. Publishing

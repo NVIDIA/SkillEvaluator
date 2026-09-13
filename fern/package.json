@@ -1,0 +1,10 @@
+{
+  "name": "skillevaluator-docs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pins the Fern CLI that validates and publishes the documentation site. Keep the fern-api version in step with fern.config.json; tests/test_ci_workflows.py asserts they agree.",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "fern-api": "5.66.1"
+  }
+}

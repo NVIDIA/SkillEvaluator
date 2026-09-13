@@ -105,6 +105,47 @@ _PROMPT_INJECTION_PATTERNS = [
 _EXECUTION_TOOL_HINTS = ("bash", "execute", "exec_command", "run_code", "run", "shell", "command")
 _READ_TOOL_HINTS = ("read", "read_file", "grep", "glob")
 _WRITE_TOOL_HINTS = ("write", "edit", "write_file", "edit_file", "notebookedit")
+# Command boundary anchoring: start of string, shell delimiters (; & | ` $ ()), subshell quotes (" '), and path prefixes.
+_CMD_PREFIX = r"(?:^|[\s;&|`\$\(\"'])(?:[a-zA-Z0-9_.~/-]*\/)?"
+
+# Quote-aware argument scanner: consumes arguments within the command segment without splitting on quoted operators.
+_NETWORK_CMD_SEGMENT = r"(?:\"(?:\\.|[^\"\\])*\"|\'[^\']*\'|\\(?:[\r\n]|.)|[^\"\'\\\r\n|;&])*?"
+
+# Suspicious environment variables ($API_TOKEN, ${SECRET_KEY}) in arguments, URLs, or quoted strings.
+_SECRET_VAR = (
+    r"(?:[\s\"'][^\s\"']*|\"[^\"]*|\'[^\']*)\$"
+    r"(?:\{\w*(?i:token|key|secret|password)\w*\}|\w*(?i:token|key|secret|password)\w*)"
+)
+
+# Fast-path guard: checks whether any supported network client is invoked in command position.
+_NETWORK_CLIENT_PATTERN = re.compile(
+    _CMD_PREFIX + r"(?:curl|wget|http|https)(?:\.exe)?(?=\s|$)",
+    re.IGNORECASE,
+)
+
+# Per-client exfiltration rules covering data flags, file uploads, unsafe HTTP methods, and attached secrets.
+_NETWORK_EXFILTRATION_PATTERNS = [
+    # curl: data (-d, --data, --json), uploads (-F, -T, --upload-file), methods (-X, --request), or secrets
+    re.compile(
+        _CMD_PREFIX + r"(?i:curl)(?:\.exe)?(?=\s|$)" + _NETWORK_CMD_SEGMENT + r"(?:"
+        r"\s-(?:-?(?:data(?:-[a-z]+)?|form(?:-string)?|json|upload-file)\b|"
+        r"[sSLkvoOfqgN]*[dT][^\s]*|"
+        r"[sSLkvoOfqgN]*F(?:[sSLkvoOfqgN]*\b|[^\s=]*=)|"
+        r"(?:[a-zA-Z]*X|-request)(?:\s*=\s*|\s*)['\"]?(?i:post|put|patch)\b)|" + _SECRET_VAR + r")"
+    ),
+    # wget: post/body data and file flags, explicit HTTP methods, or secrets
+    re.compile(
+        _CMD_PREFIX + r"(?i:wget)(?:\.exe)?(?=\s|$)" + _NETWORK_CMD_SEGMENT + r"(?:"
+        r"\s--(?:post-data|post-file|body-data|body-file|method(?:\s*=\s*|\s*)['\"]?(?i:post|put|patch)\b)|"
+        + _SECRET_VAR
+        + r")"
+    ),
+    # http / https (HTTPie): explicit HTTP methods (POST, PUT, PATCH) or secrets
+    re.compile(
+        _CMD_PREFIX + r"(?i:https?)(?:\.exe)?(?=\s|$)" + _NETWORK_CMD_SEGMENT + r"(?:"
+        r"(?<=\s)(?i:post|put|patch)(?=\s|$)|" + _SECRET_VAR + r")"
+    ),
+]
 ACCEPTABLE_ALTERNATE_SCORE = 0.75
 
 
@@ -960,9 +1001,8 @@ def check_security(
                     )
                 )
 
-            if re.search(r"\b(curl|wget|http)\b", action_text_lower) and re.search(
-                r"(-d|--data|--data-binary|-f|--form|post|put|\$\w*(?:token|key|secret|password))",
-                action_text_lower,
+            if _NETWORK_CLIENT_PATTERN.search(action_text) and any(
+                p.search(action_text) for p in _NETWORK_EXFILTRATION_PATTERNS
             ):
                 findings.append(
                     _security_finding(

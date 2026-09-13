@@ -116,6 +116,8 @@ _SHARED_SECURITY_CONSTANTS = [
     "_EXECUTION_TOOL_HINTS",
     "_READ_TOOL_HINTS",
     "_WRITE_TOOL_HINTS",
+    "_NETWORK_CLIENT_PATTERN",
+    "_NETWORK_EXFILTRATION_PATTERNS",
     "WASTE_INDICATORS",
 ]
 
@@ -168,3 +170,4 @@ def test_template_log_redaction_matches_eval_core(line):
         line,
         extra_secret_values=extra_secret_values,
     )
+

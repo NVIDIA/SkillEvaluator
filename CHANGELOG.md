@@ -19,6 +19,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Scoped network exfiltration command flag patterns in security checks, enforcing command-position anchoring, quote-aware argument segmentation, explicit HTTP method flags, and case-sensitive `-F`/`-d`/`-T` flags to prevent false-positive flags on safe URLs, packages, or download scripts while reliably detecting quoted secrets and subshell wrappers.
 - Malformed, non-UTF-8, or unreadable bundled and custom policy files now
   produce path-specific CLI errors instead of leaking raw parser or I/O errors
   ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).

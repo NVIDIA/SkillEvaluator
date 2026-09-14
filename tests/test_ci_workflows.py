@@ -281,7 +281,7 @@ def test_publish_docs_installs_the_fern_cli_from_the_committed_lockfile() -> Non
     install_step = next((step for step in job["steps"] if "npm ci" in step.get("run", "")), None)
 
     assert install_step is not None, "publish-docs.yml no longer installs the Fern CLI from the lockfile"
-    assert "--ignore-scripts" in install_step["run"]
+    assert _npm_flag_active(install_step["run"], "ignore-scripts")
     assert not re.search(r"fern-api@", install_step["run"]), "the version belongs in fern/package.json"
 
     publish_step = next(step for step in job["steps"] if "fern generate" in step.get("run", ""))
@@ -308,7 +308,49 @@ def test_every_workflow_declares_explicit_permissions() -> None:
 
 # Anchored at the start of a line so a comment mentioning npm is not a command.
 NPM_COMMAND_LINE = re.compile(r"^[ \t]*npm (?:install|ci|i|add)\b.*$", re.MULTILINE)
-NPM_REGISTRY_INSTALL = re.compile(r"^[ \t]*npm (?:install|i|add)\b(?!.*--package-lock-only).*$", re.MULTILINE)
+NPM_INSTALL_LINE = re.compile(r"^[ \t]*npm (?:install|i|add)\b.*$", re.MULTILINE)
+
+
+def _npm_flag_active(line: str, flag: str) -> bool:
+    """Whether ``--flag`` is in effect on an npm command line.
+
+    A boolean npm flag can be switched back off two ways after it appears to be
+    set: ``--no-<flag>`` or ``--<flag>=false`` (also ``=0``). A plain substring
+    check for ``--<flag>`` cannot tell those apart from the flag actually being
+    on, which is exactly the bypass a reviewer found in this guard.
+
+    The flag name must end at end-of-line, whitespace, or ``=`` -- not just any
+    non-word character -- so ``--ignore-scripts-foo`` isn't mistaken for
+    ``--ignore-scripts``. When the flag appears more than once, npm applies the
+    last occurrence, so this does too.
+    """
+    pattern = re.compile(rf"--(no-)?{re.escape(flag)}(?=$|[\s=])(?:=(\S+))?")
+    matches = list(pattern.finditer(line))
+    if not matches:
+        return False
+    negated, value = matches[-1].group(1), matches[-1].group(2)
+    if negated is not None:
+        return False
+    return value is None or value.lower() not in {"false", "0"}
+
+
+def test_npm_flag_active_rejects_negated_and_false_valued_flags() -> None:
+    assert _npm_flag_active("npm ci --ignore-scripts", "ignore-scripts")
+    assert _npm_flag_active("npm ci --ignore-scripts=true", "ignore-scripts")
+    assert not _npm_flag_active("npm ci --ignore-scripts=false", "ignore-scripts")
+    assert not _npm_flag_active("npm ci --ignore-scripts=0", "ignore-scripts")
+    assert not _npm_flag_active("npm ci --no-ignore-scripts", "ignore-scripts")
+    assert not _npm_flag_active("npm ci", "ignore-scripts")
+    assert not _npm_flag_active("npm install --package-lock-only=false", "package-lock-only")
+
+
+def test_npm_flag_active_is_not_fooled_by_a_look_alike_flag_name() -> None:
+    assert not _npm_flag_active("npm ci --ignore-scripts-if-untrusted", "ignore-scripts")
+
+
+def test_npm_flag_active_takes_the_last_occurrence_like_npm_does() -> None:
+    assert _npm_flag_active("npm ci --no-ignore-scripts --ignore-scripts", "ignore-scripts")
+    assert not _npm_flag_active("npm ci --ignore-scripts --no-ignore-scripts", "ignore-scripts")
 
 
 def test_every_workflow_npm_command_ignores_lifecycle_scripts() -> None:
@@ -320,7 +362,7 @@ def test_every_workflow_npm_command_ignores_lifecycle_scripts() -> None:
     for workflow_name in _workflow_names():
         for step in _all_steps(_load(workflow_name)):
             for line in NPM_COMMAND_LINE.findall(step.get("run", "")):
-                assert "--ignore-scripts" in line, f"{workflow_name}: {line.strip()}"
+                assert _npm_flag_active(line, "ignore-scripts"), f"{workflow_name}: {line.strip()}"
 
 
 def test_no_workflow_resolves_a_node_dependency_tree_from_the_registry() -> None:
@@ -332,8 +374,9 @@ def test_no_workflow_resolves_a_node_dependency_tree_from_the_registry() -> None
     """
     for workflow_name in _workflow_names():
         for step in _all_steps(_load(workflow_name)):
-            for line in NPM_REGISTRY_INSTALL.findall(step.get("run", "")):
-                raise AssertionError(f"{workflow_name}: use `npm ci` against the lockfile, not `{line.strip()}`")
+            for line in NPM_INSTALL_LINE.findall(step.get("run", "")):
+                if not _npm_flag_active(line, "package-lock-only"):
+                    raise AssertionError(f"{workflow_name}: use `npm ci` against the lockfile, not `{line.strip()}`")
 
 
 def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
@@ -350,3 +393,12 @@ def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
     assert declared == fern_config["version"], "fern/package.json and fern/fern.config.json disagree"
     assert re.fullmatch(r"\d+\.\d+\.\d+", declared), f"pin an exact version, not {declared!r}"
     assert lockfile["packages"]["node_modules/fern-api"]["version"] == declared, "lockfile is stale"
+
+    # NVIDIA's Fern organization rejects the authenticated docs-publish path below this
+    # version (a review comment on PR #126 surfaced the "Org 'nvidia' requires Fern CLI
+    # >= 5.106.0" error); `fern check` alone does not exercise that authenticated path,
+    # so nothing else here would have caught a stale pin.
+    minimum_required = (5, 106, 0)
+    assert tuple(int(part) for part in declared.split(".")) >= minimum_required, (
+        f"fern-api {declared} is older than the {'.'.join(map(str, minimum_required))} NVIDIA's org requires"
+    )

@@ -7,6 +7,7 @@ import contextvars
 import json
 import shutil
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -397,74 +398,90 @@ def test_validate_records_json_report_name_for_catalog_binding(monkeypatch) -> N
     assert cli_module._consume_validate_json_report() is not None
 
 
-def test_validate_json_report_handoff_isolated_between_invocations(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Overlapping validate runs must not leak JSON report names through a shared slot."""
-    from skillevaluator.models.result import ValidationResult
-
-    basenames = iter(["skillevaluator-output-alpha", "skillevaluator-output-beta"])
-
-    def _emit(results, *, report_formats, output_dir, basename, **_kwargs):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / f"{basename}.json").write_text(
-            json.dumps({"overall_passed": all(result.passed for result in results)}),
-            encoding="utf-8",
-        )
-        return all(result.passed for result in results)
-
-    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [ValidationResult(validator_name="Schema")])
-    monkeypatch.setattr(cli_module, "emit_reports", _emit)
-    monkeypatch.setattr(
-        "skillevaluator.utils.helpers.make_timestamped_basename",
-        lambda _prefix: next(basenames),
-    )
-
-    args = [
-        "validate",
-        str(FIXTURE),
-        "--no-llm",
-        "--no-tier2",
-        "--checks",
-        "schema",
-        "-r",
-        "json",
-    ]
-    runner = CliRunner()
+def _handoff_overlap_results(
+    *,
+    record_alpha: str,
+    record_beta: str,
+    run_in_context: bool,
+) -> dict[str, str | None]:
+    """Record two handoffs, then consume both after a barrier (overlap window)."""
+    alpha_ctx = contextvars.Context()
+    beta_ctx = contextvars.Context()
     barrier = threading.Barrier(2)
     results: dict[str, str | None] = {}
     thread_errors: list[BaseException] = []
 
-    def _run_validate_and_consume(tag: str) -> None:
-        def _work() -> None:
-            output_dir = tmp_path / tag
-            output_dir.mkdir()
-            invoke_args = [*args, "-o", str(output_dir)]
-            result = runner.invoke(cli, invoke_args)
-            assert result.exit_code == 0, result.output
-            barrier.wait()
-            results[tag] = cli_module._consume_validate_json_report()
+    def alpha_lane() -> None:
+        cli_module._record_validate_json_report(record_alpha)
+        barrier.wait()
+        results["alpha"] = cli_module._consume_validate_json_report()
 
-        contextvars.copy_context().run(_work)
+    def beta_lane() -> None:
+        cli_module._record_validate_json_report(record_beta)
+        barrier.wait()
+        results["beta"] = cli_module._consume_validate_json_report()
 
-    def _worker(tag: str) -> None:
+    def run_lane(ctx: contextvars.Context, lane: Callable[[], None]) -> None:
         try:
-            _run_validate_and_consume(tag)
+            if run_in_context:
+                ctx.run(lane)
+            else:
+                lane()
         except BaseException as exc:
             thread_errors.append(exc)
 
-    threads = [
-        threading.Thread(target=_worker, args=("alpha",)),
-        threading.Thread(target=_worker, args=("beta",)),
-    ]
+    threads = (
+        threading.Thread(target=run_lane, args=(alpha_ctx, alpha_lane)),
+        threading.Thread(target=run_lane, args=(beta_ctx, beta_lane)),
+    )
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
+    if thread_errors:
+        raise thread_errors[0]
+    return results
 
-    assert not thread_errors
+
+def test_validate_json_report_handoff_isolated_between_invocations() -> None:
+    """Distinct Context instances keep each basename when record/consume overlap."""
+    results = _handoff_overlap_results(
+        record_alpha="skillevaluator-output-alpha.json",
+        record_beta="skillevaluator-output-beta.json",
+        run_in_context=True,
+    )
     assert results["alpha"] == "skillevaluator-output-alpha.json"
     assert results["beta"] == "skillevaluator-output-beta.json"
+
+
+def test_validate_json_report_handoff_module_global_leaks_under_overlap(
+    monkeypatch,
+) -> None:
+    """A single module-global slot returns the last writer after overlapping records."""
+    slot: str | None = None
+
+    def _record(report_name: str | None) -> None:
+        nonlocal slot
+        slot = report_name
+
+    def _consume() -> str | None:
+        nonlocal slot
+        report_name = slot
+        slot = None
+        return report_name
+
+    monkeypatch.setattr(cli_module, "_record_validate_json_report", _record)
+    monkeypatch.setattr(cli_module, "_consume_validate_json_report", _consume)
+
+    results = _handoff_overlap_results(
+        record_alpha="skillevaluator-output-alpha.json",
+        record_beta="skillevaluator-output-beta.json",
+        run_in_context=False,
+    )
+    assert results != {
+        "alpha": "skillevaluator-output-alpha.json",
+        "beta": "skillevaluator-output-beta.json",
+    }
 
 
 def test_catalog_summary_binds_exact_json_report_not_sarif_sidecar(monkeypatch) -> None:

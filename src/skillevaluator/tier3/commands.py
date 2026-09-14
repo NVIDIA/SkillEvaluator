@@ -370,6 +370,8 @@ def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, lis
 
 def parse_environment_kwargs(raw_kwargs: tuple[str, ...]) -> dict[str, str]:
     """Parse repeatable ``--ek key=value`` CLI pairs."""
+    from skillevaluator.tier3.harbor.runner import _SENSITIVE_EK_VALUE_PATTERNS, _is_sensitive_ek_key
+
     parsed: dict[str, str] = {}
     for raw in raw_kwargs:
         if "=" not in raw:
@@ -379,6 +381,11 @@ def parse_environment_kwargs(raw_kwargs: tuple[str, ...]) -> dict[str, str]:
         value = value.strip()
         if not key:
             raise ValueError(f"--ek/--environment-kwarg key cannot be empty, got: {raw}")
+        if _is_sensitive_ek_key(key) or any(pattern.search(value) for pattern in _SENSITIVE_EK_VALUE_PATTERNS):
+            raise ValueError(
+                f"Sensitive key or value detected in environment_kwargs: {key}. "
+                "Credentials must not be passed via CLI flags or process arguments."
+            )
         parsed[key] = value
     return parsed
 
@@ -823,6 +830,8 @@ def doctor(
         else:
             from skillevaluator.tier3.harbor.runtime_preflight import (
                 CredentialProbeDisposition,
+                ModelCatalogFailureKind,
+                _is_vertex_openapi_endpoint,
                 credential_probe_disposition,
                 probe_model,
             )
@@ -830,15 +839,26 @@ def doctor(
             for agent in agent_list:
                 selected_provider = runtime_plans[agent].provider
                 probe = probe_model(selected_provider)
-                disposition = credential_probe_disposition(selected_provider, probe)
+                disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
                 if disposition == CredentialProbeDisposition.FATAL:
                     status = "fail"
                     detail = probe.detail
                 elif disposition == CredentialProbeDisposition.DEGRADED:
                     status = "warn"
-                    detail = probe.detail
-                    if probe.ok:
-                        detail = f"{detail}; catalog access does not verify runtime credentials for this endpoint"
+                    is_vertex = (
+                        _is_vertex_openapi_endpoint(getattr(selected_provider, "base_url", None))
+                        or getattr(selected_provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX"
+                    )
+                    is_auth_failure = getattr(probe, "failure_kind", None) in {
+                        ModelCatalogFailureKind.AUTHENTICATION,
+                        ModelCatalogFailureKind.AUTHORIZATION,
+                    }
+                    if not probe.ok and env_mode == "gke" and is_vertex and is_auth_failure:
+                        detail = "host does not possess Vertex AI credentials; runtime authentication is verified via GKE Workload Identity in-pod"
+                    elif probe.ok:
+                        detail = f"{probe.detail}; catalog access does not verify runtime credentials for this endpoint"
+                    else:
+                        detail = probe.detail
                 else:
                     status = "pass"
                     detail = probe.detail

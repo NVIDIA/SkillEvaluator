@@ -12,7 +12,6 @@ import math
 import os
 import re
 import shlex
-import shutil
 import ssl
 import stat
 import subprocess
@@ -740,53 +739,28 @@ def _catalog_listing_is_authoritative(provider: ProviderConfig) -> bool:
     return provider.provider.casefold() == "nv_build" and _is_native_catalog_endpoint(provider)
 
 
-def _is_vertex_openapi_endpoint(base_url: str | None) -> bool:
-    """Return whether the base URL points to a Vertex AI Agent Platform OpenAPI endpoint."""
-    if not isinstance(base_url, str) or not base_url.strip():
-        return False
-    clean = base_url.strip()
-    if "\\" in clean or any(character in clean for character in ("?", "#", ";")):
-        return False
-    try:
-        endpoint = urlsplit(clean)
-        port = endpoint.port
-    except (TypeError, ValueError):
-        return False
-    if (
-        endpoint.scheme.casefold() != "https"
-        or endpoint.hostname is None
-        or endpoint.username is not None
-        or endpoint.password is not None
-        or port not in {None, 443}
-    ):
-        return False
-    host = endpoint.hostname.casefold()
-    if not re.fullmatch(r"(?:[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)?-)?aiplatform\.googleapis\.com", host):
-        return False
-    path = endpoint.path.rstrip("/")
-    return bool(re.fullmatch(r"/v1(?:beta[0-9]+)?/projects/[^/]+/locations/[^/]+/endpoints/openapi", path))
-
-
-def _parse_vertex_openapi_metadata(base_url: str) -> tuple[str | None, str | None]:
-    """Extract project ID and location from a Vertex AI OpenAPI base URL."""
-    if not isinstance(base_url, str) or not base_url.strip():
-        return None, None
-    try:
-        endpoint = urlsplit(base_url.strip())
-        match = re.search(r"/projects/([^/]+)/locations/([^/]+)/endpoints/openapi", endpoint.path)
-        if match:
-            return match.group(1), match.group(2)
-    except Exception:
-        pass
-    return None, None
+from skillevaluator.provider_config import (
+    _get_google_access_token,
+    _is_vertex_openapi_endpoint,
+    _parse_vertex_openapi_metadata,
+)
 
 
 def credential_probe_disposition(
     provider: ProviderConfig,
     probe: ModelProbeResult,
+    *,
+    env_mode: str = "",
 ) -> CredentialProbeDisposition:
     """Classify a live catalog probe without rejecting compatible custom gateways."""
     is_vertex_openapi = _is_vertex_openapi_endpoint(getattr(provider, "base_url", None))
+    is_claude_vertex = getattr(provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX" or (
+        provider.provider.casefold() == "anthropic"
+        and not provider.api_key
+        and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+    )
+    is_vertex = is_vertex_openapi or is_claude_vertex
+
     if probe.ok:
         provider_name = provider.provider.casefold()
         if provider_name == "bedrock":
@@ -796,10 +770,7 @@ def credential_probe_disposition(
                 if getattr(probe, "catalog_authoritative", True)
                 else CredentialProbeDisposition.DEGRADED
             )
-        if provider_name == "anthropic" and (
-            getattr(provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX"
-            or (not provider.api_key and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1")
-        ):
+        if provider_name == "anthropic" and is_claude_vertex:
             return (
                 CredentialProbeDisposition.VERIFIED
                 if getattr(probe, "catalog_authoritative", True)
@@ -823,18 +794,27 @@ def credential_probe_disposition(
     except (TypeError, ValueError):
         failure_kind = ModelCatalogFailureKind.UNKNOWN
 
+    if (
+        env_mode == "gke"
+        and is_vertex
+        and failure_kind
+        in {
+            ModelCatalogFailureKind.AUTHENTICATION,
+            ModelCatalogFailureKind.AUTHORIZATION,
+        }
+    ):
+        return CredentialProbeDisposition.DEGRADED
+
     if failure_kind == ModelCatalogFailureKind.AUTHENTICATION:
         return (
             CredentialProbeDisposition.FATAL
-            if provider.provider.casefold() == "bedrock"
-            or is_vertex_openapi
-            or _is_native_catalog_endpoint(provider)
+            if provider.provider.casefold() == "bedrock" or is_vertex or _is_native_catalog_endpoint(provider)
             else CredentialProbeDisposition.DEGRADED
         )
     if failure_kind == ModelCatalogFailureKind.INVALID_CONFIGURATION:
         return CredentialProbeDisposition.FATAL
     if failure_kind == ModelCatalogFailureKind.MODEL_NOT_FOUND:
-        if is_vertex_openapi:
+        if is_vertex:
             return CredentialProbeDisposition.FATAL
         return (
             CredentialProbeDisposition.FATAL
@@ -843,7 +823,7 @@ def credential_probe_disposition(
             else CredentialProbeDisposition.DEGRADED
         )
     if failure_kind == ModelCatalogFailureKind.AUTHORIZATION:
-        if is_vertex_openapi:
+        if is_vertex:
             return CredentialProbeDisposition.FATAL
         if provider.provider == "bedrock" or provider.provider.casefold() in {"openai", "openai-compatible"}:
             # ListFoundationModels permission is distinct from InvokeModel. OpenAI
@@ -1502,42 +1482,6 @@ def _resolve_vertex_model_id(model: str) -> str:
     return mapping.get(clean.lower(), clean.lower())
 
 
-def _get_google_access_token(timeout_seconds: float = 10.0) -> str | None:
-    """Acquire Google Cloud access token via google.auth or gcloud CLI."""
-    try:
-        import google.auth
-        import google.auth.transport.requests
-
-        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-        request = google.auth.transport.requests.Request()
-        credentials.refresh(request)
-        if getattr(credentials, "token", None):
-            return str(credentials.token)
-    except Exception:
-        pass
-
-    gcloud_path = shutil.which("gcloud")
-    if gcloud_path:
-        for args in (
-            [gcloud_path, "auth", "application-default", "print-access-token"],
-            [gcloud_path, "auth", "print-access-token"],
-        ):
-            try:
-                proc = subprocess.run(
-                    args,
-                    capture_output=True,
-                    text=True,
-                    timeout=min(timeout_seconds, 10.0),
-                    check=False,
-                )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    return proc.stdout.strip()
-            except Exception:
-                pass
-
-    return None
-
-
 def _probe_vertex_anthropic_model(
     provider: ProviderConfig,
     *,
@@ -1583,7 +1527,7 @@ def _probe_vertex_anthropic_model(
             provider.provider,
             provider.model,
             "Could not acquire Google Cloud access token via google-auth or gcloud",
-            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+            failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
         )
 
     model_id = _resolve_vertex_model_id(provider.model)
@@ -1598,8 +1542,7 @@ def _probe_vertex_anthropic_model(
 
     host = "aiplatform.googleapis.com" if region == "global" else f"{region}-aiplatform.googleapis.com"
     url = (
-        f"https://{host}/v1/"
-        f"projects/{project_id}/locations/{region}/publishers/anthropic/models/{model_id}:rawPredict"
+        f"https://{host}/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model_id}:rawPredict"
     )
 
     payload = json.dumps(
@@ -1828,7 +1771,7 @@ def _probe_vertex_openapi_model(
             provider.provider,
             provider.model,
             "Could not acquire Google Cloud access token via API key or google-auth/gcloud",
-            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+            failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
         )
 
     url = f"{base_url}/chat/completions"

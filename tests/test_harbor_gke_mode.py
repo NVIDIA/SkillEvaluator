@@ -19,8 +19,10 @@ from skillevaluator.tier3.harbor import runner
 from skillevaluator.tier3.harbor.runner import (
     _GKE_REQUIRED_KWARGS,
     _check_prerequisites,
+    _harbor_subprocess_environment,
     _missing_gke_kwargs,
     _resolve_environment_kwargs,
+    _resolve_single_kubeconfig,
     _validate_agent_provider_credentials,
     build_harbor_run_command,
 )
@@ -519,7 +521,7 @@ def test_check_prerequisites_gke_expands_user_in_kubeconfig(
 def test_parse_environment_kwargs_valid():
     """Parse valid --ek key=value arguments with whitespace trimming."""
     assert parse_environment_kwargs(()) == {}
-    assert parse_environment_kwargs(("key=value",)) == {"key": "value"}
+    assert parse_environment_kwargs(("setting=value",)) == {"setting": "value"}
     assert parse_environment_kwargs(("  foo = bar  ", "baz=123", "multi=a=b=c")) == {
         "foo": "bar",
         "baz": "123",
@@ -687,5 +689,97 @@ def test_build_harbor_run_command_permits_valid_rate_and_token_flags(flag_key: s
     assert f"{flag_key}={flag_val}" in cmd
 
 
+@pytest.mark.parametrize(
+    "sensitive_key",
+    [
+        "authorization",
+        "credential",
+        "client_credential",
+        "private_key",
+        "aws_access_key_id",
+        "service_account_key",
+        "service-account-key",
+        "api_key",
+        "secret",
+        "auth_token",
+    ],
+)
+def test_parse_environment_kwargs_rejects_credential_keys(sensitive_key: str) -> None:
+    """Verify parse_environment_kwargs rejects sensitive credential keys with ValueError."""
+    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+        parse_environment_kwargs((f"{sensitive_key}=secret123",))
 
 
+@pytest.mark.parametrize(
+    "benign_token_key",
+    [
+        "max_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "tokens_per_minute",
+        "token_limit",
+        "maxTokens",
+        "MAX_TOKENS",
+        "tokenizer",
+        "tokenizer_type",
+        "detokenize",
+    ],
+)
+def test_parse_environment_kwargs_permits_benign_token_keys(benign_token_key: str) -> None:
+    """Verify parse_environment_kwargs permits benign token count, rate, and tokenizer keys."""
+    parsed = parse_environment_kwargs((f"{benign_token_key}=1000",))
+    assert parsed == {benign_token_key: "1000"}
+
+
+def test_resolve_single_kubeconfig_multi_path(tmp_path: Path) -> None:
+    """Resolve the first valid file path from a multi-path KUBECONFIG string."""
+    missing1 = tmp_path / "missing1" / "config"
+    valid1 = tmp_path / "valid1" / "config"
+    valid2 = tmp_path / "valid2" / "config"
+    valid1.parent.mkdir(parents=True)
+    valid1.write_text("kubeconfig-1", encoding="utf-8")
+    valid2.parent.mkdir(parents=True)
+    valid2.write_text("kubeconfig-2", encoding="utf-8")
+
+    multi = f"{missing1}{os.pathsep}{valid1}{os.pathsep}{valid2}"
+    resolved = _resolve_single_kubeconfig(multi)
+    assert resolved == valid1
+
+
+def test_resolve_single_kubeconfig_all_missing(tmp_path: Path) -> None:
+    """Return None when all paths in KUBECONFIG are non-existent."""
+    missing1 = tmp_path / "missing1"
+    missing2 = tmp_path / "missing2"
+    multi = f"{missing1}{os.pathsep}{missing2}"
+    assert _resolve_single_kubeconfig(multi) is None
+
+
+def test_harbor_subprocess_environment_normalizes_multipath_kubeconfig(tmp_path: Path) -> None:
+    """Normalize multi-path KUBECONFIG into a single valid path in GKE subprocess environment."""
+    valid_cfg = tmp_path / "kube" / "config"
+    valid_cfg.parent.mkdir(parents=True)
+    valid_cfg.write_text("cluster-config", encoding="utf-8")
+    missing_cfg = tmp_path / "missing" / "config"
+    multi_kubeconfig = f"{missing_cfg}{os.pathsep}{valid_cfg}"
+
+    provider = _provider()
+    env = _harbor_subprocess_environment(
+        provider=provider,
+        agent="claude-code",
+        configured_runtime_env={"KUBECONFIG": multi_kubeconfig},
+        provider_env={},
+        env_mode="gke",
+    )
+
+    assert env.get("KUBECONFIG") == str(valid_cfg)
+    assert os.pathsep not in env.get("KUBECONFIG", "")
+
+
+def test_harbor_gke_packaging_dependencies() -> None:
+    """Verify harbor[gke] extra installs kubernetes and GKEEnvironment can be imported."""
+    pytest.importorskip("kubernetes")
+    pytest.importorskip("harbor")
+
+    from harbor.environments.gke import GKEEnvironment
+
+    assert GKEEnvironment is not None

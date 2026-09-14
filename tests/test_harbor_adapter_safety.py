@@ -601,4 +601,3 @@ def test_write_task_toml_writes_mcp_servers_json_and_headers(tmp_path: Path) -> 
     assert mcp_json_path.is_file()
     loaded = json.loads(mcp_json_path.read_text(encoding="utf-8"))
     assert loaded == mcp_servers
-

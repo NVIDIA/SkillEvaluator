@@ -96,6 +96,7 @@ from skillevaluator.tier3.output_provenance import (
 )
 from skillevaluator.tier3.results_location import publish_latest_results
 from skillevaluator.tier3_environments import DEFAULT_ENV_MODE, ENV_MODE_LOCAL, HARBOR_ENV_MODES
+from skillevaluator.utils.redaction import is_sensitive_key
 
 logger = logging.getLogger(__name__)
 
@@ -335,22 +336,25 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
 )
 
 _SENSITIVE_EK_KEY_RE = re.compile(
-    r"(?i)(?:^|[^a-zA-Z0-9])(?:api[_-]?keys?|tokens?|secrets?|passwords?)(?:$|[^a-zA-Z0-9])"
+    r"(?i)(?:^|.*[_-])(?:api[_-]?key|secret|password|credential|credentials|authorization|bearer|"
+    r"private[_-]?key|service[_-]?account[_-]?key|access[_-]?key|session[_-]?token|auth[_-]?token|"
+    r"(?:access|refresh|id|auth|user|client|secret)[_-]?tokens?)(?:$|[_-].*)"
 )
 _NON_CREDENTIAL_TOKEN_KEY_RE = re.compile(
     r"^(?:max|min|num|total|count|prompt|completion|input|output|request)?[_-]?tokens$|"
     r"^(?:max|min|num|total|count|prompt|completion|input|output)[_-]token$|"
-    r"(?:^|.*[_-])tokens?[_-](?:bucket|rate|count|limit|budget|window|usage|size|per[_-]\w+)$",
+    r"(?:^|.*[_-])tokens?[_-](?:bucket|rate|count|limit|budget|window|usage|size|per[_-]\w+)$|"
+    r"(?:^|.*[_-])(?:tokenizer|tokenizers|detokenize|detokenizer|tokenization|detokenization)(?:[_-].*)?$",
     re.IGNORECASE,
 )
 
 
 def _is_sensitive_ek_key(key: str) -> bool:
     """Determine whether an environment kwarg key name represents a sensitive credential."""
-    normalized_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
-    if not _SENSITIVE_EK_KEY_RE.search(normalized_key):
+    normalized_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
+    if _NON_CREDENTIAL_TOKEN_KEY_RE.search(normalized_key):
         return False
-    return not _NON_CREDENTIAL_TOKEN_KEY_RE.search(normalized_key)
+    return is_sensitive_key(key) or bool(_SENSITIVE_EK_KEY_RE.search(normalized_key))
 
 
 _SENSITIVE_EK_VALUE_PATTERNS = (
@@ -564,9 +568,7 @@ def build_harbor_run_command(
     if env_mode != ENV_MODE_LOCAL:
         for key, value in sorted((environment_kwargs or {}).items()):
             str_val = str(value)
-            if _is_sensitive_ek_key(key) or any(
-                pattern.search(str_val) for pattern in _SENSITIVE_EK_VALUE_PATTERNS
-            ):
+            if _is_sensitive_ek_key(key) or any(pattern.search(str_val) for pattern in _SENSITIVE_EK_VALUE_PATTERNS):
                 raise ValueError(
                     f"Sensitive key or value detected in environment_kwargs: {key}. "
                     "Credentials must not be passed via CLI flags or process arguments."
@@ -671,7 +673,9 @@ def _validate_agent_provider_credentials(
     has_vertex = agent_runtime_env.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
     if "claude-code" in agents and has_vertex:
         if env_mode != "gke":
-            return [f"vertex ai live agents do not support {env_mode} mode; use --env-mode gke or a supported cloud backend."]
+            return [
+                f"vertex ai live agents do not support {env_mode} mode; use --env-mode gke or a supported cloud backend."
+            ]
         from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_project_id
 
         has_project = bool(_resolve_vertex_project_id(agent_runtime_env) or _resolve_vertex_project_id())
@@ -820,6 +824,31 @@ def _validate_agent_provider_credentials(
     return []
 
 
+def _resolve_single_kubeconfig(raw_kubeconfig: str | None = None) -> Path | None:
+    """Resolve a single existing kubeconfig file path from KUBECONFIG or default location."""
+    raw = raw_kubeconfig if raw_kubeconfig is not None else os.environ.get("KUBECONFIG")
+    if raw:
+        valid_candidates: list[Path] = []
+        for entry in raw.split(os.pathsep):
+            cleaned = entry.strip()
+            if cleaned:
+                candidate = Path(cleaned).expanduser().resolve()
+                if candidate.is_file():
+                    valid_candidates.append(candidate)
+        if valid_candidates:
+            if len(valid_candidates) > 1:
+                logger.warning(
+                    "Multiple kubeconfig files found in KUBECONFIG (%s). "
+                    "Harbor supports only a single kubeconfig; using the first: %s",
+                    raw,
+                    valid_candidates[0],
+                )
+            return valid_candidates[0]
+        return None
+    default_path = (Path.home() / ".kube" / "config").resolve()
+    return default_path if default_path.is_file() else None
+
+
 def _check_prerequisites(
     env_mode: str = DEFAULT_ENV_MODE,
     agents: list[str] | None = None,
@@ -857,13 +886,7 @@ def _check_prerequisites(
             gke_errors.append(
                 "GKE requires the 'kubernetes' Python package. Install it with 'uv add kubernetes' or 'pip install \"harbor[gke]\"'."
             )
-        raw_kc = os.environ.get("KUBECONFIG")
-        if raw_kc:
-            kc_paths = [Path(p).expanduser() for p in raw_kc.split(os.pathsep) if p.strip()]
-            has_kubeconfig = any(p.is_file() for p in kc_paths)
-        else:
-            has_kubeconfig = (Path.home() / ".kube" / "config").is_file()
-        if not has_kubeconfig:
+        if _resolve_single_kubeconfig() is None:
             gke_errors.append(
                 "GKE requires Kubernetes credentials. Run "
                 "'gcloud container clusters get-credentials <CLUSTER> "
@@ -1011,6 +1034,10 @@ def _harbor_subprocess_environment(
         environment.update(_selected_host_environment(_BEDROCK_HOST_ENV_VARS, host_env))
     environment.update(configured_runtime_env)
     environment.update(provider_env)
+    if env_mode == "gke":
+        resolved_kubeconfig = _resolve_single_kubeconfig(environment.get("KUBECONFIG"))
+        if resolved_kubeconfig is not None:
+            environment["KUBECONFIG"] = str(resolved_kubeconfig)
     if env_mode == ENV_MODE_LOCAL:
         from skillevaluator.tier3.harbor.local_runtime import local_subprocess_env
 
@@ -1221,9 +1248,9 @@ def _agent_provider_config(
             provider="anthropic",
             model=resolved_model,
             api_key=None,
-            base_url=credentials.get("ANTHROPIC_BASE_URL") or getattr(evaluator_provider, "base_url", None),
+            base_url=credentials.get("ANTHROPIC_BASE_URL"),
             litellm_model=f"anthropic/{resolved_model}",
-            region=credentials.get("CLOUD_ML_REGION") or getattr(evaluator_provider, "region", None),
+            region=credentials.get("CLOUD_ML_REGION"),
             credential_env="CLAUDE_CODE_USE_VERTEX",
         )
     if evaluator_provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
@@ -2242,6 +2269,8 @@ def _run_harbor_eval_impl(
     # this import must remain lazy to avoid a module cycle.
     from skillevaluator.tier3.harbor.runtime_preflight import (
         CredentialProbeDisposition,
+        ModelCatalogFailureKind,
+        _is_vertex_openapi_endpoint,
         credential_probe_disposition,
         probe_model,
     )
@@ -2341,9 +2370,19 @@ def _run_harbor_eval_impl(
             continue
 
         safe_detail = redact_progress_detail(probe.detail, secret_values=runtime_secret_values)
-        disposition = credential_probe_disposition(selected_provider, probe)
+        disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
+        is_vertex = (
+            _is_vertex_openapi_endpoint(getattr(selected_provider, "base_url", None))
+            or getattr(selected_provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX"
+        )
+        is_auth_failure = getattr(probe, "failure_kind", None) in {
+            ModelCatalogFailureKind.AUTHENTICATION,
+            ModelCatalogFailureKind.AUTHORIZATION,
+        }
         if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
             safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
+        elif not probe.ok and env_mode == "gke" and is_vertex and is_auth_failure and disposition == CredentialProbeDisposition.DEGRADED:
+            safe_detail = "host does not possess Vertex AI credentials; runtime authentication is verified via GKE Workload Identity in-pod"
         credential_validation_targets.append(
             {
                 "labels": list(selected_labels),

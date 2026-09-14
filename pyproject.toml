@@ -61,7 +61,7 @@ tier2 = [
 # Tier 3 live agent evaluation through Harbor's native environments.
 tier3 = [
     "skillevaluator[llm]",
-    "harbor==0.13.2",
+    "harbor[gke]==0.13.2",
     # CVE-2026-59950, CVE-2026-52870, and CVE-2026-52869 fixed floor.
     "mcp>=1.28.1,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.

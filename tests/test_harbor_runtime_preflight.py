@@ -3668,7 +3668,7 @@ def test_vertex_model_probe_missing_project_id(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_vertex_model_probe_missing_token(monkeypatch: pytest.MonkeyPatch):
-    """Inability to obtain access token returns invalid_configuration and disposition=FATAL."""
+    """Inability to obtain access token returns authentication failure, fatal by default, degraded in GKE mode."""
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-gcp-project")
     monkeypatch.setattr(runtime_preflight, "_get_google_access_token", lambda **_kwargs: None)
@@ -3676,9 +3676,10 @@ def test_vertex_model_probe_missing_token(monkeypatch: pytest.MonkeyPatch):
     provider = ProviderConfig("anthropic", "claude-3-7-sonnet", None, None, "anthropic/claude-3-7-sonnet")
     result = runtime_preflight.probe_model(provider, timeout_seconds=5)
     assert result.ok is False
-    assert result.failure_kind == "invalid_configuration"
+    assert result.failure_kind == "authentication"
     assert "access token" in result.detail
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+    assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="gke") == "degraded"
 
 
 def test_vertex_model_probe_network_timeout(monkeypatch: pytest.MonkeyPatch):
@@ -4194,32 +4195,53 @@ def test_is_vertex_openapi_endpoint():
     """Verify detection of Vertex AI Agent Platform OpenAPI base URLs."""
     from skillevaluator.tier3.harbor.runtime_preflight import _is_vertex_openapi_endpoint
 
-    assert _is_vertex_openapi_endpoint(
-        "https://aiplatform.googleapis.com/v1beta1/projects/proj-123/locations/global/endpoints/openapi"
-    ) is True
-    assert _is_vertex_openapi_endpoint(
-        "https://aiplatform.googleapis.com/v1beta1/projects/proj-123/locations/global/endpoints/openapi/"
-    ) is True
-    assert _is_vertex_openapi_endpoint(
-        "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-123/locations/us-central1/endpoints/openapi"
-    ) is True
-    assert _is_vertex_openapi_endpoint(
-        "https://europe-west4-aiplatform.googleapis.com/v1beta1/projects/p/locations/europe-west4/endpoints/openapi"
-    ) is True
+    assert (
+        _is_vertex_openapi_endpoint(
+            "https://aiplatform.googleapis.com/v1beta1/projects/proj-123/locations/global/endpoints/openapi"
+        )
+        is True
+    )
+    assert (
+        _is_vertex_openapi_endpoint(
+            "https://aiplatform.googleapis.com/v1beta1/projects/proj-123/locations/global/endpoints/openapi/"
+        )
+        is True
+    )
+    assert (
+        _is_vertex_openapi_endpoint(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-123/locations/us-central1/endpoints/openapi"
+        )
+        is True
+    )
+    assert (
+        _is_vertex_openapi_endpoint(
+            "https://europe-west4-aiplatform.googleapis.com/v1beta1/projects/p/locations/europe-west4/endpoints/openapi"
+        )
+        is True
+    )
 
     # Negative cases
     assert _is_vertex_openapi_endpoint("https://api.openai.com/v1") is False
     assert _is_vertex_openapi_endpoint("https://integrate.api.nvidia.com/v1") is False
     assert _is_vertex_openapi_endpoint("https://generativelanguage.googleapis.com/v1beta/openai") is False
-    assert _is_vertex_openapi_endpoint(
-        "http://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
-    ) is False
-    assert _is_vertex_openapi_endpoint(
-        "https://evil-aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
-    ) is False
-    assert _is_vertex_openapi_endpoint(
-        "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/other"
-    ) is False
+    assert (
+        _is_vertex_openapi_endpoint(
+            "http://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+        )
+        is False
+    )
+    assert (
+        _is_vertex_openapi_endpoint(
+            "https://evil-aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+        )
+        is False
+    )
+    assert (
+        _is_vertex_openapi_endpoint(
+            "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/other"
+        )
+        is False
+    )
     assert _is_vertex_openapi_endpoint(None) is False
     assert _is_vertex_openapi_endpoint("") is False
 
@@ -4419,12 +4441,14 @@ def test_vertex_openapi_probe_missing_token(monkeypatch: pytest.MonkeyPatch):
 
     result = runtime_preflight.probe_model(provider, timeout_seconds=5)
     assert result.ok is False
-    assert result.failure_kind == "invalid_configuration"
+    assert result.failure_kind == "authentication"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+    assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="gke") == "degraded"
 
 
 def test_vertex_openapi_probe_timeout(monkeypatch: pytest.MonkeyPatch):
     """Verify timeout during Vertex OpenAPI probe returns unavailable and disposition=DEGRADED."""
+
     def mock_urlopen(*_args, **_kwargs):
         raise TimeoutError("Connection timed out")
 
@@ -4442,6 +4466,3 @@ def test_vertex_openapi_probe_timeout(monkeypatch: pytest.MonkeyPatch):
     assert result.ok is False
     assert result.failure_kind == "unavailable"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
-
-
-

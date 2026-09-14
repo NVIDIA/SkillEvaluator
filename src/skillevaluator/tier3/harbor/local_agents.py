@@ -148,7 +148,7 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
         return (
             'CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME}" && '
             'mkdir -p "$CLAUDE_DIR" && '
-            f'printf \'%s\\n\' {escaped} > "$CLAUDE_DIR/.claude.json"'
+            f"printf '%s\\n' {escaped} > \"$CLAUDE_DIR/.claude.json\""
         )
 
     def _resolve_task_mcp_servers(self) -> list[dict[str, Any]]:

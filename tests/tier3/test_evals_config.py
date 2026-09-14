@@ -182,6 +182,22 @@ harbor:
         load_evals_config(skill)
 
 
+def test_gke_infrastructure_kwargs_contains_expected_keys():
+    """Verify all 9 GKE infrastructure and cost control kwargs are protected."""
+    expected = {
+        "cluster_name",
+        "region",
+        "namespace",
+        "registry_location",
+        "registry_name",
+        "project_id",
+        "cloud_build_machine_type",
+        "cloud_build_disk_size_gb",
+        "memory_limit_multiplier",
+    }
+    assert expected == _GKE_INFRASTRUCTURE_KWARGS
+
+
 @pytest.mark.parametrize("blocked_key", sorted(_GKE_INFRASTRUCTURE_KWARGS))
 def test_load_evals_config_blocked_infrastructure_kwargs(tmp_path, blocked_key):
     """Untrusted skills must not configure infrastructure keys in evals/config.yml."""
@@ -338,4 +354,3 @@ def test_legacy_evals_json_is_accepted_with_deprecation_warning(tmp_path):
 
     assert not any(r.status == "error" for r in results)
     assert any("Deprecated eval dataset format" in r.message for r in results)
-

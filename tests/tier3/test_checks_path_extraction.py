@@ -784,4 +784,3 @@ def test_activation_rejects_malformed_skill_md_search_without_crashing():
         ]
         result = check_activation(tool_calls, "sandbox-smoke")
         assert result["passed"] is False, cmd
-

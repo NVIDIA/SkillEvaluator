@@ -1734,6 +1734,16 @@ def dedup_scan(
         raise click.ClickException("dedup scan failed")
 
 
+def _parse_environment_kwargs_cli(raw_kwargs: tuple[str, ...]) -> dict[str, str]:
+    """Parse and validate environment kwargs for CLI commands, raising Click BadParameter on errors."""
+    from skillevaluator.tier3.commands import parse_environment_kwargs
+
+    try:
+        return parse_environment_kwargs(raw_kwargs)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint=["--ek"]) from exc
+
+
 # Hidden top-level spelling of ``tier3 evaluate`` — kept working for scripts,
 # but the tier namespace is the advertised name to avoid a duplicate surface.
 @cli.command(hidden=True)
@@ -1823,14 +1833,13 @@ def evaluate(
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
-    from skillevaluator.tier3.commands import parse_environment_kwargs
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 
     service = EvaluationService()
     if autopilot:
         _ensure_autopilot_dataset(skill_path)
 
-    parsed_environment_kwargs = parse_environment_kwargs(environment_kwargs)
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwargs)
 
     options = EvaluationOptions(
         skill_path=skill_path,
@@ -2064,9 +2073,8 @@ def doctor(
 ) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
-    from skillevaluator.tier3.commands import parse_environment_kwargs
 
-    parsed_environment_kwargs = parse_environment_kwargs(environment_kwargs)
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwargs)
     raise SystemExit(
         tier3_doctor(
             agents=agents,

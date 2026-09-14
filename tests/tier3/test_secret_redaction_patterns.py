@@ -73,4 +73,3 @@ def test_real_ya29_token_is_still_redacted():
 
     assert secret not in red
     assert "ya29.<redacted>" in red
-

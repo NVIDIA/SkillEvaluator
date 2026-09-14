@@ -10,6 +10,7 @@ import pytest
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.harbor.runner import (
     _OPERATOR_OWNED_AGENT_ENV,
+    _agent_provider_config,
     _independent_anthropic_agent_credentials,
     _is_operator_owned_runtime_name,
     _model_for_agent,
@@ -382,3 +383,44 @@ def test_independent_anthropic_agent_credentials_fallbacks(monkeypatch: pytest.M
     creds_cloud = _independent_anthropic_agent_credentials(env_mode="cloud")
     assert creds_cloud.get("GOOGLE_APPLICATION_CREDENTIALS") == "/path/to/host/key.json"
 
+
+def test_agent_provider_config_claude_vertex_decoupling() -> None:
+    """Verify Claude on Vertex agent route does not inherit evaluator base_url or region."""
+    evaluator_provider = ProviderConfig(
+        provider="openai",
+        model="gpt-5.5",
+        api_key="eval-key",
+        base_url="https://api.openai.com/v1",
+        litellm_model="openai/gpt-5.5",
+        region="eval-region-1",
+    )
+
+    # Without explicit ANTHROPIC_BASE_URL or CLOUD_ML_REGION
+    config_default = _agent_provider_config(
+        evaluator_provider=evaluator_provider,
+        agent="claude-code",
+        model="claude-3-7-sonnet",
+        credentials={"CLAUDE_CODE_USE_VERTEX": "1"},
+        env_mode="gke",
+    )
+    assert config_default.provider == "anthropic"
+    assert config_default.model == "claude-3-7-sonnet"
+    assert config_default.api_key is None
+    assert config_default.base_url is None
+    assert config_default.region is None
+    assert config_default.credential_env == "CLAUDE_CODE_USE_VERTEX"
+
+    # With explicit agent credentials
+    config_explicit = _agent_provider_config(
+        evaluator_provider=evaluator_provider,
+        agent="claude-code",
+        model="claude-3-7-sonnet",
+        credentials={
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "ANTHROPIC_BASE_URL": "https://custom-vertex.internal/v1",
+            "CLOUD_ML_REGION": "us-central1",
+        },
+        env_mode="gke",
+    )
+    assert config_explicit.base_url == "https://custom-vertex.internal/v1"
+    assert config_explicit.region == "us-central1"

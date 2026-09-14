@@ -370,9 +370,7 @@ def test_claude_mcp_servers_relative_task_path(tmp_path: Path) -> None:
         }
     ]
     (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
-    (trial_dir / "config.json").write_text(
-        json.dumps({"task": {"path": "relative-task"}}), encoding="utf-8"
-    )
+    (trial_dir / "config.json").write_text(json.dumps({"task": {"path": "relative-task"}}), encoding="utf-8")
 
     agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
     command = agent._build_register_mcp_servers_command()
@@ -411,13 +409,9 @@ def test_claude_mcp_servers_command_nested_logs_dir_layout(tmp_path: Path) -> No
 
     mcp_servers = [{"name": "nested-mcp", "transport": "stdio", "command": "echo", "args": ["hi"]}]
     (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
-    (trial_dir / "config.json").write_text(
-        json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8"
-    )
+    (trial_dir / "config.json").write_text(json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8")
 
     agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
     command = agent._build_register_mcp_servers_command()
     assert command is not None
     assert "nested-mcp" in command
-
-

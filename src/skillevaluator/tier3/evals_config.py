@@ -63,6 +63,10 @@ _GKE_INFRASTRUCTURE_KWARGS: frozenset[str] = frozenset(
         "namespace",
         "registry_location",
         "registry_name",
+        "project_id",
+        "cloud_build_machine_type",
+        "cloud_build_disk_size_gb",
+        "memory_limit_multiplier",
     }
 )
 

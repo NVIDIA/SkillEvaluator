@@ -8,6 +8,8 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import shutil
+import subprocess
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -95,7 +97,7 @@ class ProviderConfig:
     def child_environment(self) -> dict[str, str]:
         """Return this provider's public credential settings for a child process."""
         environment: dict[str, str] = {}
-        if self.credential_env and self.api_key:
+        if self.credential_env and self.credential_env != "ADC" and self.api_key:
             environment[self.credential_env] = self.api_key
 
         if self.base_url_env and self.base_url:
@@ -112,6 +114,108 @@ class ProviderConfig:
         return environment
 
 
+def _is_vertex_openapi_endpoint(base_url: str | None) -> bool:
+    """Return whether the base URL points to a Vertex AI Agent Platform OpenAPI endpoint."""
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    clean = base_url.strip()
+    if "\\" in clean or any(character in clean for character in ("?", "#", ";")):
+        return False
+    try:
+        endpoint = urlsplit(clean)
+        port = endpoint.port
+    except (TypeError, ValueError):
+        return False
+    if (
+        endpoint.scheme.casefold() != "https"
+        or endpoint.hostname is None
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or port not in {None, 443}
+    ):
+        return False
+    host = endpoint.hostname.casefold()
+    if not re.fullmatch(r"(?:[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)?-)?aiplatform\.googleapis\.com", host):
+        return False
+    path = endpoint.path.rstrip("/")
+    return bool(re.fullmatch(r"/v1(?:beta[0-9]+)?/projects/[^/]+/locations/[^/]+/endpoints/openapi", path))
+
+
+def _parse_vertex_openapi_metadata(base_url: str) -> tuple[str | None, str | None]:
+    """Extract project ID and location from a Vertex AI OpenAPI base URL."""
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None, None
+    try:
+        endpoint = urlsplit(base_url.strip())
+        match = re.search(r"/projects/([^/]+)/locations/([^/]+)/endpoints/openapi", endpoint.path)
+        if match:
+            return match.group(1), match.group(2)
+    except Exception:
+        pass
+    return None, None
+
+
+def _get_google_access_token(timeout_seconds: float = 10.0) -> str | None:
+    """Acquire Google Cloud access token via google.auth or gcloud CLI."""
+    try:
+        import google.auth
+        import google.auth.transport.requests
+
+        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        request = google.auth.transport.requests.Request()
+        credentials.refresh(request)
+        if getattr(credentials, "token", None):
+            return str(credentials.token)
+    except Exception:
+        pass
+
+    gcloud_path = shutil.which("gcloud")
+    if gcloud_path:
+        for args in (
+            [gcloud_path, "auth", "application-default", "print-access-token"],
+            [gcloud_path, "auth", "print-access-token"],
+        ):
+            try:
+                proc = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip()
+            except Exception:
+                pass
+
+    return None
+
+
+def _build_vertex_openapi_adc_config(
+    provider: str,
+    model: str,
+    base_url: str,
+    *,
+    base_url_env: str,
+    timeout_seconds: float = 10.0,
+) -> ProviderConfig:
+    """Build a ProviderConfig using Google Application Default Credentials for Vertex OpenAPI."""
+    token = _get_google_access_token(timeout_seconds=timeout_seconds)
+    if not token:
+        raise ProviderConfigurationError(
+            "Vertex AI OpenAPI endpoint requires an API key or Google Application Default Credentials (ADC)."
+        )
+    return ProviderConfig(
+        provider=provider,
+        model=model,
+        api_key=token,
+        base_url=base_url,
+        litellm_model=f"openai/{model}",
+        credential_env="ADC",
+        base_url_env=base_url_env,
+    )
+
+
 def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderConfig:
     """Resolve the public provider used for LLM-backed checks and judging."""
     env = _environment(environ)
@@ -126,13 +230,25 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             raise ProviderConfigurationError("SKILL_EVAL_LLM_MODEL must be a non-empty string when set.")
 
     if provider == "openai":
+        base_url = (env.get("SKILL_EVAL_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/")
+        api_key = env.get("OPENAI_API_KEY") or env.get("SKILL_EVAL_LLM_API_KEY")
+        if _is_vertex_openapi_endpoint(base_url) and not api_key:
+            return _build_vertex_openapi_adc_config(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                base_url_env="OPENAI_BASE_URL",
+            )
+        credential_env = "OPENAI_API_KEY" if env.get("OPENAI_API_KEY") else "SKILL_EVAL_LLM_API_KEY"
+        if not api_key:
+            raise ProviderConfigurationError("OPENAI_API_KEY or SKILL_EVAL_LLM_API_KEY is required.")
         return ProviderConfig(
             provider=provider,
             model=model,
-            api_key=_required(env, "OPENAI_API_KEY"),
-            base_url=(env.get("SKILL_EVAL_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/"),
+            api_key=api_key,
+            base_url=base_url,
             litellm_model=f"openai/{model}",
-            credential_env="OPENAI_API_KEY",
+            credential_env=credential_env,
             base_url_env="OPENAI_BASE_URL",
         )
     if provider == "anthropic":
@@ -164,11 +280,20 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             region=env.get("AWS_REGION") or "us-west-2",
         )
 
+    base_url = _required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/")
+    api_key = env.get("SKILL_EVAL_LLM_API_KEY")
+    if _is_vertex_openapi_endpoint(base_url) and not api_key:
+        return _build_vertex_openapi_adc_config(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            base_url_env="SKILL_EVAL_LLM_BASE_URL",
+        )
     return ProviderConfig(
         provider=provider,
         model=model,
         api_key=_required(env, "SKILL_EVAL_LLM_API_KEY"),
-        base_url=_required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/"),
+        base_url=base_url,
         litellm_model=f"openai/{model}",
         credential_env="SKILL_EVAL_LLM_API_KEY",
         base_url_env="SKILL_EVAL_LLM_BASE_URL",

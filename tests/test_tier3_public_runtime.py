@@ -1281,4 +1281,3 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
 
     assert sdk_urls == [expected_url]
     assert verifier._anthropic_url() == expected_url
-

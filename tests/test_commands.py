@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -521,9 +523,10 @@ def test_validate_records_json_report_name_for_catalog_binding(monkeypatch) -> N
     assert cli_module._consume_validate_json_report() is not None
 
 
-def test_validate_json_report_handoff_isolated_between_invocations(monkeypatch) -> None:
-    """Back-to-back validate runs must not leak JSON report names through a shared slot."""
-    from skillevaluator import cli as cli_module
+def test_validate_json_report_handoff_isolated_between_invocations(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Overlapping validate runs must not leak JSON report names through a shared slot."""
     from skillevaluator.models.result import ValidationResult
 
     basenames = iter(["skillevaluator-output-alpha", "skillevaluator-output-beta"])
@@ -543,24 +546,51 @@ def test_validate_json_report_handoff_isolated_between_invocations(monkeypatch) 
         lambda _prefix: next(basenames),
     )
 
+    args = [
+        "validate",
+        str(FIXTURE),
+        "--no-llm",
+        "--no-tier2",
+        "--checks",
+        "schema",
+        "-r",
+        "json",
+    ]
     runner = CliRunner()
-    with runner.isolated_filesystem():
-        args = [
-            "validate",
-            str(FIXTURE),
-            "--no-llm",
-            "--no-tier2",
-            "--checks",
-            "schema",
-            "-r",
-            "json",
-            "-o",
-            "out",
-        ]
-        assert runner.invoke(cli, args).exit_code == 0
-        assert cli_module._consume_validate_json_report() == "skillevaluator-output-alpha.json"
-        assert runner.invoke(cli, args).exit_code == 0
-        assert cli_module._consume_validate_json_report() == "skillevaluator-output-beta.json"
+    barrier = threading.Barrier(2)
+    results: dict[str, str | None] = {}
+    thread_errors: list[BaseException] = []
+
+    def _run_validate_and_consume(tag: str) -> None:
+        def _work() -> None:
+            output_dir = tmp_path / tag
+            output_dir.mkdir()
+            invoke_args = [*args, "-o", str(output_dir)]
+            result = runner.invoke(cli, invoke_args)
+            assert result.exit_code == 0, result.output
+            barrier.wait()
+            results[tag] = cli_module._consume_validate_json_report()
+
+        contextvars.copy_context().run(_work)
+
+    def _worker(tag: str) -> None:
+        try:
+            _run_validate_and_consume(tag)
+        except BaseException as exc:
+            thread_errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_worker, args=("alpha",)),
+        threading.Thread(target=_worker, args=("beta",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not thread_errors
+    assert results["alpha"] == "skillevaluator-output-alpha.json"
+    assert results["beta"] == "skillevaluator-output-beta.json"
 
 
 def test_catalog_summary_binds_exact_json_report_not_sarif_sidecar(monkeypatch) -> None:

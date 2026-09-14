@@ -78,7 +78,9 @@ both in depth.
 skillevaluator create-eval-dataset ./my-skill --full
 ```
 
-`--full` generates four case buckets — explicit, implicit, and contextual
+`--full` generates the explicit, implicit, and contextual buckets, plus a negative
+bucket when eval guidance supplies a safe off-skill prompt (template mode omits
+negative otherwise)
 positives plus a negative case that should *not* trigger the skill. Generation
 uses your configured evaluator provider; `--no-llm` falls back to keyless local
 templates. The dataset format, `EVAL.md` guidance, and refinement options live

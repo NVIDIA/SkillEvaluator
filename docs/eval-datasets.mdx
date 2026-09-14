@@ -114,13 +114,13 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `create-eval-dataset` writes `evals/evals.json` for you, grounded in your
 `SKILL.md` name, description, body, and script filenames:
 
-```bash title="Generate the full four-case dataset"
+```bash title="Generate the full bucket dataset"
 skillevaluator create-eval-dataset ./my-skill --full
 ```
 
 | Flag | Effect |
 | --- | --- |
-| `--full` | Generate the full 4-bucket dataset (four cases) instead of one. |
+| `--full` | Generate the full bucket set (up to four cases) instead of one. Template mode emits three cases when no authored off-skill prompt is available. |
 | `--no-llm` | Use local templates only — no API key required. |
 | `--dry-run` | Preview without writing. |
 | `--force` | Overwrite existing `evals/evals.json`. |
@@ -149,8 +149,10 @@ you wrote.
 
 ### The four case buckets
 
-`--full` generates one case per bucket. The mix matters: the negative case
-protects against a skill that triggers when it shouldn't.
+`--full` targets one case per bucket when a safe negative prompt is available.
+The mix matters: the negative case protects against a skill that triggers when
+it should not. In `--no-llm` template mode, the negative bucket is omitted
+unless eval guidance (for example `evals/EVAL.md`) includes an off-skill prompt.
 
 | Bucket | Intent |
 | --- | --- |

@@ -11,7 +11,7 @@ Generate eval dataset for a skill.
 
 Workflows (from simplest to highest quality):
   1. Quick start:    skillevaluator create-eval-dataset ./skill          (1 case)
-  2. Full 4-bucket:  skillevaluator create-eval-dataset ./skill --full   (4 cases)
+  2. Full buckets:   skillevaluator create-eval-dataset ./skill --full   (up to 4 cases)
   3. Template only:  skillevaluator create-eval-dataset ./skill --no-llm (no API key)
   4. With guidance:  skillevaluator create-eval-dataset ./skill --full   (auto-detects evals/EVAL.md)
   5. Agent-refined:  skillevaluator create-eval-dataset ./skill --full --refine
@@ -314,7 +314,11 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
-    """Generate 4 test cases (4-bucket strategy, no LLM needed)."""
+    """Generate the template full-bucket set (three or four cases, no LLM needed).
+
+    The negative bucket is included only when eval guidance supplies a safe
+    off-skill prompt; otherwise three positive buckets are emitted.
+    """
     name = skill["name"]
     script = _pick_primary_script(skill)
     desc = skill["description"] or f"the {name} skill"
@@ -1012,7 +1016,7 @@ def main(argv: Sequence[str] | None = None) -> DatasetGenerationResult:
         epilog="""
 Examples:
   skillevaluator create-eval-dataset ./my-skill              # 1 test case
-  skillevaluator create-eval-dataset ./my-skill --full        # 4 test cases (4-bucket)
+  skillevaluator create-eval-dataset ./my-skill --full        # up to 4 test cases (4-bucket)
   skillevaluator create-eval-dataset ./my-skill --no-llm      # Template only
   skillevaluator create-eval-dataset ./my-skill --dry-run     # Preview
   skillevaluator create-eval-dataset ./my-skill --prompt hints.md  # Custom eval guidance
@@ -1031,7 +1035,11 @@ Agent-refined mode (--refine):
         """,
     )
     parser.add_argument("path", type=Path, help="Path to the skill directory")
-    parser.add_argument("--full", action="store_true", help="Generate 4 test cases (4-bucket strategy) instead of 1")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Generate the full bucket set (up to 4 cases; negative only with authored off-skill guidance)",
+    )
     parser.add_argument("--no-llm", action="store_true", help="Use template generation (no API key needed)")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--force", action="store_true", help="Overwrite existing dataset")
@@ -1088,7 +1096,10 @@ Agent-refined mode (--refine):
     print(f"  Scripts: {skill['scripts'] or ['none']}")
     if skill.get("eval_prompt"):
         print(f"  Eval guidance: {skill['eval_prompt_source']}")
-    mode_parts = ["4-bucket" if args.full else "simple (1 test case)"]
+    if args.full:
+        mode_parts = ["full bucket set (up to 4 cases, negative when authored)"]
+    else:
+        mode_parts = ["simple (1 test case)"]
     if args.refine:
         mode_parts.append("agent-refined")
     print(f"  Mode: {', '.join(mode_parts)}")

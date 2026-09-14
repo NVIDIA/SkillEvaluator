@@ -277,7 +277,7 @@ def test_main_invalid_skill_raises_domain_error_without_printing(tmp_path, capsy
     assert capsys.readouterr() == ("", "")
 
 
-@pytest.mark.parametrize(("extra_args", "expected_cases"), [([], 1), (["--full"], 4)])
+@pytest.mark.parametrize(("extra_args", "expected_cases"), [([], 1), (["--full"], 3)])
 def test_main_reports_created_dataset_with_written_payload(tmp_path, extra_args, expected_cases):
     skill = tmp_path / "my-skill"
     skill.mkdir()
@@ -292,6 +292,22 @@ def test_main_reports_created_dataset_with_written_payload(tmp_path, extra_args,
     assert result.path == skill / "evals" / "evals.json"
     assert result.cases_count == expected_cases
     assert result.dataset == json.loads(result.path.read_text(encoding="utf-8"))
+
+
+def test_main_full_with_author_negative_writes_four_cases(tmp_path):
+    skill = tmp_path / "my-skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "EVAL.md").write_text("## Negative Cases\n- What is the capital of Peru?\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+
+    result = generate_dataset.main([str(skill), "--no-llm", "--full"])
+
+    assert result.cases_count == 4
+    assert any(case["id"].endswith("-neg-001") for case in result.dataset["evals"])
 
 
 def test_force_write_failure_preserves_existing_dataset(tmp_path, monkeypatch):

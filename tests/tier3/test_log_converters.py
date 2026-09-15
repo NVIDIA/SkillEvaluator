@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
+from skillevaluator.tier3.eval_core.checks import check_error_recovery
 from skillevaluator.tier3.eval_core.log_converters import (
     load_trajectory_with_fallback,
     synthetic_trajectory_from_claude_stream_jsonl,
@@ -198,6 +199,21 @@ def test_codex_file_change_emits_write_calls():
     assert tcs[0]["action_input"]["path"] == "/workspace/output/real.py"
 
 
+def test_codex_web_search_thread_item_emits_synthetic_tool_call():
+    log = (
+        '{"type":"item.completed","item":{"type":"web_search","id":"ws-1",'
+        '"query":"skill evaluator harbor","status":"completed",'
+        '"output":"result snippet"}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    assert tcs[0]["action"] == "web_search"
+    assert tcs[0]["action_input"]["query"] == "skill evaluator harbor"
+    assert "result snippet" in tcs[0]["observation"]
+
+
 def test_codex_mcp_tool_call_preserves_result():
     log = (
         '{"type":"item.completed","item":{"type":"mcp_tool_call","id":"mcp-1",'
@@ -211,6 +227,20 @@ def test_codex_mcp_tool_call_preserves_result():
     assert len(tcs) == 1
     assert tcs[0]["action"] == "lookup"
     assert "found skill" in tcs[0]["observation"]
+
+
+def test_error_recovery_detects_codex_status_failed_observations():
+    log = (
+        '{"type":"item.completed","item":{"type":"command_execution","id":"cmd-1",'
+        '"command":"python run.py","exit_code":1,"status":"failed","aggregated_output":""}}\n'
+        '{"type":"item.completed","item":{"type":"command_execution","id":"cmd-2",'
+        '"command":"python run.py","exit_code":0,"status":"completed","aggregated_output":"ok"}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    result = check_error_recovery(extract_tool_calls_as_dicts(traj))
+    assert result["first_attempt_clean"] is False
+    assert result["score"] < 1.0
 
 
 def test_codex_command_execution_preserves_failed_terminal_evidence():

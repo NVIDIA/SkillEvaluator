@@ -633,9 +633,11 @@ def _codex_status_error_prefix(item: dict[str, Any]) -> str:
 
 def _codex_observation_body(item: dict[str, Any], *, include_result: bool = False) -> str:
     parts: list[str] = []
-    output = item.get("aggregated_output")
-    if output is not None and str(output).strip():
-        parts.append(str(output))
+    for key in ("aggregated_output", "output"):
+        output = item.get(key)
+        if output is not None and str(output).strip():
+            parts.append(str(output))
+            break
     if include_result:
         result_text = _codex_mcp_result_text(item)
         if result_text:
@@ -830,6 +832,39 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
                 "observation": {"results": []},
             }
             observation = _codex_mcp_observation(item)
+            if observation:
+                step["observation"]["results"].append(
+                    {
+                        "source_call_id": call_id,
+                        "content": observation,
+                    }
+                )
+            steps.append(step)
+            continue
+
+        if item_type in {"web_search", "web_search_call"}:
+            call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+            query = str(item.get("query") or item.get("input") or "").strip()
+            arguments: dict[str, Any] = {"query": query} if query else {}
+            saw_content = True
+            tool_index += 1
+            step = {
+                "source": "agent",
+                "message": "",
+                "tool_calls": [
+                    {
+                        "tool_call_id": call_id,
+                        "function_name": "web_search",
+                        "arguments": arguments,
+                    }
+                ],
+                "observation": {"results": []},
+            }
+            observation = _codex_observation_content(item, include_result=True)
+            if not observation:
+                output = item.get("output")
+                if output is not None and str(output).strip():
+                    observation = str(output)
             if observation:
                 step["observation"]["results"].append(
                     {

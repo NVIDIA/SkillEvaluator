@@ -121,7 +121,8 @@ skillevaluator validate ./my-skill \
 `--full` runs Tiers 1, 2, and 3 and enables autopilot. If the skill has no
 accepted evaluation source, autopilot creates one initial case at
 `evals/evals.json`; if the file already exists, SkillEvaluator reuses it. For a
-broader four-bucket dataset, generate and review it first:
+broader bucket dataset (up to four cases, or three in template mode without an
+authored negative), generate and review it first:
 
 ```bash
 skillevaluator create-eval-dataset ./my-skill --full

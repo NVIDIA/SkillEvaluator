@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import shutil
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
+from skillevaluator import cli as cli_module
 from skillevaluator.cli import cli
 from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_agents
 
@@ -349,6 +353,258 @@ def test_validate_catalog_runs_each_skill_as_separate_job() -> None:
         assert result.exit_code == 0, result.output
         assert any(Path("out/simple").glob("*.html"))
         assert any(Path("out/simple2").glob("*.html"))
+        summary_path = Path("out/catalog-summary.json")
+        assert summary_path.is_file()
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary["total"] == 2
+        assert summary["passed"] == 2
+        assert summary["overall_passed"] is True
+        assert len(summary["skills"]) == 2
+
+
+def test_catalog_skill_entry_skips_stale_json_without_report_name(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "simple"
+    skill_dir.mkdir()
+    stale = skill_dir / "skillevaluator-output-19990101T000000.json"
+    stale.write_text(
+        json.dumps({"overall_passed": True, "severity_counts": {"high": 7}}),
+        encoding="utf-8",
+    )
+    entry = cli_module._catalog_skill_entry(
+        "simple",
+        skill_dir,
+        passed=False,
+        reason="validation failed",
+        json_report_name=None,
+    )
+    assert "overall_passed" not in entry
+    assert "severity_counts" not in entry
+
+
+def test_validate_records_json_report_name_for_catalog_binding(monkeypatch) -> None:
+    from skillevaluator import cli as cli_module
+
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli_module, "emit_reports", lambda *_args, **_kwargs: True)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(
+            cli,
+            ["validate", str(FIXTURE), "--no-llm", "--no-tier2", "--checks", "schema", "-o", "out"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert cli_module._consume_validate_json_report() is not None
+
+
+def _handoff_overlap_results(
+    *,
+    record_alpha: str,
+    record_beta: str,
+    run_in_context: bool,
+) -> dict[str, str | None]:
+    """Record two handoffs, then consume both after a barrier (overlap window)."""
+    alpha_ctx = contextvars.Context()
+    beta_ctx = contextvars.Context()
+    barrier = threading.Barrier(2)
+    results: dict[str, str | None] = {}
+    thread_errors: list[BaseException] = []
+
+    def alpha_lane() -> None:
+        cli_module._record_validate_json_report(record_alpha)
+        barrier.wait()
+        results["alpha"] = cli_module._consume_validate_json_report()
+
+    def beta_lane() -> None:
+        cli_module._record_validate_json_report(record_beta)
+        barrier.wait()
+        results["beta"] = cli_module._consume_validate_json_report()
+
+    def run_lane(ctx: contextvars.Context, lane: Callable[[], None]) -> None:
+        try:
+            if run_in_context:
+                ctx.run(lane)
+            else:
+                lane()
+        except BaseException as exc:
+            thread_errors.append(exc)
+
+    threads = (
+        threading.Thread(target=run_lane, args=(alpha_ctx, alpha_lane)),
+        threading.Thread(target=run_lane, args=(beta_ctx, beta_lane)),
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if thread_errors:
+        raise thread_errors[0]
+    return results
+
+
+def test_validate_json_report_handoff_isolated_between_invocations() -> None:
+    """Distinct Context instances keep each basename when record/consume overlap."""
+    results = _handoff_overlap_results(
+        record_alpha="skillevaluator-output-alpha.json",
+        record_beta="skillevaluator-output-beta.json",
+        run_in_context=True,
+    )
+    assert results["alpha"] == "skillevaluator-output-alpha.json"
+    assert results["beta"] == "skillevaluator-output-beta.json"
+
+
+def test_validate_json_report_handoff_module_global_leaks_under_overlap(
+    monkeypatch,
+) -> None:
+    """A single module-global slot returns the last writer after overlapping records."""
+    slot: str | None = None
+
+    def _record(report_name: str | None) -> None:
+        nonlocal slot
+        slot = report_name
+
+    def _consume() -> str | None:
+        nonlocal slot
+        report_name = slot
+        slot = None
+        return report_name
+
+    monkeypatch.setattr(cli_module, "_record_validate_json_report", _record)
+    monkeypatch.setattr(cli_module, "_consume_validate_json_report", _consume)
+
+    results = _handoff_overlap_results(
+        record_alpha="skillevaluator-output-alpha.json",
+        record_beta="skillevaluator-output-beta.json",
+        run_in_context=False,
+    )
+    assert results != {
+        "alpha": "skillevaluator-output-alpha.json",
+        "beta": "skillevaluator-output-beta.json",
+    }
+
+
+def test_catalog_summary_binds_exact_json_report_not_sarif_sidecar(monkeypatch) -> None:
+    from skillevaluator.models.result import ValidationResult
+
+    def _emit(results, *, report_formats, output_dir, basename, **_kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        standard = output_dir / f"{basename}.json"
+        sarif = output_dir / f"{basename}.sarif.json"
+        standard.write_text(
+            json.dumps({"overall_status": "pass", "severity_counts": {"high": 2}}),
+            encoding="utf-8",
+        )
+        sarif.write_text("{}", encoding="utf-8")
+        return all(result.passed for result in results)
+
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [ValidationResult(validator_name="Schema")])
+    monkeypatch.setattr(cli_module, "emit_reports", _emit)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "-r",
+                "json",
+                "-r",
+                "sarif",
+                "-o",
+                "out",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        skill = summary["skills"][0]
+        assert skill["json_report"].endswith(".json")
+        assert not skill["json_report"].endswith(".sarif.json")
+        assert skill["severity_counts"] == {"high": 2}
+
+
+def test_catalog_summary_same_second_rerun_overwrites_json(monkeypatch) -> None:
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+
+    failing = ValidationResult(validator_name="Schema")
+    failing.add_structured_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.HIGH,
+            check_name="author_missing",
+            message="missing author",
+            file_path="SKILL.md",
+        ),
+        is_error=True,
+    )
+    outcomes = [[ValidationResult(validator_name="Schema")], [failing]]
+
+    def _run_validation(_target: Path, **_kwargs):
+        return outcomes.pop(0)
+
+    def _emit(results, *, report_formats, output_dir, basename, **_kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report = output_dir / f"{basename}.json"
+        report.write_text(
+            json.dumps(
+                {
+                    "overall_passed": all(result.passed for result in results),
+                    "overall_status": "pass" if all(result.passed for result in results) else "fail",
+                    "severity_counts": {"high": 0 if all(result.passed for result in results) else 3},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return all(result.passed for result in results)
+
+    monkeypatch.setattr(cli_module, "run_validation", _run_validation)
+    monkeypatch.setattr(cli_module, "emit_reports", _emit)
+    monkeypatch.setattr(
+        "skillevaluator.utils.helpers.make_timestamped_basename",
+        lambda _prefix: "skillevaluator-output-20260908T000000",
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        shutil.copytree(FIXTURE, catalog / "simple")
+        first = runner.invoke(
+            cli,
+            ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-r", "json", "-o", "out"],
+        )
+        second = runner.invoke(
+            cli,
+            ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-r", "json", "-o", "out"],
+        )
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code != 0, second.output
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        skill = summary["skills"][0]
+        assert skill["json_report"] == "skillevaluator-output-20260908T000000.json"
+        assert skill["overall_status"] == "fail"
+        assert skill["severity_counts"] == {"high": 3}
+
+
+def test_write_catalog_summary_rejects_symlinked_parent(tmp_path: Path) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    reports = tmp_path / "reports"
+    reports.symlink_to(external, target_is_directory=True)
+    output_dir = reports / "new" / "nested"
+
+    with pytest.raises(ValueError, match=r"symlink|reparse"):
+        cli_module._write_catalog_summary(output_dir, [])
+
+    assert not (external / "new").exists()
 
 
 def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None:
@@ -749,11 +1005,15 @@ def test_validate_catalog_survives_failing_skills(monkeypatch) -> None:
             cli, ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-o", "out"]
         )
 
-    out = _plain_text(result.output)
-    assert "skill 1/2" in out and "skill 2/2" in out
-    assert "Catalog Result" in out
-    assert "0/2 skills passed" in out
-    assert result.exit_code != 0
+        out = _plain_text(result.output)
+        assert "skill 1/2" in out and "skill 2/2" in out
+        assert "Catalog Result" in out
+        assert "0/2 skills passed" in out
+        assert result.exit_code != 0
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["failed"] == 2
+        assert summary["overall_passed"] is False
+        assert all(not skill["passed"] for skill in summary["skills"])
 
 
 def test_render_evaluation_result_invokes_findings_report(monkeypatch) -> None:
@@ -893,10 +1153,13 @@ def test_validate_catalog_reports_unexpected_errors(monkeypatch) -> None:
             cli, ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-o", "out"]
         )
 
-    out = _plain_text(result.output)
-    assert "Catalog Result" in out
-    assert "unexpected error: validator exploded" in out
-    assert result.exit_code != 0
+        out = _plain_text(result.output)
+        assert "Catalog Result" in out
+        assert "unexpected error: validator exploded" in out
+        assert result.exit_code != 0
+        summary = json.loads(Path("out/catalog-summary.json").read_text(encoding="utf-8"))
+        assert summary["failed"] == 2
+        assert summary["skills"][0]["reason"] == "unexpected error: validator exploded"
 
 
 def test_summarize_tier2_empty_results_name_a_reason() -> None:

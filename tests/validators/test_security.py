@@ -2206,6 +2206,103 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not result.errors
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_accepts_fully_covered_documentation_only_report(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["metadata"]["skillspector_version"] = "2.11.2"
+        payload["components"] = [{"path": "SKILL.md", "executable": False}]
+        payload["analysis_completeness"].update(
+            {
+                "total_components": 1,
+                "scanned_components": 1,
+                "fully_inspected_files": 1,
+                "is_complete": False,
+                "status": "partial",
+            }
+        )
+        payload["analysis_completeness"]["analyzer_statuses"].append(
+            {
+                "analyzer_id": "bundled_execution_surface",
+                "status": "not_applicable",
+                "planned_work": 0,
+                "completed": 0,
+                "partial": 0,
+                "skipped": 0,
+                "failed": 0,
+                "unaccounted": 0,
+            }
+        )
+        for status in payload["analysis_completeness"]["analyzer_statuses"]:
+            if status["analyzer_id"] in {
+                "behavioral_ast",
+                "behavioral_taint_tracking",
+                "mcp_least_privilege",
+                "meta_analyzer",
+            }:
+                status.update({"status": "not_applicable", "planned_work": 0, "completed": 0})
+        _set_universal_analyzer_work(payload)
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert not result.errors
+        assert any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        "incomplete_detail",
+        [
+            pytest.param({"coverage_percent": 0}, id="missing-coverage"),
+            pytest.param({"partially_inspected_files": 1}, id="partially-inspected"),
+            pytest.param({"limitations": ["Analyzer failed."]}, id="limitation"),
+            pytest.param({"ledger_exceptions": [{"fatal": False}]}, id="ledger-exception"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_documentation_only_exception_requires_full_coverage(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        incomplete_detail: dict,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["analysis_completeness"].update(
+            {
+                "is_complete": False,
+                "status": "partial",
+                **incomplete_detail,
+            }
+        )
+        payload["analysis_completeness"]["analyzer_statuses"][0].update(
+            {"status": "not_applicable", "planned_work": 0, "completed": 0}
+        )
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_executable_skill_cannot_use_documentation_only_exception(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        payload = _skillspector_json_report()
+        payload["metadata"]["has_executable_scripts"] = True
+        payload["analysis_completeness"].update({"is_complete": False, "status": "partial"})
+        payload["analysis_completeness"]["analyzer_statuses"][0].update(
+            {"status": "not_applicable", "planned_work": 0, "completed": 0}
+        )
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        assert not any(detail.check_name == "skillspector" for detail in result.success_details)
+
     @pytest.mark.parametrize("version", ["2.9.5-safe", "2.9.6", "2.11.1-safe"])
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_accepts_captured_no_llm_report(

@@ -22,6 +22,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Fully covered documentation-only skills no longer fail security validation
+  solely because non-applicable SkillSpector analyzers report a partial status
+  ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).
 - Malformed, non-UTF-8, or unreadable bundled and custom policy files now
   produce path-specific CLI errors instead of leaking raw parser or I/O errors
   ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).

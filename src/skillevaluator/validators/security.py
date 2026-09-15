@@ -1214,7 +1214,29 @@ class SecurityValidator(ValidatorBase):
                         "missing required analyzer evidence; security scan did not complete"
                     )
                     return False
-                if (is_complete or uses_statusless_completeness_schema) and counts["total_components"]:
+                analyzer_states = {
+                    state
+                    for evidence in analyzer_evidence.values()
+                    for state, _accounting in evidence
+                }
+                complete_by_applicability = (
+                    uses_completeness_schema
+                    and not is_complete
+                    and completeness_status == "partial"
+                    and coverage_percent == 100
+                    and counts["partially_inspected_files"] == 0
+                    and counts["entirely_uninspected_files"] == 0
+                    and not ledger_exceptions
+                    and not limitations
+                    and report_metadata.get("has_executable_scripts") is False
+                    and "not_applicable" in analyzer_states
+                    and analyzer_states <= {"completed", "not_applicable"}
+                )
+                if (
+                    is_complete
+                    or uses_statusless_completeness_schema
+                    or complete_by_applicability
+                ) and counts["total_components"]:
                     universal_analyzer_ids = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | (
                         {"artifact_integrity"} if uses_completeness_schema else set()
                     )
@@ -1307,7 +1329,7 @@ class SecurityValidator(ValidatorBase):
                             "security scan did not complete"
                         )
                         return False
-                else:
+                elif not complete_by_applicability:
                     if not (
                         counts["partially_inspected_files"]
                         or counts["entirely_uninspected_files"]

@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Catalog validation now writes `catalog-summary.json` at the reports root with
+  per-skill pass/fail status, optional severity rollups from child JSON reports,
+  and paths to per-skill report directories.
+- Catalog `validate` accepts `--workers N` to validate skills in parallel child
+  processes (default 1 preserves the serial per-skill pipeline view).
 - `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` names hosts whose model catalog may
   be read over plain HTTP. Catalog reads still require HTTPS for every other
   non-loopback host. Entries match one whole host as written, with no name
@@ -19,6 +24,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Malformed, non-UTF-8, or unreadable bundled and custom policy files now
+  produce path-specific CLI errors instead of leaking raw parser or I/O errors
+  ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).
+- `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
+  `reward.json` `entry_id` metadata, using folder-name parsing only as an
+  unambiguous legacy fallback.
 - Tier 3 local mode now drops evaluator-managed empty process-loader resets
   while continuing to reject non-empty loader overrides, allowing generated
   tasks to reach agent execution

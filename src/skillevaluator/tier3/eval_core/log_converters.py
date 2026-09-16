@@ -679,6 +679,74 @@ def _codex_mcp_observation(item: dict[str, Any]) -> str:
     return _codex_observation_content(item, include_result=True)
 
 
+def _codex_web_search_arguments(item: dict[str, Any]) -> dict[str, Any]:
+    action = item.get("action")
+    if isinstance(action, dict):
+        action_type = str(action.get("type") or "").strip()
+        if action_type == "search":
+            query = action.get("query")
+            if query is not None:
+                return {"action": "search", "query": str(query)}
+        if action_type == "open_page":
+            payload: dict[str, Any] = {"action": "open_page"}
+            url = action.get("url")
+            if url is not None:
+                payload["url"] = str(url)
+            return payload
+        if action_type == "find_in_page":
+            payload = {"action": "find_in_page"}
+            for key in ("query", "url", "pattern"):
+                if action.get(key) is not None:
+                    payload[key] = str(action[key])
+            return payload
+    query = str(item.get("query") or item.get("input") or "").strip()
+    return {"query": query} if query else {}
+
+
+def _codex_collab_tool_arguments(item: dict[str, Any]) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    raw_args = item.get("arguments")
+    if isinstance(raw_args, dict):
+        arguments.update(raw_args)
+    for key in ("prompt", "receiver", "agent_id", "session_id", "message"):
+        value = item.get(key)
+        if value is not None:
+            arguments[key] = value
+    return arguments
+
+
+def _codex_tool_step(
+    *,
+    item: dict[str, Any],
+    evt: dict[str, Any],
+    tool_index: int,
+    function_name: str,
+    arguments: dict[str, Any],
+    observation: str,
+) -> dict[str, Any]:
+    call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
+    step: dict[str, Any] = {
+        "source": "agent",
+        "message": "",
+        "tool_calls": [
+            {
+                "tool_call_id": call_id,
+                "function_name": function_name,
+                "arguments": arguments,
+            }
+        ],
+        "observation": {"results": []},
+    }
+    if observation:
+        step["observation"]["results"].append(
+            {
+                "source_call_id": call_id,
+                "content": observation,
+            }
+        )
+    return step
+
+
 def _codex_file_change_step(item: dict[str, Any], evt: dict[str, Any], tool_index: int) -> dict[str, Any] | None:
     changes = item.get("changes")
     if not isinstance(changes, list):
@@ -843,36 +911,42 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
             continue
 
         if item_type in {"web_search", "web_search_call"}:
-            call_id = str(item.get("id") or evt.get("item_id") or f"codex-{tool_index + 1}")
-            query = str(item.get("query") or item.get("input") or "").strip()
-            arguments: dict[str, Any] = {"query": query} if query else {}
+            arguments = _codex_web_search_arguments(item)
+            observation = _codex_observation_content(item, include_result=True)
+            action = item.get("action")
+            if isinstance(action, dict) and not observation:
+                observation = json.dumps(action, ensure_ascii=False)
             saw_content = True
             tool_index += 1
-            step = {
-                "source": "agent",
-                "message": "",
-                "tool_calls": [
-                    {
-                        "tool_call_id": call_id,
-                        "function_name": "web_search",
-                        "arguments": arguments,
-                    }
-                ],
-                "observation": {"results": []},
-            }
-            observation = _codex_observation_content(item, include_result=True)
-            if not observation:
-                output = item.get("output")
-                if output is not None and str(output).strip():
-                    observation = str(output)
-            if observation:
-                step["observation"]["results"].append(
-                    {
-                        "source_call_id": call_id,
-                        "content": observation,
-                    }
+            steps.append(
+                _codex_tool_step(
+                    item=item,
+                    evt=evt,
+                    tool_index=tool_index,
+                    function_name="web_search",
+                    arguments=arguments,
+                    observation=observation,
                 )
-            steps.append(step)
+            )
+            continue
+
+        if item_type == "collab_tool_call":
+            tool = str(item.get("tool") or "collab_tool_call")
+            arguments = _codex_collab_tool_arguments(item)
+            observation = _codex_observation_content(item, include_result=True)
+            saw_content = True
+            tool_index += 1
+            steps.append(
+                _codex_tool_step(
+                    item=item,
+                    evt=evt,
+                    tool_index=tool_index,
+                    function_name=tool,
+                    arguments=arguments,
+                    observation=observation,
+                )
+            )
+            continue
 
     if not saw_content or not steps:
         return None

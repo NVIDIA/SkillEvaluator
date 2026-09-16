@@ -29,9 +29,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
   over repository-prefixed ``task_name`` values when resolving eval entries.
-- Codex log synthesis retains completed ``web_search`` thread items as synthetic
-  tool calls, and error-recovery checks recognize ``status=failed`` /
+- Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
+  thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
   ``exit_code=`` terminal evidence emitted by Codex converters.
+- Fully covered documentation-only skills no longer fail security validation
+  solely because non-applicable SkillSpector analyzers report a partial status
+  ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).
 - Malformed, non-UTF-8, or unreadable bundled and custom policy files now
   produce path-specific CLI errors instead of leaking raw parser or I/O errors
   ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).

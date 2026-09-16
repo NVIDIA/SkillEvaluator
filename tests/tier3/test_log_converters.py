@@ -199,19 +199,45 @@ def test_codex_file_change_emits_write_calls():
     assert tcs[0]["action_input"]["path"] == "/workspace/output/real.py"
 
 
-def test_codex_web_search_thread_item_emits_synthetic_tool_call():
+def test_codex_web_search_search_action_emits_synthetic_tool_call():
     log = (
         '{"type":"item.completed","item":{"type":"web_search","id":"ws-1",'
-        '"query":"skill evaluator harbor","status":"completed",'
-        '"output":"result snippet"}}\n'
+        '"action":{"type":"search","query":"skill evaluator harbor"},'
+        '"status":"completed"}}\n'
     )
     traj = synthetic_trajectory_from_codex_txt(log)
     assert traj is not None
     tcs = extract_tool_calls_as_dicts(traj)
     assert len(tcs) == 1
     assert tcs[0]["action"] == "web_search"
-    assert tcs[0]["action_input"]["query"] == "skill evaluator harbor"
-    assert "result snippet" in tcs[0]["observation"]
+    assert tcs[0]["action_input"] == {"action": "search", "query": "skill evaluator harbor"}
+    assert "status=completed" in tcs[0]["observation"]
+
+
+def test_codex_web_search_open_page_action_preserves_url():
+    log = (
+        '{"type":"item.completed","item":{"type":"web_search","id":"ws-2",'
+        '"action":{"type":"open_page","url":"https://example.com/docs"},'
+        '"status":"completed"}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert tcs[0]["action_input"]["url"] == "https://example.com/docs"
+    assert tcs[0]["action_input"]["action"] == "open_page"
+
+
+def test_codex_collab_tool_call_spawn_agent_emits_synthetic_tool_call():
+    log = (
+        '{"type":"item.completed","item":{"type":"collab_tool_call","id":"col-1",'
+        '"tool":"spawn_agent","prompt":"review the logs","status":"completed"}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert len(tcs) == 1
+    assert tcs[0]["action"] == "spawn_agent"
+    assert tcs[0]["action_input"]["prompt"] == "review the logs"
 
 
 def test_codex_mcp_tool_call_preserves_result():

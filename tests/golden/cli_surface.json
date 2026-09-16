@@ -1546,6 +1546,15 @@
               "type": "file"
             },
             {
+              "default": "1",
+              "name": "workers",
+              "opts": [
+                "--workers"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
               "default": "True",
               "is_flag": true,
               "name": "dedup",
@@ -2852,6 +2861,15 @@
           ],
           "param_type": "option",
           "type": "file"
+        },
+        {
+          "default": "1",
+          "name": "workers",
+          "opts": [
+            "--workers"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "default": "True",

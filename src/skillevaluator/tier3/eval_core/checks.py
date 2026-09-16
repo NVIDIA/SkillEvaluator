@@ -136,11 +136,34 @@ _WGET_DATA_FLAGS = (
     "--body-file",
 )
 _UNSAFE_HTTP_METHODS = ("post", "put", "patch")
-_HTTPIE_BODY_FLAGS = ("--json", "-j", "--form", "-f", "--multipart", "--raw")
-_CURL_SHORT_DATA_RE = re.compile(r"^-[sSLkvoOfqgN]*[dT]", re.ASCII)
-_CURL_SHORT_FORM_RE = re.compile(r"^-[sSLkvoOfqgN]*F(?:[sSLkvoOfqgN]*$|[^=]*=)", re.ASCII)
-_CURL_SHORT_METHOD_RE = re.compile(r"^-[sSLkvoOfqgN]*X(?i:post|put|patch)$", re.ASCII)
-_CURL_METHOD_FLAG_RE = re.compile(r"^-[sSLkvoOfqgN]*X$", re.ASCII)
+_HTTPIE_BODY_FLAGS = ("--raw",)
+_CURL_SHORT_OPTS_WITH_ARG = {
+    "A",
+    "b",
+    "c",
+    "C",
+    "d",
+    "D",
+    "e",
+    "E",
+    "F",
+    "H",
+    "K",
+    "m",
+    "o",
+    "r",
+    "t",
+    "T",
+    "u",
+    "U",
+    "w",
+    "x",
+    "X",
+    "y",
+    "Y",
+    "z",
+}
+_INERT_PRINT_COMMANDS = {"echo", "printf"}
 ACCEPTABLE_ALTERNATE_SCORE = 0.75
 
 
@@ -461,7 +484,10 @@ def _command_input_args(command: list[str], cmd_idx: int, assignments: dict[str,
 
 
 def _shell_executable(value: str) -> str:
+    """Extract normalized executable name from command token."""
     cleaned = str(value).strip("\"'")
+    if not cleaned or "://" in cleaned or cleaned.startswith("-"):
+        return ""
     return cleaned.replace("\\", "/").rsplit("/", 1)[-1].casefold()
 
 
@@ -530,11 +556,158 @@ def _unwrap_shell_command(
             elif cmd_idx < len(command) and re.fullmatch(r"-\d+", str(command[cmd_idx]).strip("\"'")):
                 cmd_idx += 1
             continue
+        if executable == "sudo":
+            cmd_idx += 1
+            while cmd_idx < len(command):
+                token = command[cmd_idx].strip("\"'")
+                if token == "--":
+                    cmd_idx += 1
+                    break
+                if token.startswith("-"):
+                    cmd_idx += 1
+                    if (
+                        token
+                        in {
+                            "-u",
+                            "--user",
+                            "-g",
+                            "--group",
+                            "-p",
+                            "--prompt",
+                            "-c",
+                            "--login-class",
+                            "-C",
+                            "--close-from",
+                            "-r",
+                            "--role",
+                            "-t",
+                            "--type",
+                            "-T",
+                            "--command-timeout",
+                            "-D",
+                            "--chdir",
+                            "-U",
+                            "--other-user",
+                            "-h",
+                            "--host",
+                        }
+                        and cmd_idx < len(command)
+                        and not command[cmd_idx].strip("\"'").startswith("-")
+                    ):
+                        cmd_idx += 1
+                    continue
+                break
+            continue
+        if executable == "doas":
+            cmd_idx += 1
+            while cmd_idx < len(command):
+                token = command[cmd_idx].strip("\"'")
+                if token == "--":
+                    cmd_idx += 1
+                    break
+                if token.startswith("-"):
+                    cmd_idx += 1
+                    if (
+                        token in {"-u", "-C"}
+                        and cmd_idx < len(command)
+                        and not command[cmd_idx].strip("\"'").startswith("-")
+                    ):
+                        cmd_idx += 1
+                    continue
+                break
+            continue
+        if executable == "nohup":
+            cmd_idx += 1
+            if cmd_idx < len(command) and command[cmd_idx].strip("\"'") == "--":
+                cmd_idx += 1
+            continue
+        if executable == "stdbuf":
+            cmd_idx += 1
+            while cmd_idx < len(command):
+                token = command[cmd_idx].strip("\"'")
+                if token == "--":
+                    cmd_idx += 1
+                    break
+                if token.startswith("-"):
+                    cmd_idx += 1
+                    if (
+                        token in {"-i", "-o", "-e", "--input", "--output", "--error"}
+                        and cmd_idx < len(command)
+                        and not command[cmd_idx].strip("\"'").startswith("-")
+                    ):
+                        cmd_idx += 1
+                    continue
+                break
+            continue
+        if executable == "setsid":
+            cmd_idx += 1
+            while cmd_idx < len(command) and command[cmd_idx].strip("\"'").startswith("-"):
+                token = command[cmd_idx].strip("\"'")
+                cmd_idx += 1
+                if token == "--":
+                    break
+            continue
+        if executable == "time":
+            cmd_idx += 1
+            while cmd_idx < len(command):
+                token = command[cmd_idx].strip("\"'")
+                if token == "--":
+                    cmd_idx += 1
+                    break
+                if token.startswith("-"):
+                    cmd_idx += 1
+                    if (
+                        token in {"-o", "--output", "-f", "--format"}
+                        and cmd_idx < len(command)
+                        and not command[cmd_idx].strip("\"'").startswith("-")
+                    ):
+                        cmd_idx += 1
+                    continue
+                break
+            continue
+        if executable == "builtin":
+            cmd_idx += 1
+            if cmd_idx < len(command) and command[cmd_idx].strip("\"'") == "--":
+                cmd_idx += 1
+            continue
+        if executable == "xargs":
+            cmd_idx += 1
+            while cmd_idx < len(command):
+                token = command[cmd_idx].strip("\"'")
+                if token == "--":
+                    cmd_idx += 1
+                    break
+                if token.startswith("-"):
+                    cmd_idx += 1
+                    if (
+                        token
+                        in {
+                            "-I",
+                            "-i",
+                            "-L",
+                            "-l",
+                            "-n",
+                            "-s",
+                            "-E",
+                            "-e",
+                            "-a",
+                            "--arg-file",
+                            "-d",
+                            "--delimiter",
+                        }
+                        and cmd_idx < len(command)
+                        and not command[cmd_idx].strip("\"'").startswith("-")
+                    ):
+                        cmd_idx += 1
+                    continue
+                break
+            continue
         return cmd_idx
     return None
 
 
 def _shell_c_payload(command: list[str], cmd_idx: int, assignments: dict[str, str]) -> str | None:
+    """Extract inline command string from -c shell invocation."""
     for index in range(cmd_idx + 1, len(command) - 1):
         option = _resolved_shell_arg(command[index], assignments).strip("\"'")
         if option.startswith("-") and "c" in option[1:]:
@@ -589,6 +762,9 @@ def _is_httpie_body_item(arg: str) -> bool:
     if "==" in cleaned:
         return False
     colon_idx = cleaned.find(":")
+    at_idx = cleaned.find("@")
+    if at_idx > 0 and (colon_idx == -1 or at_idx < colon_idx):
+        return True
     eq_idx = cleaned.find("=")
     if colon_idx != -1 and (eq_idx == -1 or colon_idx < eq_idx):
         return False
@@ -656,6 +832,33 @@ def _network_shell_tokens(cmd: Any) -> list[str]:
                 idx += 2
             else:
                 tokens.append(ch)
+                idx += 1
+            continue
+
+        if ch == "<":
+            if current:
+                tokens.append("".join(current))
+                current = []
+            if normalized[idx : idx + 3] == "<<<":
+                tokens.append("<<<")
+                idx += 3
+            elif normalized[idx : idx + 2] == "<<":
+                tokens.append("<<")
+                idx += 2
+            else:
+                tokens.append("<")
+                idx += 1
+            continue
+
+        if ch == ">":
+            if current:
+                tokens.append("".join(current))
+                current = []
+            if normalized[idx : idx + 2] == ">>":
+                tokens.append(">>")
+                idx += 2
+            else:
+                tokens.append(">")
                 idx += 1
             continue
 
@@ -736,7 +939,31 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
                 return True
             continue
 
+        if executable == "eval":
+            raw_args = command[cmd_idx + 1 :]
+            if raw_args:
+                if len(raw_args) == 1:
+                    eval_payload = _resolved_shell_arg(raw_args[0], assignments)
+                    if (eval_payload.startswith("'") and eval_payload.endswith("'")) or (
+                        eval_payload.startswith('"') and eval_payload.endswith('"')
+                    ):
+                        eval_payload = eval_payload[1:-1]
+                else:
+                    eval_payload = " ".join(_resolved_shell_arg(arg, assignments) for arg in raw_args)
+                if eval_payload and _is_network_exfiltration_command(eval_payload, _depth=_depth + 1):
+                    return True
+            continue
+
         if executable not in _NETWORK_EXECUTABLES:
+            if executable in _INERT_PRINT_COMMANDS:
+                continue
+            for sub_idx in range(cmd_idx + 1, len(command)):
+                tok = command[sub_idx].strip("\"'")
+                if not tok or "://" in tok or tok.startswith("-"):
+                    continue
+                sub_exe = _shell_executable(tok).removesuffix(".exe")
+                if sub_exe in _NETWORK_EXECUTABLES:
+                    return True
             continue
 
         args = command[cmd_idx + 1 :]
@@ -752,25 +979,37 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
             while i < len(args):
                 arg = args[i]
                 clean = arg.strip("\"'")
-                if clean in _CURL_DATA_FLAGS or clean in _CURL_UPLOAD_FLAGS:
-                    return True
-                if _CURL_SHORT_DATA_RE.match(clean) or _CURL_SHORT_FORM_RE.match(clean):
-                    return True
-                if _CURL_SHORT_METHOD_RE.match(clean):
-                    return True
-                if clean == "--request" or _CURL_METHOD_FLAG_RE.match(clean):
-                    if i + 1 < len(args):
-                        method = args[i + 1].strip("\"'").casefold()
-                        if method in _UNSAFE_HTTP_METHODS:
+                if clean.casefold() in {"-head", "-follow", "-speed"}:
+                    i += 1
+                    continue
+                if clean.startswith("--"):
+                    opt_name, has_eq, opt_val = clean.partition("=")
+                    if opt_name in _CURL_DATA_FLAGS or opt_name in _CURL_UPLOAD_FLAGS:
+                        return True
+                    if opt_name == "--request":
+                        method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
+                        if method.casefold() in _UNSAFE_HTTP_METHODS:
                             return True
-                elif clean.startswith("--request=") or clean.startswith("-X="):
-                    method = clean.split("=", 1)[1].casefold()
-                    if method in _UNSAFE_HTTP_METHODS:
-                        return True
-                elif clean.startswith("-X") and len(clean) > 2:
-                    method = clean[2:].casefold()
-                    if method in _UNSAFE_HTTP_METHODS:
-                        return True
+                elif clean.startswith("-") and len(clean) > 1:
+                    chars = clean[1:]
+                    c_idx = 0
+                    while c_idx < len(chars):
+                        ch = chars[c_idx]
+                        if ch in ("d", "T", "F"):
+                            return True
+                        if ch == "X":
+                            val = chars[c_idx + 1 :].removeprefix("=")
+                            if not val and i + 1 < len(args):
+                                val = args[i + 1].strip("\"'")
+                            if val.casefold() in _UNSAFE_HTTP_METHODS:
+                                return True
+                            break
+                        if ch in _CURL_SHORT_OPTS_WITH_ARG:
+                            val = chars[c_idx + 1 :]
+                            if not val and i + 1 < len(args):
+                                i += 1
+                            break
+                        c_idx += 1
                 i += 1
 
         elif executable == "wget":
@@ -778,32 +1017,34 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
             while i < len(args):
                 arg = args[i]
                 clean = arg.strip("\"'")
-                if clean in _WGET_DATA_FLAGS:
-                    return True
-                if clean.startswith("--method="):
-                    method = clean.split("=", 1)[1].casefold()
-                    if method in _UNSAFE_HTTP_METHODS:
+                if clean.startswith("--"):
+                    opt_name, has_eq, opt_val = clean.partition("=")
+                    if opt_name in _WGET_DATA_FLAGS:
                         return True
-                elif clean == "--method":
-                    if i + 1 < len(args):
-                        method = args[i + 1].strip("\"'").casefold()
-                        if method in _UNSAFE_HTTP_METHODS:
+                    if opt_name == "--method":
+                        method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
+                        if method.casefold() in _UNSAFE_HTTP_METHODS:
                             return True
                 i += 1
 
         elif executable in {"http", "https"}:
-            if stdin_piped:
+            cleaned_args = [a.strip("\"'") for a in args]
+            if stdin_piped and "--ignore-stdin" not in cleaned_args:
                 return True
             i = 0
             while i < len(args):
                 arg = args[i]
                 clean = arg.strip("\"'")
-                if clean == "<" or clean.startswith("<"):
+                if (
+                    clean in ("<", "<<", "<<<") or clean.startswith(("<", "<<", "<<<"))
+                ) and "--ignore-stdin" not in cleaned_args:
                     return True
                 if clean.casefold() in _UNSAFE_HTTP_METHODS:
                     return True
-                if clean in _HTTPIE_BODY_FLAGS:
-                    return True
+                if clean.startswith("--raw"):
+                    opt_name, _, _ = clean.partition("=")
+                    if opt_name == "--raw":
+                        return True
                 if _is_httpie_body_item(arg):
                     return True
                 i += 1

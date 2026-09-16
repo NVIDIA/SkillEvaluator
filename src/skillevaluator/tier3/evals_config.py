@@ -69,6 +69,12 @@ _GKE_INFRASTRUCTURE_KWARGS: frozenset[str] = frozenset(
         "memory_limit_multiplier",
     }
 )
+_SKILL_SAFE_ENVIRONMENT_KWARGS: frozenset[str] = frozenset(
+    {
+        "workload_profile",
+        "custom_setting",
+    }
+)
 
 
 class EvalsConfigError(ValueError):
@@ -429,10 +435,10 @@ def _environment_kwargs(value: Any, config_path: Path) -> dict[str, str]:
         if not isinstance(key, str) or not key.strip():
             raise EvalsConfigError(f"{config_path}: {field} keys must be non-empty strings")
         stripped_key = key.strip()
-        if stripped_key in _GKE_INFRASTRUCTURE_KWARGS:
+        if stripped_key not in _SKILL_SAFE_ENVIRONMENT_KWARGS:
             raise EvalsConfigError(
                 f"{config_path}: {field}.{stripped_key} cannot be configured in skill evals/config.yml. "
-                "Infrastructure settings must be provided via CLI flags or host environment variables."
+                "Infrastructure, network, mount, endpoint, and credential settings must be provided via CLI flags (--ek) or host environment variables."
             )
         if not isinstance(val, str) or not val.strip():
             raise EvalsConfigError(f"{config_path}: {field}.{stripped_key} must be a non-empty string")

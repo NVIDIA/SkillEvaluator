@@ -13,9 +13,14 @@ _SECRET_KEY_PARTS = {
     "auth",
     "authorization",
     "bearer",
+    "cert",
+    "certificate",
+    "cookie",
     "credential",
     "credentials",
     "key",
+    "oauth",
+    "passphrase",
     "password",
     "private",
     "secret",
@@ -35,7 +40,8 @@ _TOKEN_COUNT_KEYS = {
 }
 _SENSITIVE_KEY_PATTERN = (
     r"[a-z0-9_.-]*(?:api[_-]?key|secret|password|credential|authorization|bearer|token|"
-    r"access[_-]?key|session[_-]?token|private[_-]?key|service[_-]?account[_-]?key)[a-z0-9_.-]*"
+    r"access[_-]?key|session[_-]?token|private[_-]?key|service[_-]?account[_-]?key|"
+    r"cookie|session[_-]?cookie|client[_-]?certificate|certificate|cert|passphrase|oauth)[a-z0-9_.-]*"
 )
 _AUTH_HEADER_RE = re.compile(r"(?im)\b(?P<key>(?:proxy-)?authorization)\s*:\s*(?P<scheme>[A-Za-z]+)\s+[^\r\n]+")
 _SENSITIVE_QUOTED_ASSIGNMENT_RE = re.compile(

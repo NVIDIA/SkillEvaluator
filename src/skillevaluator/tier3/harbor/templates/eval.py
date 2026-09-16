@@ -1238,6 +1238,85 @@ def _is_native_openai_chat_url(provider, request_url):
     )
 
 
+def _is_vertex_openapi_url(request_url):
+    """Return whether a request URL targets a Vertex AI OpenAPI endpoint."""
+    if not isinstance(request_url, str) or not request_url.strip():
+        return False
+    try:
+        parsed = urlsplit(request_url.strip())
+    except Exception:
+        return False
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if not re.fullmatch(r"(?:[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)?-)?aiplatform\.googleapis\.com", host):
+        return False
+    path = parsed.path.rstrip("/")
+    return "/endpoints/openapi" in path
+
+
+def _get_vertex_access_token(timeout_seconds=10.0):
+    """Acquire or refresh a Google Cloud access token in-process for Vertex OpenAPI grading.
+
+    Attempts discovery via:
+    1. google.auth.default() (standard ADC library if installed)
+    2. GKE / GCE metadata server at http://169.254.169.254 (zero-dependency container ADC)
+    3. gcloud auth print-access-token (subprocess CLI fallback)
+    """
+    # 1. google.auth
+    try:
+        import google.auth
+        import google.auth.transport.requests
+
+        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        request = google.auth.transport.requests.Request()
+        credentials.refresh(request)
+        if getattr(credentials, "token", None):
+            return str(credentials.token)
+    except Exception:
+        pass
+
+    # 2. GKE / GCE metadata server
+    try:
+        metadata_url = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
+        req = urllib.request.Request(
+            metadata_url,
+            headers={"Metadata-Flavor": "Google"},
+        )
+        with urllib.request.urlopen(req, timeout=min(timeout_seconds, 5.0)) as resp:  # nosec B310
+            data = json.loads(resp.read().decode("utf-8"))
+            token = data.get("access_token")
+            if token and isinstance(token, str):
+                return token.strip()
+    except Exception:
+        pass
+
+    # 3. gcloud CLI fallback
+    import shutil
+    import subprocess
+
+    gcloud_path = shutil.which("gcloud")
+    if gcloud_path:
+        for args in (
+            [gcloud_path, "auth", "application-default", "print-access-token"],
+            [gcloud_path, "auth", "print-access-token"],
+        ):
+            try:
+                proc = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip()
+            except Exception:
+                pass
+
+    return None
+
+
 def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=None, request_url=None):
     resolved_provider = _public_provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
@@ -1552,8 +1631,26 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
             )
             # request_url was validated by _resolve_url() before this request.
-            with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-                body = json.loads(response.read())
+            try:
+                with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
+                    body = json.loads(response.read())
+            except urllib.error.HTTPError as http_err:
+                if http_err.code == 401 and _is_vertex_openapi_url(request_url):
+                    logger.info("Vertex AI OpenAPI 401 received; attempting in-process ADC token refresh")
+                    refreshed_token = _get_vertex_access_token()
+                    if refreshed_token and refreshed_token != api_key:
+                        api_key = refreshed_token
+                        if "OPENAI_API_KEY" in os.environ:
+                            os.environ["OPENAI_API_KEY"] = refreshed_token
+                        if "SKILL_EVAL_LLM_API_KEY" in os.environ:
+                            os.environ["SKILL_EVAL_LLM_API_KEY"] = refreshed_token
+                        request.add_header("Authorization", f"Bearer {refreshed_token}")
+                        with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
+                            body = json.loads(response.read())
+                    else:
+                        raise
+                else:
+                    raise
             content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
             if content is None:
                 content = ""

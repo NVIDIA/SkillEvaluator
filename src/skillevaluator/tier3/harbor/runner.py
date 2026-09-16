@@ -33,6 +33,7 @@ from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
     ProviderConfig,
     ProviderConfigurationError,
+    _get_google_access_token,
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
@@ -46,6 +47,7 @@ from skillevaluator.tier3.eval_core.secret_redaction import (
 )
 from skillevaluator.tier3.evals_config import (
     _GKE_INFRASTRUCTURE_KWARGS,
+    _SKILL_SAFE_ENVIRONMENT_KWARGS,
     EvalsConfigError,
     load_evals_config,
 )
@@ -338,8 +340,47 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
 _SENSITIVE_EK_KEY_RE = re.compile(
     r"(?i)(?:^|.*[_-])(?:api[_-]?key|secret|password|credential|credentials|authorization|bearer|"
     r"private[_-]?key|service[_-]?account[_-]?key|access[_-]?key|session[_-]?token|auth[_-]?token|"
+    r"cookie|session[_-]?cookie|client[_-]?certificate|client[_-]?cert|certificate|cert|passphrase|oauth|"
     r"(?:access|refresh|id|auth|user|client|secret)[_-]?tokens?)(?:$|[_-].*)"
 )
+_SAFE_BACKEND_CONSTRUCTOR_KWARGS: dict[str, frozenset[str]] = {
+    "gke": frozenset(
+        {
+            "cluster_name",
+            "region",
+            "namespace",
+            "registry_location",
+            "registry_name",
+            "project_id",
+            "cloud_build_machine_type",
+            "cloud_build_disk_size_gb",
+            "memory_limit_multiplier",
+            "cpu_request",
+            "cpu_limit",
+            "memory_request",
+            "memory_limit",
+            "ephemeral_storage_request",
+            *_SKILL_SAFE_ENVIRONMENT_KWARGS,
+        }
+    ),
+    "docker": frozenset(
+        {
+            "image",
+            "container_name",
+            "network_name",
+            "pull_policy",
+            *_SKILL_SAFE_ENVIRONMENT_KWARGS,
+        }
+    ),
+    "daytona": frozenset(
+        {
+            "target",
+            "snapshot",
+            "workspace_id",
+            *_SKILL_SAFE_ENVIRONMENT_KWARGS,
+        }
+    ),
+}
 _NON_CREDENTIAL_TOKEN_KEY_RE = re.compile(
     r"^(?:max|min|num|total|count|prompt|completion|input|output|request)?[_-]?tokens$|"
     r"^(?:max|min|num|total|count|prompt|completion|input|output)[_-]token$|"
@@ -566,12 +607,19 @@ def build_harbor_run_command(
         command.extend(["-a", agent, "--env", env_mode])
 
     if env_mode != ENV_MODE_LOCAL:
+        safe_keys = _SAFE_BACKEND_CONSTRUCTOR_KWARGS.get(env_mode, _SKILL_SAFE_ENVIRONMENT_KWARGS)
         for key, value in sorted((environment_kwargs or {}).items()):
             str_val = str(value)
-            if _is_sensitive_ek_key(key) or any(pattern.search(str_val) for pattern in _SENSITIVE_EK_VALUE_PATTERNS):
+            normalized_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
+            is_benign_token = bool(_NON_CREDENTIAL_TOKEN_KEY_RE.search(normalized_key))
+            if (
+                (key not in safe_keys and not is_benign_token)
+                or _is_sensitive_ek_key(key)
+                or any(pattern.search(str_val) for pattern in _SENSITIVE_EK_VALUE_PATTERNS)
+            ):
                 raise ValueError(
                     f"Sensitive key or value detected in environment_kwargs: {key}. "
-                    "Credentials must not be passed via CLI flags or process arguments."
+                    "Credentials and disallowed settings must not be passed via CLI flags or process arguments."
                 )
             command.extend(["--ek", f"{key}={value}"])
 
@@ -607,17 +655,23 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
     environment.update(
         {name: value for name in _VERIFIER_JUDGE_MODEL_ENV_VARS if (value := os.environ.get(name, "").strip())}
     )
+    if getattr(config, "credential_env", None) == "ADC":
+        fresh_token = _get_google_access_token()
+        api_key = fresh_token or getattr(config, "api_key", None) or ""
+    else:
+        api_key = getattr(config, "api_key", None) or ""
+
     if config.provider == "anthropic":
-        environment["ANTHROPIC_API_KEY"] = config.api_key or ""
+        environment["ANTHROPIC_API_KEY"] = api_key
         if config.base_url:
             environment["ANTHROPIC_BASE_URL"] = config.base_url
     elif config.provider == "bedrock":
         environment["AWS_REGION"] = config.region or "us-west-2"
         environment.update({name: os.environ[name] for name in _BEDROCK_HOST_ENV_VARS if os.environ.get(name)})
     elif config.provider == "nv_build":
-        environment["NVIDIA_API_KEY"] = config.api_key or ""
+        environment["NVIDIA_API_KEY"] = api_key
     else:
-        environment["OPENAI_API_KEY"] = config.api_key or ""
+        environment["OPENAI_API_KEY"] = api_key
         environment["OPENAI_BASE_URL"] = config.base_url or ""
     return {name: value for name, value in environment.items() if value}
 
@@ -824,8 +878,26 @@ def _validate_agent_provider_credentials(
     return []
 
 
+def _unwrap_kubeconfig_node(obj: Any) -> Any:
+    """Recursively unwrap Kubernetes ConfigNode wrappers into standard Python structures."""
+    if hasattr(obj, "value"):
+        return _unwrap_kubeconfig_node(obj.value)
+    if isinstance(obj, dict):
+        return {k: _unwrap_kubeconfig_node(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_unwrap_kubeconfig_node(item) for item in obj]
+    return obj
+
+
+_MERGED_KUBECONFIG_CACHE: dict[str, Path] = {}
+
+
 def _resolve_single_kubeconfig(raw_kubeconfig: str | None = None) -> Path | None:
-    """Resolve a single existing kubeconfig file path from KUBECONFIG or default location."""
+    """Resolve a single existing kubeconfig file path from KUBECONFIG or default location.
+
+    If multiple path entries are specified, merge them into a single temporary kubeconfig
+    file preserving all clusters, contexts, and credentials, restricted to permissions 0600.
+    """
     raw = raw_kubeconfig if raw_kubeconfig is not None else os.environ.get("KUBECONFIG")
     if raw:
         valid_candidates: list[Path] = []
@@ -836,14 +908,49 @@ def _resolve_single_kubeconfig(raw_kubeconfig: str | None = None) -> Path | None
                 if candidate.is_file():
                     valid_candidates.append(candidate)
         if valid_candidates:
-            if len(valid_candidates) > 1:
-                logger.warning(
-                    "Multiple kubeconfig files found in KUBECONFIG (%s). "
-                    "Harbor supports only a single kubeconfig; using the first: %s",
-                    raw,
-                    valid_candidates[0],
+            if len(valid_candidates) == 1:
+                return valid_candidates[0]
+            paths_str = os.pathsep.join(str(p) for p in valid_candidates)
+            cached_path = _MERGED_KUBECONFIG_CACHE.get(paths_str)
+            if cached_path is not None and cached_path.is_file():
+                return cached_path
+            try:
+                import atexit
+                import tempfile
+
+                import yaml
+                from kubernetes.config.kube_config import KubeConfigMerger
+
+                merger = KubeConfigMerger(paths_str)
+                merged_dict = _unwrap_kubeconfig_node(merger.config)
+                if not merged_dict or not isinstance(merged_dict, dict):
+                    logger.error("KubeConfigMerger produced empty or invalid configuration from %s", paths_str)
+                    return None
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix="merged_kubeconfig_",
+                    suffix=".yaml",
+                    delete=False,
+                ) as handle:
+                    merged_path = Path(handle.name)
+                    yaml.safe_dump(merged_dict, handle, default_flow_style=False)
+                    merged_path.chmod(0o600)
+                _MERGED_KUBECONFIG_CACHE[paths_str] = merged_path
+                atexit.register(lambda: merged_path.unlink(missing_ok=True))
+                logger.info(
+                    "Merged %d kubeconfig files into temporary file %s",
+                    len(valid_candidates),
+                    merged_path,
                 )
-            return valid_candidates[0]
+                return merged_path
+            except Exception as exc:
+                logger.error(
+                    "Failed to merge multiple kubeconfigs (%s): %s",
+                    raw,
+                    exc,
+                )
+                return None
         return None
     default_path = (Path.home() / ".kube" / "config").resolve()
     return default_path if default_path.is_file() else None
@@ -878,8 +985,6 @@ def _check_prerequisites(
             gke_errors.append(
                 "GKE requires the gcloud CLI to be installed. See https://cloud.google.com/sdk/docs/install"
             )
-        if not shutil.which("kubectl"):
-            gke_errors.append("GKE requires the kubectl CLI to be installed. Run 'gcloud components install kubectl'.")
         try:
             import kubernetes  # noqa: F401
         except ImportError:
@@ -890,7 +995,7 @@ def _check_prerequisites(
             gke_errors.append(
                 "GKE requires Kubernetes credentials. Run "
                 "'gcloud container clusters get-credentials <CLUSTER> "
-                "--region <REGION>' to configure kubectl, or set the "
+                "--region <REGION>' to configure credentials, or set the "
                 "KUBECONFIG environment variable."
             )
         missing_kwargs = _missing_gke_kwargs(environment_kwargs or {})
@@ -901,16 +1006,13 @@ def _check_prerequisites(
             )
         if verify_live_cluster and not gke_errors:
             try:
-                probe = subprocess.run(
-                    ["kubectl", "cluster-info"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-                if probe.returncode != 0:
-                    detail = (probe.stderr or probe.stdout).strip()
-                    gke_errors.append(f"GKE cluster probe failed: {detail}")
+                from kubernetes import client as k8s_client
+                from kubernetes import config as k8s_config
+
+                resolved_kc = _resolve_single_kubeconfig()
+                k8s_config.load_kube_config(config_file=str(resolved_kc) if resolved_kc else None)
+                api = k8s_client.CoreV1Api()
+                api.get_api_resources(_request_timeout=5.0)
             except Exception as exc:
                 gke_errors.append(f"GKE cluster probe failed: {exc}")
         return gke_errors
@@ -2381,7 +2483,13 @@ def _run_harbor_eval_impl(
         }
         if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
             safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
-        elif not probe.ok and env_mode == "gke" and is_vertex and is_auth_failure and disposition == CredentialProbeDisposition.DEGRADED:
+        elif (
+            not probe.ok
+            and env_mode == "gke"
+            and is_vertex
+            and is_auth_failure
+            and disposition == CredentialProbeDisposition.DEGRADED
+        ):
             safe_detail = "host does not possess Vertex AI credentials; runtime authentication is verified via GKE Workload Identity in-pod"
         credential_validation_targets.append(
             {

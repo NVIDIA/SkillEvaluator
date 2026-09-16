@@ -32,7 +32,12 @@ from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_model_
 @pytest.fixture(autouse=True)
 def _mock_kubernetes_package(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure kubernetes is available as a module for GKE prerequisite tests."""
-    monkeypatch.setitem(sys.modules, "kubernetes", types.ModuleType("kubernetes"))
+    try:
+        import kubernetes.config.kube_config  # noqa: F401
+    except ImportError:
+        k8s = types.ModuleType("kubernetes")
+        k8s.__path__ = []
+        monkeypatch.setitem(sys.modules, "kubernetes", k8s)
 
 
 def _provider(name: str = "openai-compatible", model: str = "google/gemini-3.8-flash") -> ProviderConfig:
@@ -163,15 +168,83 @@ def test_build_harbor_run_command_gke_defaults_claude_code_import_path():
     assert "--agent" not in command
 
 
-def test_check_prerequisites_gke_reports_missing_cli_tools(monkeypatch: pytest.MonkeyPatch):
-    """Fail prerequisites check if gcloud or kubectl is missing from PATH."""
-    monkeypatch.setattr(runner.shutil, "which", lambda cmd: None if cmd == "kubectl" else "/usr/bin/" + cmd)
-    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
-    assert any("kubectl" in err for err in errors)
-
+def test_check_prerequisites_gke_reports_missing_gcloud(monkeypatch: pytest.MonkeyPatch):
+    """Fail prerequisites check if gcloud is missing from PATH."""
     monkeypatch.setattr(runner.shutil, "which", lambda cmd: None if cmd == "gcloud" else "/usr/bin/" + cmd)
     errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
     assert any("gcloud" in err for err in errors)
+
+
+def test_check_prerequisites_gke_does_not_require_kubectl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Verify missing kubectl binary does not fail GKE prerequisites since Harbor uses Python client."""
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: None if cmd == "kubectl" else "/usr/bin/" + cmd)
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text("apiVersion: v1", encoding="utf-8")
+    monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+
+    errors = _check_prerequisites(env_mode="gke", environment_kwargs=COMPLETE_GKE_KWARGS)
+    assert not any("kubectl" in err for err in errors)
+
+
+def test_resolve_single_kubeconfig_merges_split_kubeconfig(tmp_path: Path):
+    """Merge multiple KUBECONFIG files preserving clusters, users, and contexts."""
+    import yaml
+
+    cluster_file = tmp_path / "cluster.yaml"
+    user_file = tmp_path / "user.yaml"
+
+    cluster_file.write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "v1",
+                "clusters": [{"name": "test-cluster", "cluster": {"server": "https://127.0.0.1:6443"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    user_file.write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "v1",
+                "users": [{"name": "test-user", "user": {"token": "secret-token"}}],
+                "contexts": [{"name": "test-ctx", "context": {"cluster": "test-cluster", "user": "test-user"}}],
+                "current-context": "test-ctx",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    split_kubeconfig = f"{cluster_file}{os.pathsep}{user_file}"
+    merged_path = _resolve_single_kubeconfig(split_kubeconfig)
+
+    assert merged_path is not None
+    assert merged_path.is_file()
+    assert merged_path != cluster_file
+    assert merged_path != user_file
+
+    with merged_path.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    assert data.get("current-context") == "test-ctx"
+    assert any(c["name"] == "test-cluster" for c in data.get("clusters", []))
+    assert any(u["name"] == "test-user" for u in data.get("users", []))
+    assert any(ctx["name"] == "test-ctx" for ctx in data.get("contexts", []))
+
+    # Verify caching returns the same file without re-merging
+    second_path = _resolve_single_kubeconfig(split_kubeconfig)
+    assert second_path == merged_path
+
+
+def test_resolve_single_kubeconfig_merge_failure_returns_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Verify merge failures return None rather than falling back to a partial config."""
+    f1 = tmp_path / "c1.yaml"
+    f2 = tmp_path / "c2.yaml"
+    f1.write_text("invalid: yaml: [", encoding="utf-8")
+    f2.write_text("invalid: yaml: [", encoding="utf-8")
+    split_kubeconfig = f"{f1}{os.pathsep}{f2}"
+
+    result = _resolve_single_kubeconfig(split_kubeconfig)
+    assert result is None
 
 
 def test_check_prerequisites_gke_reports_missing_kubeconfig(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -213,16 +286,17 @@ def test_check_prerequisites_gke_live_probe(monkeypatch: pytest.MonkeyPatch, tmp
     kubeconfig.write_text("apiVersion: v1", encoding="utf-8")
     monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
 
-    def fake_run(cmd, **kwargs):
-        return subprocess.CompletedProcess(cmd, returncode=1, stderr="Connection refused")
+    class FakeCoreV1Api:
+        def get_api_resources(self, **_kwargs):
+            raise RuntimeError("Connection refused")
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", FakeCoreV1Api)
     errors = _check_prerequisites(
         env_mode="gke",
         environment_kwargs=COMPLETE_GKE_KWARGS,
         verify_live_cluster=True,
     )
-    assert any("GKE cluster probe failed" in err for err in errors)
+    assert any("unreachable" in err.lower() or "probe failed" in err.lower() for err in errors)
 
 
 def test_check_prerequisites_gke_reports_missing_kubernetes_package(
@@ -414,16 +488,49 @@ def test_docker_mode_strictly_rejects_vertex_ai(monkeypatch: pytest.MonkeyPatch)
     assert "vertex ai live agents do not support docker mode" in errors[0]
 
 
-@pytest.mark.parametrize("sensitive_key", ["api_key", "secret_token", "access_password", "my_secret"])
+@pytest.mark.parametrize(
+    "sensitive_key",
+    [
+        "api_key",
+        "secret_token",
+        "access_password",
+        "my_secret",
+        "cookie",
+        "session_cookie",
+        "client_certificate",
+        "passphrase",
+        "oauth",
+        "client_cert",
+        "private_key",
+    ],
+)
 def test_build_harbor_run_command_rejects_sensitive_kwargs(sensitive_key: str):
     """Reject environment kwargs containing credentials to protect the OS process table."""
-    with pytest.raises(ValueError, match=r"Sensitive key or value detected in environment_kwargs"):
+    with pytest.raises(
+        ValueError,
+        match=r"(?:Sensitive|disallowed) key or value detected in environment_kwargs",
+    ):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="claude-code",
             job_name="gke-job",
             env_mode="gke",
             environment_kwargs={**COMPLETE_GKE_KWARGS, sensitive_key: "forbidden"},
+        )
+
+
+def test_build_harbor_run_command_rejects_unlisted_backend_kwargs():
+    """Reject backend kwargs not in the safe constructor allowlist for the backend."""
+    with pytest.raises(
+        ValueError,
+        match=r"(?:Sensitive|disallowed) key or value detected in environment_kwargs",
+    ):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="claude-code",
+            job_name="gke-job",
+            env_mode="gke",
+            environment_kwargs={**COMPLETE_GKE_KWARGS, "unrecognized_constructor_param": "val"},
         )
 
 
@@ -732,18 +839,29 @@ def test_parse_environment_kwargs_permits_benign_token_keys(benign_token_key: st
 
 
 def test_resolve_single_kubeconfig_multi_path(tmp_path: Path) -> None:
-    """Resolve the first valid file path from a multi-path KUBECONFIG string."""
+    """Resolve and merge valid file paths from a multi-path KUBECONFIG string."""
+    import yaml
+
     missing1 = tmp_path / "missing1" / "config"
     valid1 = tmp_path / "valid1" / "config"
     valid2 = tmp_path / "valid2" / "config"
     valid1.parent.mkdir(parents=True)
-    valid1.write_text("kubeconfig-1", encoding="utf-8")
+    valid1.write_text(
+        yaml.safe_dump({"apiVersion": "v1", "clusters": [{"name": "c1", "cluster": {"server": "https://c1"}}]}),
+        encoding="utf-8",
+    )
     valid2.parent.mkdir(parents=True)
-    valid2.write_text("kubeconfig-2", encoding="utf-8")
+    valid2.write_text(
+        yaml.safe_dump({"apiVersion": "v1", "users": [{"name": "u1", "user": {"token": "t1"}}]}),
+        encoding="utf-8",
+    )
 
     multi = f"{missing1}{os.pathsep}{valid1}{os.pathsep}{valid2}"
     resolved = _resolve_single_kubeconfig(multi)
-    assert resolved == valid1
+    assert resolved is not None
+    assert resolved.is_file()
+    assert resolved != valid1
+    assert resolved != valid2
 
 
 def test_resolve_single_kubeconfig_all_missing(tmp_path: Path) -> None:
@@ -773,6 +891,25 @@ def test_harbor_subprocess_environment_normalizes_multipath_kubeconfig(tmp_path:
 
     assert env.get("KUBECONFIG") == str(valid_cfg)
     assert os.pathsep not in env.get("KUBECONFIG", "")
+
+
+def test_provider_environment_refreshes_adc_token_when_credential_env_is_adc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runner re-acquires a fresh ADC token when provider uses ADC credential_env."""
+    provider = ProviderConfig(
+        provider="openai",
+        model="google/gemini-3.8-flash",
+        api_key="stale-cached-token",
+        base_url="https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi",
+        litellm_model="openai/google/gemini-3.8-flash",
+        credential_env="ADC",
+    )
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda: "fresh-host-adc-token")
+
+    env = runner._provider_environment(provider)
+
+    assert env["OPENAI_API_KEY"] == "fresh-host-adc-token"
 
 
 def test_harbor_gke_packaging_dependencies() -> None:

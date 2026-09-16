@@ -511,7 +511,9 @@ def test_resolve_llm_provider_vertex_openapi_adc_openai_alias(monkeypatch: pytes
     assert config.provider == "openai"
     assert config.api_key == "mock-adc-token"
     assert config.credential_env == "ADC"
-    assert "OPENAI_API_KEY" not in config.child_environment()
+    child_env = config.child_environment()
+    assert child_env["OPENAI_API_KEY"] == "mock-adc-token"
+    assert child_env["OPENAI_BASE_URL"] == base_url
 
 
 def test_resolve_llm_provider_vertex_openapi_adc_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -561,4 +563,3 @@ def test_openai_provider_missing_both_keys_raises() -> None:
     """Raise ProviderConfigurationError when neither OPENAI_API_KEY nor SKILL_EVAL_LLM_API_KEY is set."""
     with pytest.raises(ProviderConfigurationError, match="OPENAI_API_KEY or SKILL_EVAL_LLM_API_KEY is required"):
         resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "openai"})
-

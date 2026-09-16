@@ -4443,7 +4443,7 @@ def test_vertex_openapi_probe_missing_token(monkeypatch: pytest.MonkeyPatch):
     assert result.ok is False
     assert result.failure_kind == "authentication"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
-    assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="gke") == "degraded"
+    assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="gke") == "fatal"
 
 
 def test_vertex_openapi_probe_timeout(monkeypatch: pytest.MonkeyPatch):
@@ -4466,3 +4466,24 @@ def test_vertex_openapi_probe_timeout(monkeypatch: pytest.MonkeyPatch):
     assert result.ok is False
     assert result.failure_kind == "unavailable"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
+
+
+def test_vertex_openapi_probe_authorization_failure_fatal_in_gke():
+    """Verify HTTP 403 on Vertex OpenAPI probe remains FATAL in GKE mode."""
+    provider = ProviderConfig(
+        "openai-compatible",
+        "google/gemini-3.8-flash",
+        "mock-token",
+        "https://aiplatform.googleapis.com/v1beta1/projects/test-proj/locations/global/endpoints/openapi",
+        "openai-compatible/google/gemini-3.8-flash",
+    )
+    result = runtime_preflight.ModelProbeResult(
+        ok=False,
+        provider=provider.provider,
+        model=provider.model,
+        detail="Forbidden: missing aiplatform.endpoints.predict",
+        failure_kind="authorization",
+        http_status=403,
+    )
+    assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="gke") == "fatal"
+    assert runtime_preflight.credential_probe_disposition(provider, result, env_mode="") == "fatal"

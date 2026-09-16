@@ -796,7 +796,8 @@ def credential_probe_disposition(
 
     if (
         env_mode == "gke"
-        and is_vertex
+        and is_claude_vertex
+        and not is_vertex_openapi
         and failure_kind
         in {
             ModelCatalogFailureKind.AUTHENTICATION,

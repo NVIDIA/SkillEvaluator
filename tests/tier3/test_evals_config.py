@@ -219,6 +219,37 @@ harbor:
         load_evals_config(skill)
 
 
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "network_block_all",
+        "langsmith_endpoint",
+        "extra_docker_compose",
+        "arbitrary_backend_knob",
+        "cookie",
+        "oauth",
+    ],
+)
+def test_load_evals_config_blocked_backend_security_controls(tmp_path, forbidden_key):
+    """Verify skills can only configure keys from the safe allowlist."""
+    skill = tmp_path / "forbidden-skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"""\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    {forbidden_key}: some-value
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        EvalsConfigError,
+        match=rf"harbor\.environment_kwargs\.{forbidden_key} cannot be configured in skill evals/config\.yml",
+    ):
+        load_evals_config(skill)
+
+
 def test_validate_skill_evals_does_not_warn_expected_script_for_guide_only_skill(tmp_path):
     skill = tmp_path / "guide-skill"
     (skill / "evals").mkdir(parents=True)

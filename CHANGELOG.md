@@ -16,6 +16,9 @@ All notable changes to SkillEvaluator are documented in this file.
   (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
   with redirect-blocking preflight probes and case-insensitive model alias
   resolution.
+- Catalog validation now writes `catalog-summary.json` at the reports root with
+  per-skill pass/fail status, optional severity rollups from child JSON reports,
+  and paths to per-skill report directories.
 - `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` names hosts whose model catalog may
   be read over plain HTTP. Catalog reads still require HTTPS for every other
   non-loopback host. Entries match one whole host as written, with no name

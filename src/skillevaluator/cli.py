@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import math
+from contextvars import ContextVar
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -323,6 +326,29 @@ def _report_options(func):
         "The compact default view writes html+json unless -r is passed "
         "explicitly, which is honored exactly (including cli).",
     )(func)
+
+
+_validate_json_report_var: ContextVar[str | None] = ContextVar(
+    "_validate_json_report_var",
+    default=None,
+)
+
+
+def _effective_report_formats(report_formats: tuple[str, ...], *, quiet: bool) -> tuple[str, ...]:
+    """Resolve the report formats ``validate`` will actually emit."""
+    if quiet and not _report_formats_explicit():
+        return tuple(dict.fromkeys([fmt for fmt in report_formats if fmt != "cli"] + ["html", "json"]))
+    return report_formats
+
+
+def _record_validate_json_report(report_name: str | None) -> None:
+    _validate_json_report_var.set(report_name)
+
+
+def _consume_validate_json_report() -> str | None:
+    report_name = _validate_json_report_var.get()
+    _validate_json_report_var.set(None)
+    return report_name
 
 
 def _report_formats_explicit() -> bool:
@@ -692,6 +718,88 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
     console_.print(Text.assemble(("      reports     ", MUTED), (f"{reports_root}/<skill>/", MUTED)))
 
 
+CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
+
+
+def _catalog_skill_entry(
+    skill_name: str,
+    skill_report_dir: Path,
+    *,
+    passed: bool,
+    reason: str,
+    json_report_name: str | None = None,
+) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "name": skill_name,
+        "passed": passed,
+        "report_dir": skill_name,
+    }
+    if not passed:
+        entry["reason"] = reason
+
+    if json_report_name:
+        json_report = skill_report_dir / json_report_name
+    else:
+        return entry
+
+    if not json_report.is_file():
+        return entry
+
+    entry["json_report"] = json_report.name
+    try:
+        payload = json.loads(json_report.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return entry
+    if not isinstance(payload, dict):
+        return entry
+
+    for key in ("overall_passed", "overall_status", "incomplete_scans", "severity_counts"):
+        if key in payload:
+            entry[key] = payload[key]
+    return entry
+
+
+def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) -> Path:
+    """Write a machine-readable fleet rollup for catalog validation."""
+    from skillevaluator.reporting.base import _write_report_atomically
+
+    total = len(skills)
+    passed = sum(1 for skill in skills if skill.get("passed"))
+    failed = total - passed
+    severity_totals = {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+    }
+    for skill in skills:
+        counts = skill.get("severity_counts")
+        if not isinstance(counts, dict):
+            continue
+        for key in severity_totals:
+            value = counts.get(key)
+            if isinstance(value, int):
+                severity_totals[key] += value
+
+    summary: dict[str, object] = {
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "overall_passed": failed == 0,
+        "reports_root": output_dir.name,
+        "summary_path": CATALOG_SUMMARY_FILENAME,
+        "severity_totals": severity_totals,
+        "skills": skills,
+        "generated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    output_path = output_dir / CATALOG_SUMMARY_FILENAME
+    _write_report_atomically(
+        output_path,
+        json.dumps(summary, indent=2, default=str, allow_nan=False).encode("utf-8"),
+    )
+    return output_path
+
+
 def _validate_catalog(
     ctx: click.Context,
     *,
@@ -712,13 +820,15 @@ def _validate_catalog(
 
     skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
     failures: list[tuple[str, str]] = []
+    skill_reports: dict[str, str | None] = {}
     for index, skill_dir in enumerate(skill_dirs, start=1):
         _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
+        skill_output = output_dir / skill_dir.name
         overrides = {
             **ctx.params,
             "target_path": skill_dir,
             "content_type": "skill",
-            "output_dir": output_dir / skill_dir.name,
+            "output_dir": skill_output,
         }
         try:
             ctx.invoke(validate, **overrides)
@@ -726,6 +836,19 @@ def _validate_catalog(
             failures.append((skill_dir.name, str(getattr(exc, "message", exc))))
         except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
             failures.append((skill_dir.name, f"unexpected error: {exc}"))
+        skill_reports[skill_dir.name] = _consume_validate_json_report()
+    failure_map = dict(failures)
+    skill_entries = [
+        _catalog_skill_entry(
+            skill_dir.name,
+            output_dir / skill_dir.name,
+            passed=skill_dir.name not in failure_map,
+            reason=failure_map.get(skill_dir.name, ""),
+            json_report_name=skill_reports.get(skill_dir.name),
+        )
+        for skill_dir in skill_dirs
+    ]
+    _write_catalog_summary(output_dir, skill_entries)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     if failures:
         raise click.ClickException(
@@ -1165,6 +1288,7 @@ def validate(
     validated against its public contract. Quality/lint/version checks are
     skill-only and skipped for plugins.
     """
+    _record_validate_json_report(None)
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
@@ -1452,10 +1576,7 @@ def validate(
     # the summary; the files carry the findings) and points at them from the
     # footer. An EXPLICIT -r is a contract and is honored exactly — including
     # "cli", which renders the full Rich report below the pipeline view.
-    if quiet and not _report_formats_explicit():
-        effective_formats = tuple(dict.fromkeys([f for f in report_formats if f != "cli"] + ["html", "json"]))
-    else:
-        effective_formats = report_formats
+    effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
     emit_reports(
         results,
@@ -1468,6 +1589,9 @@ def validate(
         announce_paths=not quiet,
         sarif_scan_root=target_path,
         sarif_repository_root=sarif_repository_root,
+    )
+    _record_validate_json_report(
+        f"{report_basename_value}.json" if "json" in effective_formats else None
     )
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on

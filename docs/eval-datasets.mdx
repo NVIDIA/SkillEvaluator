@@ -120,7 +120,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 
 | Flag | Effect |
 | --- | --- |
-| `--full` | Generate the full bucket set (up to four cases) instead of one. Template mode emits three cases when no authored off-skill prompt is available. |
+| `--full` | Generate the full bucket set instead of one. LLM mode targets four cases; `--no-llm` template mode emits three cases unless `EVAL.md` includes a negative prompt. |
 | `--no-llm` | Use local templates only — no API key required. |
 | `--dry-run` | Preview without writing. |
 | `--force` | Overwrite existing `evals/evals.json`. |
@@ -149,10 +149,10 @@ you wrote.
 
 ### The four case buckets
 
-`--full` targets one case per bucket when a safe negative prompt is available.
-The mix matters: the negative case protects against a skill that triggers when
-it should not. In `--no-llm` template mode, the negative bucket is omitted
-unless eval guidance (for example `evals/EVAL.md`) includes an off-skill prompt.
+`--full` with an LLM provider targets one case per bucket, including a negative
+case that should not trigger the skill. In `--no-llm` template mode, the negative
+bucket is omitted unless eval guidance includes an off-skill prompt under a
+supported negative heading (see below).
 
 | Bucket | Intent |
 | --- | --- |
@@ -164,7 +164,7 @@ unless eval guidance (for example `evals/EVAL.md`) includes an off-skill prompt.
 ### Guide generation with EVAL.md
 
 Place an `EVAL.md` in `evals/` and the generator picks it up automatically.
-Three headings are parsed as structured hints; everything else is general
+Four headings are parsed as structured hints; everything else is general
 context:
 
 ```markdown title="evals/EVAL.md"
@@ -173,6 +173,9 @@ context:
 
 ## Behaviors
 - Expected agent behaviors to verify
+
+## Negative Cases
+- Off-skill prompts for the negative bucket in template `--full` mode
 
 ## Notes
 - General context and constraints

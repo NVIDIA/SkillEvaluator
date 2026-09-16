@@ -347,7 +347,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--full` | off | Generate the full bucket set (up to four cases; template mode omits negative without eval guidance). |
+| `--full` | off | Generate the full four-bucket dataset (LLM). With `--no-llm`, template mode omits the negative bucket without an authored off-skill prompt in `EVAL.md`. |
 | `--no-llm` | off | Use local templates only (no API key needed). |
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |

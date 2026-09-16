@@ -1016,7 +1016,7 @@ def main(argv: Sequence[str] | None = None) -> DatasetGenerationResult:
         epilog="""
 Examples:
   skillevaluator create-eval-dataset ./my-skill              # 1 test case
-  skillevaluator create-eval-dataset ./my-skill --full        # up to 4 test cases (4-bucket)
+  skillevaluator create-eval-dataset ./my-skill --full        # 4-bucket (LLM) or 3-4 template
   skillevaluator create-eval-dataset ./my-skill --no-llm      # Template only
   skillevaluator create-eval-dataset ./my-skill --dry-run     # Preview
   skillevaluator create-eval-dataset ./my-skill --prompt hints.md  # Custom eval guidance
@@ -1038,7 +1038,10 @@ Agent-refined mode (--refine):
     parser.add_argument(
         "--full",
         action="store_true",
-        help="Generate the full bucket set (up to 4 cases; negative only with authored off-skill guidance)",
+        help=(
+            "Generate the full four-bucket dataset (LLM mode). "
+            "With --no-llm, template mode omits the negative bucket without an authored off-skill prompt."
+        ),
     )
     parser.add_argument("--no-llm", action="store_true", help="Use template generation (no API key needed)")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
@@ -1097,7 +1100,10 @@ Agent-refined mode (--refine):
     if skill.get("eval_prompt"):
         print(f"  Eval guidance: {skill['eval_prompt_source']}")
     if args.full:
-        mode_parts = ["full bucket set (up to 4 cases, negative when authored)"]
+        if args.no_llm:
+            mode_parts = ["full bucket set (template; negative when authored in EVAL.md)"]
+        else:
+            mode_parts = ["full bucket set (4 cases via LLM)"]
     else:
         mode_parts = ["simple (1 test case)"]
     if args.refine:

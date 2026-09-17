@@ -8,6 +8,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 log converters now rebuild ATIF trajectories from OpenCode JSON streams
+  (`opencode.txt`) and structured Codex tee logs (`codex.txt`) when
+  `trajectory.json` is missing or empty.
 - Catalog validation now writes `catalog-summary.json` at the reports root with
   per-skill pass/fail status, optional severity rollups from child JSON reports,
   and paths to per-skill report directories.
@@ -61,6 +64,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Harbor ``result.json`` case ids now prefer canonical ``task_id.path`` metadata
+  over repository-prefixed ``task_name`` values when resolving eval entries.
+- Codex log synthesis maps ``web_search`` action payloads and ``collab_tool_call``
+  thread items into ATIF, and error-recovery checks recognize ``status=failed`` /
+  ``exit_code=`` terminal evidence emitted by Codex converters.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).

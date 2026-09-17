@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-17
+
 ### Added
 
 - Catalog validation now writes `catalog-summary.json` at the reports root with
@@ -104,6 +106,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories
   instead of any path containing those substrings, so files like `latest.py`
   are scanned.
+- Gitleaks CI now limits pull-request and push scans to history reachable from
+  the checked-out commit, while audit events retain all-ref coverage,
+  preventing unrelated refs from causing false failures
+  ([#106](https://github.com/NVIDIA/SkillEvaluator/pull/106)).
 - The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
   the results directory is not visible to the Docker daemon. Previously the smoke
   run passed -- agent output travels over the Docker exec API rather than through

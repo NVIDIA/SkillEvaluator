@@ -36,6 +36,7 @@ from skillevaluator.constants import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.quality_config import load_quality_config
 from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
@@ -129,8 +130,9 @@ class QualityScoreValidator(ValidatorBase):
     existing SkillEvaluator SchemaValidator checks.
     """
 
-    def __init__(self, min_score: int = 70) -> None:
+    def __init__(self, min_score: int = 70, quality_config: Path | None = None) -> None:
         self.min_score = min_score
+        self.quality_config = load_quality_config(quality_config)
 
     @property
     def name(self) -> str:
@@ -676,7 +678,8 @@ class QualityScoreValidator(ValidatorBase):
                 "No prerequisites/requirements documented",
                 "Document dependencies, API keys, or setup needed",
             )
-        if "## Limitations" not in content:
+        limitations = self.quality_config["limitations"]
+        if limitations["required"] and limitations["heading"] not in content:
             dim.deduct(
                 5,
                 "info",

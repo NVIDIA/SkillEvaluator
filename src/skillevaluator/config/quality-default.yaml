@@ -1,0 +1,4 @@
+# Default deterministic quality-check configuration.
+limitations:
+  required: true
+  heading: "## Limitations"

@@ -1588,6 +1588,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Minimum quality score (0-100) required to pass when the 'quality' check runs.",
 )
 @click.option(
+    "--quality-config",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Override the packaged quality-default.yaml with a custom YAML file.",
+)
+@click.option(
     "--profile",
     default=None,
     cls=GroupedOption,
@@ -1838,6 +1846,7 @@ def validate(
     llm: bool,
     llm_verify: bool,
     min_score: int,
+    quality_config: Path | None,
     profile: str | None,
     external: bool,
     policy_path: Path | None,
@@ -2055,6 +2064,7 @@ def validate(
         use_llm=llm,
         llm_verify=llm_verify,
         min_score=min_score,
+        quality_config=quality_config,
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
@@ -2312,12 +2322,24 @@ validate.help_group_descriptions = {
 @cli.command("quality-check")
 @_target_argument
 @click.option("--min-score", type=int, default=70, show_default=True)
+@click.option(
+    "--quality-config",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Override the packaged quality-default.yaml with a custom YAML file.",
+)
 @_report_options
-def quality_check(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
+def quality_check(
+    target_path: Path,
+    min_score: int,
+    quality_config: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
+) -> None:
     """Score skill quality across correctness, discoverability, reliability, and efficiency."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_quality_check(target_path, min_score=min_score),
+        run_quality_check(target_path, min_score=min_score, quality_config=quality_config),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("quality"),

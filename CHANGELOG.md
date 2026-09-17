@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-17
+
 ### Added
 
 - Catalog validation now writes `catalog-summary.json` at the reports root with
@@ -18,6 +20,41 @@ All notable changes to SkillEvaluator are documented in this file.
   HTTP proxy so its bearer token is not offered to an intermediary. The
   transport rechecks authorization before dispatch and rejects hosts that
   are no longer allowed.
+- Published benchmark cards record the evaluated source identity. `BENCHMARK.md`
+  now carries `Evaluated source`, `Evaluated source revision` and
+  `Evaluator container revision` as separate fields, so a reader can tell which
+  source tree was evaluated apart from the evaluator build that evaluated it.
+  Previously two skills evaluated from different repositories by the same
+  evaluator container produced cards whose only recorded revision was the shared
+  container tag. `validate` and `tier3 evaluate` take the identity as
+  `--evaluated-source-repository`, `--evaluated-source-revision` and
+  `--evaluator-container-revision`. `validate` records it on the card and in
+  the top-level `evaluated_source` object of its JSON report and forwards it to
+  every child of a parallel catalog run; both commands persist it into a Tier 3
+  run's `run_config.json`. It can also arrive as the `evaluated_source`
+  argument to `build_agent_eval_payload`, as an `evaluated_source` object in the
+  run's `run_config.json`, or as `metadata["evaluated_source"]` on any
+  validation result. It is never inferred from repository state while rendering,
+  because the tree that renders a card is the evaluator checkout rather than the
+  evaluated skill's source. Every populated carrier, including the payload of
+  every Tier 3 result, is folded into one identity before any report is
+  written, so carriers that disagree fail closed with nothing published instead
+  of letting result ordering decide which source tree a card claims to describe.
+  A revision is accepted only in an unambiguous shape: a full Git object id
+  (40 or 64 hex characters), or a digest whose width matches the algorithm it
+  names. A container revision is an image reference validated by component (a
+  repository path of up to 255 characters, an optional tag of up to 128, and a
+  digest at its algorithm's width), so a long repository name is no longer
+  discarded. The 255 bound measures the path once the registry host is split
+  off it. Path components are lower case, as the OCI grammar requires, while a
+  registry host may use any case and is read as a host only when it is
+  `localhost`, carries a dot, or carries a port.
+  `check_public_benchmarks.py --require-source-provenance` requires the
+  fields and fails any card publishing a `PASS` without them, including a
+  `PASS` whose evaluator container is named by a mutable tag rather than
+  pinned by digest. SkillEvaluator's own CI now runs the scan with that flag;
+  it stays opt-in for trees whose cards predate the contract
+  ([#72](https://github.com/NVIDIA/SkillEvaluator/issues/72)).
 - SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
   consumers. Findings map to rule IDs, severity levels, and file locations from
   Tier 1 validation results.
@@ -73,6 +110,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories
   instead of any path containing those substrings, so files like `latest.py`
   are scanned.
+- Gitleaks CI now limits pull-request and push scans to history reachable from
+  the checked-out commit, while audit events retain all-ref coverage,
+  preventing unrelated refs from causing false failures
+  ([#106](https://github.com/NVIDIA/SkillEvaluator/pull/106)).
 - The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
   the results directory is not visible to the Docker daemon. Previously the smoke
   run passed -- agent output travels over the Docker exec API rather than through

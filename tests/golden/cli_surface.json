@@ -541,6 +541,30 @@
           "type": "integer"
         },
         {
+          "name": "evaluated_source_repository",
+          "opts": [
+            "--evaluated-source-repository"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "evaluated_source_revision",
+          "opts": [
+            "--evaluated-source-revision"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "evaluator_container_revision",
+          "opts": [
+            "--evaluator-container-revision"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
           "choices": [
             "auto",
             "rich",
@@ -1759,6 +1783,30 @@
               "type": "boolean"
             },
             {
+              "name": "evaluated_source_repository",
+              "opts": [
+                "--evaluated-source-repository"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "evaluated_source_revision",
+              "opts": [
+                "--evaluated-source-revision"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "evaluator_container_revision",
+              "opts": [
+                "--evaluator-container-revision"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -2451,6 +2499,30 @@
               "type": "integer"
             },
             {
+              "name": "evaluated_source_repository",
+              "opts": [
+                "--evaluated-source-repository"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "evaluated_source_revision",
+              "opts": [
+                "--evaluated-source-revision"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "evaluator_container_revision",
+              "opts": [
+                "--evaluator-container-revision"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "choices": [
                 "auto",
                 "rich",
@@ -3054,6 +3126,30 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "name": "evaluated_source_repository",
+          "opts": [
+            "--evaluated-source-repository"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "evaluated_source_revision",
+          "opts": [
+            "--evaluated-source-revision"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "evaluator_container_revision",
+          "opts": [
+            "--evaluator-container-revision"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "choices": [

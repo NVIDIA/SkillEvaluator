@@ -182,6 +182,16 @@ The following flags are forwarded to the live-eval engine **only when Tier 3 is 
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults ([Eval Datasets](eval-datasets.mdx) documents the config keys and precedence). The exception is `--results-dir`, which resolves independently of `evals/config.yml` (see [Reports & Results](reports.mdx)).
 
+### Evaluated source provenance
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--evaluated-source-repository TEXT` | unset | Repository (`owner/name`) of the source tree being evaluated. |
+| `--evaluated-source-revision TEXT` | unset | Immutable revision of the evaluated source: a full Git object id, or a `sha256`/`sha384`/`sha512` digest. A short prefix is refused. |
+| `--evaluator-container-revision TEXT` | unset | Digest-pinned evaluator image reference recorded beside the evaluated source. |
+
+The identity is recorded on `BENCHMARK.md`, forwarded to every child of a parallel catalog run so each card names the same source tree, and persisted into a Tier 3 run's `run_config.json` (see [Reports & Results](reports.mdx)).
+
 ## quality-check
 
 Score skill quality across correctness, discoverability, reliability, and efficiency. Runs entirely offline — no API key.
@@ -327,6 +337,9 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 | `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation (passed through to Harbor). |
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB (passed through to Harbor). |
 | `--override-storage-mb INTEGER` | unset | Override eval-environment storage in MB (passed through to Harbor). |
+| `--evaluated-source-repository TEXT` | unset | Repository (`owner/name`) of the source tree being evaluated, persisted into the run's `run_config.json`. |
+| `--evaluated-source-revision TEXT` | unset | Immutable revision of the evaluated source: a full Git object id, or a `sha256`/`sha384`/`sha512` digest. A short prefix is refused. |
+| `--evaluator-container-revision TEXT` | unset | Digest-pinned evaluator image reference recorded beside the evaluated source. |
 | `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
 
 Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.6-sol` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.

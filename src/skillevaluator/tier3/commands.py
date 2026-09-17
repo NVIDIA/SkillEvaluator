@@ -624,6 +624,7 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Run Harbor live-agent evaluation for a skill."""
@@ -688,6 +689,7 @@ def evaluate(
             env_mode=env_mode,
             env_mode_source="CLI",
             timeout_multiplier=timeout_multiplier,
+            evaluated_source=evaluated_source,
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,

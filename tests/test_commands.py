@@ -402,6 +402,116 @@ def test_validate_catalog_workers_runs_skills_in_parallel() -> None:
         assert any(Path("out/simple2").glob("*.html"))
 
 
+_EVALUATED_REPOSITORY = "NVIDIA/NVFlare"
+_EVALUATED_COMMIT = "2263a2ebdab903e87f7e7c0a001d22c3a926a9cf"
+_EVALUATOR_CONTAINER = "ghcr.io/nvidia/skillevaluator@sha256:" + "0117bc2e" * 8
+
+
+def test_catalog_child_argv_carries_the_evaluated_source(tmp_path: Path) -> None:
+    """A parallel child renders its own card, so it needs the parent's identity."""
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    output_dir = tmp_path / "out" / "simple"
+    ctx = validate.make_context(
+        "validate",
+        [
+            str(skill_dir),
+            "--workers",
+            "2",
+            "--evaluated-source-repository",
+            _EVALUATED_REPOSITORY,
+            "--evaluated-source-revision",
+            _EVALUATED_COMMIT,
+            "--evaluator-container-revision",
+            _EVALUATOR_CONTAINER,
+        ],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir)
+
+    for option, value in (
+        ("--evaluated-source-repository", _EVALUATED_REPOSITORY),
+        ("--evaluated-source-revision", _EVALUATED_COMMIT),
+        ("--evaluator-container-revision", _EVALUATOR_CONTAINER),
+    ):
+        assert option in argv
+        assert argv[argv.index(option) + 1] == value
+    # The child validates one skill, so re-sending --workers would fan out again.
+    assert "--workers" not in argv
+
+
+def test_catalog_child_argv_forwards_every_validate_option() -> None:
+    """The allowlist is explicit, so a new option is silently dropped by default.
+
+    Each parameter is either forwarded by name or listed below with the reason
+    it must not reach a child.
+    """
+    import inspect
+
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    not_forwarded = {
+        "target_path": "the child is given one skill directory, not the catalog root",
+        "content_type": "the child re-detects the type of the single skill it is handed",
+        "workers": "forwarding it would make each child fan out again",
+        "output_dir": "each child is given its own per-skill output directory",
+    }
+    source = inspect.getsource(_catalog_child_argv_from_ctx)
+
+    dropped = [
+        param.name
+        for param in validate.params
+        if f'params.get("{param.name}"' not in source and f'params["{param.name}"]' not in source
+    ]
+
+    assert sorted(dropped) == sorted(not_forwarded)
+
+
+def test_validate_catalog_workers_records_the_evaluated_source_on_every_card() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        catalog = Path("catalog")
+        for name in ("simple", "simple2"):
+            shutil.copytree(FIXTURE, catalog / name)
+        second = catalog / "simple2" / "SKILL.md"
+        second.write_text(
+            second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                str(catalog.resolve()),
+                "--workers",
+                "2",
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-r",
+                "html",
+                "--evaluated-source-repository",
+                _EVALUATED_REPOSITORY,
+                "--evaluated-source-revision",
+                _EVALUATED_COMMIT,
+                "--evaluator-container-revision",
+                _EVALUATOR_CONTAINER,
+                "-o",
+                "out",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        for name in ("simple", "simple2"):
+            card = Path("out") / name / "BENCHMARK.md"
+            text = card.read_text(encoding="utf-8")
+            assert f"- Evaluated source: `{_EVALUATED_REPOSITORY}`" in text
+            assert f"- Evaluated source revision: `{_EVALUATED_COMMIT}`" in text
+
+
 def test_validate_catalog_workers_accepts_options_before_target_path() -> None:
     runner = CliRunner()
     with runner.isolated_filesystem():

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.evaluation.tier3_report import build_agent_eval_payload, render_agent_eval_html_report
 from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor import report, report_data
 from skillevaluator.tier3.harbor.collector import (
@@ -27,6 +27,7 @@ from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
     overall_score,
@@ -161,6 +162,59 @@ def _collect(
         expected_case_ids=case_ids,
         expected_trials=len(case_ids),
     )
+
+
+def test_collection_and_canonical_report_share_one_versioned_overall_score_policy(tmp_path: Path) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    baseline = {"entry_id": "case-001", "metric_set": DEFAULT_METRIC_SET, **dict.fromkeys(DEFAULT_METRICS, 0.5)}
+    with_skill = {
+        "entry_id": "case-001",
+        "metric_set": DEFAULT_METRIC_SET,
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+    for variant, reward in (("with", with_skill), ("without", baseline)):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        _write_reward(job_dir, "case-001__attempt", reward)
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
+    agent = result["agents"]["opencode"]
+    payload = build_agent_eval_payload(
+        "demo",
+        result["agents"],
+        attempt_policy=result["attempt_policy"],
+        use_llm_judge=False,
+    )
+
+    assert result["score_policy"] == DEFAULT_SCORE_POLICY
+    assert result["attempt_policy"]["score_policy"] == DEFAULT_SCORE_POLICY
+    assert agent["lift"]["overall"] == {"with_skill": 0.49, "without_skill": 0.5, "delta": -0.01}
+    assert agent["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.49
+    with_summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert with_summary["overall_score"] == 0.49
+    assert with_summary["score_policy"] == DEFAULT_SCORE_POLICY
+    assert payload is not None
+    assert payload["score_policy"] == DEFAULT_SCORE_POLICY
+    assert payload["summary"]["score_policy"] == DEFAULT_SCORE_POLICY
+    assert payload["overall_score"] == 0.49
+    assert payload["overall_lift"] == -0.01
+
+    report_path = render_agent_eval_html_report(skill_path, tmp_path / "results", use_llm_judge=False)
+    report_html = report_path.read_text(encoding="utf-8")
+    assert DEFAULT_SCORE_POLICY in report_html
+    assert "-0.01" in report_html
+
+    persisted_policy = json.loads((tmp_path / "results" / "attempt_policy.json").read_text(encoding="utf-8"))
+    assert persisted_policy["score_policy"] == DEFAULT_SCORE_POLICY
+    assert DEFAULT_SCORE_POLICY in persisted_policy["score_definition"]
 
 
 def test_failed_judge_sidecar_is_merged_but_never_scored_and_reason_is_safe(tmp_path: Path) -> None:

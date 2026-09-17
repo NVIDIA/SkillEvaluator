@@ -25,6 +25,7 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     DIMENSION_DISPLAY,
     METRIC_DISPLAY,
+    overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
@@ -97,13 +98,8 @@ def _default_with_skill_overall(data: Mapping[str, Any]) -> float | None:
     scores = data.get("with_skill")
     if not isinstance(scores, Mapping):
         return None
-    values: list[float] = []
-    for metric in DEFAULT_METRICS:
-        value = _finite_number(scores.get(metric))
-        if value is None:
-            return None
-        values.append(value)
-    return round(sum(values) / len(values), 4)
+    score = overall_score_from_metrics(scores, DEFAULT_METRICS)
+    return round(score, 4) if score is not None else None
 
 
 def _custom_only_with_skill_overall(data: Mapping[str, Any]) -> float | None:

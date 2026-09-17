@@ -190,8 +190,8 @@ def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
         "goal_accuracy": 0.0,
         "behavior_check": 0.0,
     }
-    assert numeric["overall"] == 0.5
-    assert overall_score(numeric) == 0.5
+    assert numeric["overall"] == 0.6
+    assert overall_score(numeric) == 0.6
 
 
 def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(

@@ -91,6 +91,21 @@ def test_skip_baseline_success_uses_canonical_default_metric_aggregate() -> None
     assert "skipped" in output
 
 
+def test_skip_baseline_default_overall_uses_the_dimension_score_policy() -> None:
+    agent = _skip_baseline_agent(
+        {
+            "security": 0.3875,
+            "skill_execution": 0.3875,
+            "skill_efficiency": 0.3875,
+            "accuracy": 0.3875,
+            "goal_accuracy": 0.9,
+            "behavior_check": 0.9,
+        }
+    )
+
+    assert _with_skill_overall(agent, DEFAULT_METRIC_SET) == pytest.approx(0.49)
+
+
 def test_skip_baseline_custom_only_uses_persisted_attempt_scores() -> None:
     agent = _skip_baseline_agent({}, pass_rate=0.5)
     agent["pass_at_k"] = {

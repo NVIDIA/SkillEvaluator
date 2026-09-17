@@ -529,6 +529,11 @@ def load_agent_data(
                     overall_key = "overall_with_skill" if variant == "with-skill" else "overall_without_skill"
                     if "overall_score" in data:
                         agent_info[overall_key] = data.get("overall_score")
+                    score_policy_key = (
+                        "score_policy_with_skill" if variant == "with-skill" else "score_policy_without_skill"
+                    )
+                    if isinstance(data.get("score_policy"), str) and data["score_policy"].strip():
+                        agent_info[score_policy_key] = data["score_policy"].strip()
                     dimension_key = "dimensions_with_skill" if variant == "with-skill" else "dimensions_without_skill"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})

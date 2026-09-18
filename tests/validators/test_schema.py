@@ -8,6 +8,9 @@ Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md specification.
 
 from pathlib import Path
 
+import pytest
+
+from skillevaluator.models.skill import SkillFrontmatter
 from skillevaluator.validators.schema import SchemaValidator
 
 
@@ -184,7 +187,7 @@ description: A skill with consecutive hyphens in name
         assert any("consecutive" in err.lower() or "hyphen" in err.lower() for err in result.errors)
 
     def test_description_length_constraints(self, tmp_path: Path):
-        """Test validation enforces description length constraints (1-1024 chars)."""
+        """Test validation enforces description length constraints (1-1024 UTF-8 bytes)."""
         skill_dir = tmp_path / "long-description"
         skill_dir.mkdir()
 
@@ -205,6 +208,23 @@ description: {long_desc}
 
         assert not result.passed
         assert any("1024" in err or "description" in err.lower() for err in result.errors)
+
+    def test_description_accepts_exact_utf8_byte_limit(self):
+        description = "a" * 1021 + "€"
+
+        frontmatter = SkillFrontmatter(name="exact-byte-limit", description=description)
+
+        assert len(description.encode("utf-8")) == 1024
+        assert frontmatter.description == description
+
+    def test_description_rejects_utf8_byte_overflow(self):
+        description = "a" * 1022 + "€"
+
+        with pytest.raises(ValueError, match=r"at most 1024 UTF-8 bytes \(got 1025 bytes\)"):
+            SkillFrontmatter(name="byte-overflow", description=description)
+
+        assert len(description) == 1023
+        assert len(description.encode("utf-8")) == 1025
 
     def test_metadata_author_validation(self, tmp_path: Path):
         """Test author format fails for malformed (no email) author under default profile."""

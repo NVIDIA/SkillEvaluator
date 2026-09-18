@@ -461,6 +461,101 @@ def _partial_agent_eval_result(
     return result
 
 
+def _finalize_evaluated_source(
+    results: list[ValidationResult],
+    evaluated_source: dict[str, str] | None,
+) -> None:
+    """Resolve one source identity onto every result before a report is written.
+
+    Provenance is part of every report, not just the card, so it has to be
+    finalized ahead of ``emit_reports``. Resolving it afterwards published a JSON
+    report that recorded neither the source repository nor its revision while
+    BENCHMARK.md recorded both, and let a contradictory identity reach disk as
+    JSON and HTML before benchmark generation failed the run.
+
+    The supplied identity is one carrier among the ones the run recorded, not a
+    default the results get to override. The fold either raises, when two
+    carriers disagree, so a run that cannot say what it evaluated writes nothing
+    at all, or yields the union of every carrier, and that union is written back
+    so each report reads one complete identity rather than whichever fragment a
+    producer happened to record. Leaving a recorded identity in place instead
+    let a partial carrier shadow the rest: a result naming only the repository
+    published a card calling the revision and the container not recorded, though
+    the operator had supplied both.
+
+    The identity rides on the results themselves, for every content type, because
+    a PASS can be published without a completed Tier 3 run and so cannot rely on
+    the Tier 3 payload as its carrier. A run that recorded no identity anywhere
+    has none written, so an absent identity stays absent rather than becoming an
+    empty one.
+    """
+    from skillevaluator.source_identity import (
+        EvaluatedSourceConflict,
+        merge_evaluated_sources,
+        recorded_evaluated_source,
+    )
+
+    try:
+        identity = merge_evaluated_sources(
+            (evaluated_source, recorded_evaluated_source(result.metadata for result in results))
+        )
+    except EvaluatedSourceConflict as exc:
+        # Name the values that disagreed rather than letting a report guess.
+        raise click.ClickException(
+            f"No report was written because the run records more than one evaluated source ({exc})."
+        ) from exc
+    if not identity:
+        return
+    for result in results:
+        if isinstance(result.metadata, dict):
+            # A fresh dict per result, so mutating one result's identity later
+            # cannot rewrite what another result or the caller is holding.
+            result.metadata["evaluated_source"] = dict(identity)
+
+
+def _evaluated_source_from_options(
+    repository: str | None,
+    revision: str | None,
+    container_revision: str | None,
+) -> dict[str, str] | None:
+    """Build the evaluated-source identity from the orchestration input.
+
+    The identity is supplied rather than inferred, because the tree running the
+    evaluator is not the tree being evaluated. A value that is not in its
+    canonical shape is rejected here rather than dropped, so a card never says
+    ``not recorded`` for a field the operator believed they had supplied.
+    """
+    from skillevaluator.source_identity import normalized_evaluated_source
+
+    supplied = {
+        "repository": repository,
+        # One option covers both immutable revision shapes the card accepts,
+        # matching its single "Evaluated source revision" line.
+        "commit": revision,
+        "content_digest": revision,
+        "evaluator_container_revision": container_revision,
+    }
+    identity = normalized_evaluated_source({key: value for key, value in supplied.items() if value}) or {}
+    for option, value, accepted, expected in (
+        ("--evaluated-source-repository", repository, ("repository",), "a forge name such as owner/repository"),
+        (
+            "--evaluated-source-revision",
+            revision,
+            ("commit", "content_digest"),
+            "a full Git object id (40 or 64 hex characters) or a digest such as sha256:<64 hex characters>",
+        ),
+        (
+            "--evaluator-container-revision",
+            container_revision,
+            ("evaluator_container_revision",),
+            "an image reference such as ghcr.io/org/image@sha256:<64 hex characters>",
+        ),
+    ):
+        if value and not any(field in identity for field in accepted):
+            raise click.BadParameter(f"expected {expected}.", param_hint=option)
+    return identity or None
+
+
 def _run_agent_eval_or_skip(
     target_path: Path,
     *,
@@ -482,6 +577,7 @@ def _run_agent_eval_or_skip(
     harbor_keep_jobs: bool = False,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
+    evaluated_source: dict[str, str] | None = None,
     progress_reporter=None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
@@ -530,6 +626,7 @@ def _run_agent_eval_or_skip(
         copy_repo=copy_repo,
         timeout_multiplier=timeout_multiplier,
         harbor_keep_jobs=harbor_keep_jobs,
+        evaluated_source=evaluated_source,
     )
     try:
         service = EvaluationService()
@@ -723,34 +820,6 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
 
 
-def _catalog_child_argv_from_sys(skill_dir: Path, output_dir: Path, parent_argv: list[str]) -> list[str]:
-    """Rebuild ``validate`` argv for one catalog skill from ``sys.argv``."""
-    argv = list(parent_argv)
-    try:
-        validate_idx = next(i for i, arg in enumerate(argv) if arg == "validate")
-    except StopIteration:
-        return ["validate", str(skill_dir), "-o", str(output_dir)]
-
-    tail = argv[validate_idx + 1 :]
-
-    child_tail: list[str] = []
-    skip_next = False
-    for arg in tail:
-        if skip_next:
-            skip_next = False
-            continue
-        if arg in {"--workers", "-o", "--output-dir"}:
-            skip_next = True
-            continue
-        if arg.startswith("--workers=") or arg.startswith("--output-dir=") or arg.startswith("-o="):
-            continue
-        if not arg.startswith("-"):
-            continue
-        child_tail.append(arg)
-
-    return ["validate", str(skill_dir), *child_tail, "-o", str(output_dir)]
-
-
 def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir: Path) -> list[str]:
     """Rebuild ``validate`` argv from the active Click context (pytest-safe)."""
     params = ctx.params
@@ -838,22 +907,20 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--timeout-multiplier", str(params["timeout_multiplier"])])
     if params.get("harbor_keep_jobs"):
         argv.append("--harbor-keep-jobs")
+    # Every child renders its own BENCHMARK.md, so the identity has to reach
+    # each one: dropping it here would publish a catalog of cards that all say
+    # the evaluated source was never recorded.
+    if params.get("evaluated_source_repository"):
+        argv.extend(["--evaluated-source-repository", str(params["evaluated_source_repository"])])
+    if params.get("evaluated_source_revision"):
+        argv.extend(["--evaluated-source-revision", str(params["evaluated_source_revision"])])
+    if params.get("evaluator_container_revision"):
+        argv.extend(["--evaluator-container-revision", str(params["evaluator_container_revision"])])
     if _report_formats_explicit():
         for fmt in params.get("report_formats") or ():
             argv.extend(["-r", fmt])
     argv.extend(["-o", str(output_dir)])
     return argv
-
-
-def _catalog_child_argv(
-    ctx: click.Context,
-    skill_dir: Path,
-    output_dir: Path,
-    parent_argv: list[str],
-) -> list[str]:
-    if "validate" in parent_argv:
-        return _catalog_child_argv_from_sys(skill_dir, output_dir, parent_argv)
-    return _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir)
 
 
 def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str | None]:
@@ -1473,6 +1540,27 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_TIER3_GROUP,
     help="Retain Harbor job dirs/artifacts after the run for inspection.",
 )
+@click.option(
+    "--evaluated-source-repository",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Repository (owner/name) of the source tree being evaluated, recorded on BENCHMARK.md.",
+)
+@click.option(
+    "--evaluated-source-revision",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Immutable revision of the evaluated source: a full Git object id, or a sha256/sha384/sha512 digest.",
+)
+@click.option(
+    "--evaluator-container-revision",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Digest-pinned evaluator image reference recorded beside the evaluated source.",
+)
 @_report_options
 def validate(
     target_path: Path,
@@ -1512,6 +1600,9 @@ def validate(
     timeout_multiplier: float | None,
     harbor_keep_jobs: bool,
     workers: int,
+    evaluated_source_repository: str | None,
+    evaluated_source_revision: str | None,
+    evaluator_container_revision: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -1531,6 +1622,11 @@ def validate(
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
+    evaluated_source = _evaluated_source_from_options(
+        evaluated_source_repository,
+        evaluated_source_revision,
+        evaluator_container_revision,
+    )
 
     from skillevaluator.cli_core import detect_content_type
     from skillevaluator.constants import (
@@ -1756,6 +1852,7 @@ def validate(
             harbor_keep_jobs=harbor_keep_jobs,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,
+            evaluated_source=evaluated_source,
             progress_reporter=reporter,
         )
         results.append(tier3_result)
@@ -1800,6 +1897,7 @@ def validate(
 
     # Reporters and the exit gate consume the same finalized result objects.
     apply_policy(results, policy)
+    _finalize_evaluated_source(results, evaluated_source)
 
     content_label = {
         CONTENT_TYPE_SKILL: "Skill",
@@ -1830,9 +1928,7 @@ def validate(
         sarif_scan_root=target_path,
         sarif_repository_root=sarif_repository_root,
     )
-    _record_validate_json_report(
-        f"{report_basename_value}.json" if "json" in effective_formats else None
-    )
+    _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --
@@ -1840,9 +1936,21 @@ def validate(
     if resolved_type == CONTENT_TYPE_SKILL:
         from skillevaluator.reporting import BenchmarkReporter
         from skillevaluator.reporting.naming import BENCHMARK_FILENAME
+        from skillevaluator.source_identity import EvaluatedSourceConflict
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        BenchmarkReporter(skill_name=target_path.name).save(results, output_dir / BENCHMARK_FILENAME)
+        # ``_finalize_evaluated_source`` already attached and resolved the
+        # identity, so a conflict aborts before any report file exists. This
+        # stays as the last line of defence: the renderer re-validates the
+        # carriers it is handed, and a producer can record one after the fact.
+        try:
+            BenchmarkReporter(skill_name=target_path.name).save(results, output_dir / BENCHMARK_FILENAME)
+        except EvaluatedSourceConflict as exc:
+            # Publication fails closed on a contradictory identity, so report which
+            # values disagreed rather than letting the card write a guess.
+            raise click.ClickException(
+                f"{BENCHMARK_FILENAME} was not written because the run records more than one evaluated source ({exc})."
+            ) from exc
 
     effective_gate_results = list(tier1_gate_results)
     if block_on_dedup_effective:
@@ -2154,6 +2262,23 @@ def _parse_environment_kwargs_cli(raw_kwargs: tuple[str, ...]) -> dict[str, str]
 @click.option("--override-memory-mb", type=int, default=None)
 @click.option("--override-storage-mb", type=int, default=None)
 @click.option(
+    "--evaluated-source-repository",
+    default=None,
+    # This command renders no card, so it names where it does record the value:
+    # the run directory, which a later card is rendered from.
+    help="Repository (owner/name) of the source tree being evaluated, persisted into the run's run_config.json.",
+)
+@click.option(
+    "--evaluated-source-revision",
+    default=None,
+    help="Immutable revision of the evaluated source: a full Git object id, or a sha256/sha384/sha512 digest.",
+)
+@click.option(
+    "--evaluator-container-revision",
+    default=None,
+    help="Digest-pinned evaluator image reference recorded beside the evaluated source.",
+)
+@click.option(
     "--progress",
     type=click.Choice(["auto", "rich", "plain", "off"]),
     default="auto",
@@ -2192,6 +2317,9 @@ def evaluate(
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    evaluated_source_repository: str | None,
+    evaluated_source_revision: str | None,
+    evaluator_container_revision: str | None,
     progress: str,
     environment_kwargs: tuple[str, ...] = (),
 ) -> None:
@@ -2200,6 +2328,13 @@ def evaluate(
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 
     service = EvaluationService()
+    # Resolved before the service is built so a non-canonical value is refused
+    # at the boundary rather than after a long live run has already started.
+    evaluated_source = _evaluated_source_from_options(
+        evaluated_source_repository,
+        evaluated_source_revision,
+        evaluator_container_revision,
+    )
     if autopilot:
         _ensure_autopilot_dataset(skill_path)
 
@@ -2229,6 +2364,7 @@ def evaluate(
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
+        evaluated_source=evaluated_source,
         environment_kwargs=parsed_environment_kwargs,
     )
     try:

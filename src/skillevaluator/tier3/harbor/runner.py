@@ -37,6 +37,7 @@ from skillevaluator.provider_config import (
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
+from skillevaluator.source_identity import normalized_evaluated_source
 from skillevaluator.tier3.eval_core.secret_redaction import (
     LOG_CRSR_RE,
     LOG_JWT_RE,
@@ -2175,6 +2176,7 @@ def _run_harbor_eval_impl(
     override_cpus: int | None = None,
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
+    evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
     environment_kwargs: Mapping[str, str] | None = None,
     _evaluator_skill_path: Path | None = None,
@@ -2555,6 +2557,9 @@ def _run_harbor_eval_impl(
         "task_source": task_source,
         "grading": {"mode": grading_mode},
         "agents": model_resolution,
+        # Persisted so a card rendered later from this run directory records the
+        # source tree that was evaluated, not the evaluator build that ran it.
+        "evaluated_source": normalized_evaluated_source(evaluated_source),
     }
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {name: f"${{{name}}}" for name in verifier_env if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS}

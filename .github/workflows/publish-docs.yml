@@ -5,18 +5,31 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/heads/main') && github.run_number > 1 }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
-      - name: Install Fern
-        run: npm install -g fern-api
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      # npm ci reproduces fern/package-lock.json exactly -- every version and
+      # integrity hash -- so nothing resolved at run time reaches the step below,
+      # which holds FERN_TOKEN.
+      - name: Install the pinned Fern CLI
+        run: npm ci --prefix fern --ignore-scripts --omit=optional
 
       - name: Publish Docs
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
-        run: fern generate --docs
+        run: ./fern/node_modules/.bin/fern generate --docs

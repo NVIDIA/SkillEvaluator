@@ -60,3 +60,6 @@ src/skillevaluator/tier3/reference_skills/*/evals/results/
 skillevaluator-output*
 skillevaluator-quality*
 skillevaluator-rubric-eval*
+
+# Node modules for the pinned Fern documentation CLI (see fern/package.json)
+node_modules/

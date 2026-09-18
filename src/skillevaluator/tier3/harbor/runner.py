@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -163,6 +163,8 @@ _HARBOR_BASE_ENV_VARS = frozenset(
         "LC_CTYPE",
         "PATH",
         "PATHEXT",
+        "SKILLEVALUATOR_ALLOWED_MCP_HOSTS",
+        "SKILLEVALUATOR_ALLOWED_MCP_SECRETS",
         "SYSTEMROOT",
         "TEMP",
         "TMP",
@@ -204,7 +206,14 @@ _HARBOR_ENV_MODE_VARS = {
         }
     ),
     "gke": frozenset(
-        {"CLOUDSDK_CONFIG", "GCP_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "KUBECONFIG"}
+        {
+            "CLOUDSDK_CONFIG",
+            "GCP_PROJECT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_PROJECT",
+            "KUBECONFIG",
+            "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
+        }
     ),
     "novita": frozenset({"NOVITA_API_KEY", "NOVITA_API_URL", "NOVITA_BASE_URL", "NOVITA_DOMAIN"}),
     "islo": frozenset({"ISLO_API_KEY", "ISLO_API_URL", "ISLO_COMPUTE_URL"}),
@@ -245,6 +254,7 @@ _VERTEX_HOST_ENV_VARS = frozenset(
         "GCP_PROJECT",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLOUD_PROJECT",
+        "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
     }
 )
 _RUNTIME_ENV_HOST_CONTROL_NAMES = (
@@ -335,8 +345,80 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
         "NVIDIA_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
     }
 )
+GKE_ALLOW_WORKLOAD_IDENTITY_ENV = "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY"
+GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE = (
+    "CLAUDE_CODE_USE_VERTEX=1 in GKE mode uses single-pod Kubernetes Workload Identity, "
+    "which shares the pod service account and GKE metadata server with evaluated skill "
+    "commands. Restrict this mode to trusted skills by setting "
+    "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1 or --ek allow_workload_identity=1."
+)
+GKE_WORKLOAD_IDENTITY_WARNING_MESSAGE = (
+    "GKE Workload Identity mode shares pod-level GCP Service Account permissions with skill setup scripts "
+    "and agent subprocesses via the Kubernetes metadata server; evaluate only trusted skills in this mode."
+)
+_OPERATOR_SECRET_PREFIXES = (
+    "ANTHROPIC_",
+    "AWS_",
+    "CLAUDE_CODE_",
+    "DAYTONA_",
+    "E2B_",
+    "GCLOUD_",
+    "GCP_",
+    "GOOGLE_",
+    "MODAL_",
+    "NVIDIA_",
+    "OPENAI_",
+    "RUNLOOP_",
+    "SKILL_EVAL_",
+    "SKILLEVALUATOR_",
+)
+
+
+def is_operator_owned_or_provider_secret(name: str) -> bool:
+    """Return True if an environment variable name belongs to operator, provider, or cloud credentials."""
+    cleaned = name.strip()
+    if not cleaned:
+        return False
+    upper = cleaned.upper()
+    if upper in _OPERATOR_OWNED_AGENT_ENV or upper in _VERIFIER_JUDGE_MODEL_ENV_VARS or upper == "KUBECONFIG":
+        return True
+    return upper.startswith(_OPERATOR_SECRET_PREFIXES)
+
+
+def is_gke_vertex_workload_identity_active(
+    env_mode: str,
+    agents: Sequence[str] = ("claude-code",),
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Return True when GKE mode is paired with Claude Code and CLAUDE_CODE_USE_VERTEX=1."""
+    if env_mode != "gke" or "claude-code" not in agents:
+        return False
+    lookup_env = env if env is not None else os.environ
+    return (
+        str(lookup_env.get("CLAUDE_CODE_USE_VERTEX", "")).strip() == "1"
+        or os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+    )
+
+
+def is_gke_workload_identity_allowed(
+    environment_kwargs: Mapping[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Return True only when the operator explicitly opts into GKE Workload Identity."""
+    for candidate_env in (env, os.environ):
+        if candidate_env is not None:
+            raw_env = str(candidate_env.get(GKE_ALLOW_WORKLOAD_IDENTITY_ENV, "")).strip().lower()
+            if raw_env in {"1", "true", "yes"}:
+                return True
+    if environment_kwargs:
+        raw_ek = str(environment_kwargs.get("allow_workload_identity", "")).strip().lower()
+        if raw_ek in {"1", "true", "yes"}:
+            return True
+    return False
+
 
 _SENSITIVE_EK_KEY_RE = re.compile(
     r"(?i)(?:^|.*[_-])(?:api[_-]?key|secret|password|credential|credentials|authorization|bearer|"
@@ -347,6 +429,7 @@ _SENSITIVE_EK_KEY_RE = re.compile(
 _SAFE_BACKEND_CONSTRUCTOR_KWARGS: dict[str, frozenset[str]] = {
     "gke": frozenset(
         {
+            "allow_workload_identity",
             "cluster_name",
             "region",
             "namespace",
@@ -622,6 +705,8 @@ def build_harbor_run_command(
                     f"Sensitive key or value detected in environment_kwargs: {key}. "
                     "Credentials and disallowed settings must not be passed via CLI flags or process arguments."
                 )
+            if key == "allow_workload_identity":
+                continue
             command.extend(["--ek", f"{key}={value}"])
 
     if jobs_dir is not None:
@@ -701,6 +786,7 @@ def _validate_agent_provider_credentials(
     *,
     env_mode: str = DEFAULT_ENV_MODE,
     agent_models: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Reject provider-to-agent combinations that cannot use the selected API."""
     model_sources = agent_model_sources or {}
@@ -725,12 +811,17 @@ def _validate_agent_provider_credentials(
             "only its selected provider credential."
         ]
 
-    has_vertex = agent_runtime_env.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+    has_vertex = (
+        agent_runtime_env.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+        or os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+    )
     if "claude-code" in agents and has_vertex:
         if env_mode != "gke":
             return [
                 f"vertex ai live agents do not support {env_mode} mode; use --env-mode gke or a supported cloud backend."
             ]
+        if not is_gke_workload_identity_allowed(environment_kwargs, agent_runtime_env):
+            return [GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE]
         from skillevaluator.tier3.harbor.runtime_preflight import _resolve_vertex_project_id
 
         has_project = bool(_resolve_vertex_project_id(agent_runtime_env) or _resolve_vertex_project_id())
@@ -879,14 +970,61 @@ def _validate_agent_provider_credentials(
     return []
 
 
-def _unwrap_kubeconfig_node(obj: Any) -> Any:
-    """Recursively unwrap Kubernetes ConfigNode wrappers into standard Python structures."""
+_KUBECONFIG_FILE_PATH_KEYS = frozenset(
+    {
+        "certificate-authority",
+        "client-certificate",
+        "client-key",
+        "tokenFile",
+        "idp-certificate-authority",
+    }
+)
+
+
+def _resolve_relative_kubeconfig_path(
+    raw_value: str,
+    base_dir: Path | None,
+    fallback_dirs: Sequence[Path] = (),
+) -> str:
+    """Resolve a relative kubeconfig path against its source file directory."""
+    expanded = Path(raw_value.strip()).expanduser()
+    if expanded.is_absolute():
+        return str(expanded)
+    if base_dir is not None:
+        return str((base_dir / expanded).resolve())
+    for directory in fallback_dirs:
+        candidate = (directory / expanded).resolve()
+        if candidate.exists():
+            return str(candidate)
+    if fallback_dirs:
+        return str((fallback_dirs[0] / expanded).resolve())
+    return raw_value
+
+
+def _unwrap_kubeconfig_node(
+    obj: Any,
+    source_path: str | None = None,
+    fallback_dirs: Sequence[Path] = (),
+) -> Any:
+    """Recursively unwrap Kubernetes ConfigNode wrappers while absolutizing relative file paths."""
+    node_path = getattr(obj, "path", None) or source_path
     if hasattr(obj, "value"):
-        return _unwrap_kubeconfig_node(obj.value)
+        return _unwrap_kubeconfig_node(obj.value, source_path=node_path, fallback_dirs=fallback_dirs)
     if isinstance(obj, dict):
-        return {k: _unwrap_kubeconfig_node(v) for k, v in obj.items()}
+        out: dict[str, Any] = {}
+        base_dir = Path(node_path).expanduser().resolve().parent if node_path else None
+        for k, v in obj.items():
+            unwrapped = _unwrap_kubeconfig_node(v, source_path=node_path, fallback_dirs=fallback_dirs)
+            if (
+                isinstance(unwrapped, str)
+                and unwrapped.strip()
+                and (k in _KUBECONFIG_FILE_PATH_KEYS or (k == "command" and ("/" in unwrapped or os.sep in unwrapped)))
+            ):
+                unwrapped = _resolve_relative_kubeconfig_path(unwrapped, base_dir, fallback_dirs)
+            out[k] = unwrapped
+        return out
     if isinstance(obj, list):
-        return [_unwrap_kubeconfig_node(item) for item in obj]
+        return [_unwrap_kubeconfig_node(item, source_path=node_path, fallback_dirs=fallback_dirs) for item in obj]
     return obj
 
 
@@ -912,7 +1050,8 @@ def _resolve_single_kubeconfig(raw_kubeconfig: str | None = None) -> Path | None
             if len(valid_candidates) == 1:
                 return valid_candidates[0]
             paths_str = os.pathsep.join(str(p) for p in valid_candidates)
-            cached_path = _MERGED_KUBECONFIG_CACHE.get(paths_str)
+            cache_key = os.pathsep.join(f"{p}:{p.stat().st_mtime_ns}:{p.stat().st_size}" for p in valid_candidates)
+            cached_path = _MERGED_KUBECONFIG_CACHE.get(cache_key)
             if cached_path is not None and cached_path.is_file():
                 return cached_path
             try:
@@ -922,8 +1061,24 @@ def _resolve_single_kubeconfig(raw_kubeconfig: str | None = None) -> Path | None
                 import yaml
                 from kubernetes.config.kube_config import KubeConfigMerger
 
-                merger = KubeConfigMerger(paths_str)
-                merged_dict = _unwrap_kubeconfig_node(merger.config)
+                with tempfile.TemporaryDirectory(prefix="kubeconfig_stage_") as stage_dir:
+                    staged_paths: list[str] = []
+                    for idx, cand in enumerate(valid_candidates):
+                        cand_data = yaml.safe_load(cand.read_text(encoding="utf-8"))
+                        if isinstance(cand_data, dict):
+                            cand_data = _unwrap_kubeconfig_node(cand_data, source_path=str(cand))
+                            staged_file = Path(stage_dir) / f"cand_{idx}.yaml"
+                            staged_file.write_text(
+                                yaml.safe_dump(cand_data, default_flow_style=False),
+                                encoding="utf-8",
+                            )
+                            staged_file.chmod(0o600)
+                            staged_paths.append(str(staged_file))
+                        else:
+                            staged_paths.append(str(cand))
+                    merger = KubeConfigMerger(os.pathsep.join(staged_paths))
+                    fallback_dirs = [p.parent for p in valid_candidates]
+                    merged_dict = _unwrap_kubeconfig_node(merger.config, fallback_dirs=fallback_dirs)
                 if not merged_dict or not isinstance(merged_dict, dict):
                     logger.error("KubeConfigMerger produced empty or invalid configuration from %s", paths_str)
                     return None
@@ -937,7 +1092,7 @@ def _resolve_single_kubeconfig(raw_kubeconfig: str | None = None) -> Path | None
                     merged_path = Path(handle.name)
                     yaml.safe_dump(merged_dict, handle, default_flow_style=False)
                     merged_path.chmod(0o600)
-                _MERGED_KUBECONFIG_CACHE[paths_str] = merged_path
+                _MERGED_KUBECONFIG_CACHE[cache_key] = merged_path
                 atexit.register(lambda: merged_path.unlink(missing_ok=True))
                 logger.info(
                     "Merged %d kubeconfig files into temporary file %s",
@@ -1005,6 +1160,11 @@ def _check_prerequisites(
                 f"GKE mode requires environment kwargs: {', '.join(missing_kwargs)}. "
                 "Specify them via --ek key=value or SKILLEVALUATOR_GKE_* environment variables."
             )
+        if is_gke_vertex_workload_identity_active(
+            env_mode,
+            agents or ["claude-code"],
+        ) and not is_gke_workload_identity_allowed(environment_kwargs):
+            gke_errors.append(GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE)
         if verify_live_cluster and not gke_errors:
             try:
                 from kubernetes import client as k8s_client
@@ -1173,7 +1333,11 @@ def _harbor_subprocess_environment(
     return environment
 
 
-def _independent_anthropic_agent_credentials(*, env_mode: str = "") -> dict[str, str]:
+def _independent_anthropic_agent_credentials(
+    *,
+    env_mode: str = "",
+    environment_kwargs: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Resolve and validate a host-owned Anthropic credential pair or Vertex AI configuration."""
     candidate_names = (
         "ANTHROPIC_API_KEY",
@@ -1198,9 +1362,11 @@ def _independent_anthropic_agent_credentials(*, env_mode: str = "") -> dict[str,
             credentials["CLOUD_ML_REGION"] = _resolve_vertex_region()
 
         # In GKE mode, strip host-local GOOGLE_APPLICATION_CREDENTIALS paths;
-        # pods authenticate via Kubernetes Workload Identity.
+        # pods authenticate via Kubernetes Workload Identity only when explicitly allowed.
         if env_mode == "gke":
             credentials.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+            if not is_gke_workload_identity_allowed(environment_kwargs):
+                return {}
         elif g_creds := os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
             credentials["GOOGLE_APPLICATION_CREDENTIALS"] = g_creds
 
@@ -1280,6 +1446,7 @@ def _agent_credentials(
     provider: ProviderConfig,
     agent: str,
     env_mode: str,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Resolve operator-owned credentials for exactly one agent runtime."""
     if provider.provider == "nv_build":
@@ -1293,7 +1460,7 @@ def _agent_credentials(
             # sentinel and must not inherit NVIDIA_API_KEY in task env.
             return {}
         if agent == "claude-code":
-            return _independent_anthropic_agent_credentials(env_mode=env_mode)
+            return _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
         if agent == "codex":
             return {
                 name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -1301,7 +1468,7 @@ def _agent_credentials(
         return {}
 
     if provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
-        return _independent_anthropic_agent_credentials(env_mode=env_mode)
+        return _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
     if provider.provider == "anthropic" and agent == "codex":
         return {
             name: os.environ.get(name, "") for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if os.environ.get(name)
@@ -1309,7 +1476,7 @@ def _agent_credentials(
 
     if provider.provider == "anthropic" and agent in {"claude-code", "opencode"}:
         if agent == "claude-code" and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1":
-            return _independent_anthropic_agent_credentials(env_mode=env_mode)
+            return _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
         return {
             name: value
             for name, value in {
@@ -1440,6 +1607,7 @@ def _resolve_agent_runtime_plan(
     configured_runtime_env: Mapping[str, str],
     env_mode: str,
     model_sources: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, AgentRuntimePlan]:
     """Resolve the single credential plan used by staging and execution.
 
@@ -1463,7 +1631,12 @@ def _resolve_agent_runtime_plan(
     }
     plans: dict[str, AgentRuntimePlan] = {}
     for agent in agents:
-        credentials = _agent_credentials(provider=provider, agent=agent, env_mode=env_mode)
+        credentials = _agent_credentials(
+            provider=provider,
+            agent=agent,
+            env_mode=env_mode,
+            environment_kwargs=environment_kwargs,
+        )
         validation_env = {**configured_runtime_env, **credentials}
         credential_errors = _validate_agent_provider_credentials(
             provider,
@@ -1472,6 +1645,7 @@ def _resolve_agent_runtime_plan(
             dict(model_sources or {}),
             env_mode=env_mode,
             agent_models={agent: models[agent]},
+            environment_kwargs=environment_kwargs,
         )
         if credential_errors:
             raise ValueError(credential_errors[0])
@@ -2355,6 +2529,7 @@ def _run_harbor_eval_impl(
             configured_runtime_env=configured_runtime_env,
             env_mode=env_mode,
             model_sources={agent: details["source"] for agent, details in model_resolution.items()},
+            environment_kwargs=resolved_environment_kwargs,
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
@@ -3017,6 +3192,8 @@ def _run_harbor_eval_impl(
             report_warning = "HTML report was not generated: report file is missing"
     except Exception as exc:
         report_warning = f"HTML report was not generated: {exc}"
+    if is_gke_vertex_workload_identity_active(env_mode, agents):
+        results.setdefault("security_notices", []).append(GKE_WORKLOAD_IDENTITY_WARNING_MESSAGE)
     if report_warning:
         results.setdefault("warnings", []).append(report_warning)
         results["report_status"] = "degraded"

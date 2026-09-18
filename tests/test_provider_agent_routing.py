@@ -315,6 +315,7 @@ def test_openai_provider_accepts_claude_with_vertex_backend() -> None:
             {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "test-project"},
             {"claude-code": "CLI"},
             env_mode="gke",
+            environment_kwargs={"allow_workload_identity": "true"},
         )
         == []
     )
@@ -327,6 +328,7 @@ def test_openai_provider_rejects_default_gpt_model_for_claude_with_vertex() -> N
         {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "test-project"},
         {"claude-code": "public provider default"},
         env_mode="gke",
+        environment_kwargs={"allow_workload_identity": "true"},
     )
     assert errors and "needs an explicit Anthropic model" in errors[0]
 
@@ -371,8 +373,14 @@ def test_independent_anthropic_agent_credentials_fallbacks(monkeypatch: pytest.M
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/host/key.json")
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
 
-    # In GKE mode:
-    creds_gke = _independent_anthropic_agent_credentials(env_mode="gke")
+    # In GKE mode without opt-in, fail closed:
+    assert _independent_anthropic_agent_credentials(env_mode="gke") == {}
+
+    # In GKE mode with explicit opt-in:
+    creds_gke = _independent_anthropic_agent_credentials(
+        env_mode="gke",
+        environment_kwargs={"allow_workload_identity": "true"},
+    )
     assert creds_gke["CLAUDE_CODE_USE_VERTEX"] == "1"
     assert creds_gke["ANTHROPIC_VERTEX_PROJECT_ID"] == "fallback-gcp-proj"
     assert creds_gke["CLOUD_ML_REGION"] == "us-east5"

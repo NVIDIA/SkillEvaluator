@@ -14,8 +14,14 @@ All notable changes to SkillEvaluator are documented in this file.
   boundaries in favor of host environment variables and CLI flags.
 - Claude Code live agent routing for Google Cloud Vertex AI
   (`CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`),
-  with redirect-blocking preflight probes and case-insensitive model alias
-  resolution.
+  with redirect-blocking preflight probes, case-insensitive model alias
+  resolution, and explicit trusted-skill opt-in (`SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1`
+  or `--ek allow_workload_identity=true`) when using single-pod GKE Workload Identity.
+- Fail-closed validation for skill-authored MCP server configurations
+  (`evals/environment/mcp_servers.toml` and `mcp_servers.json`) that blocks
+  operator/provider credential references and literal secrets, while allowing
+  operator-approved MCP endpoints and non-LLM secrets via
+  `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` and `SKILLEVALUATOR_ALLOWED_MCP_SECRETS`.
 
 ## 0.3.0 - 2026-09-17
 

@@ -819,6 +819,18 @@ def _validate_mcp_toml(path: Path, results: list[CheckResult]) -> None:
                     f"The adapter will auto-infer this, but explicit is better.",
                 )
             )
+        try:
+            from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+            validate_mcp_server_declarations([s])
+        except ValueError as exc:
+            results.append(
+                CheckResult(
+                    str(path),
+                    "error",
+                    str(exc),
+                )
+            )
 
 
 def _check_unrecognised(skill_path: Path, results: list[CheckResult]) -> None:

@@ -786,6 +786,7 @@ def doctor(
                     configured_runtime_env={},
                     env_mode=env_mode,
                     model_sources={agent: details[1] for agent, details in model_resolution.items()},
+                    environment_kwargs=environment_kwargs,
                 )
             except ValueError as exc:
                 plan_error = str(exc)

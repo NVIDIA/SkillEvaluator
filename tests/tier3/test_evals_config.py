@@ -183,8 +183,9 @@ harbor:
 
 
 def test_gke_infrastructure_kwargs_contains_expected_keys():
-    """Verify all 9 GKE infrastructure and cost control kwargs are protected."""
+    """Verify all 10 GKE infrastructure and security control kwargs are protected."""
     expected = {
+        "allow_workload_identity",
         "cluster_name",
         "region",
         "namespace",

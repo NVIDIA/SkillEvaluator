@@ -2384,6 +2384,31 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
+        elif env_mode == "gke":
+            from skillevaluator.tier3.commands import parse_agents
+            from skillevaluator.tier3.harbor.runner import (
+                is_gke_vertex_workload_identity_active,
+                is_gke_workload_identity_allowed,
+            )
+
+            if is_gke_vertex_workload_identity_active(
+                env_mode, parse_agents(agents)
+            ) and is_gke_workload_identity_allowed(options.environment_kwargs):
+                from rich.panel import Panel
+                from rich.text import Text
+
+                console.print(
+                    Panel(
+                        Text(
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.13.2 single-pod "
+                            "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
+                            style="yellow",
+                        ),
+                        title=Text("GKE Workload Identity · Trusted Skills Only", style="bold cyan"),
+                        border_style="yellow",
+                        padding=(0, 1),
+                    )
+                )
         progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)

@@ -250,6 +250,17 @@ def _split_into_chunks(
        fixed-size overlapping windows.
     3. Guarantee at least one chunk is returned.
     """
+    if type(chunk_size) is not int:
+        raise SimilarityConfigError("Embedding chunk size must be an integer.")
+    if type(overlap) is not int:
+        raise SimilarityConfigError("Embedding chunk overlap must be an integer.")
+    if chunk_size <= 0:
+        raise SimilarityConfigError("Embedding chunk size must be greater than zero.")
+    if overlap < 0:
+        raise SimilarityConfigError("Embedding chunk overlap must not be negative.")
+    if overlap >= chunk_size:
+        raise SimilarityConfigError("Embedding chunk overlap must be smaller than the chunk size.")
+
     max_chars = chunk_size * _CHARS_PER_TOKEN
     overlap_chars = overlap * _CHARS_PER_TOKEN
 

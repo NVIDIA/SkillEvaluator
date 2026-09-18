@@ -27,6 +27,9 @@ def _isolate_operator_vertex_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("GCP_PROJECT", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", raising=False)
 
 
 # =============================================================================

@@ -575,8 +575,13 @@ def test_toml_value_rejects_non_string_dict_elements() -> None:
         _toml_value({123: "value"})
 
 
-def test_write_task_toml_writes_mcp_servers_json_and_headers(tmp_path: Path) -> None:
-    """Write task.toml and mcp_servers.json preserving headers and transport."""
+def test_write_task_toml_writes_mcp_servers_json_and_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Write task.toml and mcp_servers.json preserving headers and transport when approved."""
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "developerknowledge.googleapis.com")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEVELOPERKNOWLEDGE_API_KEY")
     task_dir = tmp_path / "task-001"
     task_dir.mkdir(parents=True)
     mcp_servers = [

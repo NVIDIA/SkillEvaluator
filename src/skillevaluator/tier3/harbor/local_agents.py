@@ -110,10 +110,14 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
     """Wrap Claude Code to preserve rich MCP server declarations (transport, headers)."""
 
     def _build_register_mcp_servers_command(self) -> str | None:
-        """Return a shell command that writes MCP config to ~/.claude.json with headers."""
+        """Build MCP registration command supporting streamable-http and headers from mcp_servers.json."""
         mcp_servers = self._resolve_task_mcp_servers()
         if not mcp_servers:
             return super()._build_register_mcp_servers_command()
+
+        from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+        validate_mcp_server_declarations(mcp_servers)
 
         servers: dict[str, dict[str, Any]] = {}
         for server in mcp_servers:
@@ -171,8 +175,12 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
                 return []
             raw_servers = json.loads(mcp_json_path.read_text(encoding="utf-8"))
             if isinstance(raw_servers, list):
-                return raw_servers
+                from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+                return validate_mcp_server_declarations(raw_servers, source_label=str(mcp_json_path))
             return []
+        except ValueError:
+            raise
         except Exception:
             return []
 

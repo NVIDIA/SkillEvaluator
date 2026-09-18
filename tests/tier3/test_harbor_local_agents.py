@@ -277,8 +277,13 @@ def test_local_opencode_removes_docker_only_stdbuf(monkeypatch, tmp_path) -> Non
     assert captured["env"]["OPENAI_API_KEY"] == "test"
 
 
-def test_claude_mcp_servers_command_with_mcp_json(tmp_path: Path) -> None:
+def test_claude_mcp_servers_command_with_mcp_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Build MCP configuration command with streamable-http and headers from task mcp_servers.json."""
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "developerknowledge.googleapis.com")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEVELOPERKNOWLEDGE_API_KEY")
     agent_logs = tmp_path / "agent"
     agent_logs.mkdir(parents=True)
     task_dir = tmp_path / "task-001"

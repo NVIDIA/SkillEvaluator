@@ -210,6 +210,51 @@ class TestEmbedChunked:
 
         assert result == pytest.approx([0.5, 0.5])
 
+    @pytest.mark.parametrize("overlap", [10, 11])
+    def test_embed_chunked_rejects_non_progressing_windows_before_provider_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        overlap: int,
+    ) -> None:
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        client = EmbeddingClient()
+
+        with (
+            patch.object(client, "embed") as mock_embed,
+            pytest.raises(SimilarityConfigError, match="overlap must be smaller"),
+        ):
+            client.embed_chunked("x" * 100, chunk_size=10, overlap=overlap)
+
+        mock_embed.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("chunk_size", "overlap"),
+        [
+            (True, 0),
+            (10.0, 0),
+            (10, True),
+            (10, 1.5),
+            (10, math.nan),
+        ],
+        ids=["bool-size", "float-size", "bool-overlap", "float-overlap", "nan-overlap"],
+    )
+    def test_embed_chunked_rejects_non_integer_windows_before_provider_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        chunk_size: object,
+        overlap: object,
+    ) -> None:
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        client = EmbeddingClient()
+
+        with (
+            patch.object(client, "embed") as mock_embed,
+            pytest.raises(SimilarityConfigError, match="must be an integer"),
+        ):
+            client.embed_chunked("x" * 100, chunk_size=chunk_size, overlap=overlap)  # type: ignore[arg-type]
+
+        mock_embed.assert_not_called()
+
 
 class TestSplitIntoChunks:
     def test_short_text_single_chunk(self) -> None:
@@ -235,6 +280,19 @@ class TestSplitIntoChunks:
     def test_empty_text_returns_original(self) -> None:
         chunks = _split_into_chunks("", chunk_size=100, overlap=10)
         assert chunks == [""]
+
+    @pytest.mark.parametrize(
+        ("chunk_size", "overlap", "message"),
+        [
+            (0, 0, "chunk size must be greater than zero"),
+            (10, -1, "chunk overlap must not be negative"),
+            (10, 10, "overlap must be smaller than the chunk size"),
+            (10, 11, "overlap must be smaller than the chunk size"),
+        ],
+    )
+    def test_rejects_invalid_chunk_windows(self, chunk_size: int, overlap: int, message: str) -> None:
+        with pytest.raises(SimilarityConfigError, match=message):
+            _split_into_chunks("x" * 100, chunk_size=chunk_size, overlap=overlap)
 
     def test_heading_split_preserves_heading_with_content(self) -> None:
         text = "# Title\nSome intro\n## Part 1\nDetails"

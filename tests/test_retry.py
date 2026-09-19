@@ -122,19 +122,6 @@ def test_resolve_retry_config_custom_env() -> None:
     assert config.max_delay == 45.0
 
 
-def test_resolve_retry_config_aliases() -> None:
-    """Verify resolve_retry_config recognizes LLM_JUDGE_* aliases when primary names are absent."""
-    env = {
-        "LLM_JUDGE_MAX_RETRIES": "2",
-        "LLM_JUDGE_RETRY_BASE_DELAY": "0.5",
-        "LLM_JUDGE_RETRY_MAX_DELAY": "20.0",
-    }
-    config = resolve_retry_config(env)
-    assert config.max_retries == 2
-    assert config.base_delay == 0.5
-    assert config.max_delay == 20.0
-
-
 def test_resolve_retry_config_defensive_fallbacks() -> None:
     """Verify resolve_retry_config safely falls back to defaults when values are malformed."""
     env = {

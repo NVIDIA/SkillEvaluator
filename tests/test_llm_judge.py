@@ -589,7 +589,8 @@ def test_transient_429_preserves_schema_and_does_not_memoize_unsupported(
     )
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
-    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_BASE_DELAY", "0.01")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_BASE_DELAY", "0.0")
+    monkeypatch.setattr("time.sleep", lambda _s: None)
 
     class _RateLimitError(Exception):
         status_code = 429

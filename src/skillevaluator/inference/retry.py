@@ -21,12 +21,9 @@ DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_BASE_DELAY: float = 1.0
 DEFAULT_MAX_DELAY: float = 30.0
 _RETRIABLE_HTTP_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
-_PRIMARY_MAX_RETRIES_ENV: str = "SKILL_EVAL_LLM_MAX_RETRIES"
-_ALIAS_MAX_RETRIES_ENV: str = "LLM_JUDGE_MAX_RETRIES"
-_PRIMARY_BASE_DELAY_ENV: str = "SKILL_EVAL_LLM_RETRY_BASE_DELAY"
-_ALIAS_BASE_DELAY_ENV: str = "LLM_JUDGE_RETRY_BASE_DELAY"
-_PRIMARY_MAX_DELAY_ENV: str = "SKILL_EVAL_LLM_RETRY_MAX_DELAY"
-_ALIAS_MAX_DELAY_ENV: str = "LLM_JUDGE_RETRY_MAX_DELAY"
+_MAX_RETRIES_ENV: str = "SKILL_EVAL_LLM_MAX_RETRIES"
+_BASE_DELAY_ENV: str = "SKILL_EVAL_LLM_RETRY_BASE_DELAY"
+_MAX_DELAY_ENV: str = "SKILL_EVAL_LLM_RETRY_MAX_DELAY"
 
 
 @dataclass(frozen=True)
@@ -73,50 +70,36 @@ def calculate_full_jitter_delay(
     return random.uniform(0.0, backoff)
 
 
-def _int_env(environ: Mapping[str, str], names: tuple[str, ...], fallback: int) -> int:
-    """Read a non-negative integer from the first matching environment variable or return default."""
-    for name in names:
-        raw = str(environ.get(name, "")).strip()
-        if raw:
-            try:
-                val = int(raw)
-                return val if val >= 0 else fallback
-            except ValueError:
-                return fallback
+def _int_env(environ: Mapping[str, str], name: str, fallback: int) -> int:
+    """Read a non-negative integer from the environment variable or return default."""
+    raw = str(environ.get(name, "")).strip()
+    if raw:
+        try:
+            val = int(raw)
+            return val if val >= 0 else fallback
+        except ValueError:
+            return fallback
     return fallback
 
 
-def _float_env(environ: Mapping[str, str], names: tuple[str, ...], fallback: float) -> float:
-    """Read a non-negative float from the first matching environment variable or return default."""
-    for name in names:
-        raw = str(environ.get(name, "")).strip()
-        if raw:
-            try:
-                val = float(raw)
-                return val if val >= 0.0 else fallback
-            except ValueError:
-                return fallback
+def _float_env(environ: Mapping[str, str], name: str, fallback: float) -> float:
+    """Read a non-negative float from the environment variable or return default."""
+    raw = str(environ.get(name, "")).strip()
+    if raw:
+        try:
+            val = float(raw)
+            return val if val >= 0.0 else fallback
+        except ValueError:
+            return fallback
     return fallback
 
 
 def resolve_retry_config(environ: Mapping[str, str] | None = None) -> RetryConfig:
     """Resolve retry and backoff limits from environment variables with safe defaults."""
     env = os.environ if environ is None else environ
-    max_retries = _int_env(
-        env,
-        (_PRIMARY_MAX_RETRIES_ENV, _ALIAS_MAX_RETRIES_ENV),
-        fallback=DEFAULT_MAX_RETRIES,
-    )
-    base_delay = _float_env(
-        env,
-        (_PRIMARY_BASE_DELAY_ENV, _ALIAS_BASE_DELAY_ENV),
-        fallback=DEFAULT_BASE_DELAY,
-    )
-    raw_max_delay = _float_env(
-        env,
-        (_PRIMARY_MAX_DELAY_ENV, _ALIAS_MAX_DELAY_ENV),
-        fallback=DEFAULT_MAX_DELAY,
-    )
+    max_retries = _int_env(env, _MAX_RETRIES_ENV, fallback=DEFAULT_MAX_RETRIES)
+    base_delay = _float_env(env, _BASE_DELAY_ENV, fallback=DEFAULT_BASE_DELAY)
+    raw_max_delay = _float_env(env, _MAX_DELAY_ENV, fallback=DEFAULT_MAX_DELAY)
     max_delay = max(base_delay, raw_max_delay)
     return RetryConfig(max_retries=max_retries, base_delay=base_delay, max_delay=max_delay)
 

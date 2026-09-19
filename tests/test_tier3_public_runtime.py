@@ -1291,9 +1291,6 @@ def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
         "SKILL_EVAL_LLM_MAX_RETRIES": "5",
         "SKILL_EVAL_LLM_RETRY_BASE_DELAY": "2.0",
         "SKILL_EVAL_LLM_RETRY_MAX_DELAY": "40.0",
-        "LLM_JUDGE_MAX_RETRIES": "4",
-        "LLM_JUDGE_RETRY_BASE_DELAY": "1.5",
-        "LLM_JUDGE_RETRY_MAX_DELAY": "35.0",
         "UNRELATED_CUSTOM_VAR": "secret",
     }
     _write_task_toml(
@@ -1307,7 +1304,4 @@ def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
     assert verifier_env["SKILL_EVAL_LLM_MAX_RETRIES"] == "${SKILL_EVAL_LLM_MAX_RETRIES}"
     assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
     assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
-    assert verifier_env["LLM_JUDGE_MAX_RETRIES"] == "${LLM_JUDGE_MAX_RETRIES}"
-    assert verifier_env["LLM_JUDGE_RETRY_BASE_DELAY"] == "${LLM_JUDGE_RETRY_BASE_DELAY}"
-    assert verifier_env["LLM_JUDGE_RETRY_MAX_DELAY"] == "${LLM_JUDGE_RETRY_MAX_DELAY}"
     assert "UNRELATED_CUSTOM_VAR" not in verifier_env

@@ -1562,42 +1562,31 @@ def _calculate_jitter_delay(attempt, base_delay=1.0, max_delay=30.0):
 def _resolve_eval_retry_config():
     """Resolve retry and backoff limits from environment variables with safe defaults."""
 
-    def _read_int(names, default):
-        """Read a non-negative integer from the first matching environment variable or return default."""
-        for name in names:
-            raw = str(os.environ.get(name, "")).strip()
-            if raw:
-                try:
-                    val = int(raw)
-                    return val if val >= 0 else default
-                except ValueError:
-                    return default
+    def _read_int(name, default):
+        """Read a non-negative integer from the environment variable or return default."""
+        raw = str(os.environ.get(name, "")).strip()
+        if raw:
+            try:
+                val = int(raw)
+                return val if val >= 0 else default
+            except ValueError:
+                return default
         return default
 
-    def _read_float(names, default):
-        """Read a non-negative float from the first matching environment variable or return default."""
-        for name in names:
-            raw = str(os.environ.get(name, "")).strip()
-            if raw:
-                try:
-                    val = float(raw)
-                    return val if val >= 0.0 else default
-                except ValueError:
-                    return default
+    def _read_float(name, default):
+        """Read a non-negative float from the environment variable or return default."""
+        raw = str(os.environ.get(name, "")).strip()
+        if raw:
+            try:
+                val = float(raw)
+                return val if val >= 0.0 else default
+            except ValueError:
+                return default
         return default
 
-    max_retries = _read_int(
-        ("SKILL_EVAL_LLM_MAX_RETRIES", "LLM_JUDGE_MAX_RETRIES"),
-        _DEFAULT_MAX_RETRIES,
-    )
-    base_delay = _read_float(
-        ("SKILL_EVAL_LLM_RETRY_BASE_DELAY", "LLM_JUDGE_RETRY_BASE_DELAY"),
-        _DEFAULT_BASE_DELAY,
-    )
-    raw_max_delay = _read_float(
-        ("SKILL_EVAL_LLM_RETRY_MAX_DELAY", "LLM_JUDGE_RETRY_MAX_DELAY"),
-        _DEFAULT_MAX_DELAY,
-    )
+    max_retries = _read_int("SKILL_EVAL_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+    base_delay = _read_float("SKILL_EVAL_LLM_RETRY_BASE_DELAY", _DEFAULT_BASE_DELAY)
+    raw_max_delay = _read_float("SKILL_EVAL_LLM_RETRY_MAX_DELAY", _DEFAULT_MAX_DELAY)
     return max_retries, base_delay, max(base_delay, raw_max_delay)
 
 

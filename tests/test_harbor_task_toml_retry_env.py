@@ -16,11 +16,8 @@ def test_verifier_provider_env_vars_includes_retry_settings() -> None:
     """Verify _VERIFIER_PROVIDER_ENV_VARS allowlist contains all retry configuration keys."""
     expected_retry_vars = {
         "SKILL_EVAL_LLM_MAX_RETRIES",
-        "LLM_JUDGE_MAX_RETRIES",
         "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
-        "LLM_JUDGE_RETRY_BASE_DELAY",
         "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
-        "LLM_JUDGE_RETRY_MAX_DELAY",
     }
     assert expected_retry_vars.issubset(_VERIFIER_PROVIDER_ENV_VARS)
 

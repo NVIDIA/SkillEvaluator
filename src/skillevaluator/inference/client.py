@@ -105,6 +105,27 @@ def _temperature_kwargs(model: str, temperature: float | None) -> dict[str, floa
     return {"temperature": temperature}
 
 
+_SCHEMA_UNSUPPORTED_TARGETS: set[tuple[str, str, str]] = set()
+
+
+def _is_schema_unsupported_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+    return status_code in {400, 422} or isinstance(exc, TypeError)
+
+
+def _extract_choice_content(response: Any) -> str:
+    choices = getattr(response, "choices", None) or []
+    first_choice = choices[0] if choices else None
+    message = getattr(first_choice, "message", None) if first_choice is not None else None
+    content = getattr(message, "content", None) if message is not None else ""
+    if not content:
+        return ""
+    return content.strip()
+
+
 class LLMClient:
     """Public-provider client for chat completions.
 
@@ -259,15 +280,24 @@ class LLMClient:
 
     # -- direct-use methods -----------------------------------------------
 
-    def completions(self, system_prompt: str, user_prompt: str) -> str:
+    def completions(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        schema_name: str = "judge_response",
+    ) -> str:
         """Send a chat completion request and return the response text.
 
         Raises :class:`LLMClientError` when the response is empty.
         """
         config = self._resolved_config()
         client = self._get_client()
+        target_key = (config.provider, config.base_url or "", config.model)
 
         def _invoke_provider() -> str:
+            use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
                 call_kwargs: dict[str, Any] = {
                     "model": config.model,
@@ -276,7 +306,22 @@ class LLMClient:
                     "messages": [{"role": "user", "content": user_prompt}],
                     **_temperature_kwargs(config.model, self._temperature),
                 }
-                response = client.messages.create(**call_kwargs)
+                if use_schema:
+                    call_kwargs["output_config"] = {
+                        "format": {
+                            "type": "json_schema",
+                            "schema": response_schema,
+                        }
+                    }
+                try:
+                    response = client.messages.create(**call_kwargs)
+                except Exception as exc:
+                    if use_schema and _is_schema_unsupported_error(exc):
+                        _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+                        call_kwargs.pop("output_config", None)
+                        response = client.messages.create(**call_kwargs)
+                    else:
+                        raise
                 content = "".join(
                     str(block.text) for block in response.content if getattr(block, "type", None) == "text"
                 )
@@ -300,10 +345,10 @@ class LLMClient:
                     **_temperature_kwargs(config.model, self._temperature),
                     **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
                 )
-                content = response.choices[0].message.content
+                content = _extract_choice_content(response)
                 if not content:
                     raise EmptyLLMResponseError("LLM returned empty response content")
-                return str(content).strip()
+                return content
             call_kwargs: dict[str, Any] = {
                 "model": config.model,
                 "messages": [
@@ -313,12 +358,29 @@ class LLMClient:
                 **_temperature_kwargs(config.model, self._temperature),
                 **_token_limit_kwargs(config, self._max_tokens),
             }
+            if use_schema:
+                call_kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name,
+                        "strict": True,
+                        "schema": response_schema,
+                    },
+                }
 
-            response = client.chat.completions.create(**call_kwargs)
-            content = response.choices[0].message.content
+            try:
+                response = client.chat.completions.create(**call_kwargs)
+            except Exception as exc:
+                if use_schema and _is_schema_unsupported_error(exc):
+                    _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+                    call_kwargs.pop("response_format", None)
+                    response = client.chat.completions.create(**call_kwargs)
+                else:
+                    raise
+            content = _extract_choice_content(response)
             if not content:
                 raise EmptyLLMResponseError("LLM returned empty response content")
-            return content.strip()
+            return content
 
         return retry_call_with_backoff(
             _invoke_provider,

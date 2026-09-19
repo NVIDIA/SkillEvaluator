@@ -1292,7 +1292,16 @@ def _is_native_openai_chat_url(provider, request_url):
     )
 
 
-def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=None, request_url=None):
+def _chat_completion_payload(
+    model,
+    prompt,
+    max_tokens,
+    temperature,
+    provider=None,
+    request_url=None,
+    response_schema=None,
+    schema_name="judge_response",
+):
     resolved_provider = _public_provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
@@ -1308,6 +1317,15 @@ def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=No
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
+    if response_schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": True,
+                "schema": response_schema,
+            },
+        }
     return payload
 
 
@@ -1615,28 +1633,52 @@ def _urlopen_with_retry(request, timeout=90):
             attempt += 1
 
 
-def _call_anthropic(prompt, model, max_tokens, temperature):
+_SCHEMA_UNSUPPORTED_TARGETS = set()
+
+
+def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None):
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None, "ANTHROPIC_API_KEY is required for the anthropic provider"
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    if temperature is not None and _supports_custom_temperature(model):
-        payload["temperature"] = temperature
-    request = urllib.request.Request(
-        _anthropic_url(),
-        data=json.dumps(payload).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-    )
+    target_url = _anthropic_url()
+    target_key = ("anthropic", target_url, model)
+    use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+
+    def _build_request(include_schema):
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if temperature is not None and _supports_custom_temperature(model):
+            payload["temperature"] = temperature
+        if include_schema:
+            payload["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": response_schema,
+                }
+            }
+        return urllib.request.Request(
+            target_url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+
     # _anthropic_url() validates the configured base URL before this request.
-    raw_response = _urlopen_with_retry(request, timeout=90)
+    try:
+        raw_response = _urlopen_with_retry(_build_request(use_schema), timeout=90)
+    except urllib.error.HTTPError as error:
+        if use_schema and error.code in {400, 422}:
+            error.close()
+            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            raw_response = _urlopen_with_retry(_build_request(False), timeout=90)
+        else:
+            raise
     body = json.loads(raw_response)
     content = "".join(
         str(block.get("text", ""))
@@ -1681,10 +1723,31 @@ def _selected_judge_model(model=None):
     )
 
 
-def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+def _resolve_judge_schema(prompt, response_schema=None, schema_name="judge_response"):
+    if response_schema is not None:
+        return response_schema, schema_name
+    if "SKILL_IDENTIFIED" in prompt and "ACTION_CORRECT" in prompt:
+        return ACCURACY_JSON_SCHEMA, "accuracy_judgment"
+    if '"user_goal"' in prompt and '"end_state"' in prompt and '"achieved"' in prompt:
+        return GOAL_ACCURACY_JSON_SCHEMA, "goal_accuracy_judgment"
+    if "EXPECTED BEHAVIORS:" in prompt and '"results"' in prompt:
+        return BEHAVIOR_CHECK_JSON_SCHEMA, "behavior_check_judgment"
+    return None, schema_name
+
+
+def _call_public_llm_with_provenance(
+    prompt,
+    model=None,
+    max_tokens=1024,
+    temperature=0.0,
+    allow_model_fallback=True,
+    response_schema=None,
+    schema_name="judge_response",
+):
     provider = _public_provider()
     if not provider:
         return None, _public_provider_error(), {}
+    resolved_schema, resolved_name = _resolve_judge_schema(prompt, response_schema, schema_name)
     requested_model = _selected_judge_model(model)
     models = _fallback_models(requested_model) if allow_model_fallback else [requested_model]
     errors = []
@@ -1694,7 +1757,13 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
         last_provenance = provenance
         try:
             if provider == "anthropic":
-                content, error = _call_anthropic(prompt, candidate_model, max_tokens, temperature)
+                content, error = _call_anthropic(
+                    prompt,
+                    candidate_model,
+                    max_tokens,
+                    temperature,
+                    response_schema=resolved_schema,
+                )
                 if error:
                     return None, _redact_configured_credentials(error), provenance
                 return content, None, provenance
@@ -1712,24 +1781,48 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
             if not api_key:
                 return None, f"No API key configured for {provider}", provenance
             request_url = _resolve_url(provider)
-            request = urllib.request.Request(
-                request_url,
-                data=json.dumps(
-                    _chat_completion_payload(
-                        candidate_model,
-                        prompt,
-                        max_tokens,
-                        temperature,
-                        provider=provider,
-                        request_url=request_url,
-                    )
-                ).encode(),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            )
+            target_key = (provider, request_url, candidate_model)
+            use_schema = resolved_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+
+            def _build_oai_request(
+                include_schema,
+                *,
+                _url=request_url,
+                _model=candidate_model,
+                _key=api_key,
+            ):
+                return urllib.request.Request(
+                    _url,
+                    data=json.dumps(
+                        _chat_completion_payload(
+                            _model,
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            provider=provider,
+                            request_url=_url,
+                            response_schema=resolved_schema if include_schema else None,
+                            schema_name=resolved_name,
+                        )
+                    ).encode(),
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {_key}"},
+                )
+
             # request_url was validated by _resolve_url() before this request.
-            raw_response = _urlopen_with_retry(request, timeout=90)
+            try:
+                raw_response = _urlopen_with_retry(_build_oai_request(use_schema), timeout=90)
+            except urllib.error.HTTPError as error:
+                if use_schema and error.code in {400, 422}:
+                    error.close()
+                    _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+                    raw_response = _urlopen_with_retry(_build_oai_request(False), timeout=90)
+                else:
+                    raise
             body = json.loads(raw_response)
-            content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+            choices = body.get("choices") or [{}]
+            first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+            message = first_choice.get("message")
+            content = message.get("content", "") if isinstance(message, dict) else ""
             if content is None:
                 content = ""
             if candidate_model != requested_model:
@@ -1747,13 +1840,23 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
     return None, _redact_configured_credentials(detail), last_provenance
 
 
-def call_public_llm(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+def call_public_llm(
+    prompt,
+    model=None,
+    max_tokens=1024,
+    temperature=0.0,
+    allow_model_fallback=True,
+    response_schema=None,
+    schema_name="judge_response",
+):
     content, error, _provenance = _call_public_llm_with_provenance(
         prompt,
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
         allow_model_fallback=allow_model_fallback,
+        response_schema=response_schema,
+        schema_name=schema_name,
     )
     return content, error
 
@@ -4153,11 +4256,76 @@ def _goal_payload_error(parsed):
     return None
 
 
+ACCURACY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "criteria": {
+            "type": "object",
+            "properties": {
+                "SKILL_IDENTIFIED": {"type": "boolean"},
+                "ACTION_CORRECT": {"type": "boolean"},
+                "FACTUALLY_ACCURATE": {"type": "boolean"},
+                "TASK_ADDRESSED": {"type": "boolean"},
+                "ACTIONABLE": {"type": "boolean"},
+            },
+            "required": [
+                "SKILL_IDENTIFIED",
+                "ACTION_CORRECT",
+                "FACTUALLY_ACCURATE",
+                "TASK_ADDRESSED",
+                "ACTIONABLE",
+            ],
+            "additionalProperties": False,
+        },
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["criteria", "score", "reason"],
+    "additionalProperties": False,
+}
+
+GOAL_ACCURACY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "user_goal": {"type": "string"},
+        "end_state": {"type": "string"},
+        "achieved": {"type": "boolean"},
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["user_goal", "end_state", "achieved", "score", "reason"],
+    "additionalProperties": False,
+}
+
+BEHAVIOR_CHECK_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "integer"},
+                    "passed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["step", "passed", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "score": {"type": "number"},
+        "summary": {"type": "string"},
+    },
+    "required": ["results", "score", "summary"],
+    "additionalProperties": False,
+}
+
+
 def judge_accuracy(question, ground_truth, agent_text):
     if not ground_truth:
         return {"score": 1.0, "reason": "No ground_truth -- skipped"}
     prompt = f"""You are an expert evaluator for AI agent responses. Evaluate by checking \
-each criterion below against the expected answer. For each, answer YES or NO.
+each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
 
 1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?
 2. ACTION_CORRECT: Does the response describe or execute the correct actions/scripts?
@@ -4165,8 +4333,7 @@ each criterion below against the expected answer. For each, answer YES or NO.
 4. TASK_ADDRESSED: Does the response directly address the user's request?
 5. ACTIONABLE: Does the response provide actionable information (not just acknowledgment)?
 
-For each criterion write: YES or NO with a brief reason.
-Then compute score = count(YES) / 5.
+Compute score = count(true) / 5.
 Be lenient on exact wording but strict on factual correctness.
 
 Respond with ONLY a JSON object:
@@ -4365,7 +4532,7 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors_text}
 
-For each behavior, respond YES (observed) or NO (not observed) with a brief reason.
+For each behavior, set "passed" to true (observed) or false (not observed) with a brief reason.
 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true, "reason": "..."}}, ...], "score": 0.67, "summary": "brief summary"}}"""

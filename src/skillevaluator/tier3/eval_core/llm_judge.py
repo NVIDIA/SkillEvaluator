@@ -220,31 +220,10 @@ def _chat_completion_payload(
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
     if response_schema is not None:
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "strict": True,
-                "schema": response_schema,
-            },
-        }
+        from skillevaluator.inference.client import _build_openai_response_format
+
+        payload["response_format"] = _build_openai_response_format(response_schema, schema_name)
     return payload
-
-
-def _resolve_judge_schema(
-    prompt: str,
-    response_schema: dict[str, Any] | None = None,
-    schema_name: str = "judge_response",
-) -> tuple[dict[str, Any] | None, str]:
-    if response_schema is not None:
-        return response_schema, schema_name
-    if "SKILL_IDENTIFIED" in prompt and "ACTION_CORRECT" in prompt:
-        return ACCURACY_JSON_SCHEMA, "accuracy_judgment"
-    if '"user_goal"' in prompt and '"end_state"' in prompt and '"achieved"' in prompt:
-        return GOAL_ACCURACY_JSON_SCHEMA, "goal_accuracy_judgment"
-    if "EXPECTED BEHAVIORS:" in prompt and '"results"' in prompt:
-        return BEHAVIOR_CHECK_JSON_SCHEMA, "behavior_check_judgment"
-    return None, schema_name
 
 
 def call_public_llm(
@@ -266,7 +245,6 @@ def call_public_llm(
     drifting between dataset generation, Tier 1, and Tier 3.
     """
     _ = timeout, allow_model_fallback
-    resolved_schema, resolved_name = _resolve_judge_schema(prompt, response_schema, schema_name)
     try:
         from skillevaluator.inference.client import LLMClient
 
@@ -280,8 +258,8 @@ def call_public_llm(
             client.completions(
                 "You are a precise evaluation judge.",
                 prompt,
-                response_schema=resolved_schema,
-                schema_name=resolved_name,
+                response_schema=response_schema,
+                schema_name=schema_name,
             ),
             None,
         )
@@ -802,6 +780,8 @@ def judge_accuracy(
         ground_truth=ground_truth,
         agent_text=agent_text,
     )
+    kwargs.setdefault("response_schema", ACCURACY_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
@@ -890,6 +870,8 @@ def judge_goal_accuracy(
         tool_summary=tool_summary,
         agent_text=agent_text,
     )
+    kwargs.setdefault("response_schema", GOAL_ACCURACY_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "goal_accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
@@ -982,6 +964,8 @@ def judge_behavior_check(
         behaviors=behaviors_text,
     )
     kwargs.setdefault("max_tokens", BEHAVIOR_JUDGE_MAX_TOKENS)
+    kwargs.setdefault("response_schema", BEHAVIOR_CHECK_JSON_SCHEMA)
+    kwargs.setdefault("schema_name", "behavior_check_judgment")
 
     content, error = call_public_llm(prompt, **kwargs)
     if error:

@@ -108,12 +108,59 @@ def _temperature_kwargs(model: str, temperature: float | None) -> dict[str, floa
 _SCHEMA_UNSUPPORTED_TARGETS: set[tuple[str, str, str]] = set()
 
 
+def _build_openai_response_format(schema: dict[str, Any], schema_name: str = "judge_response") -> dict[str, Any]:
+    """Build OpenAI-compatible JSON schema response_format payload."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _build_anthropic_output_config(schema: dict[str, Any]) -> dict[str, Any]:
+    """Build Anthropic Messages API output_config payload."""
+    return {
+        "format": {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    }
+
+
 def _is_schema_unsupported_error(exc: Exception) -> bool:
     status_code = getattr(exc, "status_code", None)
     if status_code is None:
         response = getattr(exc, "response", None)
         status_code = getattr(response, "status_code", None)
     return status_code in {400, 422} or isinstance(exc, TypeError)
+
+
+def _call_with_schema_fallback(
+    call_fn: Any,
+    call_kwargs: dict[str, Any],
+    *,
+    schema_key: str,
+    target_key: tuple[str, str, str],
+    use_schema: bool,
+) -> Any:
+    """Invoke call_fn and downgrade to prompt-only on HTTP 400/422 schema errors."""
+    try:
+        return call_fn(**call_kwargs)
+    except Exception as exc:
+        if use_schema and _is_schema_unsupported_error(exc):
+            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            logger.warning(
+                "Structured output schema unsupported by provider=%s model=%s; "
+                "downgrading to prompt-only JSON and memoizing target.",
+                target_key[0],
+                target_key[2],
+            )
+            call_kwargs.pop(schema_key, None)
+            return call_fn(**call_kwargs)
+        raise
 
 
 def _extract_choice_content(response: Any) -> str:
@@ -306,22 +353,15 @@ class LLMClient:
                     "messages": [{"role": "user", "content": user_prompt}],
                     **_temperature_kwargs(config.model, self._temperature),
                 }
-                if use_schema:
-                    call_kwargs["output_config"] = {
-                        "format": {
-                            "type": "json_schema",
-                            "schema": response_schema,
-                        }
-                    }
-                try:
-                    response = client.messages.create(**call_kwargs)
-                except Exception as exc:
-                    if use_schema and _is_schema_unsupported_error(exc):
-                        _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
-                        call_kwargs.pop("output_config", None)
-                        response = client.messages.create(**call_kwargs)
-                    else:
-                        raise
+                if use_schema and response_schema is not None:
+                    call_kwargs["output_config"] = _build_anthropic_output_config(response_schema)
+                response = _call_with_schema_fallback(
+                    client.messages.create,
+                    call_kwargs,
+                    schema_key="output_config",
+                    target_key=target_key,
+                    use_schema=use_schema,
+                )
                 content = "".join(
                     str(block.text) for block in response.content if getattr(block, "type", None) == "text"
                 )
@@ -358,25 +398,16 @@ class LLMClient:
                 **_temperature_kwargs(config.model, self._temperature),
                 **_token_limit_kwargs(config, self._max_tokens),
             }
-            if use_schema:
-                call_kwargs["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": schema_name,
-                        "strict": True,
-                        "schema": response_schema,
-                    },
-                }
+            if use_schema and response_schema is not None:
+                call_kwargs["response_format"] = _build_openai_response_format(response_schema, schema_name)
 
-            try:
-                response = client.chat.completions.create(**call_kwargs)
-            except Exception as exc:
-                if use_schema and _is_schema_unsupported_error(exc):
-                    _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
-                    call_kwargs.pop("response_format", None)
-                    response = client.chat.completions.create(**call_kwargs)
-                else:
-                    raise
+            response = _call_with_schema_fallback(
+                client.chat.completions.create,
+                call_kwargs,
+                schema_key="response_format",
+                target_key=target_key,
+                use_schema=use_schema,
+            )
             content = _extract_choice_content(response)
             if not content:
                 raise EmptyLLMResponseError("LLM returned empty response content")

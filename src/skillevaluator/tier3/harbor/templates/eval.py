@@ -1292,6 +1292,26 @@ def _is_native_openai_chat_url(provider, request_url):
     )
 
 
+def _build_openai_response_format(schema, schema_name="judge_response"):
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _build_anthropic_output_config(schema):
+    return {
+        "format": {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    }
+
+
 def _chat_completion_payload(
     model,
     prompt,
@@ -1318,14 +1338,7 @@ def _chat_completion_payload(
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
     if response_schema is not None:
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "strict": True,
-                "schema": response_schema,
-            },
-        }
+        payload["response_format"] = _build_openai_response_format(response_schema, schema_name)
     return payload
 
 
@@ -1636,6 +1649,23 @@ def _urlopen_with_retry(request, timeout=90):
 _SCHEMA_UNSUPPORTED_TARGETS = set()
 
 
+def _urlopen_with_schema_fallback(build_request, *, target_key, use_schema, timeout=90):
+    try:
+        return _urlopen_with_retry(build_request(use_schema), timeout=timeout)
+    except urllib.error.HTTPError as error:
+        if use_schema and error.code in {400, 422}:
+            error.close()
+            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            logger.warning(
+                "Structured output schema unsupported by provider=%s model=%s; "
+                "downgrading to prompt-only JSON and memoizing target.",
+                target_key[0],
+                target_key[2],
+            )
+            return _urlopen_with_retry(build_request(False), timeout=timeout)
+        raise
+
+
 def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None):
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -1653,12 +1683,7 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
         if temperature is not None and _supports_custom_temperature(model):
             payload["temperature"] = temperature
         if include_schema:
-            payload["output_config"] = {
-                "format": {
-                    "type": "json_schema",
-                    "schema": response_schema,
-                }
-            }
+            payload["output_config"] = _build_anthropic_output_config(response_schema)
         return urllib.request.Request(
             target_url,
             data=json.dumps(payload).encode(),
@@ -1670,15 +1695,12 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
         )
 
     # _anthropic_url() validates the configured base URL before this request.
-    try:
-        raw_response = _urlopen_with_retry(_build_request(use_schema), timeout=90)
-    except urllib.error.HTTPError as error:
-        if use_schema and error.code in {400, 422}:
-            error.close()
-            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
-            raw_response = _urlopen_with_retry(_build_request(False), timeout=90)
-        else:
-            raise
+    raw_response = _urlopen_with_schema_fallback(
+        _build_request,
+        target_key=target_key,
+        use_schema=use_schema,
+        timeout=90,
+    )
     body = json.loads(raw_response)
     content = "".join(
         str(block.get("text", ""))
@@ -1723,18 +1745,6 @@ def _selected_judge_model(model=None):
     )
 
 
-def _resolve_judge_schema(prompt, response_schema=None, schema_name="judge_response"):
-    if response_schema is not None:
-        return response_schema, schema_name
-    if "SKILL_IDENTIFIED" in prompt and "ACTION_CORRECT" in prompt:
-        return ACCURACY_JSON_SCHEMA, "accuracy_judgment"
-    if '"user_goal"' in prompt and '"end_state"' in prompt and '"achieved"' in prompt:
-        return GOAL_ACCURACY_JSON_SCHEMA, "goal_accuracy_judgment"
-    if "EXPECTED BEHAVIORS:" in prompt and '"results"' in prompt:
-        return BEHAVIOR_CHECK_JSON_SCHEMA, "behavior_check_judgment"
-    return None, schema_name
-
-
 def _call_public_llm_with_provenance(
     prompt,
     model=None,
@@ -1747,7 +1757,6 @@ def _call_public_llm_with_provenance(
     provider = _public_provider()
     if not provider:
         return None, _public_provider_error(), {}
-    resolved_schema, resolved_name = _resolve_judge_schema(prompt, response_schema, schema_name)
     requested_model = _selected_judge_model(model)
     models = _fallback_models(requested_model) if allow_model_fallback else [requested_model]
     errors = []
@@ -1762,7 +1771,7 @@ def _call_public_llm_with_provenance(
                     candidate_model,
                     max_tokens,
                     temperature,
-                    response_schema=resolved_schema,
+                    response_schema=response_schema,
                 )
                 if error:
                     return None, _redact_configured_credentials(error), provenance
@@ -1782,7 +1791,7 @@ def _call_public_llm_with_provenance(
                 return None, f"No API key configured for {provider}", provenance
             request_url = _resolve_url(provider)
             target_key = (provider, request_url, candidate_model)
-            use_schema = resolved_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+            use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
 
             def _build_oai_request(
                 include_schema,
@@ -1801,23 +1810,20 @@ def _call_public_llm_with_provenance(
                             temperature,
                             provider=provider,
                             request_url=_url,
-                            response_schema=resolved_schema if include_schema else None,
-                            schema_name=resolved_name,
+                            response_schema=response_schema if include_schema else None,
+                            schema_name=schema_name,
                         )
                     ).encode(),
                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {_key}"},
                 )
 
             # request_url was validated by _resolve_url() before this request.
-            try:
-                raw_response = _urlopen_with_retry(_build_oai_request(use_schema), timeout=90)
-            except urllib.error.HTTPError as error:
-                if use_schema and error.code in {400, 422}:
-                    error.close()
-                    _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
-                    raw_response = _urlopen_with_retry(_build_oai_request(False), timeout=90)
-                else:
-                    raise
+            raw_response = _urlopen_with_schema_fallback(
+                _build_oai_request,
+                target_key=target_key,
+                use_schema=use_schema,
+                timeout=90,
+            )
             body = json.loads(raw_response)
             choices = body.get("choices") or [{}]
             first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
@@ -4353,6 +4359,8 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
         _accuracy_payload_error,
         call_public_llm,
         extract_json,
+        response_schema=ACCURACY_JSON_SCHEMA,
+        schema_name="accuracy_judgment",
     )
     if error:
         return _judge_error(error)
@@ -4480,6 +4488,8 @@ Respond with ONLY a JSON object:
         _goal_payload_error,
         _call_public_llm_with_provenance,
         extract_json,
+        response_schema=GOAL_ACCURACY_JSON_SCHEMA,
+        schema_name="goal_accuracy_judgment",
     )
     if error:
         return _judge_error(error, **provenance)
@@ -4537,7 +4547,12 @@ For each behavior, set "passed" to true (observed) or false (not observed) with 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true, "reason": "..."}}, ...], "score": 0.67, "summary": "brief summary"}}"""
 
-    content, error = call_public_llm(prompt, max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS)
+    content, error = call_public_llm(
+        prompt,
+        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+        schema_name="behavior_check_judgment",
+    )
     if error:
         return _judge_error(f"LLM judge error: {error}", results=[])
 
@@ -4551,7 +4566,10 @@ Respond with ONLY a JSON object:
     if score is None:
         # One retry max, with an explicit machine-readable-output reminder.
         retry_content, retry_error = call_public_llm(
-            prompt + _BEHAVIOR_RETRY_REMINDER, max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS
+            prompt + _BEHAVIOR_RETRY_REMINDER,
+            max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+            response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+            schema_name="behavior_check_judgment",
         )
         if not retry_error:
             parsed = _parse_judge_object(retry_content)

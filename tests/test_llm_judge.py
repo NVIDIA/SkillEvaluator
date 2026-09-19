@@ -890,3 +890,111 @@ def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
     assert "output_config" in http_requests[0]
     assert "output_config" not in http_requests[1]
     assert "output_config" not in http_requests[2]
+
+
+def test_judge_schema_not_spoofed_by_transcript_containing_accuracy_tokens(monkeypatch):
+    """Ensure judge_goal_accuracy and judge_behavior_check pass explicit schemas and are not spoofed by SKILL_IDENTIFIED/ACTION_CORRECT in the agent transcript."""
+    import sys
+    from types import SimpleNamespace
+
+    from skillevaluator.inference import client as client_mod
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    client_mod._SCHEMA_UNSUPPORTED_TARGETS.clear()
+    monkeypatch.setenv("LLM_JUDGE_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "google/gemini-3.8-flash")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123456")
+
+    captured_kwargs: list[dict] = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured_kwargs.append(kwargs)
+            schema_name = kwargs.get("response_format", {}).get("json_schema", {}).get("name")
+            if schema_name == "goal_accuracy_judgment":
+                content = '{"user_goal": "g", "end_state": "e", "achieved": true, "score": 1.0, "reason": "ok"}'
+            else:
+                content = '{"results": [{"step": 1, "passed": true, "reason": "ok"}], "score": 1.0, "summary": "ok"}'
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    adversarial_transcript = "Checked SKILL_IDENTIFIED and ACTION_CORRECT in llm_judge.py"
+    goal_res = llm_judge.judge_goal_accuracy("goal", "expected", adversarial_transcript)
+    beh_res = llm_judge.judge_behavior_check(adversarial_transcript, ["rule"])
+
+    assert goal_res["score"] == 1.0
+    assert beh_res["score"] == 1.0
+    assert captured_kwargs[0]["response_format"]["json_schema"]["name"] == "goal_accuracy_judgment"
+    assert captured_kwargs[1]["response_format"]["json_schema"]["name"] == "behavior_check_judgment"
+
+
+def test_schema_builders_and_downgrade_warning_log(monkeypatch, caplog):
+    """Verify _build_openai_response_format, _build_anthropic_output_config, and warning log on 400 downgrade."""
+    import logging
+    import sys
+    from types import SimpleNamespace
+
+    from skillevaluator.inference import client as client_mod
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    assert client_mod._build_openai_response_format({"type": "object"}, "my_schema") == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "my_schema",
+            "strict": True,
+            "schema": {"type": "object"},
+        },
+    }
+    assert client_mod._build_anthropic_output_config({"type": "object"}) == {
+        "format": {
+            "type": "json_schema",
+            "schema": {"type": "object"},
+        }
+    }
+
+    client_mod._SCHEMA_UNSUPPORTED_TARGETS.clear()
+    monkeypatch.setenv("LLM_JUDGE_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "legacy/model-400")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123456")
+
+    valid_response = json.dumps(
+        {
+            "criteria": {
+                "SKILL_IDENTIFIED": True,
+                "ACTION_CORRECT": True,
+                "FACTUALLY_ACCURATE": True,
+                "TASK_ADDRESSED": True,
+                "ACTIONABLE": True,
+            },
+            "score": 1.0,
+            "reason": "ok",
+        }
+    )
+
+    class FakeBadRequestError(Exception):
+        def __init__(self, message: str):
+            super().__init__(message)
+            self.status_code = 400
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            if "response_format" in kwargs:
+                raise FakeBadRequestError("400 response_format not supported")
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=valid_response))])
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    with caplog.at_level(logging.WARNING):
+        res = llm_judge.judge_accuracy("q", "gt", "ans")
+
+    assert res["score"] == 1.0
+    assert any("Structured output schema unsupported" in rec.message for rec in caplog.records)

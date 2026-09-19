@@ -380,7 +380,9 @@ def test_shared_structured_judge_keeps_explicit_max_tokens_override(
 
     assert result["score"] is not None
     assert len(calls) == 1
-    assert calls[0]["kwargs"] == {"max_tokens": 2048}
+    assert calls[0]["kwargs"]["max_tokens"] == 2048
+    assert isinstance(calls[0]["kwargs"]["response_schema"], dict)
+    assert isinstance(calls[0]["kwargs"]["schema_name"], str)
 
 
 def test_judge_error_reserved_fields_cannot_be_overridden(judge_module) -> None:

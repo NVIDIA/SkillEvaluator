@@ -4,6 +4,24 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Transparent HTTP 429 (rate-limiting), transient 5xx, and timeout recovery for
+  LLM judges in both the Harbor container verifier (`eval.py`) and host runtime
+  (`LLMClient`). Features zero-dependency full jitter exponential backoff,
+  RFC-7231 `Retry-After` header parsing, defensive environment overrides
+  (`SKILL_EVAL_LLM_MAX_RETRIES`, `SKILL_EVAL_LLM_RETRY_BASE_DELAY`, and
+  `SKILL_EVAL_LLM_RETRY_MAX_DELAY`), and
+  automatic container forwarding via Harbor `task.toml` without altering
+  benchmark metrics or scoring formulas.
+- Provider-aware structured JSON schema enforcement (`response_format` for
+  OpenAI-compatible / Gemini Vertex / NVIDIA NIM endpoints and `output_config`
+  for Anthropic `/v1/messages`) across `judge_accuracy`, `judge_goal_accuracy`,
+  and `judge_behavior_check`, with automatic `HTTP 400`/`422` downgrade and
+  per-target memoization (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt
+  alignment, and a guard for missing `message` fields on reasoning token
+  exhaustion.
+
 ## 0.3.0 - 2026-09-17
 
 ### Added

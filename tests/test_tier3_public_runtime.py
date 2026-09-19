@@ -196,7 +196,7 @@ def test_local_bridge_command_uses_custom_agent_import_path() -> None:
 
 
 def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
-    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker or local"):
+    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker, local, or gke"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="codex",
@@ -1281,3 +1281,95 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
 
     assert sdk_urls == [expected_url]
     assert verifier._anthropic_url() == expected_url
+
+
+def test_verifier_refreshes_adc_token_on_401_for_vertex_openapi(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify verifier template refreshes ADC token in-process upon HTTP 401 when calling Vertex OpenAPI."""
+    import io
+    import urllib.error
+
+    verifier = _load_verifier_template()
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/test-p/locations/global/endpoints/openapi"
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", "expired-initial-token")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
+
+    monkeypatch.setattr(verifier, "_get_vertex_access_token", lambda **_kw: "refreshed-adc-token")
+
+    attempts: list[str] = []
+
+    def mock_urlopen(request, timeout=90):
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+        attempts.append(auth_header)
+        if auth_header == "Bearer expired-initial-token":
+            raise urllib.error.HTTPError(
+                url=request.full_url,
+                code=401,
+                msg="Unauthorized",
+                hdrs={},
+                fp=io.BytesIO(b'{"error": {"message": "Token expired"}}'),
+            )
+        if auth_header == "Bearer refreshed-adc-token":
+            resp = Mock()
+            resp.read.return_value = json.dumps(
+                {"choices": [{"message": {"content": "grading verdict from refreshed token"}}]}
+            ).encode("utf-8")
+            resp.__enter__ = Mock(return_value=resp)
+            resp.__exit__ = Mock(return_value=False)
+            return resp
+        raise RuntimeError(f"Unexpected auth header: {auth_header}")
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", mock_urlopen)
+
+    content, error, _provenance = verifier._call_public_llm_with_provenance(
+        "Evaluate this trajectory",
+        allow_model_fallback=False,
+    )
+
+    assert error is None
+    assert content == "grading verdict from refreshed token"
+    assert attempts == ["Bearer expired-initial-token", "Bearer refreshed-adc-token"]
+    assert verifier.os.environ.get("OPENAI_API_KEY") == "refreshed-adc-token"
+
+
+def test_verifier_401_does_not_retry_non_vertex_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify verifier template does not attempt ADC refresh on HTTP 401 for non-Vertex endpoints."""
+    import io
+    import urllib.error
+
+    verifier = _load_verifier_template()
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "invalid-key")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "gpt-4o")
+
+    refresh_called = False
+
+    def mock_get_token(**_kw):
+        nonlocal refresh_called
+        refresh_called = True
+        return "some-token"
+
+    monkeypatch.setattr(verifier, "_get_vertex_access_token", mock_get_token)
+
+    def mock_urlopen(request, timeout=90):
+        raise urllib.error.HTTPError(
+            url=request.full_url,
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=io.BytesIO(b'{"error": "Invalid API key"}'),
+        )
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", mock_urlopen)
+
+    content, error, _provenance = verifier._call_public_llm_with_provenance(
+        "Evaluate this trajectory",
+        allow_model_fallback=False,
+    )
+
+    assert content is None
+    assert error is not None
+    assert "401" in error or "Unauthorized" in error
+    assert refresh_called is False

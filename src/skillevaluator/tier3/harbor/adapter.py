@@ -27,12 +27,12 @@ import stat
 import subprocess
 import tempfile
 import tomllib
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from skillevaluator.tier3.case_ids import safe_child, validate_case_ids, validate_output_directory_path
 from skillevaluator.tier3.harbor import DEFAULT_LLM_VERIFIER_TIMEOUT_SEC
@@ -1727,6 +1727,195 @@ def _write_instruction(task_dir: Path, question: str) -> None:
     (task_dir / "instruction.md").write_text(question + "\n", encoding="utf-8")
 
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+
+class McpServerDeclaration(BaseModel):
+    """Schema for a skill-declared MCP server entry at the configuration boundary."""
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    transport: str | None = None
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class McpSecurityPolicy(BaseModel):
+    """Host-controlled allowlists for skill-declared MCP servers."""
+
+    model_config = ConfigDict(frozen=True)
+
+    allowed_hosts: frozenset[str] = Field(default_factory=frozenset)
+    allowed_secrets: frozenset[str] = Field(default_factory=frozenset)
+
+    @classmethod
+    def from_environ(cls, environ: Mapping[str, str] | None = None) -> McpSecurityPolicy:
+        """Parse host MCP security allowlists from environment variables."""
+        env = os.environ if environ is None else environ
+        hosts = frozenset(
+            host.strip().lower() for host in env.get("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "").split(",") if host.strip()
+        )
+        secrets = frozenset(
+            secret.strip() for secret in env.get("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "").split(",") if secret.strip()
+        )
+        return cls(allowed_hosts=hosts, allowed_secrets=secrets)
+
+
+_MCP_SENSITIVE_HEADER_TOKENS = (
+    "auth",
+    "bearer",
+    "cookie",
+    "credential",
+    "key",
+    "password",
+    "secret",
+    "token",
+)
+_MCP_SENSITIVE_ENV_TOKENS = (
+    "API_KEY",
+    "AUTH_TOKEN",
+    "BEARER",
+    "COOKIE",
+    "CREDENTIAL",
+    "PASSWORD",
+    "PRIVATE_KEY",
+    "SECRET",
+    "TOKEN",
+)
+_MCP_LITERAL_SECRET_RE = re.compile(
+    r"(?i)(?:(?:^|\s)bearer\s+\S+|(?:^|\s)basic\s+\S+|\bsk-[A-Za-z0-9_-]{8,}|\bnvapi-[A-Za-z0-9_-]{8,}|"
+    r"\bAIza[0-9A-Za-z_-]{16,}|\bya29\.[0-9A-Za-z_-]{16,}|"
+    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|"
+    r"\bgh[pousr]_[A-Za-z0-9]{16,}|\bxox[baprs]-[A-Za-z0-9-]{8,})"
+)
+
+
+def _extract_mcp_env_refs(value: object) -> list[str]:
+    """Extract all $VAR and ${VAR} references from a string or nested structure."""
+    refs: list[str] = []
+    if isinstance(value, str):
+        for match in _COMPOSE_ENV_RE.finditer(value):
+            var_name = match.group(1) or match.group(2)
+            if var_name:
+                refs.append(var_name)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            refs.extend(_extract_mcp_env_refs(k))
+            refs.extend(_extract_mcp_env_refs(v))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            refs.extend(_extract_mcp_env_refs(item))
+    return refs
+
+
+def _contains_literal_secret(value: str) -> bool:
+    """Return True if a string contains a literal secret after stripping ${VAR}/$VAR placeholders."""
+    stripped = _COMPOSE_ENV_RE.sub("", value).strip()
+    if not stripped:
+        return False
+    return bool(_MCP_LITERAL_SECRET_RE.search(stripped))
+
+
+def validate_mcp_server_declarations(
+    servers: list[dict[str, Any]],
+    *,
+    allowed_runtime_env: Mapping[str, str] | None = None,
+    source_label: str = "mcp_servers.toml",
+    environ: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Validate MCP server declarations against operator secret exfiltration and unapproved auth headers."""
+    from skillevaluator.tier3.harbor.runner import is_operator_owned_or_provider_secret
+
+    policy = McpSecurityPolicy.from_environ(environ)
+    runtime_env_names = set(allowed_runtime_env.keys()) if allowed_runtime_env else set()
+
+    for raw_srv in servers:
+        try:
+            parsed = McpServerDeclaration.model_validate(raw_srv)
+        except ValidationError as exc:
+            raise ValueError(f"Invalid MCP server declaration in {source_label}: {exc}") from exc
+
+        name = parsed.name or "<unnamed>"
+        hostname = (urlsplit(parsed.url.strip()).hostname or "").lower() if parsed.url and parsed.url.strip() else ""
+        is_stdio_only = not hostname and (parsed.transport in (None, "stdio") or bool(parsed.command))
+
+        # Check all string fields (url, command, args) for literal secrets
+        for field_label, str_values in (
+            ("url", [parsed.url] if parsed.url else []),
+            ("command", [parsed.command] if parsed.command else []),
+            ("args", parsed.args),
+        ):
+            for text in str_values:
+                if _contains_literal_secret(text):
+                    raise ValueError(
+                        f"MCP server '{name}' in {source_label} declares a literal credential in '{field_label}'. "
+                        "Literal secrets in MCP configurations are prohibited."
+                    )
+
+        all_refs = _extract_mcp_env_refs(raw_srv)
+        for ref in all_refs:
+            if is_operator_owned_or_provider_secret(ref):
+                raise ValueError(
+                    f"MCP server '{name}' in {source_label} references operator-owned credential '${{{ref}}}', "
+                    "which cannot be forwarded to skill-configured MCP servers."
+                )
+            ref_upper = ref.upper()
+            is_sensitive_ref = any(token in ref_upper for token in _MCP_SENSITIVE_ENV_TOKENS)
+            allowed_via_runtime_env = is_stdio_only and not is_sensitive_ref and ref in runtime_env_names
+            if ref not in policy.allowed_secrets and not allowed_via_runtime_env:
+                raise ValueError(
+                    f"MCP server '{name}' in {source_label} references environment variable '${{{ref}}}' without "
+                    "operator approval. Set SKILLEVALUATOR_ALLOWED_MCP_SECRETS (and SKILLEVALUATOR_ALLOWED_MCP_HOSTS "
+                    "for remote servers) on the host to allow dedicated non-LLM MCP credentials."
+                )
+            if hostname and hostname not in policy.allowed_hosts:
+                raise ValueError(
+                    f"MCP server '{name}' in {source_label} sends secret '${{{ref}}}' to unapproved host '{hostname}'. "
+                    f"Add '{hostname}' to SKILLEVALUATOR_ALLOWED_MCP_HOSTS on the host to approve this MCP endpoint."
+                )
+
+        for header_name_str, header_val_str in parsed.headers.items():
+            header_lower = header_name_str.lower()
+            header_refs = _extract_mcp_env_refs(header_val_str)
+            is_sensitive_header = any(token in header_lower for token in _MCP_SENSITIVE_HEADER_TOKENS)
+            has_literal_secret = _contains_literal_secret(header_val_str)
+            if has_literal_secret or (is_sensitive_header and not header_refs):
+                raise ValueError(
+                    f"MCP server '{name}' in {source_label} declares literal credential or unapproved authentication "
+                    f"header '{header_name_str}'. Literal secrets in mcp_servers.toml are prohibited; use an "
+                    "operator-approved ${VAR} reference with SKILLEVALUATOR_ALLOWED_MCP_SECRETS and "
+                    "SKILLEVALUATOR_ALLOWED_MCP_HOSTS."
+                )
+            if is_sensitive_header and (not hostname or hostname not in policy.allowed_hosts):
+                raise ValueError(
+                    f"MCP server '{name}' in {source_label} declares authentication header '{header_name_str}' for "
+                    f"unapproved host '{hostname or '<missing-host>'}'. Add the host to SKILLEVALUATOR_ALLOWED_MCP_HOSTS."
+                )
+
+        for env_key_str, env_val_str in parsed.env.items():
+            cleaned_key = env_key_str.strip()
+            if is_operator_owned_or_provider_secret(cleaned_key):
+                raise ValueError(
+                    f"MCP server '{name}' in {source_label} declares operator-owned credential '{cleaned_key}' in env, "
+                    "which cannot be set or overridden by skill-configured MCP servers."
+                )
+            env_refs = _extract_mcp_env_refs(env_val_str)
+            key_upper = cleaned_key.upper()
+            is_sensitive_key = any(token in key_upper for token in _MCP_SENSITIVE_ENV_TOKENS)
+            has_literal_secret = _contains_literal_secret(env_val_str)
+            if has_literal_secret or (is_sensitive_key and not env_refs):
+                raise ValueError(
+                    f"MCP server '{name}' in {source_label} declares literal secret value for sensitive env variable "
+                    f"'{cleaned_key}'. Use an operator-approved ${{VAR}} reference with SKILLEVALUATOR_ALLOWED_MCP_SECRETS."
+                )
+
+    return servers
+
+
 def _load_mcp_servers(skill_path: Path) -> list[dict[str, Any]]:
     """Load MCP server declarations from evals/environment/mcp_servers.toml."""
     evals_dir = skill_path / "evals"
@@ -1769,6 +1958,7 @@ def _load_mcp_servers(skill_path: Path) -> list[dict[str, Any]]:
                 s = {**s, "transport": "stdio"}
                 logger.debug("mcp_servers.toml: inferred transport=stdio for '%s'", s["name"])
             valid.append(s)
+        validate_mcp_server_declarations(valid, source_label=str(mcp_file))
         if valid:
             logger.debug("Loaded %d MCP server(s) from %s", len(valid), mcp_file)
         return valid
@@ -1842,12 +2032,18 @@ skills_dir = "/workspace/skills"
     content += _pre_agent_setup_healthcheck_toml_block(pre_agent_setup)
 
     if mcp_servers:
+        validate_mcp_server_declarations(
+            mcp_servers,
+            allowed_runtime_env=runtime_env,
+            source_label="task.toml mcp_servers",
+        )
         for srv in mcp_servers:
             content += "\n[[environment.mcp_servers]]\n"
             for key, val in srv.items():
                 if not isinstance(key, str):
                     raise TypeError("MCP TOML keys must be strings")
                 content += f"{_toml_quote(key)} = {_toml_value(val)}\n"
+        (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers, indent=2), encoding="utf-8")
 
     tomllib.loads(content)
     (task_dir / "task.toml").write_text(content, encoding="utf-8")
@@ -1859,13 +2055,16 @@ def _toml_quote(value: str) -> str:
 
 
 def _toml_value(value: Any) -> str:
-    """Serialize the documented MCP TOML scalar and string-list values."""
+    """Serialize the documented MCP TOML scalar, string-list, and string-dict values."""
 
     if isinstance(value, str):
         return _toml_quote(value)
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return "[" + ", ".join(_toml_quote(item) for item in value) + "]"
-    raise TypeError("MCP TOML values must be strings or lists of strings")
+    if isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        items = [f"{_toml_quote(k)} = {_toml_quote(v)}" for k, v in value.items()]
+        return "{" + ", ".join(items) + "}"
+    raise TypeError("MCP TOML values must be strings, lists of strings, or dictionaries of strings")
 
 
 def _runtime_env_toml_block(runtime_env: dict[str, str] | None) -> str:

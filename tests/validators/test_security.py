@@ -3991,6 +3991,33 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert os.environ["OPENAI_API_KEY"] == "ambient-openai-key"
         assert os.environ["OPENAI_BASE_URL"] == "https://ambient.example.test/v1"
 
+    @pytest.mark.parametrize("provider_name", ["openai", "openai-compatible"])
+    def test_skillspector_child_environment_maps_vertex_openapi_adc(
+        self,
+        monkeypatch,
+        provider_name: str,
+    ) -> None:
+        """Verify SkillSpector child receives OPENAI_API_KEY with ADC under both provider aliases."""
+        monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kw: "mock-adc-token")
+        base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider_name)
+        if provider_name == "openai":
+            monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+        else:
+            monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", base_url)
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SKILL_EVAL_LLM_API_KEY", raising=False)
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+
+        child_env = _skillspector_child_env()
+
+        assert child_env is not None
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
+        assert child_env["SKILLSPECTOR_MODEL"] == "google/gemini-3.8-flash"
+        assert child_env["OPENAI_API_KEY"] == "mock-adc-token"
+        assert child_env["OPENAI_BASE_URL"] == base_url
+
     def test_partial_llm_verdicts_are_reported_as_partial(self, tmp_path: Path) -> None:
         """A verifier response covering only some findings must not claim full confirmation."""
         result = ValidationResult()

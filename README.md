@@ -15,11 +15,13 @@ Agent skills are folders of instructions and supporting files that extend AI
 agents, as defined by the [Agent Skills specification](https://agentskills.io/).
 SkillEvaluator is part of the
 [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
+Skills that pass are published to the
+[NVIDIA skills catalog](https://github.com/NVIDIA/skills).
 
-> **Research foundation.** Tier 3 operationalizes the methodology from
+> **Research foundation.** Tier 3 implements methods from
 > [*Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills*](https://arxiv.org/abs/2608.20614):
-> matched with- and without-skill trials and Skill Lift. SkillEvaluator also
-> provides validation, deduplication, dataset authoring, and reporting.
+> paired with/without-skill trials and Skill Lift; SkillEvaluator provides
+> validation, deduplication, dataset authoring, and reporting.
 
 ## Three-tier overview
 
@@ -147,12 +149,13 @@ findings, including invalid task-source evidence, into the exit gate.
 
 ## Research and citation
 
-Access the research through the [paper](https://arxiv.org/abs/2608.20614),
+Resources: [paper](https://arxiv.org/abs/2608.20614),
 [PDF](https://arxiv.org/pdf/2608.20614),
-[DOI](https://doi.org/10.48550/arXiv.2608.20614), or
-[BibTeX](https://arxiv.org/bibtex/2608.20614). Cite it for the methodology and
-results. For reproducibility, record the SkillEvaluator release or commit used.
-See [CITATION.cff](CITATION.cff).
+[DOI](https://doi.org/10.48550/arXiv.2608.20614),
+[BibTeX](https://arxiv.org/bibtex/2608.20614), and the
+[NVIDIA Developer blog](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/).
+Cite the paper for methodology and results. For reproducibility, record the
+SkillEvaluator release or commit. See [CITATION.cff](CITATION.cff).
 
 ## Documentation
 

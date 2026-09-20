@@ -16,7 +16,7 @@ agents, as defined by the [Agent Skills specification](https://agentskills.io/).
 SkillEvaluator is part of the
 [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
-> **Research foundation.** Tier 3 operationalizes the ACES methodology from
+> **Research foundation.** Tier 3 operationalizes the methodology from
 > [*Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills*](https://arxiv.org/abs/2608.20614):
 > matched with- and without-skill trials and Skill Lift. SkillEvaluator also
 > provides validation, deduplication, dataset authoring, and reporting.
@@ -147,7 +147,7 @@ findings, including invalid task-source evidence, into the exit gate.
 
 ## Research and citation
 
-Access the ACES work through the [paper](https://arxiv.org/abs/2608.20614),
+Access the research through the [paper](https://arxiv.org/abs/2608.20614),
 [PDF](https://arxiv.org/pdf/2608.20614),
 [DOI](https://doi.org/10.48550/arXiv.2608.20614), or
 [BibTeX](https://arxiv.org/bibtex/2608.20614). Cite it for the methodology and

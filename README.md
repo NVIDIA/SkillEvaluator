@@ -6,13 +6,14 @@
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![Documentation](https://img.shields.io/badge/Documentation-docs.nvidia.com-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/)
 [![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
+[![NVIDIA Developer Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
 
 SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent
 artifacts, starting with agent skills: deterministic quality gates, semantic
 overlap detection, synthetic eval dataset generation, and live agent evaluation.
 
-Agent skills are folders of instructions and supporting files that extend AI
-agents, as defined by the [Agent Skills specification](https://agentskills.io/).
+Agent skills extend AI agents with instructions and supporting files, as
+defined by the [Agent Skills specification](https://agentskills.io/).
 SkillEvaluator is part of the
 [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 Skills that pass are published to the

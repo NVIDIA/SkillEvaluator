@@ -107,7 +107,9 @@ def _description(command: click.Command) -> RenderableType | None:
 
 def _definition_table(rows: list[tuple[str, str]], *, key_style: str) -> RenderableType:
     table = Table.grid(padding=(0, 2, 0, 0))
-    table.add_column(style=key_style, no_wrap=True)
+    # Long choice lists must not consume the entire terminal and hide the
+    # description column (notably Tier 3's environment choices).
+    table.add_column(style=key_style, max_width=38, overflow="fold")
     table.add_column(style="help.text")
     for key, value in rows:
         table.add_row(Text(key), Text(value or ""))

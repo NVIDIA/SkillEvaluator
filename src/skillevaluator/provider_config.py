@@ -17,6 +17,7 @@ import idna
 
 PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
+_PROVIDER_SETUP_URL = "https://docs.nvidia.com/skills/skillevaluator/configuration"
 
 # Pinned frontier chat defaults (not floating aliases like ``gpt-5`` / ``claude-opus-latest``).
 # Harbor ``templates/eval.py`` cannot import this module — keep its local
@@ -25,18 +26,20 @@ OPENAI_BASE_URL = "https://api.openai.com/v1"
 CHAT_DEFAULT_OPENAI = "gpt-5.6-sol"
 CHAT_DEFAULT_ANTHROPIC = "claude-opus-5"
 CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5"
+CHAT_DEFAULT_NVIDIA = "nvidia/nemotron-3-super-120b-a12b"
 # Lower-cost OpenAI alternative for ``SKILL_EVAL_LLM_MODEL`` overrides.
 CHAT_CHEAP_OPENAI = "gpt-5.4-mini"
 
 CHAT_DEFAULT_MODELS = {
     "openai": CHAT_DEFAULT_OPENAI,
     "anthropic": CHAT_DEFAULT_ANTHROPIC,
-    "nv_build": "nvidia/nemotron-3-nano-30b-a3b",
+    "nv_build": CHAT_DEFAULT_NVIDIA,
     "bedrock": CHAT_DEFAULT_BEDROCK,
 }
+EMBEDDING_DEFAULT_NVIDIA = "nvidia/nemotron-3-embed-1b"
 _EMBEDDING_DEFAULT_MODELS = {
     "openai": "text-embedding-3-small",
-    "nv_build": "nvidia/nv-embed-v1",
+    "nv_build": EMBEDDING_DEFAULT_NVIDIA,
 }
 _SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "nv_build", "bedrock", "openai-compatible"})
 _ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -238,7 +241,14 @@ def _environment(environ: Mapping[str, str] | None) -> Mapping[str, str]:
 def _required(environ: Mapping[str, str], variable: str) -> str:
     value = environ.get(variable, "").strip()
     if not value:
-        raise ProviderConfigurationError(f"{variable} is required for the selected provider.")
+        message = f"{variable} is required for the selected provider."
+        if variable in {"NVIDIA_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SKILL_EVAL_LLM_API_KEY"}:
+            message += (
+                "\n\nSet it in your shell:\n"
+                f"  export {variable}='your-api-key'\n\n"
+                f"Provider setup:\n  {_PROVIDER_SETUP_URL}"
+            )
+        raise ProviderConfigurationError(message)
     return value
 
 
@@ -408,27 +418,31 @@ def _selected_provider(environ: Mapping[str, str], variable: str) -> str:
         if environ.get(credential, "").strip()
     ]
     if len(available) > 1:
+        choices = _SUPPORTED_PROVIDERS
+        if "EMBEDDING" in variable:
+            choices = choices - {"anthropic", "bedrock"}
+        example = next(provider for provider in available if provider in choices)
         raise ProviderConfigurationError(
-            f"{variable} is required when multiple public provider credentials are configured."
+            f"{variable} is required.\n"
+            "Multiple public provider credentials are configured.\n\n"
+            f"Accepted values:\n  {', '.join(sorted(choices))}\n\n"
+            f"Choose one, for example:\n  export {variable}={example}"
         )
     if available:
         return available[0]
-    prefix = variable.removesuffix("_PROVIDER")
-    if "EMBEDDING" in variable:
-        # Anthropic/Bedrock have no embedding models: recommending them (or the
-        # ANTHROPIC_API_KEY auto-detection) here would send the user straight
-        # into the "does not provide embeddings" rejection below.
-        raise ProviderConfigurationError(
-            f"No provider is configured ({variable} unset and no credential found). Set one of: "
-            "NVIDIA_API_KEY for NVIDIA Build (build.nvidia.com) or OPENAI_API_KEY (auto-detected) — "
-            f"or set {variable}=openai|nv_build|openai-compatible explicitly "
-            f"(openai-compatible also needs {prefix}_BASE_URL, {prefix}_API_KEY, and {prefix}_MODEL)."
-        )
+    alternatives = "  openai     -> OPENAI_API_KEY\n"
+    # Anthropic/Bedrock have no embedding models; do not suggest them here.
+    if "EMBEDDING" not in variable:
+        alternatives += "  anthropic  -> ANTHROPIC_API_KEY\n"
     raise ProviderConfigurationError(
-        f"No provider is configured ({variable} unset and no credential found). Set one of: "
-        "NVIDIA_API_KEY for NVIDIA Build (build.nvidia.com), OPENAI_API_KEY, or ANTHROPIC_API_KEY "
-        f"(auto-detected) — or set {variable}=openai|anthropic|nv_build|bedrock|openai-compatible "
-        f"explicitly (openai-compatible also needs {prefix}_BASE_URL, {prefix}_API_KEY, and {prefix}_MODEL)."
+        "No provider is configured.\n\n"
+        "For NVIDIA Build, set:\n"
+        f"  export {variable}=nv_build\n"
+        "  export NVIDIA_API_KEY='your-api-key'\n"
+        "  Get a key: https://build.nvidia.com\n\n"
+        f"Other {variable} values and their keys:\n"
+        f"{alternatives}\n"
+        f"More providers and setup options:\n  {_PROVIDER_SETUP_URL}"
     )
 
 

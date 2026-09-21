@@ -24,7 +24,7 @@ class EvaluationOptions:
     """
 
     skill_path: Path
-    agents: str = "codex"
+    agents: str | None = None
     env_mode: str = "docker"
     skip_baseline: bool = False
     n_attempts: int | None = None

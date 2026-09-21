@@ -22,13 +22,18 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MODEL,
 )
 from skillevaluator.logging_config import get_logger
-from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_embedding_provider
+from skillevaluator.provider_config import (
+    EMBEDDING_DEFAULT_NVIDIA,
+    ProviderConfig,
+    ProviderConfigurationError,
+    resolve_embedding_provider,
+)
 
 logger = get_logger(__name__)
 
 
 class SimilarityConfigError(Exception):
-    """Raised when embedding configuration is missing or invalid."""
+    """Raised when configuration or provider failures prevent embedding comparison."""
 
 
 MAX_EMBEDDING_VECTOR_DIMENSION = 65_536
@@ -129,11 +134,41 @@ class EmbeddingClient:
             return []
 
         client = self._get_client()
-        response = client.embeddings.create(
-            model=self.model,
-            input=texts,
-            encoding_format="float",
-        )
+        from openai import APIConnectionError, APIStatusError
+
+        config = self._resolved_config()
+        kwargs: dict[str, Any] = {}
+        if config.provider == "nv_build" or self.model == EMBEDDING_DEFAULT_NVIDIA:
+            # Deduplication compares documents symmetrically, not queries to documents.
+            kwargs["extra_body"] = {"input_type": "passage"}
+        try:
+            response = client.embeddings.create(
+                model=self.model,
+                input=texts,
+                encoding_format="float",
+                **kwargs,
+            )
+        except APIStatusError as exc:
+            # Provider responses can echo input text, credentials, or private URLs.
+            # Preserve the status and recovery action without forwarding the body.
+            status = exc.status_code
+            if status in (404, 410):
+                action = (
+                    "The embedding model or endpoint is unavailable. "
+                    "Check SKILL_EVAL_EMBEDDING_MODEL against your provider's active models "
+                    "and verify the configured endpoint."
+                )
+            elif status in (401, 403):
+                action = "Check the embedding provider's API key and access to the configured model."
+            elif status == 429:
+                action = "The embedding provider is rate-limiting requests. Check your quota and retry later."
+            else:
+                action = "Check the embedding provider's availability and model configuration before retrying."
+            raise SimilarityConfigError(f"Embedding request failed (HTTP {status}). {action}") from exc
+        except APIConnectionError as exc:
+            raise SimilarityConfigError(
+                "Embedding connection failed. Check the configured endpoint and network, then retry."
+            ) from exc
         data = list(response.data)
         if len(data) != len(texts):
             raise SimilarityConfigError(
@@ -145,7 +180,7 @@ class EmbeddingClient:
         for item in data:
             index = getattr(item, "index", None)
             if type(index) is not int or not 0 <= index < len(texts):
-                raise SimilarityConfigError(f"Embedding response index is invalid: {index!r}.")
+                raise SimilarityConfigError("Embedding response index must be an integer within the input range.")
             if ordered[index] is not None:
                 raise SimilarityConfigError(f"Embedding response contains duplicate index {index}.")
             vector = getattr(item, "embedding", None)

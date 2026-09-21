@@ -54,7 +54,7 @@ def test_live_eval_exposes_only_harbor_native_environments() -> None:
     assert "modal" in result.output
     assert "harbor-environment" not in result.output
     assert "k8s-sandbox" not in result.output
-    assert "local" not in result.output
+    assert "local" in result.output
     assert "base-image-mode" not in result.output
     assert "--agent-runtime-preflight" in result.output
 

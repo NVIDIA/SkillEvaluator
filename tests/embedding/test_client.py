@@ -90,10 +90,81 @@ class TestEmbed:
 
         assert result == expected
         mock_openai.embeddings.create.assert_called_once_with(
-            model="nvidia/nv-embed-v1",
+            model="nvidia/nemotron-3-embed-1b",
             input=["hello", "world"],
             encoding_format="float",
+            extra_body={"input_type": "passage"},
         )
+
+    @pytest.mark.parametrize("model", ["text-embedding-3-small", "custom-embedding-model"])
+    def test_other_models_keep_standard_openai_request(self, model: str) -> None:
+        client = EmbeddingClient(model=model, api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        sdk.embeddings.create.return_value = _make_fake_response([[1.0, 0.0]])
+        client._client = sdk
+
+        assert client.embed(["text"]) == [[1.0, 0.0]]
+        sdk.embeddings.create.assert_called_once_with(model=model, input=["text"], encoding_format="float")
+
+    def test_nvidia_default_at_explicit_endpoint_includes_passage_type(self) -> None:
+        client = EmbeddingClient(api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        sdk.embeddings.create.return_value = _make_fake_response([[1.0, 0.0]])
+        client._client = sdk
+
+        client.embed(["text"])
+
+        assert sdk.embeddings.create.call_args.kwargs["model"] == "nvidia/nemotron-3-embed-1b"
+        assert sdk.embeddings.create.call_args.kwargs["extra_body"] == {"input_type": "passage"}
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 429, 500])
+    def test_service_error_is_actionable_without_echoing_response(self, status: int) -> None:
+        import httpx
+        from openai import APIStatusError
+
+        client = EmbeddingClient(model="test-model", api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        request = httpx.Request("POST", "http://127.0.0.1:12345/v1/embeddings?secret-marker")
+        response = httpx.Response(status, request=request, json={"detail": "secret-marker"})
+        sdk.embeddings.create.side_effect = APIStatusError("secret-marker", response=response, body={"secret-marker": True})
+        client._client = sdk
+
+        with pytest.raises(SimilarityConfigError) as error:
+            client.embed(["private input text"])
+
+        assert f"HTTP {status}" in str(error.value)
+        assert "secret-marker" not in str(error.value)
+        assert "private input text" not in str(error.value)
+        if status in {404, 410}:
+            assert "SKILL_EVAL_EMBEDDING_MODEL" in str(error.value)
+
+    def test_connection_error_does_not_echo_endpoint_credentials(self) -> None:
+        import httpx
+        from openai import APIConnectionError
+
+        client = EmbeddingClient(model="test-model", api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        request = httpx.Request("POST", "http://127.0.0.1:12345/v1/embeddings?secret-marker")
+        sdk.embeddings.create.side_effect = APIConnectionError(message="secret-marker", request=request)
+        client._client = sdk
+
+        with pytest.raises(SimilarityConfigError, match="connection") as error:
+            client.embed(["private input text"])
+
+        assert "secret-marker" not in str(error.value)
+
+    def test_invalid_response_index_does_not_echo_provider_content(self) -> None:
+        client = EmbeddingClient(model="test-model", api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        sdk.embeddings.create.return_value = _FakeEmbeddingResponse(
+            data=[_FakeEmbeddingItem(embedding=[1.0, 0.0], index="private-input-marker")]
+        )
+        client._client = sdk
+
+        with pytest.raises(SimilarityConfigError, match="index") as error:
+            client.embed(["text"])
+
+        assert "private-input-marker" not in str(error.value)
 
     def test_embed_reorders_out_of_order_provider_response_by_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NVIDIA_API_KEY", "test-key")

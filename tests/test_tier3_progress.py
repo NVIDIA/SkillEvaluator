@@ -2004,7 +2004,29 @@ def test_runtime_preflight_running_event_precedes_slow_preflight_call(
         ["codex"],
         output_dir=tmp_path / "results",
         keep_harbor_jobs=True,
+        agent_runtime_preflight=True,
         progress_reporter=reporter,
+    )
+
+
+def test_runtime_preflight_is_skipped_by_default_with_enablement_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    reporter = _RecordingReporter()
+
+    runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        progress_reporter=reporter,
+    )
+
+    event = next(event for event in reporter.events if event.stage == "agent-runtime-preflight")
+    assert event.state == "skipped"
+    assert event.detail == (
+        "disabled by default; enable with --agent-runtime-preflight or harbor.agent_runtime_preflight"
     )
 
 
@@ -2153,6 +2175,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
         ["codex", "opencode"],
         output_dir=tmp_path / "results",
         keep_harbor_jobs=True,
+        agent_runtime_preflight=True,
         progress_reporter=reporter,
     )
 

@@ -142,6 +142,7 @@ def test_advisory_payload_exposes_same_report_truth_metadata() -> None:
     assert payload["evaluated_at"] is None
     assert payload["evaluator_version"] == __version__
     assert payload["score_policy"] == DEFAULT_SCORE_POLICY
+    assert payload["evaluated_source"] is None
     assert payload["dataset_summary"] == {
         "total_tasks": 0,
         "positive_tasks": 0,
@@ -156,6 +157,8 @@ def test_advisory_payload_exposes_same_report_truth_metadata() -> None:
         "dataset_summary",
         "dataset_digest",
         "dataset_digest_algorithm",
+        "score_policy",
+        "evaluated_source",
         "verdict_policy",
     ):
         assert payload["summary"][field] == payload[field]

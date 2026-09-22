@@ -314,12 +314,18 @@ def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path:
         pytest.param(None, DEFAULT_SCORE_POLICY, DEFAULT_SCORE_POLICY, 0.49, id="current-policy"),
     ],
 )
+@pytest.mark.parametrize(
+    "evaluated_source",
+    [None, {"repository": "NVIDIA/SkillEvaluator", "commit": "a" * 40}],
+    ids=["without-source", "with-source"],
+)
 def test_default_v2_rerender_respects_recorded_or_historical_policy(
     tmp_path: Path,
     stored_overall: object,
     recorded_policy: str | None,
     expected_policy: str,
     expected_score: float,
+    evaluated_source: dict[str, str] | None,
 ) -> None:
     skill = tmp_path / "demo"
     skill.mkdir()
@@ -349,6 +355,10 @@ def test_default_v2_rerender_respects_recorded_or_historical_policy(
     if recorded_policy is not None:
         summary_payload["score_policy"] = recorded_policy
     summary.write_text(json.dumps(summary_payload), encoding="utf-8")
+    if evaluated_source is not None:
+        (run_dir / "run_config.json").write_text(
+            json.dumps({"evaluated_source": evaluated_source}), encoding="utf-8"
+        )
     if recorded_policy is None:
         comparison_summary = run_dir / "codex" / "with-skill" / "summary.json"
         comparison_summary.parent.mkdir(parents=True)
@@ -381,6 +391,9 @@ def test_default_v2_rerender_respects_recorded_or_historical_policy(
     assert payload["overall_score"] == pytest.approx(expected_score)
     assert payload["agents"]["opencode"]["with_skill"] == pytest.approx(expected_score)
     assert payload["score_policy"] == expected_policy
+    assert payload["summary"]["score_policy"] == expected_policy
+    assert payload["evaluated_source"] == evaluated_source
+    assert payload["summary"]["evaluated_source"] == evaluated_source
     assert payload["attempt_policy"]["score_policy"] == expected_policy
     if expected_policy == LEGACY_SCORE_POLICY:
         assert payload["best_agent"] == "opencode"

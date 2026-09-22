@@ -88,6 +88,60 @@ by default, so a missing, skipped, or incomplete live evaluation produces
 explicitly persist `benchmark_policy.tier3_required = false`; the card
 discloses that exception instead of implying that Tier 3 ran.
 
+### Evaluated source provenance
+
+The Evaluation Metadata section distinguishes the source tree that was evaluated
+from the evaluator build that evaluated it:
+
+```text
+- Evaluator version: `0.8.2`
+- Evaluated source: `NVIDIA/NVFlare`
+- Evaluated source revision: `2263a2ebdab903e87f7e7c0a001d22c3a926a9cf`
+- Evaluator container revision: `ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...`
+```
+
+Without that separation, two skills evaluated from different repositories by the
+same evaluator container publish cards whose only recorded revision is the shared
+container tag, and a reader cannot tell which version of a skill was evaluated or
+whether the card has gone stale.
+
+The identity is supplied by the orchestration input and carried through the
+evaluation-result contract unchanged. It is never inferred from repository state
+while rendering, because the tree that renders a card is the evaluator checkout
+rather than the evaluated skill's source. The supported seams are:
+
+- `--evaluated-source-repository`, `--evaluated-source-revision` and
+  `--evaluator-container-revision`, accepted by both `validate` and
+  `tier3 evaluate`, which record the identity on the card and, for a Tier 3 run,
+  persist it into that run's `run_config.json`;
+- the `evaluated_source` argument to `build_agent_eval_payload` or
+  `agent_eval_result_from_directory`;
+- an `evaluated_source` object in the run's `run_config.json`. Note that
+  SkillEvaluator writes that file itself, so a publication pipeline using this
+  route has to add the key to the generated run artifact before the card is
+  rendered;
+- `metadata["evaluated_source"]` on any validation result, which is how a card
+  that publishes without a completed Tier 3 run records its identity.
+
+Where any two carriers supply a field and disagree, rendering fails rather than
+silently choosing one, so the order results happen to arrive in can never decide
+which source tree a card names. `Evaluated source revision` records a full Git
+object id of 40 or 64 hex characters, or a canonical `sha256`/`sha384`/`sha512`
+digest of the evaluated skill content at that algorithm's own width when a run
+has no upstream commit. A short revision prefix is refused, because it can grow
+a second match as a tree grows. `Evaluator container revision` records an image
+reference validated component by component: a repository path of at most 255
+characters, an optional tag of at most 128 characters, and an optional digest at
+its own algorithm's width. The 255 bound measures the path once the registry
+host has been split off it. Path components are lower case, as the OCI grammar
+requires, while a registry host may use any case and is read as a host only when
+it is `localhost`, carries a dot, or carries a port. A bare name is refused
+because it identifies a repository rather than the build that ran, and a
+published PASS additionally requires the digest, or a full implementation
+revision, because a tag can be repointed after the card is published. Fields
+the orchestration did not supply render as
+`not recorded (not supplied by the orchestration input)`.
+
 Keep the file with the skill and refresh it whenever the skill, eval dataset,
 agent/model, evaluator version, scoring policy, attempt policy, or execution
 environment materially changes. Follow the
@@ -345,6 +399,13 @@ For CI and tooling, two JSON entry points matter:
   tiers. Each result carries finalized gating metadata. Tier 3 is advisory by
   default and becomes blocking with `--block-on-agent-eval`; Tier 2 is blocking
   by default and becomes advisory with `--no-block-on-dedup`.
+- **The evaluated source identity**: every JSON report always carries a
+  top-level `evaluated_source` object, resolved from every carrier the run
+  recorded, so the JSON and `BENCHMARK.md` name the same source tree. It is
+  `null` when the orchestration input supplied none. Carriers that name
+  different sources abort the run before any report file is written, so a
+  contradictory identity is never published in one format and reported in
+  another.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

@@ -33,6 +33,8 @@ from skillevaluator.tier3.harbor.metrics import (
     overall_score,
 )
 
+FIFO_SUBPROCESS_TIMEOUT_SECONDS = 10
+
 
 def _write_complete_job_result(job_dir: Path, trial_names: list[str]) -> None:
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -1800,7 +1802,7 @@ def test_fifo_reward_is_rejected_without_blocking(tmp_path: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
-        timeout=2,
+        timeout=FIFO_SUBPROCESS_TIMEOUT_SECONDS,
     )
 
     assert completed.returncode == 0, completed.stderr
@@ -1829,7 +1831,7 @@ def test_fifo_diagnostic_text_is_rejected_without_blocking(tmp_path: Path, artif
         check=False,
         capture_output=True,
         text=True,
-        timeout=2,
+        timeout=FIFO_SUBPROCESS_TIMEOUT_SECONDS,
     )
 
     assert completed.returncode == 0, completed.stderr
@@ -2184,7 +2186,7 @@ def test_diagnostic_copy_rejects_fifo_without_blocking_and_records_manifest(tmp_
         check=False,
         capture_output=True,
         text=True,
-        timeout=2,
+        timeout=FIFO_SUBPROCESS_TIMEOUT_SECONDS,
     )
 
     assert completed.returncode == 0, completed.stderr

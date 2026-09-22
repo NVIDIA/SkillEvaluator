@@ -5,15 +5,24 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![Documentation](https://img.shields.io/badge/Documentation-docs.nvidia.com-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/)
+[![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
+[![NVIDIA Developer Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
 
 SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent
 artifacts, starting with agent skills: deterministic quality gates, semantic
 overlap detection, synthetic eval dataset generation, and live agent evaluation.
 
-Agent skills are folders of instructions and supporting files that extend AI
-agents, as defined by the [Agent Skills specification](https://agentskills.io/).
+Agent skills extend AI agents with instructions and supporting files, as
+defined by the [Agent Skills specification](https://agentskills.io/).
 SkillEvaluator is part of the
 [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
+Skills that pass are published to the
+[NVIDIA skills catalog](https://github.com/NVIDIA/skills).
+
+> **Research foundation.** Tier 3 implements methods from
+> [*Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills*](https://arxiv.org/abs/2608.20614):
+> paired with/without-skill trials and Skill Lift; SkillEvaluator provides
+> validation, deduplication, dataset authoring, and reporting.
 
 ## Three-tier overview
 
@@ -138,6 +147,16 @@ before scaling a run. Tier 1 always gates `validate`. Tier 2 gates by default;
 `--no-block-on-dedup` keeps its scan and reports but makes its findings
 advisory. Tier 3 is advisory by default; `--block-on-agent-eval` promotes its
 findings, including invalid task-source evidence, into the exit gate.
+
+## Research and citation
+
+Resources: [paper](https://arxiv.org/abs/2608.20614),
+[PDF](https://arxiv.org/pdf/2608.20614),
+[DOI](https://doi.org/10.48550/arXiv.2608.20614),
+[BibTeX](https://arxiv.org/bibtex/2608.20614), and the
+[NVIDIA Developer blog](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/).
+Cite the paper for methodology and results. For reproducibility, record the
+SkillEvaluator release or commit. See [CITATION.cff](CITATION.cff).
 
 ## Documentation
 

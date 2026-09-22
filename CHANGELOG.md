@@ -4,6 +4,30 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Tier 3 script execution credit now requires evidence that the expected script
+  was invoked. `check_script_execution` previously treated the script name as a
+  substring of an execution command, so reading, printing or searching the
+  script, or running a similarly named file, scored a full `Executed <script>`.
+  Credit is now given only for a recognised invocation: the script run directly,
+  an interpreter given it as its script argument, a `source`, or a `sh -c`
+  payload that does one of those, with `cd` tracked and script identity compared
+  exactly. Interpreter and wrapper options come from grammars derived by running
+  each option against a script that records whether it executed, so `--help`,
+  `perl -c` and `bash -n` run no script while `python -Wignore` and
+  `env FOO=1` still resolve to theirs. A command the walk cannot resolve keeps
+  the existing 0.75 partial credit rather than being scored either way: a path
+  built at run time, an option outside a grammar, a name only in heredoc data,
+  inline code or a module that names the script, and anything reaching a command
+  through standard input, including `xargs` and `parallel`, whose behaviour the
+  command text never determines. Applied to both the host checker and the
+  bundled Harbor verifier.
+
+- Added `scripts/script_invocation_differential.py`, a differential harness that
+  executes each command for real against fixtures that record whether they ran,
+  and compares the result against both implementations.
+
 ## 0.3.0 - 2026-09-17
 
 ### Added

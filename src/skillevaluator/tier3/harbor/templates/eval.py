@@ -3477,24 +3477,825 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
     }
 
 
-def check_script_execution(tool_calls, expected_script):
+# Interpreters that run a script named on their command line, with the options
+# that decide where that script comes from. The first set is options meaning the
+# interpreter runs inline code or a module, so no script path runs at all. The
+# second is options that consume a value, either attached ("-Wignore") or as the
+# following token ("-I lib").
+# Interpreter option grammars. Each interpreter names only the options whose
+# effect on the script argument is certain. The boolean and value sets were
+# derived by running every option against a script that records whether it
+# executed, rather than from documentation, which is why perl's -M and -i and
+# python's -Q are absent: their argument is conditionally attached, so no
+# single rule resolves them. An option that is not listed for the interpreter
+# in hand, including one belonging to a different interpreter, makes the
+# command undecidable rather than credited.
+_INTERPRETER_GRAMMARS: dict[str, dict[str, frozenset[str]]] = {
+    "python": {
+        "boolean": frozenset(
+            {
+                "-b",
+                "-B",
+                "-d",
+                "-E",
+                "-i",
+                "-I",
+                "-O",
+                "-OO",
+                "-P",
+                "-q",
+                "-s",
+                "-S",
+                "-t",
+                "-u",
+                "-v",
+                "-W0",
+                "-W1",
+                "-W2",
+            }
+        ),
+        "value": frozenset({"-W", "-X"}),
+        # -m imports a module, and importing runs it, so like -c this is code
+        # whose effect the walk cannot read.
+        "code": frozenset({"-c", "-m"}),
+        "terminal": frozenset({"-h", "-?", "--help", "-V", "--version"}),
+    },
+    "perl": {
+        "boolean": frozenset({"-C", "-f", "-i", "-l", "-s", "-t", "-T", "-U", "-w", "-W", "-W0", "-X"}),
+        "value": frozenset({"-I"}),
+        "code": frozenset({"-e", "-E"}),
+        "terminal": frozenset({"-c", "-h", "-v", "-V", "--help", "--version"}),
+    },
+    "ruby": {
+        "boolean": frozenset(
+            {"-a", "-d", "-i", "-l", "-s", "-S", "-U", "-v", "-w", "-W", "-W0", "-W1", "-W2", "--verbose"}
+        ),
+        "value": frozenset({"-E", "-I"}),
+        "code": frozenset({"-e"}),
+        "terminal": frozenset({"-c", "-h", "--help", "--version"}),
+    },
+    "node": {
+        "boolean": frozenset({"-i", "--interactive", "--no-warnings", "--trace-warnings"}),
+        "value": frozenset({"-C", "-r", "--conditions", "--import", "--loader", "--require"}),
+        "code": frozenset({"-e", "--eval", "-p", "--print"}),
+        "terminal": frozenset({"-c", "--check", "-h", "--help", "-v", "--version"}),
+    },
+    "bash": {
+        "boolean": frozenset(
+            {
+                "-a",
+                "-b",
+                "-B",
+                "-C",
+                "-e",
+                "-E",
+                "-f",
+                "-h",
+                "-H",
+                "-i",
+                "-l",
+                "-m",
+                "-p",
+                "-P",
+                "-t",
+                "-T",
+                "-u",
+                "-v",
+                "-x",
+                "--verbose",
+            }
+        ),
+        "value": frozenset(),
+        "code": frozenset({"-c"}),
+        "terminal": frozenset({"-n", "--help", "--version"}),
+    },
+    "sh": {
+        "boolean": frozenset({"-a", "-b", "-C", "-e", "-E", "-f", "-i", "-I", "-l", "-m", "-p", "-u", "-v", "-x"}),
+        "value": frozenset(),
+        "code": frozenset({"-c"}),
+        "terminal": frozenset({"-n"}),
+    },
+}
+_INTERPRETER_GRAMMARS["dash"] = _INTERPRETER_GRAMMARS["sh"]
+_INTERPRETER_GRAMMARS["zsh"] = _INTERPRETER_GRAMMARS["bash"]
+_SOURCING_COMMANDS = frozenset({".", "source"})
+_VERSION_SUFFIX_RE = re.compile(r"\d+(?:\.\d+)*$")
+# Wrapper grammars, derived the same way as the interpreter ones by running
+# each option and checking whether the wrapped command still executed. A
+# wrapper option that is not listed makes the command undecidable rather than
+# assuming the wrapped command runs, and a help or version option means the
+# wrapper printed and exited without running anything.
+_WRAPPER_GRAMMARS: dict[str, dict[str, frozenset[str]]] = {
+    "env": {
+        "boolean": frozenset({"-i", "-v", "--ignore-environment", "--debug"}),
+        "value": frozenset({"-u", "--unset", "-C", "--chdir"}),
+        "terminal": frozenset({"--help", "--version"}),
+    },
+    "timeout": {
+        "boolean": frozenset({"--preserve-status", "--foreground", "-v", "--verbose"}),
+        "value": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+        "terminal": frozenset({"--help", "--version"}),
+    },
+    "nice": {
+        "boolean": frozenset(),
+        "value": frozenset({"-n", "--adjustment"}),
+        "terminal": frozenset({"--help", "--version"}),
+    },
+    "nohup": {"boolean": frozenset(), "value": frozenset(), "terminal": frozenset({"--help", "--version"})},
+    "stdbuf": {
+        "boolean": frozenset(),
+        "value": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
+        "terminal": frozenset({"--help", "--version"}),
+    },
+    "setsid": {
+        "boolean": frozenset({"-f", "-w", "--fork", "--wait"}),
+        "value": frozenset(),
+        "terminal": frozenset({"--help", "--version", "-V", "-h"}),
+    },
+    "time": {"boolean": frozenset({"-p"}), "value": frozenset(), "terminal": frozenset({"--help", "--version"})},
+    "sudo": {
+        "boolean": frozenset({"-E", "-H", "-n", "-S", "-b"}),
+        "value": frozenset({"-u", "--user", "-g", "--group"}),
+        "terminal": frozenset({"--help", "--version", "-h", "-V"}),
+    },
+    "doas": {"boolean": frozenset({"-n", "-s"}), "value": frozenset({"-u"}), "terminal": frozenset({"-h", "--help"})},
+    "xvfb-run": {
+        "boolean": frozenset({"-a", "--auto-servernum"}),
+        "value": frozenset({"-s", "--server-args", "-n", "--server-num"}),
+        "terminal": frozenset({"-h", "--help", "--version"}),
+    },
+    # Whether these run anything at all depends on their standard input, which
+    # a command's own text never carries: `printf "" | xargs -r python run.py`
+    # runs nothing, and `xargs -p` runs nothing with no terminal to confirm at.
+    # So they resolve only to "printed and exited", never to the command after
+    # them.
+    "xargs": {"boolean": frozenset(), "value": frozenset(), "terminal": frozenset({"--help", "--version"})},
+    "parallel": {"boolean": frozenset(), "value": frozenset(), "terminal": frozenset({"--help", "--version"})},
+}
+_STDIN_DEPENDENT_WRAPPERS = frozenset({"xargs", "parallel"})
+for _runner in ("uv", "uvx", "poetry", "pipenv", "pdm", "hatch", "rye"):
+    _WRAPPER_GRAMMARS[_runner] = {
+        "boolean": frozenset(),
+        "value": frozenset(),
+        "terminal": frozenset({"-h", "--help", "-V", "--version"}),
+    }
+_TRANSPARENT_COMMAND_PREFIXES = frozenset(
+    {"timeout", "nohup", "nice", "stdbuf", "time", "sudo", "doas", "xvfb-run", "setsid"}
+)
+_RUNNER_COMMAND_PREFIXES = frozenset({"uv", "uvx", "poetry", "pipenv", "pdm", "hatch", "rye"})
+_DURATION_ARG_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+_NEGATIVE_NUMBER_RE = re.compile(r"^-\d+$")
+_WRAPPER_OK = "ok"
+_WRAPPER_NONE = "none"
+_WRAPPER_UNKNOWN = "unknown"
+# Shell grouping keywords, which introduce a command rather than being one,
+# and the end-of-options marker, which stands before one.
+_GROUPING_TOKENS = frozenset({"{", "(", "!", "}", ")", "--"})
+# Text the shell resolves at run time, which a static walk cannot compare.
+_DYNAMIC_ARGUMENT_RE = re.compile(r"\$\(|\$\{|`|\{\}")
+_UNRESOLVED_ARG_RE = _DYNAMIC_ARGUMENT_RE
+# Commands that build their arguments from standard input, so a path piped to
+# them never appears as an argument this walk can read.
+_STDIN_ARGV_RE = re.compile(r"(?:^|[\s|;&])(?:xargs|parallel)(?:\s|$)")
+
+_SCRIPT = "script"
+_NO_SCRIPT = "none"
+_INLINE_CODE = "code"
+_UNDECIDABLE = "unknown"
+# Shell builtins that run text this walk does not read as commands.
+_OPAQUE_SHELL_BUILTINS = frozenset({"eval"})
+_INPUT_REDIRECTS = frozenset({"<", "0<"})
+
+
+def _carries_a_nested_invocation(command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str) -> bool:
+    """Whether an invocation of the script sits inside an unrecognised command.
+
+    `flock /tmp/lock python run.py`, `strace -f python run.py` and
+    `taskset -c 0 python run.py` all run the script through a wrapper this walk
+    has no grammar for, and listing every such wrapper is not possible: the set
+    is open, and `./wrap.sh run.py` is indistinguishable from `cat run.py` by
+    text alone. So rather than name them, an unrecognised command that carries
+    what looks like an interpreter running the script is left unresolved, while
+    one that merely takes it as an argument stays a non-invocation.
+    """
+    words = [_resolved_shell_arg(str(word), assignments).strip("\"'") for word in command[cmd_idx + 1 :]]
+    for position, word in enumerate(words):
+        base = _VERSION_SUFFIX_RE.sub("", _shell_executable(word).removesuffix(".exe")) or word
+        if base not in _INTERPRETER_GRAMMARS and base != "source":
+            # "." is excluded: as an argument it is far more often a path or a
+            # filter (`jq . run.py`) than a sourcing command.
+            continue
+        if any(_script_path_matches(later, expected) for later in words[position + 1 :]):
+            return True
+    return False
+
+
+def _redirects_script_to_stdin(command: list[str], assignments: dict[str, str], expected: str) -> bool:
+    """Whether the script is fed to a command's standard input.
+
+    ``python <run.py`` runs the script even though it never appears as an
+    argument, and ``wc -l <run.py`` only counts its lines, so which of the two
+    happened is not something the command text settles.
+    """
+    for position, word in enumerate(command[:-1]):
+        token = str(word)
+        if (token in _INPUT_REDIRECTS or token.endswith("<")) and _script_path_matches(
+            _resolved_shell_arg(str(command[position + 1]), assignments), expected
+        ):
+            return True
+    return False
+
+
+def _command_names_script(command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str) -> bool:
+    """Whether the expected script is named anywhere in this command's words.
+
+    Inline code, a module, or text handed to ``eval`` can run the script
+    without it ever appearing as an argument this walk resolves, so naming it
+    is the difference between "nothing ran" and "this walk cannot tell".
+    """
+    target = str(expected).strip().strip("\"'")
+    if not target:
+        return False
+    return any(target in _resolved_shell_arg(str(word), assignments) for word in command[cmd_idx + 1 :])
+
+
+def _script_path_matches(value: Any, expected_script: str) -> bool:
+    """Whether one shell argument names the expected script exactly.
+
+    ``run.py`` matches ``run.py``, ``./run.py`` and ``/skills/demo/run.py``. It
+    does not match ``run.py.bak``, ``rerun.py`` or ``run.pyc``: a filename that
+    merely contains the expected one is a different file.
+    """
+    target = str(expected_script).strip().strip("\"'").replace("\\", "/")
+    candidate = str(value).strip().strip("\"'").replace("\\", "/")
+    if not target or not candidate:
+        return False
+    if "/" in target:
+        return candidate == target or candidate.endswith(f"/{target}")
+    return candidate.rsplit("/", 1)[-1] == target
+
+
+_MAX_HEREDOC_OPERANDS = 8
+# The word after ``<<`` that ends the body, optionally quoted or escaped. The
+# ``-`` of ``<<-`` asks for leading tabs to be stripped from the terminator.
+_HEREDOC_DELIMITER_RE = re.compile(r"\A(-?)[ \t]*((?:[^\s;&|<>()'\"`\\]|\\.|'[^']*'|\"[^\"]*\")+)")
+
+
+def _skip_arithmetic(text: str, index: int) -> int:
+    """Advance past an arithmetic expansion, where ``<<`` is a shift operator."""
+    depth = 0
+    while index < len(text):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return index
+
+
+def _heredoc_operator_index(text: str) -> int:
+    """Index of the first ``<<`` that is really a heredoc or here-string operator.
+
+    Quoted text and arithmetic are skipped, so neither ``echo '<<'`` nor
+    ``echo $((1 << 2))`` is read as one. Returns ``-1`` when there is none.
+    """
+    quote: str | None = None
+    index = 0
+    while index < len(text) - 1:
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            index += 1
+            continue
+        if quote is None and char == "(" and text[index + 1] == "(":
+            index = _skip_arithmetic(text, index)
+            continue
+        if quote is None and char == "<" and text[index + 1] == "<":
+            return index
+        index += 1
+    return -1
+
+
+def _split_heredoc_body(body: str, terminator: str, strip_tabs: bool) -> tuple[str, str]:
+    """Split a heredoc body from the commands written after its terminator line."""
+    lines = body.split("\n")
+    for offset, line in enumerate(lines):
+        candidate = line.lstrip("\t") if strip_tabs else line
+        if candidate.rstrip("\r") == terminator:
+            return "\n".join(lines[:offset]), "\n".join(lines[offset + 1 :])
+    return body, ""
+
+
+# shlex groups a run of shell punctuation into one token, so ``));`` arrives
+# whole and the separator inside it would otherwise be missed, leaving the
+# command after it read as an argument of the command before it.
+_PUNCTUATION_RUN_RE = re.compile(r"\A[();|&]+\Z")
+_PUNCTUATION_PIECE_RE = re.compile(r"&&|\|\||[();|&]")
+
+
+def _split_punctuation_runs(tokens: list[str]) -> list[str]:
+    """Separate a grouped run of punctuation into the operators it is made of."""
+    separated: list[str] = []
+    for token in tokens:
+        if len(token) > 1 and _PUNCTUATION_RUN_RE.match(token):
+            separated.extend(_PUNCTUATION_PIECE_RE.findall(token))
+        else:
+            separated.append(token)
+    return separated
+
+
+def _unquoted_separator_index(text: str) -> int:
+    """Where an operand ends: at the first separator outside quotes.
+
+    ``cat <<< "a; b"`` is one operand, so the ``;`` inside the quotes does not
+    end it and the command written after the real separator is still walked.
+    """
+    quote: str | None = None
+    for index, char in enumerate(text):
+        if char == "\\" and quote != "'":
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if quote is None and char in {";", "\n", "|", "&"}:
+            return index
+    return len(text)
+
+
+def _split_heredocs(command_text: str) -> tuple[str, str]:
+    """Split a command into the text to walk and the text that is operand data.
+
+    Returns the commands to walk and the heredoc or here-string data fed to
+    them. Quotes are tracked so ``echo '<<'`` is not mistaken for a heredoc,
+    arithmetic is skipped so ``echo $((1 << 2))`` is not either, a heredoc body
+    ends at its terminator line so commands written after it are still walked,
+    and a here-string consumes only its single operand.
+    """
+    commands: list[str] = []
+    data: list[str] = []
+    remaining = command_text
+    for _ in range(_MAX_HEREDOC_OPERANDS):
+        position = _heredoc_operator_index(remaining)
+        if position < 0:
+            break
+        commands.append(remaining[:position])
+        rest = remaining[position + 2 :]
+        if rest.startswith("<"):
+            # Here-string: one operand, then normal commands resume.
+            operand = rest[1:].lstrip()
+            cut = _unquoted_separator_index(operand)
+            data.append(operand[:cut])
+            remaining = " " + operand[cut:]
+            continue
+        delimiter = _HEREDOC_DELIMITER_RE.match(rest)
+        if delimiter is None:
+            # Nothing names the end of the body, so the rest of the text is it.
+            data.append(rest)
+            remaining = ""
+            break
+        line_end = rest.find("\n", delimiter.end())
+        if line_end == -1:
+            # The body never starts, so what follows the delimiter is command.
+            commands.append(" " + rest[delimiter.end() :])
+            remaining = ""
+            break
+        # The rest of the operator's own line still belongs to its command.
+        commands.append(" " + rest[delimiter.end() : line_end])
+        body, resumed = _split_heredoc_body(
+            rest[line_end + 1 :],
+            delimiter.group(2).strip("\"'").replace("\\", ""),
+            bool(delimiter.group(1)),
+        )
+        data.append(body)
+        remaining = "\n" + resumed
+    commands.append(remaining)
+    return "".join(commands), "\n".join(data)
+
+
+def _has_inline_code_option(grammar: dict[str, frozenset[str]], args: list[str]) -> bool:
+    """Whether the arguments carry this interpreter's inline-code option.
+
+    ``_shell_c_payload`` accepts any option containing the letter ``c``, which
+    also matches ``--check`` and ``-Mstrict``, so the grammar decides instead.
+    """
+    code = grammar["code"]
+    code_letters = {option[1] for option in code if len(option) == 2 and not option.startswith("--")}
+    boolean_letters = {option[1] for option in grammar["boolean"] if len(option) == 2 and not option.startswith("--")}
+    for arg in args:
+        token = str(arg).strip("\"'")
+        if token in code:
+            return True
+        if token.startswith("-") and not token.startswith("--") and len(token) > 2:
+            letters = token[1:]
+            if letters[-1] in code_letters and all(letter in boolean_letters for letter in letters[:-1]):
+                return True
+    return False
+
+
+def _interpreter_script_arg(
+    executable: str,
+    command: list[str],
+    cmd_idx: int,
+    assignments: dict[str, str],
+) -> tuple[str, str | None]:
+    """Resolve which argument an interpreter runs as a script.
+
+    Returns ``(_SCRIPT, arg)`` when one is named, ``(_NO_SCRIPT, None)`` when
+    the interpreter runs inline code, prints and exits, or only checks syntax,
+    and ``(_UNDECIDABLE, None)`` when any option before the candidate is not in
+    this interpreter's grammar. Only the first non-option argument is the
+    script: anything after it is that script's own argv, so
+    ``python other.py run.py`` runs ``other.py``.
+    """
+    base = _VERSION_SUFFIX_RE.sub("", executable) or executable
+    grammar = _INTERPRETER_GRAMMARS.get(base)
+    args = _command_input_args(command, cmd_idx, assignments)
+    if grammar is None:
+        # Sourcing and anything else without a grammar: the first argument is
+        # the file, and an option would mean a shape this walk does not model.
+        first = next((a for a in args if a), None)
+        if first is None:
+            return (_NO_SCRIPT, None)
+        return (_UNDECIDABLE, None) if str(first).strip("\"'").startswith("-") else (_SCRIPT, first)
+
+    index = 0
+    while index < len(args):
+        raw = args[index]
+        token = str(raw).strip("\"'")
+        index += 1
+        if token == "--":
+            return (_SCRIPT, args[index]) if index < len(args) else (_NO_SCRIPT, None)
+        if not token.startswith("-") or token == "-":
+            return (_SCRIPT, raw)
+        if token in grammar["code"]:
+            return (_INLINE_CODE, None)
+        if token in grammar["terminal"]:
+            return (_NO_SCRIPT, None)
+        if token in grammar["boolean"]:
+            continue
+        if token in grammar["value"]:
+            index += 1
+            continue
+        name, separator, _ = token.partition("=")
+        if separator and (name in grammar["value"] or name in grammar["boolean"]):
+            continue
+        if not token.startswith("--"):
+            # A short-option cluster, possibly carrying an attached value.
+            letters = token[1:]
+            short = {
+                kind: {o[1] for o in options if len(o) == 2 and not o.startswith("--")}
+                for kind, options in grammar.items()
+            }
+            recognised = True
+            for position, letter in enumerate(letters):
+                if letter in short["code"]:
+                    return (_INLINE_CODE, None)
+                if letter in short["terminal"]:
+                    return (_NO_SCRIPT, None)
+                if letter in short["value"]:
+                    if position + 1 == len(letters):
+                        index += 1
+                    break
+                if letter not in short["boolean"]:
+                    recognised = False
+                    break
+            if recognised:
+                continue
+        return (_UNDECIDABLE, None)
+    return (_NO_SCRIPT, None)
+
+
+def _skip_wrapper_options(
+    wrapper: str,
+    command: list[str],
+    cmd_idx: int,
+    assignments: dict[str, str],
+) -> tuple[str, int]:
+    """Advance past one wrapper's own options using its grammar.
+
+    Returns ``(_WRAPPER_OK, index)`` at the wrapped command, ``_WRAPPER_NONE``
+    when a help or version option means the wrapper printed and exited, and
+    ``_WRAPPER_UNKNOWN`` for an option the grammar does not describe, because
+    assuming it takes no value is how a wrapper ends up crediting a command
+    that never ran.
+    """
+    grammar = _WRAPPER_GRAMMARS.get(wrapper)
+    if grammar is None:
+        return (_WRAPPER_UNKNOWN, cmd_idx)
+    index = cmd_idx + 1
+    options_done = False
+    while index < len(command):
+        token = _resolved_shell_arg(command[index], assignments).strip("\"'")
+        if not options_done and token in grammar["terminal"]:
+            return (_WRAPPER_NONE, index)
+        if wrapper in _STDIN_DEPENDENT_WRAPPERS:
+            return (_WRAPPER_UNKNOWN, index)
+        if token == "--":
+            # End of this wrapper's own OPTIONS. Its positional arguments, such
+            # as timeout's duration, still come before the wrapped command.
+            options_done = True
+            index += 1
+            continue
+        if not options_done:
+            if token in grammar["boolean"]:
+                index += 1
+                continue
+            if token in grammar["value"]:
+                index += 2
+                continue
+            name, separator, _ = token.partition("=")
+            if separator and (name in grammar["value"] or name in grammar["boolean"]):
+                index += 1
+                continue
+        if wrapper == "nice" and _NEGATIVE_NUMBER_RE.match(token):
+            index += 1
+            continue
+        assignment = _SHELL_ASSIGNMENT_RE.match(token)
+        if wrapper == "env" and assignment:
+            assignments[assignment.group(1)] = assignment.group(2)
+            index += 1
+            continue
+        if not token.startswith("-") or options_done:
+            if wrapper == "timeout" and _DURATION_ARG_RE.match(token):
+                index += 1
+                continue
+            if wrapper in _RUNNER_COMMAND_PREFIXES:
+                return (_WRAPPER_OK, index + 1) if token == "run" else (_WRAPPER_UNKNOWN, index)
+            return (_WRAPPER_OK, index)
+        if len(token) > 2 and not token.startswith("--"):
+            short = token[:2]
+            if short in grammar["value"]:
+                index += 1
+                continue
+        return (_WRAPPER_UNKNOWN, index)
+    return (_WRAPPER_NONE, index)
+
+
+def _skip_transparent_prefixes(
+    command: list[str],
+    cmd_idx: int,
+    assignments: dict[str, str],
+) -> tuple[str, int]:
+    """Advance past grouping tokens and wrappers that run the command after them."""
+    for _ in range(_MAX_SHELL_WRAPPERS):
+        if cmd_idx >= len(command):
+            return (_WRAPPER_OK, cmd_idx)
+        if command[cmd_idx] in _GROUPING_TOKENS:
+            cmd_idx += 1
+            continue
+        executable = _shell_executable(_resolved_shell_arg(command[cmd_idx], assignments)).removesuffix(".exe")
+        if executable in _TRANSPARENT_COMMAND_PREFIXES or executable in _RUNNER_COMMAND_PREFIXES:
+            status, cmd_idx = _skip_wrapper_options(executable, command, cmd_idx, assignments)
+            if status != _WRAPPER_OK:
+                return (status, cmd_idx)
+            continue
+        return (_WRAPPER_OK, cmd_idx)
+    return (_WRAPPER_OK, cmd_idx)
+
+
+def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> bool | None:
+    """Whether a shell command invokes ``expected_script``.
+
+    Credit is given only for a recognised way of running a script: the script
+    invoked directly, an interpreter given it as its script argument, a
+    ``source``, or a ``sh -c`` payload that does one of those. Every other
+    command is reported as not an invocation, so reading, printing, searching,
+    copying or deleting the file needs no special case.
+
+    ``None`` means undecidable rather than negative, and is returned only when
+    the shell resolves the path at run time or an unrecognised option may have
+    consumed it. The same "a textual match is not evidence" reasoning is already
+    applied to SKILL.md reads by :func:`_cmd_reads_skill_md`.
+    """
+    if not expected_script:
+        return False
+    if _depth > _MAX_SHELL_REFERENCE_DEPTH:
+        return None
+    command_text = str(cmd)
+    if not command_text.strip():
+        return False
+    # A heredoc or here-string operand is data rather than further commands, but
+    # the tokenizer turns its newlines into separators, so it is split out.
+    analysed_text, unexamined_text = _split_heredocs(command_text)
+    tokens = _split_punctuation_runs(_shell_tokens(analysed_text))
+    if not tokens:
+        return None if str(expected_script) in command_text else False
+
+    assignments: dict[str, str] = {}
+    current_directory: str | None = None
+    undecidable = False
+    ran_a_wrapper_help = False
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx] in _SHELL_SEPARATORS:
+            idx += 1
+            continue
+        end = idx
+        while end < len(tokens) and tokens[end] not in _SHELL_SEPARATORS:
+            end += 1
+        command = tokens[idx:end]
+
+        cmd_idx = 0
+        while cmd_idx < len(command):
+            assignment = _SHELL_ASSIGNMENT_RE.match(command[cmd_idx])
+            if not assignment:
+                break
+            assignments[assignment.group(1)] = assignment.group(2)
+            cmd_idx += 1
+
+        if cmd_idx >= len(command):
+            # The whole command was variable assignments, which run nothing.
+            idx = end + 1
+            continue
+
+        if _redirects_script_to_stdin(command, assignments, expected_script):
+            undecidable = True
+            idx = end + 1
+            continue
+        leading = _shell_executable(_resolved_shell_arg(command[cmd_idx], assignments)).removesuffix(".exe")
+        if leading in _WRAPPER_GRAMMARS:
+            wrapper_status, cmd_idx = _skip_wrapper_options(leading, command, cmd_idx, assignments)
+            if wrapper_status != _WRAPPER_OK:
+                if wrapper_status == _WRAPPER_NONE:
+                    ran_a_wrapper_help = True
+                if wrapper_status == _WRAPPER_UNKNOWN:
+                    undecidable = True
+                idx = end + 1
+                continue
+        unwrapped_idx = _unwrap_shell_command(command, cmd_idx, assignments)
+        if unwrapped_idx is None:
+            undecidable = True
+            idx = end + 1
+            continue
+        wrapper_status, cmd_idx = _skip_transparent_prefixes(command, unwrapped_idx, assignments)
+        if wrapper_status != _WRAPPER_OK:
+            if wrapper_status == _WRAPPER_NONE:
+                ran_a_wrapper_help = True
+            if wrapper_status == _WRAPPER_UNKNOWN:
+                undecidable = True
+            idx = end + 1
+            continue
+
+        if cmd_idx < len(command):
+            if _resolved_shell_arg(command[cmd_idx], assignments).strip("\"'").startswith("-"):
+                # An option standing where a command should: an option outside
+                # the wrapper's grammar consumed the tokens up to here, so what
+                # runs is unresolved rather than nothing.
+                undecidable = True
+                idx = end + 1
+                continue
+            executable_path = _path_with_shell_cwd(
+                _resolved_shell_arg(command[cmd_idx], assignments),
+                current_directory,
+            )
+            executable = _shell_executable(executable_path)
+
+            if executable == "cd":
+                directory = next(
+                    (
+                        arg
+                        for arg in _command_input_args(command, cmd_idx, assignments)
+                        if arg and not arg.startswith("-")
+                    ),
+                    None,
+                )
+                if directory is None:
+                    undecidable = True
+                else:
+                    current_directory = directory
+                idx = end + 1
+                continue
+
+            grammar = _INTERPRETER_GRAMMARS.get(_VERSION_SUFFIX_RE.sub("", executable) or executable)
+            if executable in _SHELL_COMMAND_INTERPRETERS and (
+                grammar is None or _has_inline_code_option(grammar, _command_input_args(command, cmd_idx, assignments))
+            ):
+                payload = _shell_c_payload(command, cmd_idx, assignments)
+                if payload is not None:
+                    nested = _cmd_executes_script(payload, expected_script, _depth=_depth + 1)
+                    if nested is True:
+                        return True
+                    if nested is None:
+                        undecidable = True
+                    idx = end + 1
+                    continue
+
+            if executable in _OPAQUE_SHELL_BUILTINS:
+                if _command_names_script(command, cmd_idx, assignments, expected_script):
+                    undecidable = True
+                idx = end + 1
+                continue
+
+            if _script_path_matches(executable_path, expected_script):
+                return True
+
+            runs_a_script = (
+                executable in _INTERPRETER_GRAMMARS
+                or executable in _SOURCING_COMMANDS
+                or re.fullmatch(r"python\d+(?:\.\d+)*", executable) is not None
+            )
+            if not runs_a_script and _carries_a_nested_invocation(command, cmd_idx, assignments, expected_script):
+                undecidable = True
+                idx = end + 1
+                continue
+            if runs_a_script:
+                status, script_arg = _interpreter_script_arg(executable, command, cmd_idx, assignments)
+                if status == _UNDECIDABLE:
+                    undecidable = True
+                elif status == _INLINE_CODE:
+                    # Inline code or a module can run the script itself, which
+                    # this walk does not read, so naming it leaves the command
+                    # unresolved rather than settled as running nothing.
+                    if _command_names_script(command, cmd_idx, assignments, expected_script):
+                        undecidable = True
+                elif status == _SCRIPT and script_arg is not None:
+                    if _script_path_matches(_path_with_shell_cwd(script_arg, current_directory), expected_script):
+                        return True
+                    if _UNRESOLVED_ARG_RE.search(str(script_arg)):
+                        undecidable = True
+
+        idx = end + 1
+
+    if undecidable:
+        return None
+    if expected_script in unexamined_text:
+        # Named only in data this walk did not read as commands.
+        return None
+    if ran_a_wrapper_help and not undecidable:
+        # A wrapper printed its help and exited, so nothing ran.
+        return False
+    if expected_script in command_text and _STDIN_ARGV_RE.search(command_text):
+        # A path can reach xargs through standard input rather than as an
+        # argument, so neither answer is supported by the command text.
+        return None
+    if expected_script in command_text and _DYNAMIC_ARGUMENT_RE.search(command_text):
+        # The shell builds the path at run time, so neither answer is supported.
+        return None
+    return False
+
+
+def check_script_execution(
+    tool_calls: list[dict[str, Any]],
+    expected_script: str | None,
+) -> dict[str, Any]:
+    """Check whether the agent executed the expected script."""
     if not expected_script:
         return {"passed": True, "score": 1.0, "reason": "No specific script expected"}
+
     exec_calls = [tc for tc in tool_calls if _is_execution_action(str(tc["action"]))]
+    unclassified_reference = False
     for call in exec_calls:
-        cmd = _command_text(call)
-        if expected_script in cmd:
+        verdict = _cmd_executes_script(_command_text(call), expected_script)
+        if verdict is True:
             return {"passed": True, "score": 1.0, "reason": f"Executed {expected_script}"}
+        if verdict is None:
+            unclassified_reference = True
+
     if _has_unsupported_native_codex_call(tool_calls):
         return _unsupported_native_codex_result(
             "Script execution could not be evaluated because a native Codex exec wrapper was unsupported"
         )
-    for tc in tool_calls:
-        obs = str(tc.get("observation", "")).lower()
-        if expected_script.lower() in obs:
-            return {"passed": True, "score": 0.75, "reason": f"{expected_script} found in tool observation"}
+
+    if unclassified_reference:
+        return {
+            "passed": True,
+            "score": 0.75,
+            "reason": f"{expected_script} referenced in a command that could not be classified as an invocation",
+        }
+
     if not exec_calls:
+        # Check observation text as fallback (script may run inside Skill tool).
+        # A file-read tool returning the script's own source is not evidence
+        # that it ran.
+        for tc in tool_calls:
+            if _is_file_read_action(str(tc["action"])):
+                continue
+            obs = str(tc.get("observation", "")).lower()
+            if expected_script.lower() in obs:
+                return {"passed": True, "score": 0.75, "reason": f"{expected_script} found in tool observation"}
         return {"passed": False, "score": 0.0, "reason": "No execute/run_code call found"}
+
+    # Observation fallback for exec calls. A command that names the script
+    # without invoking it produced any mention in its own output, so that
+    # output is not independent evidence that the script ran.
+    for call in exec_calls:
+        if expected_script in _command_text(call):
+            continue
+        obs = str(call.get("observation", "")).lower()
+        if expected_script.lower() in obs:
+            return {"passed": True, "score": 0.75, "reason": f"{expected_script} found in execution observation"}
+
     return {"passed": False, "score": 0.0, "reason": f"Execute called but not with {expected_script}"}
 
 

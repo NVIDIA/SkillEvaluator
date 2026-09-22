@@ -762,7 +762,7 @@ def test_nvidia_build_opencode_default_model_is_prefixed_for_local_runtime() -> 
     ("provider_name", "expected"),
     [
         ("openai", "openai/test-model"),
-        ("openai-compatible", "openai/test-model"),
+        ("openai-compatible", "openai/nvidia/nvidia/nemotron-3-super-120b-long-ctx"),
         ("anthropic", "anthropic/test-model"),
     ],
 )
@@ -777,7 +777,7 @@ def test_opencode_default_model_is_provider_qualified(provider_name: str, expect
 
     assert _model_for_agent("opencode", cli_model=None, config_agents={}, provider=provider) == (
         expected,
-        "public provider default",
+        "openai-compatible agent default" if provider_name == "openai-compatible" else "public provider default",
     )
 
 

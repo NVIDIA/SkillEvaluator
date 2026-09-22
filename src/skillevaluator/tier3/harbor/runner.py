@@ -31,7 +31,9 @@ from uuid import uuid4
 from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
+    CHAT_DEFAULT_ANTHROPIC,
     CHAT_DEFAULT_NVIDIA,
+    GATEWAY_AGENT_DEFAULT_MODELS,
     ProviderConfig,
     ProviderConfigurationError,
     _normalize_anthropic_base_url,
@@ -570,7 +572,7 @@ def _validate_agent_provider_credentials(
                     "AWS_BEARER_TOKEN_BEDROCK for the agent environment."
                 ]
 
-        if provider.provider in {"openai", "openai-compatible"} and "claude-code" in agents:
+        if provider.provider == "openai" and "claude-code" in agents:
             if not agent_runtime_env.get("ANTHROPIC_API_KEY", "").strip():
                 return [
                     "claude-code with the OpenAI evaluator provider requires an independent ANTHROPIC_API_KEY "
@@ -863,6 +865,24 @@ def _independent_anthropic_agent_credentials() -> dict[str, str]:
     return credentials
 
 
+def _gateway_anthropic_agent_credentials(provider: ProviderConfig) -> dict[str, str]:
+    """Use a shared gateway unless the operator selected a separate Claude route.
+
+    A standalone Anthropic key keeps its native endpoint, so a native key is
+    never silently sent to the shared gateway. An explicit base URL without a
+    separate key selects another API root on the operator's gateway.
+    """
+    credentials = _independent_anthropic_agent_credentials()
+    if credentials.get("ANTHROPIC_API_KEY", "").strip():
+        return credentials
+    base_url = credentials.get("ANTHROPIC_BASE_URL")
+    if not base_url:
+        base_url = _normalize_anthropic_base_url(provider.base_url or "", variable="SKILL_EVAL_LLM_BASE_URL")
+    if not base_url:
+        raise ProviderConfigurationError("SKILL_EVAL_LLM_BASE_URL is required for the Claude gateway route.")
+    return {"ANTHROPIC_API_KEY": provider.api_key or "", "ANTHROPIC_BASE_URL": base_url}
+
+
 def _judge_model_config(
     provider: ProviderConfig,
     provider_env: Mapping[str, str],
@@ -947,7 +967,9 @@ def _agent_credentials(
             }
         return {}
 
-    if provider.provider in {"openai", "openai-compatible"} and agent == "claude-code":
+    if provider.provider == "openai-compatible" and agent == "claude-code":
+        return _gateway_anthropic_agent_credentials(provider)
+    if provider.provider == "openai" and agent == "claude-code":
         return _independent_anthropic_agent_credentials()
     if provider.provider == "anthropic" and agent == "codex":
         return {
@@ -1193,6 +1215,12 @@ def _model_for_agent(
         configured = config_agents.get(agent, {}) if isinstance(config_agents, dict) else {}
         if isinstance(configured, dict) and configured.get("model"):
             selected, source = str(configured["model"]), "evals/config.yml"
+        elif provider.provider == "openai-compatible" and agent in GATEWAY_AGENT_DEFAULT_MODELS:
+            selected, source = GATEWAY_AGENT_DEFAULT_MODELS[agent], "openai-compatible agent default"
+            if agent == "claude-code":
+                credentials = _independent_anthropic_agent_credentials()
+                if credentials.get("ANTHROPIC_API_KEY", "").strip() and not credentials.get("ANTHROPIC_BASE_URL"):
+                    selected, source = CHAT_DEFAULT_ANTHROPIC, "native Anthropic agent default"
         else:
             selected, source = provider.model, "public provider default"
     if (
@@ -1211,7 +1239,7 @@ def _model_for_agent(
             "openai": "openai",
             "openai-compatible": "openai",
         }.get(provider.provider)
-        if namespace and source == "public provider default":
+        if namespace and source in {"public provider default", "openai-compatible agent default"}:
             selected = f"{namespace}/{selected}"
     return selected, source
 
@@ -2460,10 +2488,7 @@ def _run_harbor_eval_impl(
             ProgressEvent(
                 stage="agent-runtime-preflight",
                 state="skipped",
-                detail=(
-                    "disabled by default; enable with --agent-runtime-preflight "
-                    "or harbor.agent_runtime_preflight"
-                ),
+                detail=("disabled by default; enable with --agent-runtime-preflight or harbor.agent_runtime_preflight"),
             )
         )
     errors: list[str] = []

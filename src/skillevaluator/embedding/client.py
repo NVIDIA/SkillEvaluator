@@ -138,7 +138,11 @@ class EmbeddingClient:
 
         config = self._resolved_config()
         kwargs: dict[str, Any] = {}
-        if config.provider == "nv_build" or self.model == EMBEDDING_DEFAULT_NVIDIA:
+        if (
+            config.provider == "nv_build"
+            or self.model == EMBEDDING_DEFAULT_NVIDIA
+            or self.model.endswith("/" + EMBEDDING_DEFAULT_NVIDIA)
+        ):
             # Deduplication compares documents symmetrically, not queries to documents.
             kwargs["extra_body"] = {"input_type": "passage"}
         try:

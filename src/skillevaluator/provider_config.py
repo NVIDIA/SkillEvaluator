@@ -27,6 +27,9 @@ CHAT_DEFAULT_OPENAI = "gpt-5.6-sol"
 CHAT_DEFAULT_ANTHROPIC = "claude-opus-5"
 CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5"
 CHAT_DEFAULT_NVIDIA = "nvidia/nemotron-3-super-120b-a12b"
+# Gateway catalog IDs are independent of native-provider model names. Operators
+# can override these defaults without changing the configured endpoint or key.
+CHAT_DEFAULT_GATEWAY = "nvidia/nvidia/nemotron-3-super-120b-long-ctx"
 # Lower-cost OpenAI alternative for ``SKILL_EVAL_LLM_MODEL`` overrides.
 CHAT_CHEAP_OPENAI = "gpt-5.4-mini"
 
@@ -35,11 +38,20 @@ CHAT_DEFAULT_MODELS = {
     "anthropic": CHAT_DEFAULT_ANTHROPIC,
     "nv_build": CHAT_DEFAULT_NVIDIA,
     "bedrock": CHAT_DEFAULT_BEDROCK,
+    "openai-compatible": CHAT_DEFAULT_GATEWAY,
+}
+# Agent harnesses have separate model defaults with their required capabilities.
+GATEWAY_AGENT_DEFAULT_MODELS = {
+    "codex": "openai/openai/gpt-5.6-sol",
+    "claude-code": "aws/anthropic/bedrock-claude-opus-5",
+    "opencode": CHAT_DEFAULT_GATEWAY,
 }
 EMBEDDING_DEFAULT_NVIDIA = "nvidia/nemotron-3-embed-1b"
+EMBEDDING_DEFAULT_GATEWAY = "nvidia/nvidia/nemotron-3-embed-1b"
 _EMBEDDING_DEFAULT_MODELS = {
     "openai": "text-embedding-3-small",
     "nv_build": EMBEDDING_DEFAULT_NVIDIA,
+    "openai-compatible": EMBEDDING_DEFAULT_GATEWAY,
 }
 _SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "nv_build", "bedrock", "openai-compatible"})
 _ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -122,7 +134,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
     _validate_provider(provider, variable="SKILL_EVAL_LLM_PROVIDER")
     configured_model = env.get("SKILL_EVAL_LLM_MODEL")
     if configured_model is None:
-        model = _default_chat_model(provider)
+        model = CHAT_DEFAULT_MODELS[provider]
     else:
         model = configured_model.strip()
         if not model:
@@ -216,9 +228,9 @@ def resolve_embedding_provider(environ: Mapping[str, str] | None = None) -> Prov
             credential_env="NVIDIA_API_KEY",
         )
 
-    model = env.get("SKILL_EVAL_EMBEDDING_MODEL")
+    model = env.get("SKILL_EVAL_EMBEDDING_MODEL", _EMBEDDING_DEFAULT_MODELS[provider]).strip()
     if not model:
-        raise ProviderConfigurationError("SKILL_EVAL_EMBEDDING_MODEL is required for openai-compatible embeddings.")
+        raise ProviderConfigurationError("SKILL_EVAL_EMBEDDING_MODEL must be a non-empty string when set.")
     return ProviderConfig(
         provider=provider,
         model=model,
@@ -450,10 +462,3 @@ def _validate_provider(provider: str, *, variable: str) -> None:
     if provider not in _SUPPORTED_PROVIDERS:
         choices = ", ".join(sorted(_SUPPORTED_PROVIDERS))
         raise ProviderConfigurationError(f"{variable} must be one of: {choices}.")
-
-
-def _default_chat_model(provider: str) -> str:
-    try:
-        return CHAT_DEFAULT_MODELS[provider]
-    except KeyError as exc:
-        raise ProviderConfigurationError("SKILL_EVAL_LLM_MODEL is required for openai-compatible providers.") from exc

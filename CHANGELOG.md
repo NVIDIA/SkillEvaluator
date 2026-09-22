@@ -20,6 +20,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- OpenAI-compatible gateways now have chat, embedding, and separate Codex,
+  Claude Code, and OpenCode model defaults. Set the provider, URL, and key;
+  override model IDs when the gateway uses different catalog names. Claude
+  Code inherits the gateway route unless an explicit Anthropic route is set.
+  Run reports identify harness defaults separately from CLI/config overrides.
+
 - Run individual tiers directly with `skillevaluator tier1 PATH`, `tier2 PATH`,
   and `tier3 PATH`, while retaining the expert subcommands. Tier 1 includes
   dependency checks and enables LLM checks when configured; Tier 2 reports

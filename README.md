@@ -60,6 +60,11 @@ export NVIDIA_API_KEY='nvapi-...'
 This key covers chat, Tier 2 embeddings, and supported Tier 3 agents in
 Docker or local mode.
 
+For gateways, set `SKILL_EVAL_LLM_PROVIDER=openai-compatible`,
+`SKILL_EVAL_LLM_BASE_URL`, and `SKILL_EVAL_LLM_API_KEY`.
+[Model defaults are overridable](docs/configuration.mdx#choose-an-llm-provider);
+the gateway must support the selected models and APIs.
+
 Run all tiers on `./my-skill`, a directory containing `SKILL.md`:
 
 ```bash

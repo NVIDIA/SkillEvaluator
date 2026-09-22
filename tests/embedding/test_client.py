@@ -106,15 +106,16 @@ class TestEmbed:
         assert client.embed(["text"]) == [[1.0, 0.0]]
         sdk.embeddings.create.assert_called_once_with(model=model, input=["text"], encoding_format="float")
 
-    def test_nvidia_default_at_explicit_endpoint_includes_passage_type(self) -> None:
-        client = EmbeddingClient(api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+    @pytest.mark.parametrize("model", [None, "publisher/nvidia/nemotron-3-embed-1b"])
+    def test_nvidia_default_at_explicit_endpoint_includes_passage_type(self, model) -> None:
+        client = EmbeddingClient(model=model, api_key="test-key", base_url="http://127.0.0.1:12345/v1")
         sdk = MagicMock()
         sdk.embeddings.create.return_value = _make_fake_response([[1.0, 0.0]])
         client._client = sdk
 
         client.embed(["text"])
 
-        assert sdk.embeddings.create.call_args.kwargs["model"] == "nvidia/nemotron-3-embed-1b"
+        assert sdk.embeddings.create.call_args.kwargs["model"] == (model or "nvidia/nemotron-3-embed-1b")
         assert sdk.embeddings.create.call_args.kwargs["extra_body"] == {"input_type": "passage"}
 
     @pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 429, 500])
@@ -126,7 +127,9 @@ class TestEmbed:
         sdk = MagicMock()
         request = httpx.Request("POST", "http://127.0.0.1:12345/v1/embeddings?secret-marker")
         response = httpx.Response(status, request=request, json={"detail": "secret-marker"})
-        sdk.embeddings.create.side_effect = APIStatusError("secret-marker", response=response, body={"secret-marker": True})
+        sdk.embeddings.create.side_effect = APIStatusError(
+            "secret-marker", response=response, body={"secret-marker": True}
+        )
         client._client = sdk
 
         with pytest.raises(SimilarityConfigError) as error:

@@ -347,7 +347,7 @@ def test_nvidia_build_endpoint_cannot_be_redirected() -> None:
     assert embedding.base_url == "https://integrate.api.nvidia.com/v1"
 
 
-def test_openai_compatible_provider_requires_explicit_model() -> None:
+def test_openai_compatible_provider_requires_explicit_endpoint() -> None:
     with pytest.raises(ProviderConfigurationError) as exc_info:
         resolve_llm_provider(
             {
@@ -355,7 +355,7 @@ def test_openai_compatible_provider_requires_explicit_model() -> None:
                 "SKILL_EVAL_LLM_API_KEY": "test-key",
             }
         )
-    assert str(exc_info.value) == "SKILL_EVAL_LLM_MODEL is required for openai-compatible providers."
+    assert str(exc_info.value) == "SKILL_EVAL_LLM_BASE_URL is required for the selected provider."
 
 
 def test_anthropic_requires_explicit_embedding_provider() -> None:

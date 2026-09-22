@@ -920,7 +920,8 @@ def test_inconclusive_credential_probe_degrades_and_continues(
     )
 
     assert "error" not in result
-    assert len(probe_calls) == (2 if provider_name == "anthropic" else 1)
+    # Gateway harness defaults are distinct from the evaluator/judge model.
+    assert len(probe_calls) == (2 if provider_name in {"anthropic", "openai-compatible"} else 1)
     assert any(call.provider == provider_name for call in probe_calls)
     assert task_calls
     transitions = [(event.stage, event.state) for event in reporter.events]
@@ -1886,7 +1887,14 @@ def test_default_task_staging_failure_cleans_transient_artifacts(
     assert result["run_config"]["credential_validation"]["status"] == "degraded"
     assert result["run_config"]["credential_validation"]["targets"] == [
         {
-            "labels": ["codex", "standard grader"],
+            "labels": ["codex"],
+            "provider": "openai-compatible",
+            "model": "openai/openai/gpt-5.6-sol",
+            "status": "degraded",
+            "detail": "model catalog access does not verify runtime credentials for this endpoint",
+        },
+        {
+            "labels": ["standard grader"],
             "provider": "openai-compatible",
             "model": "gpt-5",
             "status": "degraded",

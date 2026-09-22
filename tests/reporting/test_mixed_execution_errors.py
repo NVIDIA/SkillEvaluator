@@ -102,7 +102,9 @@ def test_tier2_cli_reports_preserve_analysis_errors_with_findings(tmp_path: Path
     thread.start()
     skill = tmp_path / "skill"
     skill.mkdir()
-    (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
+    (skill / "SKILL.md").write_text(
+        "\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"), encoding="utf-8"
+    )
     reports = tmp_path / "reports"
     for purpose in ("LLM", "EMBEDDING"):
         monkeypatch.setenv(f"SKILL_EVAL_{purpose}_PROVIDER", "openai-compatible")
@@ -119,7 +121,7 @@ def test_tier2_cli_reports_preserve_analysis_errors_with_findings(tmp_path: Path
     assert invocation.exit_code == 1, invocation.output
     assert requests.count("/v1/embeddings") == 1
     assert requests.count("/v1/chat/completions") == 2
-    payload = json.loads((reports / "skillevaluator-tier2.json").read_text())
+    payload = json.loads((reports / "skillevaluator-tier2.json").read_text(encoding="utf-8"))
     result = payload["results"][0]
     failed_clusters = {"mixed": 1, "errors_only": 2, "finding_only": 0}[outcome]
     assert result["status"] == ("incomplete" if failed_clusters else "failed")
@@ -132,14 +134,14 @@ def test_tier2_cli_reports_preserve_analysis_errors_with_findings(tmp_path: Path
     )
 
     html = _VisibleHTMLText()
-    html.feed((reports / "skillevaluator-tier2.html").read_text())
+    html.feed((reports / "skillevaluator-tier2.html").read_text(encoding="utf-8"))
     # Earlier logger output must not mask omissions from the actual CLI report.
     marker = "SkillEvaluator Validation Results"
     assert marker in invocation.output
     outputs = {
         "cli": invocation.output[invocation.output.index(marker) :],
         "html": " ".join(html.parts),
-        "markdown": (reports / "skillevaluator-tier2.md").read_text(),
+        "markdown": (reports / "skillevaluator-tier2.md").read_text(encoding="utf-8"),
     }
     outputs = {name: " ".join(text.split()) for name, text in outputs.items()}
     diagnostic = "LLM analysis did not complete"

@@ -28,7 +28,7 @@ Skills that pass are published to the
 
 ![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](docs/assets/three-tier-overview.svg)
 
-Tiers are independent entry points; nothing requires running earlier ones first.
+Run each tier independently.
 
 | Tier | Purpose | Run one tier | Requires |
 | --- | --- | --- | --- |
@@ -37,9 +37,9 @@ Tiers are independent entry points; nothing requires running earlier ones first.
 | Tier 3: Live Evaluation | Does it help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 
 [SkillSpector](https://github.com/NVIDIA/SkillSpector) provides Tier 1 security
-scanning. [Harbor](https://github.com/harbor-framework/harbor), the open-source agent evaluation framework, powers Tier 3
-sandboxed agent runs. Full tier guides live in the
-[documentation](https://docs.nvidia.com/skills/skillevaluator/).
+scanning; [Harbor](https://github.com/harbor-framework/harbor), the open-source agent
+evaluation framework, powers Tier 3 sandboxed agent runs.
+See the [tier guides](https://docs.nvidia.com/skills/skillevaluator/).
 
 ## Quickstart
 
@@ -49,27 +49,24 @@ Install with [uv](https://docs.astral.sh/uv/):
 uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
-**To configure NVIDIA Build for all three tiers, set just two variables: the
-provider and its API key.** Get a key from [build.nvidia.com](https://build.nvidia.com):
+**For NVIDIA Build, set just two variables for all tiers.** Get an API key from
+[build.nvidia.com](https://build.nvidia.com):
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
 ```
 
-The same key covers chat, Tier 2 embeddings, and the supported Tier 3 agents in
-Docker or local mode. Models and embedding providers have configured defaults.
+This key covers chat, Tier 2 embeddings, and supported Tier 3 agents in
+Docker or local mode.
 
-Run all three tiers. `./my-skill` is a directory containing a `SKILL.md`:
+Run all tiers on `./my-skill`, a directory containing `SKILL.md`:
 
 ```bash
 skillevaluator validate ./my-skill
 ```
 
-Tier 3 uses autopilot to prepare the dataset and evaluate with and without
-the skill. Runtime requirements are below.
-
-To run one tier independently:
+Run individual tiers:
 
 ```bash
 skillevaluator tier1 ./my-skill
@@ -77,19 +74,17 @@ skillevaluator tier2 ./my-skill
 skillevaluator tier3 ./my-skill
 ```
 
-Each command runs its tier directly:
-
 - **Tier 1** runs static checks, including dependency checks, plus rubric,
   LLM security analysis, and finding verification when a provider is configured.
-  Without a provider it runs static checks and explicitly reports the LLM stages
-  as skipped. Use `--no-llm` to opt out of LLM checks.
+  Without a provider, LLM stages are reported as skipped.
+  Use `--no-llm` to opt out of LLM checks.
 - **Tier 2** checks for repeated content inside the skill. Add
   `--catalog ./skill-catalog.json` to compare against other skills too; without
   a catalog, the output explicitly says inter-skill comparison did not run.
 - **Tier 3** creates one starter evaluation case if no dataset or task source
   exists, then runs the provider-native agent in Docker with and without the
   skill. Valid existing sources are reused unchanged; invalid ones produce an
-  error. A starter case is a first run, not comprehensive evaluation coverage.
+  error. Review starter cases; they provide limited coverage.
 
 A tier without a path shows help.
 Expert commands such as `tier1 security-scan`, `tier2 similarity-check`, and
@@ -97,22 +92,22 @@ Expert commands such as `tier1 security-scan`, `tier2 similarity-check`, and
 
 ### Runtime requirements
 
-`[all]` installs Python extras. Also install Semgrep, SkillSpector, and Gitleaks
-for full Tier 1 coverage, and an agent runtime and sandbox for Tier 3. Follow the
+`[all]` installs Python extras; full Tier 1 needs Semgrep, SkillSpector, and Gitleaks,
+and Tier 3 needs an agent runtime and sandbox. Follow the
 [installation guide](https://docs.nvidia.com/skills/skillevaluator/installation),
-then check Tier 3 readiness:
+then check readiness:
 
 ```bash
 skillevaluator doctor --env-mode docker
 ```
 
-For a quick deterministic check before installing external scanners, run
-`skillevaluator quality-check ./my-skill`; no API key is needed. If the shell
-cannot find the command, run `uv tool update-shell` and open a new terminal.
+For a keyless check without external scanners, run
+`skillevaluator quality-check ./my-skill`. If the command is unavailable,
+run `uv tool update-shell` and reopen your terminal.
 
 ### Other providers and optional model overrides
 
-OpenAI also starts with two variables and uses the default Codex agent for Tier 3:
+OpenAI uses two variables and defaults to Codex for Tier 3:
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=openai

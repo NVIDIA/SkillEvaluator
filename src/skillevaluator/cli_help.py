@@ -18,6 +18,7 @@ from __future__ import annotations
 import inspect
 import os
 import re
+import shutil
 import sys
 
 import click
@@ -26,6 +27,8 @@ from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
+
+from skillevaluator import __version__
 
 # Color scheme for the help screen. Kept intentionally small and semantic so the
 # palette can be tweaked in one place.
@@ -44,6 +47,41 @@ _HELP_THEME = Theme(
 )
 
 _INDENT = (0, 0, 0, 2)
+
+# ANSI Shadow lettering, stored as text so no font dependency is needed at runtime.
+# Keep the full letter shapes; smaller terminals get a plain title, not squeezed art.
+_WORDMARK = """███████╗██╗  ██╗██╗██╗     ██╗         ███████╗██╗   ██╗ █████╗ ██╗     ██╗   ██╗ █████╗ ████████╗ ██████╗ ██████╗
+██╔════╝██║ ██╔╝██║██║     ██║         ██╔════╝██║   ██║██╔══██╗██║     ██║   ██║██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗
+███████╗█████╔╝ ██║██║     ██║         █████╗  ██║   ██║███████║██║     ██║   ██║███████║   ██║   ██║   ██║██████╔╝
+╚════██║██╔═██╗ ██║██║     ██║         ██╔══╝  ╚██╗ ██╔╝██╔══██║██║     ██║   ██║██╔══██║   ██║   ██║   ██║██╔══██╗
+███████║██║  ██╗██║███████╗███████╗    ███████╗ ╚████╔╝ ██║  ██║███████╗╚██████╔╝██║  ██║   ██║   ╚██████╔╝██║  ██║
+╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝    ╚══════╝  ╚═══╝  ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝"""
+
+
+def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -> RenderableType | None:
+    """Brand interactive root help without adding output to command execution."""
+    if (
+        not getattr(command, "show_banner", False)
+        or ctx.parent is not None
+        or os.environ.get("TERM") in {"dumb", "unknown"}
+        or not sys.stdout.isatty()
+        or not sys.stderr.isatty()
+    ):
+        return None
+
+    try:
+        _WORDMARK.encode(sys.stdout.encoding or "utf-8")
+        supports_blocks = True
+    except UnicodeEncodeError:
+        supports_blocks = False
+    tagline = "Static checks · Deduplication · Live evaluation"
+    if supports_blocks and width >= max(map(len, _WORDMARK.splitlines())):
+        heading = Text(_WORDMARK, style="bold #76b900")
+        heading.highlight_regex(r"[╔╗╚╝═║]+", style="dim #76b900")
+        lines = [Text(""), heading, Text(""), Text(f"v{__version__}  ·  {tagline}", style="dim")]
+    else:
+        lines = [Text(f"SKILLEVALUATOR v{__version__}", style="bold #76b900"), Text(tagline, style="dim")]
+    return Group(*lines)
 
 
 class GroupedOption(click.Option):
@@ -226,15 +264,19 @@ def _epilog(command: click.Command) -> RenderableType | None:
 def render_help(command: click.Command, ctx: click.Context, *, width: int | None = None) -> str:
     """Render a command's help screen as a (optionally colorized) string."""
     color = _wants_color(ctx)
-    # Use an explicit color system (not "auto") so styles survive ``capture()``,
-    # which has no attached terminal to auto-detect against. "standard" (8/16
-    # colors) is universally supported and covers our palette.
+    help_width = width or 80
+    # The wordmark can use a wide terminal while help keeps Click's readable line
+    # length. Conversely, Click's minimum width of 50 must not widen a tiny banner.
+    terminal_width = shutil.get_terminal_size().columns
+    banner = _welcome_banner(command, ctx, width=terminal_width)
+    # Detect terminal capabilities before capture so the banner can use NVIDIA
+    # green on truecolor terminals and degrade to the supported palette elsewhere.
     console = Console(
         theme=_HELP_THEME,
-        width=width or 80,
+        width=max(help_width, terminal_width) if banner is not None else help_width,
         highlight=False,
         force_terminal=color,
-        color_system="standard" if color else None,
+        color_system=("standard" if os.environ.get("TERM") in {"dumb", "unknown"} else "auto") if color else None,
     )
 
     sections = [
@@ -254,7 +296,10 @@ def render_help(command: click.Command, ctx: click.Context, *, width: int | None
         body.append(section)
 
     with console.capture() as capture:
-        console.print(Group(*body))
+        if banner is not None:
+            console.print(banner, width=terminal_width)
+            console.print()
+        console.print(Group(*body), width=help_width)
     # Strip the trailing column padding rich adds to aligned table cells so the
     # output has no trailing whitespace (parity with Click's own help).
     return "\n".join(line.rstrip() for line in capture.get().splitlines()) + "\n"
@@ -277,10 +322,12 @@ class RichGroup(click.Group):
         self,
         *args: object,
         help_command_groups: tuple[tuple[str, tuple[str, ...]], ...] = (),
+        show_banner: bool = False,
         **kwargs: object,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.help_command_groups = help_command_groups
+        self.show_banner = show_banner
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         formatter.write(render_help(self, ctx, width=formatter.width))

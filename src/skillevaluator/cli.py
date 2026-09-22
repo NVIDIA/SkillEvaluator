@@ -175,6 +175,7 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     cls=RichGroup,
     context_settings=CONTEXT_SETTINGS,
     help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
+    show_banner=True,
 )
 @click.version_option(version=__version__, prog_name="skillevaluator")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging.")

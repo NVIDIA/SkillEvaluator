@@ -20,6 +20,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Interactive top-level help now opens with a green SkillEvaluator wordmark,
+  installed version, and tier overview. Narrow terminals use a compact header;
+  redirected output and subcommands keep their existing output format.
+
 - OpenAI-compatible gateways now have chat, embedding, and separate Codex,
   Claude Code, and OpenCode model defaults. Set the provider, URL, and key;
   override model IDs when the gateway uses different catalog names. Claude

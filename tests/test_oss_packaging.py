@@ -587,7 +587,7 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     normalized_quickstart = " ".join(quickstart.split())
 
     assert "brew install semgrep gitleaks" in quickstart
-    assert "uv tool install git+https://github.com/NVIDIA/SkillSpector.git" in quickstart
+    assert "uv tool install --force git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0" in quickstart
     assert "Semgrep, SkillSpector, and Gitleaks" in quickstart
     assert "missing scanner evidence leaves the result `INCOMPLETE` and exits `1`" in normalized_quickstart
     assert "most often Gitleaks" not in ci

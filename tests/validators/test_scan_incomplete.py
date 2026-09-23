@@ -132,15 +132,16 @@ class TestScanIncompleteMarking:
     @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
     @patch.object(Tools.skillspector, "run")
     def test_clean_scan_is_not_marked(self, mock_run, skill_dir):
+        # Reuse the captured schema to model a supported synthetic scanner.
+        payload = json.loads(
+            (Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-safe-no-llm.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        payload["metadata"]["skillspector_version"] = "2.12.0"
         mock_run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
-                    "issues": [],
-                    "metadata": {"skillspector_version": "1.0.0"},
-                }
-            ),
+            stdout=json.dumps(payload),
             stderr="",
             exit_code=0,
         )

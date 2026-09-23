@@ -104,19 +104,14 @@ class TestIterScannableFilesPrunes:
 
 
 def _clean_spector_result():
+    # Reuse the complete report structure for synthetic current-version
+    # subprocess responses; the captured historical fixture stays unchanged.
+    fixture = Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-safe-no-llm.json"
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    data["metadata"]["skillspector_version"] = "2.12.0"
     return ToolResult(
         success=True,
-        stdout=json.dumps(
-            {
-                "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
-                "issues": [],
-                "metadata": {
-                    "skillspector_version": "1.0.0",
-                    "llm_requested": False,
-                    "llm_available": False,
-                },
-            }
-        ),
+        stdout=json.dumps(data),
         stderr="",
         exit_code=0,
     )
@@ -137,8 +132,9 @@ class TestSkillspectorFilteredCopy:
             return _clean_spector_result()
 
         mock_run.side_effect = capture
-        SecurityValidator()._run_skillspector(skill_with_artifacts)
+        result = SecurityValidator()._run_skillspector(skill_with_artifacts)
 
+        assert result.passed
         assert seen["path"] != skill_with_artifacts.resolve()
         assert seen["path"].name == "my-skill"
         assert seen["has_manifest"] and seen["has_payload"]
@@ -153,8 +149,9 @@ class TestSkillspectorFilteredCopy:
         (skill / "SKILL.md").write_text("---\nname: clean-skill\n---\n")
         mock_run.return_value = _clean_spector_result()
 
-        SecurityValidator()._run_skillspector(skill)
+        result = SecurityValidator()._run_skillspector(skill)
 
+        assert result.passed
         args = mock_run.call_args.args[0]
         assert args[args.index("scan") + 1] == str(skill.resolve())
 
@@ -182,6 +179,7 @@ class TestSkillspectorFilteredCopy:
             data["issues"] = [
                 {
                     "id": "SC8",
+                    "finding_id": "shipped-bytecode-1",
                     "pattern": "Shipped Python bytecode",
                     "severity": "HIGH",
                     "confidence": 0.95,
@@ -189,6 +187,8 @@ class TestSkillspectorFilteredCopy:
                     "location": {"file": "__pycache__/payload.pyc", "start_line": 1},
                 }
             ]
+            data["components"] = [{"path": "__pycache__/payload.pyc", "executable": False}]
+            data["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
             return ToolResult(success=False, stdout=json.dumps(data), stderr="", exit_code=1)
 
         mock_run.side_effect = capture
@@ -205,12 +205,16 @@ class TestSkillspectorFilteredCopy:
     def test_findings_map_back_to_original_paths(self, mock_run, skill_with_artifacts):
         def report_on_copy(args, **kwargs):
             scanned = args[args.index("scan") + 1]
+            data = json.loads(_clean_spector_result().stdout)
             data = {
+                **data,
                 "skill": {"name": "my-skill", "source": scanned},
                 "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
+                "components": [{"path": f"{scanned}/payload.py", "executable": False}],
                 "issues": [
                     {
                         "id": "SS001",
+                        "finding_id": "eval-usage-1",
                         "category": "execution",
                         "pattern": "eval-usage",
                         "severity": "HIGH",
@@ -219,8 +223,8 @@ class TestSkillspectorFilteredCopy:
                         "finding": "dangerous call",
                     }
                 ],
-                "metadata": {"skillspector_version": "1.0.0"},
             }
+            data["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
             return ToolResult(success=False, stdout=json.dumps(data), stderr="", exit_code=1)
 
         mock_run.side_effect = report_on_copy

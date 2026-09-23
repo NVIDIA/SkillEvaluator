@@ -4,6 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Require SkillSpector 2.12.0 or newer for security scanning. Reports from older
+  or unverifiable versions leave validation `INCOMPLETE`; version errors include
+  upgrade guidance.
+  Installation instructions and scanner hints now target the v2.12.0 release.
+
 ## 0.3.0 - 2026-09-17
 
 ### Added

@@ -353,7 +353,10 @@ class TestExternalTool:
         with patch("shutil.which", return_value=None):
             tool = ExternalTool("SkillSpector", "skillspector")
 
-        assert tool.get_install_hint() == "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git"
+        assert tool.get_install_hint() == (
+            "Install SkillSpector 2.12.0 or newer with: "
+            "uv tool install --force git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0"
+        )
         assert "[security]" not in tool.get_install_hint()
 
     def test_bundled_scanner_hints_point_at_security_extra(self):

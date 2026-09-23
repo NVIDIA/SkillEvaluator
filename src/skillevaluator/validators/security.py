@@ -41,7 +41,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.spdx import is_spdx_only_html_comment
-from skillevaluator.utils.tool_runner import Tools, parse_json_output
+from skillevaluator.utils.tool_runner import SKILLSPECTOR_MIN_VERSION, Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
     Severity,
@@ -818,6 +818,16 @@ class SecurityValidator(ValidatorBase):
             return result
 
         metadata = data.get("metadata") or {}
+        # Schema parsing retains support for historical reports, but live
+        # scanner evidence must come from a supported stable release.
+        reported_version = metadata["skillspector_version"]
+        if tuple(map(int, reported_version.split("."))) < tuple(map(int, SKILLSPECTOR_MIN_VERSION.split("."))):
+            result.add_error(
+                f"SkillSpector {reported_version} is below the required minimum {SKILLSPECTOR_MIN_VERSION}; "
+                f"security scan did not complete. {Tools.skillspector.get_install_hint()}"
+            )
+            result.mark_scan_incomplete(stage_name)
+            return result
         if use_llm and not (metadata.get("llm_requested") is True and metadata.get("llm_available") is True):
             result.add_error(
                 "skillspector-llm did not confirm available LLM analysis; provider or model diagnostics were redacted"
@@ -880,7 +890,8 @@ class SecurityValidator(ValidatorBase):
             if not isinstance(raw_version, str) or SEMVER_RE.fullmatch(raw_version) is None:
                 version_error = (
                     "skillspector JSON field 'metadata.skillspector_version' must be a semantic version; "
-                    "security scan did not complete"
+                    f"a stable release {SKILLSPECTOR_MIN_VERSION} or newer is required; "
+                    f"security scan did not complete. {Tools.skillspector.get_install_hint()}"
                 )
             else:
                 major, minor, patch = (int(part) for part in raw_version.split("."))
@@ -888,7 +899,8 @@ class SecurityValidator(ValidatorBase):
         elif report_metadata is None:
             version_error = (
                 "skillspector JSON report is missing "
-                "'metadata.skillspector_version'; security scan did not complete"
+                f"'metadata.skillspector_version'; a stable release {SKILLSPECTOR_MIN_VERSION} or newer is required; "
+                f"security scan did not complete. {Tools.skillspector.get_install_hint()}"
             )
         uses_completeness_schema = (
             skillspector_version is not None
@@ -1525,7 +1537,7 @@ class SecurityValidator(ValidatorBase):
                 )
                 return False
         metadata = data.get("metadata") or {}
-        for field in ("skillspector_version", "filtering_mode"):
+        for field in ("filtering_mode",):
             value = metadata.get(field)
             if value is not None and not isinstance(value, str):
                 result.add_error(

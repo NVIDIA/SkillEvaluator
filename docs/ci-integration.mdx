@@ -67,7 +67,7 @@ jobs:
       - name: Install external Python scanners
         run: |
           uv tool install semgrep
-          uv tool install git+https://github.com/NVIDIA/SkillSpector.git
+          uv tool install --force git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0
 
       - name: Install Gitleaks
         run: |

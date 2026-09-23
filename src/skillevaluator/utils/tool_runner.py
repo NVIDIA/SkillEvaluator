@@ -36,6 +36,9 @@ CVSS_THRESHOLDS: dict[Severity, float] = {
 # Every invocation overrides the findings code so those states are distinct.
 GITLEAKS_FINDINGS_EXIT_CODE = 10
 
+# SkillSpector is installed separately; its reports must meet this version floor.
+SKILLSPECTOR_MIN_VERSION = "2.12.0"
+
 
 def cvss_to_severity(score: float) -> Severity:
     """Convert CVSSv3 score to severity level."""
@@ -178,7 +181,11 @@ class ExternalTool:
                 "Install Semgrep separately with: brew install semgrep (macOS) "
                 "or uv tool install semgrep"
             ),
-            "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git",
+            "skillspector": (
+                f"Install SkillSpector {SKILLSPECTOR_MIN_VERSION} or newer with: "
+                "uv tool install --force "
+                f"git+https://github.com/NVIDIA/SkillSpector.git@v{SKILLSPECTOR_MIN_VERSION}"
+            ),
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
             ),

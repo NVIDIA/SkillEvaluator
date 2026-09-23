@@ -129,10 +129,14 @@ and environment backends.
 <Note>
 Install the required security scanners separately so their dependency stacks do not constrain the SkillEvaluator distribution:
 
+SkillSpector must be version **2.12.0 or newer**. The command below installs the
+minimum supported release and replaces an older tool installation. Older or
+unverifiable versions leave security validation `INCOMPLETE`.
+
 ```bash title="External security scanners"
 brew install semgrep gitleaks                                  # macOS
 uv tool install semgrep                                       # isolated Python tool environment
-uv tool install git+https://github.com/NVIDIA/SkillSpector.git
+uv tool install --force git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0
 ```
 
 On other systems, install Gitleaks with `go install github.com/gitleaks/gitleaks/v8@latest` or a binary from the [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases). Semgrep and SkillSpector must be on `PATH`, or configured with `SKILLEVALUATOR_SEMGREP_PATH` and `SKILLEVALUATOR_SKILLSPECTOR_PATH`. RHEL 8 and compatible enterprise Linux systems can supply compatible executables independently of the SkillEvaluator Python environment.

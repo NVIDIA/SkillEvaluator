@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Preserve full Codex gateway model IDs in cloud environments, including E2B
+  and Daytona, while retaining local runtime setup and native provider routing.
 - Keep Tier 2 execution diagnostics visible alongside duplicate findings in
   CLI, HTML, and Markdown reports, without repeating the findings as errors.
 - Use `nvidia/nemotron-3-super-120b-a12b` as the shared NVIDIA Build default for

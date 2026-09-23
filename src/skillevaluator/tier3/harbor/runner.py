@@ -389,8 +389,6 @@ def build_harbor_run_command(
     """Build a Harbor invocation for a built-in environment type or local mode."""
     if env_mode not in HARBOR_ENV_MODES:
         raise ValueError(f"env_mode must be one of: {', '.join(sorted(HARBOR_ENV_MODES))}")
-    if agent_import_path and env_mode not in {"docker", ENV_MODE_LOCAL}:
-        raise ValueError("agent_import_path is supported only with --env docker or local")
 
     command = [
         _harbor_bin(),
@@ -447,7 +445,11 @@ def build_harbor_run_command(
             command.extend(["-a", agent])
         command.extend(["--environment-import-path", SECURE_DOCKER_ENV_IMPORT_PATH])
     else:
-        command.extend(["-a", agent, "--env", env_mode])
+        if agent_import_path:
+            command.extend(["--agent-import-path", agent_import_path])
+        else:
+            command.extend(["-a", agent])
+        command.extend(["--env", env_mode])
     if jobs_dir is not None:
         command.extend(["--jobs-dir", str(jobs_dir)])
     if disable_verification:
@@ -1246,7 +1248,7 @@ def _model_for_agent(
 
 def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
     """Select only the provider-specific wrappers required for this environment."""
-    if provider.provider == "openai-compatible" and agent == "codex" and env_mode == "docker":
+    if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
     if provider.provider == "openai-compatible" and agent == "opencode" and env_mode == "docker":
         return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayOpenCode"

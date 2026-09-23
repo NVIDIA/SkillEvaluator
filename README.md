@@ -70,14 +70,12 @@ If your shell cannot find the command after installation, run
 
 ## LLM provider setup
 
-No OpenAI or Anthropic key yet? Create a free API key at
-[build.nvidia.com](https://build.nvidia.com) — NVIDIA Build offers free
-inferencing, and NVIDIA Build defaults to the open-source Nemotron model
-`nvidia/nemotron-3-nano-30b-a3b` for a quick try. Prefer a different model?
-Pick any free model on [build.nvidia.com](https://build.nvidia.com) and set
-`SKILL_EVAL_LLM_MODEL`. Once that key is set, the same provider works
-seamlessly across Tier 1 LLM checks, Tier 2, and Tier 3 (chat plus embeddings
-with one credential):
+NVIDIA Build offers free inferencing with a free API key from
+[build.nvidia.com](https://build.nvidia.com). Its default chat model is the
+open-source Nemotron `nvidia/nemotron-3-nano-30b-a3b`. Choose another free model
+on [build.nvidia.com](https://build.nvidia.com) with `SKILL_EVAL_LLM_MODEL`.
+One credential supports chat and embeddings across Tier 1 LLM checks, Tier 2,
+and Tier 3:
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build

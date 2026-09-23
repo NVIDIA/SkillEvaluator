@@ -9,3 +9,10 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ['''^sk-AbCdEf1234567890$''']
 paths = ['''^tests/test_tier3_(progress|result_display)\.py$''']
+
+[[allowlists]]
+description = "Synthetic Google access token used by Harbor MCP credential rejection tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^ya29\.a0AfH6SMBx1234567890abcdef$''']
+paths = ['''^tests/test_harbor_gke_mode\.py$''']

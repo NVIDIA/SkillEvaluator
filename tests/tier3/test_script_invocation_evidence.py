@@ -708,3 +708,207 @@ def test_reading_a_script_needs_no_list_of_reading_commands(check, command) -> N
     """
     result = check(_bash(command, SCRIPT_SOURCE), EXPECTED_SCRIPT)
     assert result["score"] == 0.0
+
+
+# The cases below came from review of the first revision, each a command the
+# shell runs differently from how the walk read it.
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd",
+        "cd && true",
+        "cd -",
+        "timeout --frobnicate 5 python other.py",
+        "python -Q other.py",
+        "env -Z python other.py",
+        "for f in other.py; do python $f; done",
+        "case $x in a) python other.py;; esac",
+    ],
+)
+def test_partial_credit_requires_the_script_to_be_named(check, command) -> None:
+    """A walk that cannot resolve a command which never names the script has
+    learned nothing about that script. A bare ``cd`` loses track of the
+    directory and an unknown option may have consumed anything, but neither is
+    evidence about run.py, so they score as they did before invocation
+    evidence was required: zero, not partial credit.
+    """
+    result = check(_bash(command, ""), EXPECTED_SCRIPT)
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    ["cd && cat run.py && python $f", "timeout --frobnicate 5 python run.py", "cd && python -Q run.py"],
+)
+def test_naming_the_script_keeps_partial_credit_for_an_unresolved_command(check, command) -> None:
+    result = check(_bash(command, ""), EXPECTED_SCRIPT)
+    assert result["score"] == 0.75
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash run.sh -c 'echo done'",
+        "bash -- run.sh -c 'echo done'",
+        "sh run.sh --help",
+        "bash -x run.sh -c x",
+        "zsh run.sh -n",
+    ],
+)
+def test_options_after_the_script_operand_belong_to_the_script(check, command) -> None:
+    """``bash run.sh -c 'echo done'`` runs run.sh and hands it ``-c``; only the
+    options before the first operand are the shell's own.
+    """
+    result = check(_bash(command, "done"), "run.sh")
+    assert result["score"] == 1.0
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash -c 'echo done' run.sh", 0.0),
+        ("bash -c 'bash run.sh' run.sh", 1.0),
+        ("bash -xc 'bash run.sh'", 1.0),
+    ],
+)
+def test_inline_code_still_decides_when_the_option_precedes_the_operand(check, command, expected) -> None:
+    """With ``-c`` before any operand the next word is code and run.sh is only
+    its ``$0``; the payload alone decides whether the script ran.
+    """
+    result = check(_bash(command, "done"), "run.sh")
+    assert result["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 < /dev/null run.py",
+        "python3 </dev/null run.py",
+        "python3 0< /dev/null run.py",
+        "python3 <&0 run.py",
+        "python3 2>/dev/null run.py",
+        "python3 2>&1 run.py",
+        "python3 1>>log.txt run.py",
+        "python3 < /dev/null -u run.py",
+        "python3 -u < /dev/null run.py",
+        "python3 run.py < /dev/null",
+    ],
+)
+def test_redirections_before_the_script_are_not_its_operand(check, command) -> None:
+    """A redirection belongs to the shell, wherever it stands in the command."""
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == 1.0
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize("command", ["python3 <run.py", "python3 < run.py", "wc -l < run.py"])
+def test_a_script_fed_through_standard_input_is_still_unresolved(check, command) -> None:
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == 0.75
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if true; then ./run.py; fi",
+        "for i in one; do ./run.py; done",
+        "if false; then true; else python run.py; fi",
+        "if false; then true; elif true; then python run.py; fi",
+        "while read -r line; do python run.py; done < names.txt",
+        "until ./run.py; do sleep 1; done",
+        "if ./run.py; then echo ok; fi",
+        "then FOO=1 python run.py",
+        "if [ -f run.py ]; then python run.py; fi",
+        "for i in 1 2; do timeout 5 python run.py; done",
+        "for f in run.py; do python $f; done",
+        'for f in run.py; do python "$f"; done',
+        "for f in ./run.py; do $f; done",
+        "for f in run.py; do echo $f; python $f; done",
+    ],
+)
+def test_invocations_inside_control_structures_are_credited(check, command) -> None:
+    """``then`` and ``do`` stand before a command rather than being one, and a
+    loop header with a single value binds its variable for the body.
+    """
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == 1.0
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if [ -f run.py ]; then cat run.py; fi",
+        "for i in one; do cat run.py; done",
+        "while true; do wc -l run.py; break; done",
+        "if grep -q main run.py; then echo yes; fi",
+        "for f in run.py; do cat $f; done",
+        'for f in run.py; do wc -l "$f"; done',
+    ],
+)
+def test_reading_the_script_inside_a_control_structure_is_still_zero(check, command) -> None:
+    result = check(_bash(command, SCRIPT_SOURCE), EXPECTED_SCRIPT)
+    assert result["score"] == 0.0
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "for f in run.py other.py; do python $f; done",
+        "for f in run.py other.py; do cat $f; done",
+        "for f in $(ls run.py); do python $f; done",
+        "case $x in run.py) python run.py;; esac",
+        "case x in x) ./run.py;; esac",
+    ],
+)
+def test_unmodelled_control_syntax_naming_the_script_is_unresolved(check, command) -> None:
+    """A header with several values settles nothing about its variable, and
+    ``case`` bodies are not modelled at all, so a script named inside either
+    is neither credited nor settled as unrun.
+    """
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == 0.75
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "script"),
+    [
+        ("/usr/bin/perl5.34.0 run.pl", "run.pl"),
+        ("/usr/bin/perl5.38.2 run.pl", "run.pl"),
+        ("perl5.38 -w run.pl", "run.pl"),
+        ("python3.13 run.py", "run.py"),
+        ("ruby3.2 run.rb", "run.rb"),
+        ("node22 run.js", "run.js"),
+        ("bash5 run.sh", "run.sh"),
+    ],
+)
+def test_versioned_interpreter_names_resolve_their_script(check, command, script) -> None:
+    result = check(_bash(command, "done"), script)
+    assert result["score"] == 1.0
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "script", "expected"),
+    [
+        ("perl5.38.2 -c run.pl", "run.pl", 0.0),
+        ("perl5.38.2 --version run.pl", "run.pl", 0.0),
+        ("python3.13 -m json.tool run.py", "run.py", 0.75),
+        ("bash5.2 -c 'bash run.sh'", "run.sh", 1.0),
+    ],
+)
+def test_a_versioned_interpreter_keeps_its_grammar(check, command, script, expected) -> None:
+    """The version suffix changes the name, not the options."""
+    result = check(_bash(command, "done"), script)
+    assert result["score"] == expected

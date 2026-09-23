@@ -18,7 +18,11 @@ Three outcomes matter:
 * a **partial on a real run** is the checker scoring 0.75 for a command that
   ran. That is not a defect. It is the checker reporting that it could not
   resolve the command, which is the correct answer for a shape it does not
-  model, such as a path arriving through standard input.
+  model, such as a path arriving through standard input;
+* a **partial without a reference** is the checker scoring 0.75 for a command
+  whose text never names the expected script. Parsing uncertainty over an
+  unrelated command is not evidence about the script, so this is a defect: the
+  checker has credited a command it knows nothing about.
 
 Host and bundled Harbor verifier are compared on every command as well, because
 the two copies must not drift.
@@ -61,6 +65,39 @@ TEMPLATE = _load_template()
 
 PY = "python3"
 SCRIPT = "skills/demo/run.py"
+SHELL_SCRIPT = "skills/demo/run.sh"
+
+
+def _versioned_name(interpreter: str, version: str) -> str:
+    """The interpreter under a versioned name, as distributions install it.
+
+    Debian ships ``perl5.38.2`` beside ``perl`` and every platform ships
+    ``python3.12`` beside ``python3``. The longest installed form is used, so
+    the command executes here; where none is installed the command is
+    reported as not runnable rather than scored. An interpreter outside the
+    default search path is named by its absolute path, because ``env -i``
+    empties PATH and would otherwise fail to find it for a reason the command
+    text does not carry.
+    """
+    parts = version.split(".")
+    candidates = [interpreter + ".".join(parts[:count]) for count in range(len(parts), 0, -1)]
+    for name in candidates:
+        found = shutil.which(name)
+        if found:
+            return name if Path(found).parent in {Path("/bin"), Path("/usr/bin")} else found
+    return candidates[0]
+
+
+def _perl_version() -> str:
+    try:
+        completed = subprocess.run(["perl", "-e", 'printf "%vd", $^V'], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return "5.38.2"
+    return completed.stdout.strip() or "5.38.2"
+
+
+VERSIONED_PY = _versioned_name("python", f"{sys.version_info.major}.{sys.version_info.minor}")
+VERSIONED_PERL = _versioned_name("perl", _perl_version())
 
 
 def _marker(name: str) -> str:
@@ -79,6 +116,9 @@ FIXTURES = {
     "run.py": _marker("run.py"),
     "other.py": _marker("other.py"),
     "notes.txt": "notes\n",
+    # a loop reading `< notes.txt` must find it after `cd skills/demo` too,
+    # otherwise its body never runs for a reason the command text does not carry
+    "skills/demo/notes.txt": "notes\n",
     "lib.js": "module.exports={}\n",
     "lib.rb": "",
 }
@@ -167,6 +207,30 @@ PREFIX_FORMS = [
     "echo x | ",
 ]
 SUFFIX_FORMS = ["", " > out.txt", " 2>&1", " ; echo done", " || true"]
+# Redirections that stand before the script: the shell's, not the interpreter's.
+REDIRECT_FORMS = ["< /dev/null ", "</dev/null ", "0< /dev/null ", "<&0 ", "2>/dev/null ", "2>&1 ", "1>>out.txt "]
+# Control structures around a command, with the command as {body}.
+CONTROL_FORMS = [
+    "if true; then {body}; fi",
+    "if false; then true; else {body}; fi",
+    "if false; then true; elif true; then {body}; fi",
+    "for i in one; do {body}; done",
+    "while read -r _; do {body}; done < notes.txt",
+    "until false; do {body}; break; done",
+    "case x in x) {body};; esac",
+]
+# Arguments a shell script receives, which look like the shell's own options.
+SCRIPT_ARGUMENT_FORMS = [" -c 'echo done'", " --help", " -- -x", " -n"]
+# Commands that never name the expected script, which no walk may credit.
+UNRELATED_BODIES = [
+    "cd",
+    "cd skills",
+    "true",
+    f"{PY} skills/demo/other.py",
+    "timeout --frobnicate 5 python3 skills/demo/other.py",
+    "python3 -Q skills/demo/other.py",
+    "env -Z python3 skills/demo/other.py",
+]
 
 
 def curated() -> list[tuple[str, str]]:
@@ -270,16 +334,59 @@ def curated() -> list[tuple[str, str]]:
     add(f"echo {SCRIPT} | xargs {PY}")
     add(f"xargs -I{{}} {PY} {{}} <<< {SCRIPT}")
     add(f"find skills -name run.py -exec {PY} {{}} \\;")
+
+    # from review of the first revision: commands the shell runs differently
+    # from how the walk read them
+    for body in UNRELATED_BODIES:
+        add(body)
+    for argument in SCRIPT_ARGUMENT_FORMS:
+        add(f"bash {SHELL_SCRIPT}{argument}", "run.sh")
+        add(f"bash -- {SHELL_SCRIPT}{argument}", "run.sh")
+    add(f"bash -c 'echo done' {SHELL_SCRIPT}", "run.sh")
+    add(f"bash -c 'bash {SHELL_SCRIPT}' x", "run.sh")
+    for redirect in REDIRECT_FORMS:
+        add(f"{PY} {redirect}{SCRIPT}")
+        add(f"{PY} -u {redirect}{SCRIPT}")
+    for control in CONTROL_FORMS:
+        add(control.format(body=f"{PY} {SCRIPT}"))
+        add(control.format(body=f"cat {SCRIPT}"))
+        add(control.format(body=f"timeout 20 {PY} {SCRIPT}"))
+    add(f"for f in {SCRIPT}; do {PY} $f; done")
+    add(f"for f in {SCRIPT}; do cat $f; done")
+    add(f"for f in {SCRIPT} skills/demo/other.py; do {PY} $f; done")
+    add(f"for f in {SCRIPT} skills/demo/other.py; do cat $f; done")
+    add(f"if {PY} {SCRIPT}; then echo ok; fi")
+    add(f"if true; then FOO=1 {PY} {SCRIPT}; fi")
+    for interpreter, script in ((VERSIONED_PY, SCRIPT), (VERSIONED_PERL, "skills/demo/run.pl")):
+        name = script.rsplit("/", 1)[-1]
+        add(f"{interpreter} {script}", name)
+        add(f"{interpreter.rsplit('/', 1)[-1]} {script}", name)
+        add(f"{interpreter} -c {script}", name)
+        add(f"{interpreter} --version {script}", name)
+        add(f"env -i {interpreter} {script}", name)
     return cases
 
 
-def _generate(rng: random.Random) -> str:
+def _generate(rng: random.Random) -> tuple[str, str]:
+    """One random command and the script it is scored against."""
     prefix = rng.choice(PREFIX_FORMS)
+    script = "run.py"
     target = "run.py" if prefix.startswith(("cd ", "(cd ")) else SCRIPT
-    if rng.random() < 0.4:
+    interpreter = VERSIONED_PY if rng.random() < 0.15 else PY
+    redirect = rng.choice(REDIRECT_FORMS) if rng.random() < 0.15 else ""
+    shape = rng.random()
+    if shape < 0.1:
+        body = rng.choice(UNRELATED_BODIES)
+    elif shape < 0.2:
+        script = "run.sh"
+        shell_target = "run.sh" if prefix.startswith(("cd ", "(cd ")) else SHELL_SCRIPT
+        body = f"bash {rng.choice(['', '-- ', '-x '])}{shell_target}{rng.choice(SCRIPT_ARGUMENT_FORMS)}"
+    elif shape < 0.5:
         body = f"{rng.choice(NON_EXECUTING_VERBS)} {target}"
     else:
-        body = f"{rng.choice(WRAPPER_FORMS)}{PY} {rng.choice(INTERPRETER_FORMS)}{target}"
+        body = f"{rng.choice(WRAPPER_FORMS)}{interpreter} {rng.choice(INTERPRETER_FORMS)}{redirect}{target}"
+    if rng.random() < 0.15:
+        body = rng.choice(CONTROL_FORMS).format(body=body)
     suffix = rng.choice(SUFFIX_FORMS)
     if prefix.startswith("("):
         suffix += ")"
@@ -288,7 +395,7 @@ def _generate(rng: random.Random) -> str:
         command += rng.choice([" && ", " ; ", " || ", "\n"]) + rng.choice(
             ["echo tail", "true", f"{rng.choice(NON_EXECUTING_VERBS)} {target}"]
         )
-    return command
+    return command, script
 
 
 def _build(directory: Path) -> None:
@@ -352,6 +459,12 @@ def _run_one(command: str, script: str) -> tuple[str, str]:
             return ("false negative", host_result["reason"])
         if ran and score != 1.0:
             return ("partial on a real run", f"{score}")
+        if (
+            score == 0.75
+            and script.rsplit("/", 1)[-1] not in command
+            and "could not be classified" in host_result["reason"]
+        ):
+            return ("partial without a reference", host_result["reason"])
         return ("agreed", f"{score}")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
@@ -368,9 +481,13 @@ def main() -> int:
     if arguments.fuzz:
         rng = random.Random(arguments.seed)
         seen = {command for command, _ in commands}
-        while len(seen) < len(commands) + arguments.fuzz:
-            seen.add(_generate(rng))
-        commands += [(command, "run.py") for command in seen if command not in {c for c, _ in commands}]
+        generated: list[tuple[str, str]] = []
+        while len(generated) < arguments.fuzz:
+            command, script = _generate(rng)
+            if command not in seen:
+                seen.add(command)
+                generated.append((command, script))
+        commands += generated
 
     buckets: dict[str, list[tuple[str, str]]] = {}
     for command, script in commands:
@@ -383,10 +500,15 @@ def main() -> int:
     print(f"\ncommands executed: {executed} of {len(commands)}")
     defects = 0
     short_circuit = buckets.get("short-circuited chain (declared limitation)", [])
-    for outcome in ("false positive", "false negative", "divergence"):
+    for outcome, label in (
+        ("false positive", "false positives"),
+        ("false negative", "false negatives"),
+        ("divergence", "divergences"),
+        ("partial without a reference", "partials without a reference"),
+    ):
         entries = buckets.get(outcome, [])
         defects += len(entries)
-        print(f"  {outcome}s: {len(entries)}")
+        print(f"  {label}: {len(entries)}")
         for command, detail in entries[:25]:
             print(f"     {command!r} -> {detail}")
     print(f"  short-circuited chains (declared limitation, credited but did not run): {len(short_circuit)}")

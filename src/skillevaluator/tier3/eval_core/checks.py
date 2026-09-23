@@ -1938,6 +1938,22 @@ _UNDECIDABLE = "unknown"
 # Shell builtins that run text this walk does not read as commands.
 _OPAQUE_SHELL_BUILTINS = frozenset({"eval"})
 _INPUT_REDIRECTS = frozenset({"<", "0<"})
+# Redirection operators the tokenizer splits out on their own, each followed
+# by an operand that belongs to the shell rather than to the command's argv.
+# The output forms are in _OUTPUT_REDIRECTS; these are the input forms and the
+# descriptor-duplicating `>&`.
+_INPUT_REDIRECT_OPERATORS = frozenset({"<", "<&", "<>", ">&"})
+# A redirection carried as one token with its operand attached (`</dev/null`,
+# `2>&1`), which only happens when the tokenizer fell back to a plain split.
+_ATTACHED_REDIRECT_RE = re.compile(r"^\d*(?:<>|<&|>&|>>|>\||<|>)[^<>&|\s]")
+# Reserved words that stand before a command rather than being one: what
+# follows `then` or `do` is the command that runs.
+_COMMAND_INTRODUCING_WORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do"})
+# Loop headers name the values a variable will take and run nothing themselves;
+# what the body does with that variable is not something this text settles.
+_LOOP_HEADER_WORDS = frozenset({"for", "select"})
+# Control syntax this walk does not model, so a script inside it is unresolved.
+_UNMODELLED_CONTROL_WORDS = frozenset({"case"})
 
 
 def _carries_a_nested_invocation(command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str) -> bool:
@@ -1990,6 +2006,61 @@ def _command_names_script(command: list[str], cmd_idx: int, assignments: dict[st
     if not target:
         return False
     return any(target in _resolved_shell_arg(str(word), assignments) for word in command[cmd_idx + 1 :])
+
+
+def _names_script_anywhere(command_text: str, expected_script: str) -> bool:
+    """Whether the expected script's file name appears anywhere in the command text.
+
+    This is the reference test the checker applied before invocation evidence
+    was required, kept as the floor under partial credit. A walk that cannot
+    resolve a command which never names the script has learned nothing about
+    that script, so it answers "did not run it" rather than "cannot tell":
+    parsing uncertainty is not evidence.
+    """
+    name = str(expected_script).strip().strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
+    return bool(name) and name.casefold() in str(command_text).casefold()
+
+
+_SHELL_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _loop_header_is_unresolved(command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str) -> bool:
+    """Bind a loop variable where the header settles it, else say whether it matters.
+
+    ``for f in run.py; do python $f; done`` gives ``f`` exactly one value, so
+    the body is read with ``f`` bound and scored as ``python run.py`` would be,
+    and ``cat $f`` in the same body stays a non-invocation. A header with
+    several values, or none (``for f; do`` iterates the positional
+    parameters), settles nothing about ``$f``: if the script is among the
+    values the command is unresolved, and otherwise the header runs nothing.
+    """
+    words = [_resolved_shell_arg(str(word), assignments).strip("\"'") for word in command[cmd_idx + 1 :]]
+    if len(words) >= 2 and words[1] == "in" and _SHELL_NAME_RE.fullmatch(words[0]):
+        values = words[2:]
+        if len(values) == 1:
+            assignments[words[0]] = values[0]
+            return False
+    return _command_names_script(command, cmd_idx, assignments, expected)
+
+
+def _command_start(command: list[str], assignments: dict[str, str]) -> int:
+    """Index of the word that is the command, past reserved words and assignments.
+
+    ``then FOO=1 ./run.py`` runs ``./run.py``: the reserved word introduces the
+    command and the assignment is its environment, in either order.
+    """
+    cmd_idx = 0
+    while cmd_idx < len(command):
+        word = command[cmd_idx]
+        if word in _COMMAND_INTRODUCING_WORDS or word in _GROUPING_TOKENS:
+            cmd_idx += 1
+            continue
+        assignment = _SHELL_ASSIGNMENT_RE.match(word)
+        if assignment is None:
+            break
+        assignments[assignment.group(1)] = assignment.group(2)
+        cmd_idx += 1
+    return cmd_idx
 
 
 def _script_path_matches(value: Any, expected_script: str) -> bool:
@@ -2156,24 +2227,54 @@ def _split_heredocs(command_text: str) -> tuple[str, str]:
     return "".join(commands), "\n".join(data)
 
 
-def _has_inline_code_option(grammar: dict[str, frozenset[str]], args: list[str]) -> bool:
-    """Whether the arguments carry this interpreter's inline-code option.
+def _is_redirection_operator(token: str) -> bool:
+    return _is_output_redirect(token) or _is_heredoc_redirect(token) or token in _INPUT_REDIRECT_OPERATORS
 
-    ``_shell_c_payload`` accepts any option containing the letter ``c``, which
-    also matches ``--check`` and ``-Mstrict``, so the grammar decides instead.
+
+def _interpreter_operands(command: list[str], cmd_idx: int, assignments: dict[str, str]) -> list[str]:
+    """The interpreter's own arguments, with every redirection removed.
+
+    ``python3 < /dev/null run.py`` runs run.py: the redirection belongs to the
+    shell, not to python's argument list. The tokenizer splits an operator and
+    its operand into their own tokens, and a descriptor such as the ``2`` of
+    ``2>/dev/null`` into a third, so none of them may stand where the first
+    operand is looked for. A script fed through standard input is a different
+    shape, and :func:`_redirects_script_to_stdin` has already answered for it
+    before this is reached.
     """
-    code = grammar["code"]
-    code_letters = {option[1] for option in code if len(option) == 2 and not option.startswith("--")}
-    boolean_letters = {option[1] for option in grammar["boolean"] if len(option) == 2 and not option.startswith("--")}
-    for arg in args:
-        token = str(arg).strip("\"'")
-        if token in code:
-            return True
-        if token.startswith("-") and not token.startswith("--") and len(token) > 2:
-            letters = token[1:]
-            if letters[-1] in code_letters and all(letter in boolean_letters for letter in letters[:-1]):
-                return True
-    return False
+    args: list[str] = []
+    skip_next = False
+    words = command[cmd_idx + 1 :]
+    for position, arg in enumerate(words):
+        if skip_next:
+            skip_next = False
+            continue
+        token = str(arg)
+        if _is_heredoc_redirect(token):
+            break
+        if _is_output_redirect(token) or token in _INPUT_REDIRECT_OPERATORS:
+            skip_next = True
+            continue
+        if token.isdigit() and position + 1 < len(words) and _is_redirection_operator(str(words[position + 1])):
+            continue
+        if _ATTACHED_REDIRECT_RE.match(token):
+            continue
+        args.append(_resolved_shell_arg(arg, assignments))
+    return args
+
+
+def _runs_inline_code(executable: str, command: list[str], cmd_idx: int, assignments: dict[str, str]) -> bool:
+    """Whether a shell's option prefix carries its inline-code option.
+
+    Only the options before the first script operand are the shell's own. In
+    ``bash run.sh -c 'echo done'`` the ``-c`` is run.sh's argument, and after
+    ``--`` nothing is an option at all, so the grammar walk that finds the
+    script operand decides this rather than a scan of every argument.
+    ``_shell_c_payload`` accepts any option containing the letter ``c``, which
+    also matches ``--check`` and ``-Mstrict``, so it is not consulted first.
+    """
+    status, _ = _interpreter_script_arg(executable, command, cmd_idx, assignments)
+    return status == _INLINE_CODE
 
 
 def _interpreter_script_arg(
@@ -2193,7 +2294,7 @@ def _interpreter_script_arg(
     """
     base = _VERSION_SUFFIX_RE.sub("", executable) or executable
     grammar = _INTERPRETER_GRAMMARS.get(base)
-    args = _command_input_args(command, cmd_idx, assignments)
+    args = _interpreter_operands(command, cmd_idx, assignments)
     if grammar is None:
         # Sourcing and anything else without a grammar: the first argument is
         # the file, and an option would mean a shape this walk does not model.
@@ -2324,7 +2425,7 @@ def _skip_transparent_prefixes(
     for _ in range(_MAX_SHELL_WRAPPERS):
         if cmd_idx >= len(command):
             return (_WRAPPER_OK, cmd_idx)
-        if command[cmd_idx] in _GROUPING_TOKENS:
+        if command[cmd_idx] in _GROUPING_TOKENS or command[cmd_idx] in _COMMAND_INTRODUCING_WORDS:
             cmd_idx += 1
             continue
         executable = _shell_executable(_resolved_shell_arg(command[cmd_idx], assignments)).removesuffix(".exe")
@@ -2358,6 +2459,11 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
     command_text = str(cmd)
     if not command_text.strip():
         return False
+    if not _names_script_anywhere(command_text, expected_script):
+        # An unresolved walk over a command that never names the script is
+        # not evidence about that script, so it is a non-invocation, as it was
+        # before invocation evidence was required.
+        return False
     # A heredoc or here-string operand is data rather than further commands, but
     # the tokenizer turns its newlines into separators, so it is split out.
     analysed_text, unexamined_text = _split_heredocs(command_text)
@@ -2379,16 +2485,23 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
             end += 1
         command = tokens[idx:end]
 
-        cmd_idx = 0
-        while cmd_idx < len(command):
-            assignment = _SHELL_ASSIGNMENT_RE.match(command[cmd_idx])
-            if not assignment:
-                break
-            assignments[assignment.group(1)] = assignment.group(2)
-            cmd_idx += 1
-
+        cmd_idx = _command_start(command, assignments)
         if cmd_idx >= len(command):
-            # The whole command was variable assignments, which run nothing.
+            # Variable assignments, or a bare reserved word, which run nothing.
+            idx = end + 1
+            continue
+        if command[cmd_idx] in _LOOP_HEADER_WORDS:
+            # The header runs nothing itself. With a single value the loop
+            # variable is bound for the body that follows; otherwise a script
+            # named here is unresolved, never a settled non-invocation.
+            if _loop_header_is_unresolved(command, cmd_idx, assignments, expected_script):
+                undecidable = True
+            idx = end + 1
+            continue
+        if command[cmd_idx] in _UNMODELLED_CONTROL_WORDS:
+            # `case` is not modelled, so what its bodies do with the script
+            # this text names is not settled either way.
+            undecidable = True
             idx = end + 1
             continue
 
@@ -2450,9 +2563,11 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
                 idx = end + 1
                 continue
 
-            grammar = _INTERPRETER_GRAMMARS.get(_VERSION_SUFFIX_RE.sub("", executable) or executable)
-            if executable in _SHELL_COMMAND_INTERPRETERS and (
-                grammar is None or _has_inline_code_option(grammar, _command_input_args(command, cmd_idx, assignments))
+            # `perl5.38.2` and `python3.13` run the same scripts as `perl` and
+            # `python`, so the version suffix is dropped before every lookup.
+            interpreter = _VERSION_SUFFIX_RE.sub("", executable) or executable
+            if interpreter in _SHELL_COMMAND_INTERPRETERS and _runs_inline_code(
+                executable, command, cmd_idx, assignments
             ):
                 payload = _shell_c_payload(command, cmd_idx, assignments)
                 if payload is not None:
@@ -2473,11 +2588,7 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
             if _script_path_matches(executable_path, expected_script):
                 return True
 
-            runs_a_script = (
-                executable in _INTERPRETER_GRAMMARS
-                or executable in _SOURCING_COMMANDS
-                or re.fullmatch(r"python\d+(?:\.\d+)*", executable) is not None
-            )
+            runs_a_script = interpreter in _INTERPRETER_GRAMMARS or interpreter in _SOURCING_COMMANDS
             if not runs_a_script and _carries_a_nested_invocation(command, cmd_idx, assignments, expected_script):
                 undecidable = True
                 idx = end + 1

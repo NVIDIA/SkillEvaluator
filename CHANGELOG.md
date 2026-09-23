@@ -21,7 +21,13 @@ All notable changes to SkillEvaluator are documented in this file.
   built at run time, an option outside a grammar, a name only in heredoc data,
   inline code or a module that names the script, and anything reaching a command
   through standard input, including `xargs` and `parallel`, whose behaviour the
-  command text never determines. Applied to both the host checker and the
+  command text never determines. Partial credit is only ever given for a
+  command that names the script: an unresolved command that never mentions it
+  scores zero, as before. Redirections standing before the script
+  (`python3 < /dev/null run.py`), a script's own arguments that look like shell
+  options (`bash run.sh -c '...'`), invocations inside `if`, `while`, `until`
+  and `for` bodies, and versioned interpreter names (`perl5.38.2`, `python3.13`)
+  resolve as the shell runs them. Applied to both the host checker and the
   bundled Harbor verifier.
 
 - Added `scripts/script_invocation_differential.py`, a differential harness that

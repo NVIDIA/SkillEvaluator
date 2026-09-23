@@ -17,6 +17,7 @@ from skillevaluator.validators.security import SecurityValidator
 
 TIMEOUT_RESULT = ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message="tool timed out")
 CRASH_RESULT = ToolResult(success=True, stdout="", stderr="usage error", exit_code=2)
+_SKILLSPECTOR_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-safe-no-llm.json"
 
 
 @pytest.fixture
@@ -134,13 +135,7 @@ class TestScanIncompleteMarking:
     def test_clean_scan_is_not_marked(self, mock_run, skill_dir):
         mock_run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
-                    "issues": [],
-                    "metadata": {"skillspector_version": "1.0.0"},
-                }
-            ),
+            stdout=_SKILLSPECTOR_REPORT.read_text(encoding="utf-8"),
             stderr="",
             exit_code=0,
         )

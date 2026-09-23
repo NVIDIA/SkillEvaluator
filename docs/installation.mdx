@@ -135,6 +135,13 @@ uv tool install semgrep                                       # isolated Python 
 uv tool install git+https://github.com/NVIDIA/SkillSpector.git
 ```
 
+SkillSpector **2.12.0 or newer** is required. Older versions leave validation
+`INCOMPLETE`. To upgrade an existing uv tool installation, run:
+
+```bash title="Upgrade SkillSpector"
+uv tool install --upgrade git+https://github.com/NVIDIA/SkillSpector.git
+```
+
 On other systems, install Gitleaks with `go install github.com/gitleaks/gitleaks/v8@latest` or a binary from the [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases). Semgrep and SkillSpector must be on `PATH`, or configured with `SKILLEVALUATOR_SEMGREP_PATH` and `SKILLEVALUATOR_SKILLSPECTOR_PATH`. RHEL 8 and compatible enterprise Linux systems can supply compatible executables independently of the SkillEvaluator Python environment.
 
 Docker is required only for Tier 3 Docker-mode evaluation. Agent CLIs and their credentials are user-supplied — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
@@ -158,7 +165,7 @@ skillevaluator health-check
 uv installs tools to `~/.local/bin`, which may not be on PATH yet. Run `uv tool update-shell` and open a new terminal.
 </Accordion>
 <Accordion title="Validation reports INCOMPLETE and exits non-zero">
-Install any missing required scanner named in the report. The `security` extra supplies Bandit and pip-audit; Semgrep, SkillSpector, and Gitleaks are separate executables. Missing required evidence leaves validation `INCOMPLETE` and non-zero.
+Install any missing required scanner named in the report. The `security` extra supplies Bandit and pip-audit; Semgrep, SkillSpector, and Gitleaks are separate executables. SkillSpector must be version 2.12.0 or newer; see [System tools](#system-tools) for the upgrade command. Missing required evidence or an older SkillSpector version leaves validation `INCOMPLETE` and non-zero.
 </Accordion>
 </AccordionGroup>
 

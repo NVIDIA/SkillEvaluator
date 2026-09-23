@@ -42,8 +42,9 @@ Get your first evaluation result in about two minutes, with no API key. This pag
 
   `validate` runs the full static and security check suite. The `[all]` install
   above includes the Python scanners, but complete evidence also requires the
-  separate Semgrep, SkillSpector, and Gitleaks executables. Install all three,
-  and pass `--no-dedup` to skip the Tier 2 pass that needs an embeddings key:
+  separate Semgrep, SkillSpector 2.12.0 or newer, and Gitleaks executables.
+  Install all three, and pass `--no-dedup` to skip the Tier 2 pass that needs
+  an embeddings key:
 
   ```bash title="Complete offline Tier 1"
   brew install semgrep gitleaks   # macOS

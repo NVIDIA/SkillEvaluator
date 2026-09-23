@@ -27,6 +27,8 @@ from skillevaluator.validators.base import iter_scannable_files
 from skillevaluator.validators.secrets import SecretsValidator
 from skillevaluator.validators.security import SecurityValidator
 
+_SKILLSPECTOR_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-safe-no-llm.json"
+
 
 @pytest.fixture
 def skill_with_artifacts(tmp_path):
@@ -106,17 +108,7 @@ class TestIterScannableFilesPrunes:
 def _clean_spector_result():
     return ToolResult(
         success=True,
-        stdout=json.dumps(
-            {
-                "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
-                "issues": [],
-                "metadata": {
-                    "skillspector_version": "1.0.0",
-                    "llm_requested": False,
-                    "llm_available": False,
-                },
-            }
-        ),
+        stdout=_SKILLSPECTOR_REPORT.read_text(encoding="utf-8"),
         stderr="",
         exit_code=0,
     )
@@ -182,6 +174,7 @@ class TestSkillspectorFilteredCopy:
             data["issues"] = [
                 {
                     "id": "SC8",
+                    "finding_id": "shipped-bytecode",
                     "pattern": "Shipped Python bytecode",
                     "severity": "HIGH",
                     "confidence": 0.95,
@@ -189,6 +182,8 @@ class TestSkillspectorFilteredCopy:
                     "location": {"file": "__pycache__/payload.pyc", "start_line": 1},
                 }
             ]
+            data["analysis_completeness"]["findings_before_filtering"] = 1
+            data["analysis_completeness"]["findings_after_filtering"] = 1
             return ToolResult(success=False, stdout=json.dumps(data), stderr="", exit_code=1)
 
         mock_run.side_effect = capture
@@ -205,22 +200,28 @@ class TestSkillspectorFilteredCopy:
     def test_findings_map_back_to_original_paths(self, mock_run, skill_with_artifacts):
         def report_on_copy(args, **kwargs):
             scanned = args[args.index("scan") + 1]
-            data = {
-                "skill": {"name": "my-skill", "source": scanned},
-                "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
-                "issues": [
-                    {
-                        "id": "SS001",
-                        "category": "execution",
-                        "pattern": "eval-usage",
-                        "severity": "HIGH",
-                        "confidence": 1.0,
-                        "location": {"file": f"{scanned}/payload.py", "start_line": 1},
-                        "finding": "dangerous call",
-                    }
-                ],
-                "metadata": {"skillspector_version": "1.0.0"},
+            data = json.loads(_clean_spector_result().stdout)
+            data["skill"] = {"name": "my-skill", "source": scanned}
+            data["risk_assessment"] = {
+                "score": 80,
+                "severity": "HIGH",
+                "recommendation": "DO_NOT_INSTALL",
             }
+            data["issues"] = [
+                {
+                    "id": "SS001",
+                    "finding_id": "dangerous-call",
+                    "category": "execution",
+                    "pattern": "eval-usage",
+                    "severity": "HIGH",
+                    "confidence": 1.0,
+                    "location": {"file": f"{scanned}/payload.py", "start_line": 1},
+                    "finding": "dangerous call",
+                }
+            ]
+            data["components"][0]["path"] = f"{scanned}/payload.py"
+            data["analysis_completeness"]["findings_before_filtering"] = 1
+            data["analysis_completeness"]["findings_after_filtering"] = 1
             return ToolResult(success=False, stdout=json.dumps(data), stderr="", exit_code=1)
 
         mock_run.side_effect = report_on_copy

@@ -34,9 +34,9 @@ Each flag earns its place:
 
 ## GitHub Actions recipe
 
-A complete workflow: install with uv, add the external Semgrep, SkillSpector,
-and Gitleaks scanners for a complete security result, validate, upload the
-reports, and post the Markdown report on the pull request.
+A complete workflow: install with uv, add the external Semgrep, SkillSpector
+2.12.0 or newer, and Gitleaks scanners for a complete security result, validate,
+upload the reports, and post the Markdown report on the pull request.
 
 ```yaml title="ci.yml"
 name: Validate skills
@@ -256,8 +256,9 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
   <Accordion title="overall_status is 'incomplete'">
     A required scanner is missing or returned no evidence. Check the report for
     the named scanner: Semgrep, SkillSpector, and Gitleaks are all separate
-    executables, and the `security` extra alone does not install them. The
-    scanners fail closed: `validate` exits non-zero and the report stays
+    executables, and the `security` extra alone does not install them. SkillSpector
+    versions older than 2.12.0 must be upgraded. The scanners fail closed:
+    `validate` exits non-zero and the report stays
     non-green until every required scanner is installed and returns valid
     evidence. See the workflow above or
     [Installation: System tools](installation.mdx#system-tools).

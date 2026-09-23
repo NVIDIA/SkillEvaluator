@@ -275,7 +275,7 @@ The default set is `schema`, `version`, `security`, `pii`, `license`, `code-inte
 
 ## Scanner setup
 
-Install `skillevaluator[security]` for the bundled Python scanners (Bandit and pip-audit). Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
+Install `skillevaluator[security]` for the bundled Python scanners (Bandit and pip-audit). Install Semgrep and SkillSpector **2.12.0 or newer** in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. Older SkillSpector versions leave the run `INCOMPLETE`; see [Installation: System tools](installation.mdx#system-tools) for installation and upgrade commands.
 
 Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/external.yaml`.
 

@@ -115,9 +115,9 @@ skillevaluator context-optimization-check ./my-skill
 skillevaluator similarity-check ./skills
 ```
 
-Install Semgrep, SkillSpector, and Gitleaks before a full run; missing Tier 1
-scanner evidence makes validation incomplete. Then verify the selected agent
-runtime and use `validate --full`:
+Install Semgrep, SkillSpector, and Gitleaks for full validation (SkillSpector
+`>=2.12.0`). Missing scanner evidence makes validation incomplete. Verify the
+agent runtime and use `validate --full`:
 
 ```bash
 skillevaluator doctor --agents codex --env-mode docker

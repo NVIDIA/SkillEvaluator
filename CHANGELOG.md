@@ -4,6 +4,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Require SkillSpector 2.12.0 or newer for Tier 1 security scanning. Older
+  scanner versions now leave the result `INCOMPLETE` with upgrade guidance.
+
 ## 0.3.0 - 2026-09-17
 
 ### Added

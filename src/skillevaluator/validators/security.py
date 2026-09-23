@@ -54,6 +54,7 @@ logger = get_logger(__name__)
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
+_SKILLSPECTOR_MIN_VERSION = (2, 12, 0)
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
@@ -1720,6 +1721,15 @@ class SecurityValidator(ValidatorBase):
         if score < minimum_score:
             result.add_error(
                 "skillspector JSON risk score understates the reported issues; security scan did not complete"
+            )
+            return False
+
+        if skillspector_version is not None and skillspector_version < _SKILLSPECTOR_MIN_VERSION:
+            minimum_version = ".".join(str(part) for part in _SKILLSPECTOR_MIN_VERSION)
+            result.add_error(
+                f"SkillSpector {minimum_version} or newer is required; found {metadata['skillspector_version']}. "
+                "Upgrade with: uv tool install --upgrade git+https://github.com/NVIDIA/SkillSpector.git; "
+                "security scan did not complete"
             )
             return False
 

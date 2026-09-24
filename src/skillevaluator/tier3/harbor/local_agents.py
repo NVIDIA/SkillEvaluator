@@ -109,6 +109,46 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
 class SkillEvaluatorClaudeCode(ClaudeCode):
     """Wrap Claude Code to preserve rich MCP server declarations (transport, headers)."""
 
+    def _resolve_task_path(self) -> Path | None:
+        """Resolve the task directory path from trial config.json."""
+        trial_config_path = self.logs_dir.parent / "config.json"
+        if not trial_config_path.is_file():
+            trial_config_path = self.logs_dir.parent.parent / "config.json"
+            if not trial_config_path.is_file():
+                return None
+        try:
+            config_data = json.loads(trial_config_path.read_text(encoding="utf-8"))
+            task_path_str = config_data.get("task", {}).get("path")
+            if not task_path_str:
+                return None
+            task_path = Path(task_path_str)
+            if not task_path.is_absolute():
+                task_path = (trial_config_path.parent / task_path).resolve()
+            return task_path
+        except Exception:
+            return None
+
+    def _resolve_task_runtime_env(self) -> dict[str, str]:
+        """Extract allowed runtime environment from task.toml if available."""
+        task_path = self._resolve_task_path()
+        if not task_path:
+            return {}
+        task_toml_path = task_path / "task.toml"
+        if not task_toml_path.is_file():
+            return {}
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        try:
+            task_data = tomllib.loads(task_toml_path.read_text(encoding="utf-8"))
+            env_table = task_data.get("environment", {}).get("env", {})
+            if isinstance(env_table, dict):
+                return {str(k): str(v) for k, v in env_table.items()}
+        except Exception:
+            pass
+        return {}
+
     def _build_register_mcp_servers_command(self) -> str | None:
         """Build MCP registration command supporting streamable-http and headers from mcp_servers.json."""
         mcp_servers = self._resolve_task_mcp_servers()
@@ -117,7 +157,8 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
 
         from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
 
-        validate_mcp_server_declarations(mcp_servers)
+        runtime_env = self._resolve_task_runtime_env()
+        validate_mcp_server_declarations(mcp_servers, allowed_runtime_env=runtime_env)
 
         servers: dict[str, dict[str, Any]] = {}
         for server in mcp_servers:
@@ -157,19 +198,10 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
 
     def _resolve_task_mcp_servers(self) -> list[dict[str, Any]]:
         """Resolve rich MCP declarations from task mcp_servers.json if available."""
-        trial_config_path = self.logs_dir.parent / "config.json"
-        if not trial_config_path.is_file():
-            trial_config_path = self.logs_dir.parent.parent / "config.json"
-            if not trial_config_path.is_file():
-                return []
+        task_path = self._resolve_task_path()
+        if not task_path:
+            return []
         try:
-            config_data = json.loads(trial_config_path.read_text(encoding="utf-8"))
-            task_path_str = config_data.get("task", {}).get("path")
-            if not task_path_str:
-                return []
-            task_path = Path(task_path_str)
-            if not task_path.is_absolute():
-                task_path = (trial_config_path.parent / task_path).resolve()
             mcp_json_path = task_path / "mcp_servers.json"
             if not mcp_json_path.is_file():
                 return []
@@ -177,7 +209,12 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
             if isinstance(raw_servers, list):
                 from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
 
-                return validate_mcp_server_declarations(raw_servers, source_label=str(mcp_json_path))
+                runtime_env = self._resolve_task_runtime_env()
+                return validate_mcp_server_declarations(
+                    raw_servers,
+                    allowed_runtime_env=runtime_env,
+                    source_label=str(mcp_json_path),
+                )
             return []
         except ValueError:
             raise

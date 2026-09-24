@@ -1203,3 +1203,29 @@ def test_mcp_server_declarations_block_operator_secrets_and_unapproved_headers(
 
     spec_results = validate_skillevaluators(skill_dir)
     assert any("operator-owned credential" in r.message for r in spec_results if r.status == "error")
+
+    # 6. Non-sensitive harbor.runtime_env is carried through _load_mcp_servers and validate_skillevaluators
+    valid_skill = tmp_path / "valid-mcp-skill"
+    valid_env_dir = valid_skill / "evals" / "environment"
+    valid_env_dir.mkdir(parents=True)
+    (valid_skill / "SKILL.md").write_text("---\nname: valid-mcp-skill\ndescription: test\n---\n", encoding="utf-8")
+    (valid_skill / "evals" / "evals.json").write_text('[{"id": "1", "question": "test"}]\n', encoding="utf-8")
+    (valid_skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  runtime_env:\n    LOCAL_DB_PATH: /workspace/db.sqlite\n",
+        encoding="utf-8",
+    )
+    (valid_env_dir / "mcp_servers.toml").write_text(
+        "[[mcp_servers]]\n"
+        'name = "local-db"\n'
+        'transport = "stdio"\n'
+        'command = "python3"\n'
+        'args = ["--db", "${LOCAL_DB_PATH}"]\n'
+        'env = { LOCAL_DB_PATH = "${LOCAL_DB_PATH}" }\n',
+        encoding="utf-8",
+    )
+    servers = _load_mcp_servers(valid_skill)
+    assert len(servers) == 1
+    assert servers[0]["name"] == "local-db"
+
+    spec_results_valid = validate_skillevaluators(valid_skill)
+    assert not any(r.status == "error" for r in spec_results_valid)

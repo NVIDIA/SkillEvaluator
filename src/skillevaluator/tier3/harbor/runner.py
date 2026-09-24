@@ -19,7 +19,7 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -34,6 +34,7 @@ from skillevaluator.provider_config import (
     ProviderConfig,
     ProviderConfigurationError,
     _get_google_access_token,
+    _is_vertex_openapi_endpoint,
     _normalize_anthropic_base_url,
     resolve_llm_provider,
 )
@@ -1629,17 +1630,27 @@ def _resolve_agent_runtime_plan(
         for name, value in _provider_environment(provider).items()
         if name not in _VERIFIER_JUDGE_MODEL_ENV_VARS
     }
+    effective_provider = provider
+    if provider.provider in {"openai", "openai-compatible"}:
+        refreshed_key = provider_env.get("OPENAI_API_KEY")
+        if refreshed_key and refreshed_key != provider.api_key:
+            effective_provider = replace(provider, api_key=refreshed_key)
+    elif provider.provider == "anthropic":
+        refreshed_key = provider_env.get("ANTHROPIC_API_KEY")
+        if refreshed_key and refreshed_key != provider.api_key:
+            effective_provider = replace(provider, api_key=refreshed_key)
+
     plans: dict[str, AgentRuntimePlan] = {}
     for agent in agents:
         credentials = _agent_credentials(
-            provider=provider,
+            provider=effective_provider,
             agent=agent,
             env_mode=env_mode,
             environment_kwargs=environment_kwargs,
         )
         validation_env = {**configured_runtime_env, **credentials}
         credential_errors = _validate_agent_provider_credentials(
-            provider,
+            effective_provider,
             [agent],
             validation_env,
             dict(model_sources or {}),
@@ -1652,7 +1663,7 @@ def _resolve_agent_runtime_plan(
 
         subprocess_env = _harbor_subprocess_environment(
             env_mode=env_mode,
-            provider=provider,
+            provider=effective_provider,
             configured_runtime_env=configured_runtime_env,
             provider_env=provider_env,
             agent=agent,
@@ -1664,7 +1675,7 @@ def _resolve_agent_runtime_plan(
             agent=agent,
             model=models[agent],
             provider=_agent_provider_config(
-                evaluator_provider=provider,
+                evaluator_provider=effective_provider,
                 agent=agent,
                 model=models[agent],
                 credentials=credentials,
@@ -1791,6 +1802,16 @@ def _run_harbor(
     include_task_names: list[str] | None = None,
     environment_kwargs: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
+    base_url = (verifier_env or {}).get("OPENAI_BASE_URL") or run_env.get("OPENAI_BASE_URL")
+    if _is_vertex_openapi_endpoint(base_url):
+        fresh_token = _get_google_access_token()
+        if fresh_token:
+            run_env = dict(run_env)
+            run_env["OPENAI_API_KEY"] = fresh_token
+            if verifier_env is not None:
+                verifier_env = dict(verifier_env)
+                verifier_env["OPENAI_API_KEY"] = fresh_token
+
     command = build_harbor_run_command(
         dataset_path=dataset,
         agent=agent,

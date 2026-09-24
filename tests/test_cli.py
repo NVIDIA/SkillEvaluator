@@ -54,18 +54,18 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
 
     assert result.exit_code == 0
     headings = (
+        "Tier workflows:",
         "Core workflows:",
         "Tier 1 · Static and security:",
         "Tier 2 · Deduplication:",
         "Tier 3 · Live evaluation:",
-        "Expert aliases:",
     )
     positions = [result.output.index(heading) for heading in headings]
     assert positions == sorted(positions)
 
-    core = result.output.split(headings[0], 1)[1].split(headings[1], 1)[0]
+    core = result.output.split("Core workflows:", 1)[1].split("Tier 1 · Static and security:", 1)[0]
     assert all(command in core for command in ("validate", "health-check", "doctor", "models"))
-    tier3 = result.output.split(headings[3], 1)[1].split(headings[4], 1)[0]
+    tier3 = result.output.split("Tier 3 · Live evaluation:", 1)[1]
     assert all(command in tier3 for command in ("create-eval-dataset", "compare", "view", "harbor-view"))
     assert "Other commands:" not in result.output
 
@@ -255,7 +255,7 @@ def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path:
 
     result = CliRunner().invoke(
         cli,
-        ["validate", str(linked_target), "--no-dedup", "--checks", "schema"],
+        ["validate", "--no-tier3", str(linked_target), "--no-dedup", "--checks", "schema"],
     )
 
     assert result.exit_code == 0, result.output
@@ -562,7 +562,7 @@ def test_live_eval_help_uses_skill_evaluator_runtime_and_grading_names() -> None
     assert "default_plus_custom" in evaluate.output
     assert "harbor-environment" not in evaluate.output
     assert "k8s-sandbox" not in evaluate.output
-    assert "local" not in evaluate.output
+    assert "local" in evaluate.output
     assert "--autopilot" in evaluate.output
     assert "--progress [auto|rich|plain|off]" in evaluate.output
 
@@ -711,13 +711,14 @@ def test_validate_help_is_detailed() -> None:
     assert "skillevaluator validate ./my-skill" in result.output
 
 
-def test_tier1_validate_alias_shares_detailed_help() -> None:
-    # The tier1 alias is the same command object, so it carries the same help.
+def test_tier1_validate_alias_shows_only_tier1_options() -> None:
     result = CliRunner().invoke(cli, ["tier1", "validate", "-h"])
 
     assert result.exit_code == 0
-    assert "Tier 3 · Live Agent Evaluation:" in result.output
-    assert "Examples:" in result.output
+    assert "--checks" in result.output
+    assert "--no-llm" in result.output
+    assert "--agents" not in result.output
+    assert "--dedup" not in result.output
 
 
 def test_validate_code_integrity_reports_only_static_test_evidence(tmp_path: Path, monkeypatch) -> None:
@@ -776,6 +777,7 @@ def test_validate_code_integrity_reports_only_static_test_evidence(tmp_path: Pat
         cli,
         [
             "validate",
+            "--no-tier3",
             str(skill),
             "--verbose",
             "--checks",

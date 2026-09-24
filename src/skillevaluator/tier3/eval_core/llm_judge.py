@@ -214,6 +214,7 @@ def _chat_completion_payload(
         "model": model,
         token_key: max_tokens,
         "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature

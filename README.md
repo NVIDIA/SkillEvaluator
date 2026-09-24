@@ -8,6 +8,8 @@
 [![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
 [![NVIDIA Developer Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
 
+> 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
+
 SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent
 artifacts, starting with agent skills: deterministic quality gates, semantic
 overlap detection, synthetic eval dataset generation, and live agent evaluation.
@@ -49,8 +51,7 @@ Install with [uv](https://docs.astral.sh/uv/):
 uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
-**For NVIDIA Build, set just two variables for all tiers.** Get an API key from
-[build.nvidia.com](https://build.nvidia.com):
+**NVIDIA Build: set just two variables.** [API key](https://build.nvidia.com):
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build

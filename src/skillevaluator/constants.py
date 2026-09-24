@@ -6,7 +6,7 @@
 Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md, HOW_TO_CONTRIBUTE_WORKFLOW_RULES.md specifications.
 """
 
-from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI
+from skillevaluator.provider_config import CHAT_DEFAULT_OPENAI, EMBEDDING_DEFAULT_NVIDIA
 
 # =============================================================================
 # SKILLS CONSTANTS
@@ -236,7 +236,7 @@ SIMILARITY_LOW_THRESHOLD = 0.50  # LOOSELY_RELATED
 SIMILARITY_DEFAULT_THRESHOLD = 0.75
 
 # Embedding model configuration
-SIMILARITY_DEFAULT_MODEL = "nvidia/nv-embed-v1"
+SIMILARITY_DEFAULT_MODEL = EMBEDDING_DEFAULT_NVIDIA
 SIMILARITY_CHUNK_SIZE = 512  # tokens per chunk for full-body mode
 SIMILARITY_CHUNK_OVERLAP = 64  # token overlap between chunks
 

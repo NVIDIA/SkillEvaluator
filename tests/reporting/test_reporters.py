@@ -423,6 +423,27 @@ class TestJSONReporter:
         # Compact JSON should not have newlines (except in strings)
         assert output.count("\n") == 0
 
+    def test_tier2_analysis_diagnostics_are_exported_without_unrelated_metadata(self) -> None:
+        result = ValidationResult(validator_name="Context Deduplication")
+        result.mark_scan_incomplete("deduplication-llm")
+        result.metadata["llm_analysis"] = {
+            "provider": "nv_build",
+            "model": "nvidia/test-model",
+            "clusters_total": 6,
+            "clusters_completed": 1,
+            "clusters_failed": 5,
+            "failures": [{"count": 5, "diagnostic": "HTTP 410: Model unavailable."}],
+        }
+        result.metadata["private_provider_context"] = "private-token"
+        reporter = JSONReporter(include_timestamp=False)
+
+        for text in (reporter.render(result), reporter.render_all([result])):
+            data = json.loads(text)
+            actual = data["results"][0] if "results" in data else data
+            assert actual["status"] == "incomplete"
+            assert actual["llm_analysis"] == result.metadata["llm_analysis"]
+            assert "private-token" not in text
+
     def test_name_property(self) -> None:
         """Test reporter name."""
         reporter = JSONReporter()

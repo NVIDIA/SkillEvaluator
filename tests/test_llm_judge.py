@@ -777,6 +777,8 @@ def test_persistent_400_after_schema_downgrade_fails_fast_without_infinite_loop(
 
     def fake_sdk_create(**kwargs):
         sdk_calls.append(kwargs)
+        if "response_format" in kwargs:
+            raise _BadRequestError("response_format is not supported; echoed test-secret-key-9999999")
         raise _BadRequestError("HTTP 400 echoed test-secret-key-9999999")
 
     mock_openai = MagicMock()
@@ -999,3 +1001,220 @@ def test_schema_builders_and_downgrade_warning_log(monkeypatch, caplog):
 
     assert res["score"] == 1.0
     assert any("Structured output schema unsupported" in rec.message for rec in caplog.records)
+
+
+def test_unrelated_400_context_length_does_not_disable_schema_flags() -> None:
+    """Verify unrelated HTTP 400 context_length_exceeded errors do not disable schema for valid requests."""
+    import httpx
+    import openai
+
+    from skillevaluator.inference import client as client_mod
+    from skillevaluator.inference.client import LLMClient
+
+    client_mod._SCHEMA_UNSUPPORTED_TARGETS.clear()
+    schema_flags_sent: list[bool] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.read())
+        schema_flags_sent.append("response_format" in payload)
+        if len(schema_flags_sent) <= 2:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "context_length_exceeded: maximum context length is 8192 tokens",
+                        "type": "invalid_request_error",
+                        "code": "context_length_exceeded",
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "criteria": {
+                                        "SKILL_IDENTIFIED": True,
+                                        "ACTION_CORRECT": True,
+                                        "FACTUALLY_ACCURATE": True,
+                                        "TASK_ADDRESSED": True,
+                                        "ACTIONABLE": True,
+                                    },
+                                    "score": 1.0,
+                                    "reason": "ok",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = LLMClient(
+        model="gpt-5.6-sol",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test-fake",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(mock_handler)),
+    )
+
+    with pytest.raises(openai.BadRequestError):
+        client.completions("sys", "oversized_1", response_schema={"type": "object"})
+
+    with pytest.raises(openai.BadRequestError):
+        client.completions("sys", "oversized_2", response_schema={"type": "object"})
+
+    res = client.completions("sys", "valid_3", response_schema={"type": "object"})
+    assert res
+
+    assert schema_flags_sent == [True, True, True]
+    assert len(client_mod._SCHEMA_UNSUPPORTED_TARGETS) == 0
+
+
+def test_schema_downgrade_memoized_only_on_confirmed_success() -> None:
+    """Verify target is only memoized into _SCHEMA_UNSUPPORTED_TARGETS when fallback succeeds."""
+    import httpx
+    import openai
+
+    from skillevaluator.inference import client as client_mod
+    from skillevaluator.inference.client import LLMClient
+
+    client_mod._SCHEMA_UNSUPPORTED_TARGETS.clear()
+    target_key = ("openai", "https://api.openai.com/v1", "gpt-5.6-sol")
+
+    calls_a: list[bool] = []
+
+    def mock_handler_failure(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.read())
+        calls_a.append("response_format" in payload)
+        if "response_format" in payload:
+            return httpx.Response(400, json={"error": {"message": "response_format is not supported"}})
+        return httpx.Response(500, json={"error": {"message": "Internal server error"}})
+
+    client_a = LLMClient(
+        model="gpt-5.6-sol",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test-fake",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(mock_handler_failure)),
+    )
+
+    with pytest.raises(openai.InternalServerError):
+        client_a.completions("sys", "prompt", response_schema={"type": "object"})
+
+    assert calls_a == [True, False]
+    assert target_key not in client_mod._SCHEMA_UNSUPPORTED_TARGETS
+
+    calls_b: list[bool] = []
+
+    def mock_handler_success(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.read())
+        calls_b.append("response_format" in payload)
+        if "response_format" in payload:
+            return httpx.Response(400, json={"error": {"message": "response_format is not supported"}})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    client_b = LLMClient(
+        model="gpt-5.6-sol",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test-fake",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(mock_handler_success)),
+    )
+
+    res = client_b.completions("sys", "prompt", response_schema={"type": "object"})
+    assert res == "ok"
+    assert calls_b == [True, False]
+    assert target_key in client_mod._SCHEMA_UNSUPPORTED_TARGETS
+
+
+def test_harbor_eval_template_unrelated_400_does_not_disable_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify template eval.py does not treat unrelated 400 as schema capability failure."""
+    import importlib.util
+    import io
+    import urllib.error
+    from pathlib import Path
+
+    template_path = (
+        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
+    )
+    spec = importlib.util.spec_from_file_location("harbor_template_eval_unrelated_400", template_path)
+    assert spec and spec.loader
+    eval_template = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(eval_template)
+
+    eval_template._SCHEMA_UNSUPPORTED_TARGETS.clear()
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
+
+    http_requests: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "criteria": {
+                                            "SKILL_IDENTIFIED": True,
+                                            "ACTION_CORRECT": True,
+                                            "FACTUALLY_ACCURATE": True,
+                                            "TASK_ADDRESSED": True,
+                                            "ACTIONABLE": True,
+                                        },
+                                        "score": 1.0,
+                                        "reason": "ok",
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+
+    call_count = 0
+
+    def fake_urlopen(req, timeout=90):
+        nonlocal call_count
+        call_count += 1
+        payload = json.loads(req.data)
+        http_requests.append(payload)
+        if call_count == 1:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                400,
+                "Bad Request",
+                {},
+                io.BytesIO(b'{"error": {"message": "context_length_exceeded", "code": "context_length_exceeded"}}'),
+            )
+        return _Resp()
+
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
+
+    res1 = eval_template.judge_accuracy("q1", "gt1", "ans1")
+    assert res1["status"] == "error"
+    assert res1["score"] is None
+    assert len(http_requests) == 1
+    assert "response_format" in http_requests[0]
+    assert len(eval_template._SCHEMA_UNSUPPORTED_TARGETS) == 0
+
+    res2 = eval_template.judge_accuracy("q2", "gt2", "ans2")
+    assert res2["score"] == 1.0
+    assert len(http_requests) == 2
+    assert "response_format" in http_requests[1]
+    assert len(eval_template._SCHEMA_UNSUPPORTED_TARGETS) == 0

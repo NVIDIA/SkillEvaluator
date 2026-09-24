@@ -22,6 +22,7 @@ RAGAS is used for goal_accuracy and accuracy when available.
 
 from __future__ import annotations
 
+import io
 import ipaddress
 import json
 import logging
@@ -1635,23 +1636,74 @@ def _urlopen_with_retry(request, timeout=90):
             attempt += 1
 
 
+_SCHEMA_OPTION_INDICATORS = (
+    "response_format",
+    "output_config",
+    "json_schema",
+    "structured output",
+    "structured outputs",
+    "structured_output",
+    "structured_outputs",
+)
+
+_UNSUPPORTED_REASON_INDICATORS = (
+    "unsupported",
+    "not supported",
+    "extra input",
+    "extra inputs",
+    "unknown parameter",
+    "unknown field",
+    "unknown argument",
+    "unrecognized request argument",
+    "unrecognized parameter",
+    "unexpected keyword argument",
+    "unexpected argument",
+    "invalid parameter",
+    "invalid argument",
+    "not permitted",
+    "not allowed",
+    "disallowed",
+)
+
+
+def _is_schema_unsupported_http_error(error):
+    """Determine whether an HTTP error indicates structured output schema is unsupported."""
+    if getattr(error, "code", None) not in {400, 422}:
+        return False
+    body_text = ""
+    try:
+        body_bytes = error.read()
+        error.fp = io.BytesIO(body_bytes)
+        body_text = body_bytes.decode("utf-8", "replace")
+    except Exception:
+        pass
+    text = f"{error} {getattr(error, 'reason', '')} {body_text}".lower()
+    has_option = any(indicator in text for indicator in _SCHEMA_OPTION_INDICATORS)
+    if not has_option and "schema" in text and ("unsupported" in text or "not supported" in text):
+        has_option = True
+    has_reason = any(indicator in text for indicator in _UNSUPPORTED_REASON_INDICATORS)
+    return has_option and has_reason
+
+
 _SCHEMA_UNSUPPORTED_TARGETS = set()
 
 
 def _urlopen_with_schema_fallback(build_request, *, target_key, use_schema, timeout=90):
+    """Open URL with retry, falling back to prompt-only on confirmed schema capability errors."""
     try:
         return _urlopen_with_retry(build_request(use_schema), timeout=timeout)
     except urllib.error.HTTPError as error:
-        if use_schema and error.code in {400, 422}:
+        if use_schema and _is_schema_unsupported_http_error(error):
             error.close()
-            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
             logger.warning(
                 "Structured output schema unsupported by provider=%s model=%s; "
                 "downgrading to prompt-only JSON and memoizing target.",
                 target_key[0],
                 target_key[2],
             )
-            return _urlopen_with_retry(build_request(False), timeout=timeout)
+            response = _urlopen_with_retry(build_request(False), timeout=timeout)
+            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            return response
         raise
 
 

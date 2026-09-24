@@ -18,8 +18,10 @@ provider-native credential. Importing this module never requires a key.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import urllib.error
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
@@ -130,12 +132,84 @@ def _build_anthropic_output_config(schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_SCHEMA_OPTION_INDICATORS: frozenset[str] = frozenset(
+    {
+        "response_format",
+        "output_config",
+        "json_schema",
+        "structured output",
+        "structured outputs",
+        "structured_output",
+        "structured_outputs",
+    }
+)
+
+_UNSUPPORTED_REASON_INDICATORS: tuple[str, ...] = (
+    "unsupported",
+    "not supported",
+    "extra input",
+    "extra inputs",
+    "unknown parameter",
+    "unknown field",
+    "unknown argument",
+    "unrecognized request argument",
+    "unrecognized parameter",
+    "unexpected keyword argument",
+    "unexpected argument",
+    "invalid parameter",
+    "invalid argument",
+    "not permitted",
+    "not allowed",
+    "disallowed",
+)
+
+
 def _is_schema_unsupported_error(exc: Exception) -> bool:
+    """Determine whether an exception indicates structured output schema is unsupported."""
     status_code = getattr(exc, "status_code", None)
     if status_code is None:
         response = getattr(exc, "response", None)
         status_code = getattr(response, "status_code", None)
-    return status_code in {400, 422} or isinstance(exc, TypeError)
+    if status_code is None and isinstance(exc, urllib.error.HTTPError):
+        status_code = exc.code
+
+    is_type_error = isinstance(exc, TypeError)
+    if status_code not in {400, 422} and not is_type_error:
+        return False
+
+    parts: list[str] = [str(exc), getattr(exc, "message", "")]
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        parts.append(str(body))
+        error_dict = body.get("error")
+        if isinstance(error_dict, dict):
+            parts.append(str(error_dict.get("message", "")))
+            param = error_dict.get("param")
+            if param:
+                parts.append(str(param))
+    elif isinstance(body, str):
+        parts.append(body)
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        text = getattr(response, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body_bytes = exc.read()
+            exc.fp = io.BytesIO(body_bytes)
+            parts.append(body_bytes.decode("utf-8", "replace"))
+        except Exception:
+            pass
+
+    full_text = " ".join(part for part in parts if part).lower()
+    has_option = any(indicator in full_text for indicator in _SCHEMA_OPTION_INDICATORS)
+    if not has_option and "schema" in full_text and ("unsupported" in full_text or "not supported" in full_text):
+        has_option = True
+    has_reason = any(indicator in full_text for indicator in _UNSUPPORTED_REASON_INDICATORS)
+    return has_option and has_reason
 
 
 def _call_with_schema_fallback(
@@ -146,20 +220,22 @@ def _call_with_schema_fallback(
     target_key: tuple[str, str, str],
     use_schema: bool,
 ) -> Any:
-    """Invoke call_fn and downgrade to prompt-only on HTTP 400/422 schema errors."""
+    """Invoke call_fn and downgrade to prompt-only on confirmed HTTP 400/422 schema errors."""
     try:
         return call_fn(**call_kwargs)
     except Exception as exc:
         if use_schema and _is_schema_unsupported_error(exc):
-            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
             logger.warning(
                 "Structured output schema unsupported by provider=%s model=%s; "
                 "downgrading to prompt-only JSON and memoizing target.",
                 target_key[0],
                 target_key[2],
             )
-            call_kwargs.pop(schema_key, None)
-            return call_fn(**call_kwargs)
+            fallback_kwargs = dict(call_kwargs)
+            fallback_kwargs.pop(schema_key, None)
+            result = call_fn(**fallback_kwargs)
+            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            return result
         raise
 
 
@@ -204,6 +280,7 @@ class LLMClient:
         max_retries: int | None = None,
         retry_base_delay: float | None = None,
         retry_max_delay: float | None = None,
+        http_client: Any = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
@@ -214,6 +291,7 @@ class LLMClient:
         self._max_retries = max_retries if max_retries is not None else retry_cfg.max_retries
         self._retry_base_delay = retry_base_delay if retry_base_delay is not None else retry_cfg.base_delay
         self._retry_max_delay = retry_max_delay if retry_max_delay is not None else retry_cfg.max_delay
+        self._http_client = http_client
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
 
@@ -299,9 +377,11 @@ class LLMClient:
                 raise LLMClientError(
                     "The 'anthropic' package is required for Anthropic LLM operations. Install with: pip install 'skillevaluator[llm]'"
                 ) from exc
-            client_kwargs: dict[str, Any] = {"api_key": config.api_key}
+            client_kwargs: dict[str, Any] = {"api_key": config.api_key, "max_retries": 0}
             if config.base_url:
                 client_kwargs["base_url"] = config.base_url
+            if self._http_client is not None:
+                client_kwargs["http_client"] = self._http_client
             self._client = Anthropic(**client_kwargs)
             return self._client
 
@@ -312,7 +392,14 @@ class LLMClient:
                 "The 'openai' package is required for LLM operations. Install it with: pip install openai"
             ) from exc
 
-        client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+        client_kwargs: dict[str, Any] = {
+            "api_key": config.api_key,
+            "base_url": config.base_url,
+            "max_retries": 0,
+        }
+        if self._http_client is not None:
+            client_kwargs["http_client"] = self._http_client
+        client = OpenAI(**client_kwargs)
         if (
             config.base_url is not None
             and not _is_canonical_openai_base_url(config.base_url)

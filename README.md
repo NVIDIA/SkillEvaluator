@@ -8,6 +8,8 @@
 [![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
 [![NVIDIA Developer Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
 
+> 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
+
 SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent
 artifacts, starting with agent skills: deterministic quality gates, semantic
 overlap detection, synthetic eval dataset generation, and live agent evaluation.
@@ -66,14 +68,12 @@ If your shell cannot find the command after installation, run
 
 ## LLM provider setup
 
-No OpenAI or Anthropic key yet? Create a free API key at
-[build.nvidia.com](https://build.nvidia.com) — NVIDIA Build offers free
-inferencing, and NVIDIA Build defaults to the open-source Nemotron model
-`nvidia/nemotron-3-nano-30b-a3b` for a quick try. Prefer a different model?
-Pick any free model on [build.nvidia.com](https://build.nvidia.com) and set
-`SKILL_EVAL_LLM_MODEL`. Once that key is set, the same provider works
-seamlessly across Tier 1 LLM checks, Tier 2, and Tier 3 (chat plus embeddings
-with one credential):
+NVIDIA Build offers free inferencing with a free API key from
+[build.nvidia.com](https://build.nvidia.com). Its default chat model is the
+open-source Nemotron `nvidia/nemotron-3-nano-30b-a3b`. Choose another free model
+on [build.nvidia.com](https://build.nvidia.com) with `SKILL_EVAL_LLM_MODEL`.
+One credential supports chat and embeddings across Tier 1 LLM checks, Tier 2,
+and Tier 3:
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build

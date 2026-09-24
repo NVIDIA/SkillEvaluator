@@ -912,3 +912,122 @@ def test_a_versioned_interpreter_keeps_its_grammar(check, command, script, expec
     """The version suffix changes the name, not the options."""
     result = check(_bash(command, "done"), script)
     assert result["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 2 > numeric.out run.py",
+        "python3 2 >numeric.out run.py",
+        "python3 1 >> log.txt run.py",
+        "python3 0 < notes.txt run.py",
+    ],
+)
+def test_a_digit_standing_apart_from_its_operator_is_an_operand(check, command) -> None:
+    """``2 > numeric.out`` is an argument ``2`` and a redirection of standard
+    output, not a redirection of standard error: the shell reads a descriptor
+    only when the digits are written flush against the operator. The
+    interpreter therefore runs a script named ``2`` and hands it ``run.py``.
+    """
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == 0.0
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 2>/dev/null run.py",
+        "python3 2> /dev/null run.py",
+        "python3 2>&1 run.py",
+        "python3 1>>log.txt run.py",
+        "python3 1> log.txt run.py",
+        "python3 0</dev/null run.py",
+        "python3 0< /dev/null run.py",
+        "python3 2>/dev/null -u run.py",
+        "echo '2>' ; python3 run.py",
+        'echo "2 > x" ; python3 run.py',
+    ],
+)
+def test_an_attached_descriptor_before_the_script_is_a_redirection(check, command) -> None:
+    """The descriptor and its operator stay together through tokenizing, so a
+    redirection written before the script never stands where the script is
+    looked for, and a ``2>`` inside quotes is data.
+    """
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == 1.0
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash -c 2>/dev/null './run.sh'", 1.0),
+        ("bash -c 2> /dev/null './run.sh'", 1.0),
+        ("bash 2>/dev/null -c './run.sh'", 1.0),
+        ("bash -c 2>/dev/null 'bash run.sh'", 1.0),
+        ("bash -c 2>/dev/null -- './run.sh'", 1.0),
+        ("bash -c 2>/dev/null 'cat ./run.sh'", 0.0),
+        ("bash -c 2 './run.sh'", 0.0),
+    ],
+)
+def test_the_shell_payload_is_read_from_the_same_stream_as_its_option(check, command, expected) -> None:
+    """A redirection standing between ``-c`` and its payload belongs to the
+    shell, so the payload is the next operand after it, not the redirection.
+    ``bash -c 2 './run.sh'`` runs the command ``2`` with ``./run.sh`` as its
+    ``$0``, and nothing runs the script.
+    """
+    result = check(_bash(command, "done"), "run.sh")
+    assert result["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('for f in run.py; do cat "$f"; done; for f in other.py another.py; do python3 "$f"; done', 0.0),
+        ("for f in run.py; do cat $f; done; for f; do python3 $f; done", 0.0),
+        ("for f in run.py; do cat $f; done; for f in; do python3 $f; done", 0.0),
+        ('for f in run.py; do cat "$f"; done; for f in run.py other.py; do python3 "$f"; done', 0.75),
+        ("for f in other.py; do cat $f; done; for f in run.py; do python3 $f; done", 1.0),
+        ("for f in run.py; do cat $f; done; for g in other.py another.py; do python3 $f; done", 1.0),
+    ],
+)
+def test_a_loop_variable_rebound_without_a_unique_value_is_forgotten(check, command, expected) -> None:
+    """A single-value header binds its variable for its own body. A later
+    header that gives the same variable several values, or none, settles
+    nothing about it, so the earlier value is dropped rather than read into
+    the new body: the second loop above runs two other scripts, not ``run.py``.
+    A loop variable keeps its last value after its loop ends, so a later loop
+    over a different variable that runs ``python3 $f`` does run ``run.py``.
+    """
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("printf '' | for f in run.py; do cat $f; done; for g in x; do python3 $f; done", 0.0),
+        ("for f in run.py; do cat $f; done | true; python3 $f", 0.0),
+        ("if true; then for f in run.py; do cat $f; done; fi | true; python3 $f", 0.0),
+        ("echo x | if true; then f=run.py; fi; python3 $f", 0.0),
+        ("FOO=run.py | true; python3 $FOO", 0.0),
+        ("printf '' | for f in run.py; do python3 $f; done", 1.0),
+        ("echo x | while read -r l; do for f in run.py; do python3 $f; done; done", 1.0),
+        ("for f in run.py; do cat $f; done; python3 $f", 1.0),
+        ("if true; then f=run.py; fi; python3 $f", 1.0),
+        ("f=run.py; echo x | python3 $f", 1.0),
+    ],
+)
+def test_a_binding_made_inside_a_pipeline_does_not_outlive_it(check, command, expected) -> None:
+    """Each command of a pipeline runs in a subshell, a compound command
+    included, so a loop variable or assignment made there is gone once the
+    pipeline ends; the body of a loop piped into still sees its own header.
+    Outside a pipeline a loop variable keeps its last value, and a value
+    bound before the pipeline is read by a command inside it.
+    """
+    result = check(_bash(command, "done"), EXPECTED_SCRIPT)
+    assert result["score"] == expected

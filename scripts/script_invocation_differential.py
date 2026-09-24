@@ -115,6 +115,16 @@ FIXTURES = {
     "skills/demo/run.js": "require('fs').writeFileSync('MARKER.run.js','ran'); console.log('js')\n",
     "run.py": _marker("run.py"),
     "other.py": _marker("other.py"),
+    "another.py": _marker("another.py"),
+    "skills/demo/another.py": _marker("another.py"),
+    # ``python3 2 > out.txt run.py`` runs a script named 2: these exist so that
+    # command succeeds, as the shell reads it, without touching run.py.
+    "0": "print('zero')\n",
+    "1": "print('one')\n",
+    "2": "print('two')\n",
+    "skills/demo/0": "print('zero')\n",
+    "skills/demo/1": "print('one')\n",
+    "skills/demo/2": "print('two')\n",
     "notes.txt": "notes\n",
     # a loop reading `< notes.txt` must find it after `cd skills/demo` too,
     # otherwise its body never runs for a reason the command text does not carry
@@ -208,7 +218,28 @@ PREFIX_FORMS = [
 ]
 SUFFIX_FORMS = ["", " > out.txt", " 2>&1", " ; echo done", " || true"]
 # Redirections that stand before the script: the shell's, not the interpreter's.
-REDIRECT_FORMS = ["< /dev/null ", "</dev/null ", "0< /dev/null ", "<&0 ", "2>/dev/null ", "2>&1 ", "1>>out.txt "]
+REDIRECT_FORMS = [
+    "< /dev/null ",
+    "</dev/null ",
+    "0< /dev/null ",
+    "<&0 ",
+    "2>/dev/null ",
+    "2> /dev/null ",
+    "2>&1 ",
+    "1>>out.txt ",
+    "1> out.txt ",
+]
+# A digit standing apart from its operator is an operand: ``python3 2 > out.txt
+# run.py`` runs the script named 2 and hands it run.py.
+DETACHED_DESCRIPTOR_FORMS = ["2 > out.txt ", "2 >out.txt ", "1 >> out.txt ", "0 < notes.txt "]
+# A second loop header for the same variable, after ``for f in run.py; do cat $f; done``.
+REBINDING_HEADERS = [
+    "for f in {other} {another}; do {body}; done",
+    "for f; do {body}; done",
+    "for f in {other}; do {body}; done",
+    "for f in {script}; do {body}; done",
+    "for g in x; do {body}; done",
+]
 # Control structures around a command, with the command as {body}.
 CONTROL_FORMS = [
     "if true; then {body}; fi",
@@ -347,6 +378,25 @@ def curated() -> list[tuple[str, str]]:
     for redirect in REDIRECT_FORMS:
         add(f"{PY} {redirect}{SCRIPT}")
         add(f"{PY} -u {redirect}{SCRIPT}")
+        add(f"bash -c {redirect}'bash {SHELL_SCRIPT}'", "run.sh")
+        add(f"bash {redirect}-c 'bash {SHELL_SCRIPT}'", "run.sh")
+        add(f"bash -c {redirect}'cat {SHELL_SCRIPT}'", "run.sh")
+    for redirect in DETACHED_DESCRIPTOR_FORMS:
+        add(f"{PY} {redirect}{SCRIPT}")
+        add(f"cd skills/demo && {PY} {redirect}run.py")
+    add(f"bash -c 2 '{SHELL_SCRIPT}'", "run.sh")
+    names = {"script": SCRIPT, "other": "skills/demo/other.py", "another": "skills/demo/another.py"}
+    for header in REBINDING_HEADERS:
+        add(f"for f in {SCRIPT}; do cat $f; done; " + header.format(body=f"{PY} $f", **names))
+        add(f"for f in {SCRIPT}; do cat $f; done; " + header.format(body="cat $f", **names))
+    # A pipeline runs its commands in subshells, so a binding made in one
+    # does not reach the command after the pipeline.
+    add(f"printf '' | for f in {SCRIPT}; do cat $f; done; for g in x; do {PY} $f; done")
+    add(f"for f in {SCRIPT}; do cat $f; done | true; {PY} $f")
+    add(f"printf '' | for f in {SCRIPT}; do {PY} $f; done")
+    add(f"echo x | while read -r l; do for f in {SCRIPT}; do {PY} $f; done; done")
+    add(f"if true; then for f in {SCRIPT}; do cat $f; done; fi | true; {PY} $f")
+    add(f"for f in {SCRIPT}; do cat $f; done; {PY} $f")
     for control in CONTROL_FORMS:
         add(control.format(body=f"{PY} {SCRIPT}"))
         add(control.format(body=f"cat {SCRIPT}"))
@@ -374,6 +424,8 @@ def _generate(rng: random.Random) -> tuple[str, str]:
     target = "run.py" if prefix.startswith(("cd ", "(cd ")) else SCRIPT
     interpreter = VERSIONED_PY if rng.random() < 0.15 else PY
     redirect = rng.choice(REDIRECT_FORMS) if rng.random() < 0.15 else ""
+    if rng.random() < 0.05:
+        redirect = rng.choice(DETACHED_DESCRIPTOR_FORMS)
     shape = rng.random()
     if shape < 0.1:
         body = rng.choice(UNRELATED_BODIES)
@@ -381,7 +433,24 @@ def _generate(rng: random.Random) -> tuple[str, str]:
         script = "run.sh"
         shell_target = "run.sh" if prefix.startswith(("cd ", "(cd ")) else SHELL_SCRIPT
         body = f"bash {rng.choice(['', '-- ', '-x '])}{shell_target}{rng.choice(SCRIPT_ARGUMENT_FORMS)}"
-    elif shape < 0.5:
+    elif shape < 0.27:
+        script = "run.sh"
+        shell_target = "run.sh" if prefix.startswith(("cd ", "(cd ")) else SHELL_SCRIPT
+        payload = rng.choice([f"bash {shell_target}", f"cat {shell_target}", f"./{shell_target}"])
+        between = rng.choice([*REDIRECT_FORMS, ""])
+        body = rng.choice([f"bash -c {between}'{payload}'", f"bash {between}-c '{payload}'"])
+    elif shape < 0.34:
+        header = rng.choice(REBINDING_HEADERS)
+        inside = prefix.startswith(("cd ", "(cd "))
+        names = {
+            "script": "run.py" if inside else SCRIPT,
+            "other": "other.py" if inside else "skills/demo/other.py",
+            "another": "another.py" if inside else "skills/demo/another.py",
+        }
+        body = f"for f in {names['script']}; do cat $f; done; " + header.format(
+            body=rng.choice([f"{interpreter} $f", "cat $f"]), **names
+        )
+    elif shape < 0.55:
         body = f"{rng.choice(NON_EXECUTING_VERBS)} {target}"
     else:
         body = f"{rng.choice(WRAPPER_FORMS)}{interpreter} {rng.choice(INTERPRETER_FORMS)}{redirect}{target}"

@@ -16,13 +16,14 @@ local, and cloud environment backends.
 
 ## Supported agents
 
-Pass agents as a comma-separated list with `-a/--agents`. The default is
-`codex`. Three agents are supported:
+Pass agents as a comma-separated list with `-a/--agents`. Without that option,
+SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
+`codex` for OpenAI, and `claude-code` for Anthropic. Three agents are supported:
 
 | Agent | Notes |
 | --- | --- |
 | `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. |
-| `codex` | OpenAI's Codex CLI. The default agent. |
+| `codex` | OpenAI's Codex CLI. The OpenAI-provider default. |
 | `opencode` | The OpenCode CLI. |
 
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
@@ -75,12 +76,12 @@ orchestration and server tools Build cannot execute — `WebFetch`,
 
 ### Models on the one-key path
 
-With `nv_build` and no explicit override, the bridged agents (`codex` and
-`claude-code`) default to `nvidia/nemotron-3-super-120b-a12b`. Direct
-OpenCode defaults to `nvidia/nemotron-3-nano-30b-a3b` and is automatically
-qualified with the `nvidia/` adapter namespace, so it renders as
-`nvidia/nvidia/nemotron-3-nano-30b-a3b` in run output — the doubled prefix
-is the adapter namespace plus the catalog publisher, not a bug.
+With `nv_build` and no explicit model override, every supported agent defaults
+to `nvidia/nemotron-3-super-120b-a12b`. The provider-native agent selection is
+OpenCode. Its model is automatically qualified with the `nvidia/` adapter
+namespace, so it renders as `nvidia/nvidia/nemotron-3-super-120b-a12b` in run
+output — the doubled prefix is the adapter namespace plus the catalog publisher,
+not a bug.
 
 An explicit `--agent-model` value with NVIDIA Build must be a full
 `publisher/model` catalog ID; an explicit OpenCode override also carries the
@@ -280,8 +281,9 @@ pass, warn, or fail row per agent. A warning means the catalog result is
 non-authoritative, such as a public NVIDIA Build listing or an OpenAI catalog
 permission failure that does not decide inference access. Browse catalog
 membership with `skillevaluator models` (top 10 by default; `--limit` and
-`--json` adjust the result), but use the Tier 3 runtime preflight to prove that
-the agent can actually invoke the model. A different route used only by the
+`--json` adjust the result). To prove that the agent can actually invoke the
+model before the measured matrix, opt into the extra Tier 3 execution with
+`--agent-runtime-preflight`. A different route used only by the
 standard grader is not exercised by that smoke and remains unproven until
 grading begins.
 

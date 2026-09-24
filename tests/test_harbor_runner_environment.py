@@ -1562,3 +1562,82 @@ def test_local_nvidia_provider_preserves_explicit_codex_credentials(
     assert environment["NVIDIA_API_KEY"] == "provider-key"
     assert environment["OPENAI_API_KEY"] == "codex-key"
     assert environment["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+
+
+def test_resolve_agent_runtime_plan_preserves_refreshed_adc_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _resolve_agent_runtime_plan preserves refreshed ADC token and does not overwrite with expired token."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    provider = ProviderConfig(
+        provider="openai",
+        model="google/gemini-3.8-flash",
+        api_key="expired-token",
+        base_url=base_url,
+        litellm_model="openai/google/gemini-3.8-flash",
+        credential_env="ADC",
+        base_url_env="OPENAI_BASE_URL",
+    )
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-token")
+    monkeypatch.setattr(runner.os, "environ", {"PATH": "/usr/bin"})
+
+    plans = runner._resolve_agent_runtime_plan(
+        provider=provider,
+        agents=["opencode", "codex"],
+        models={
+            "opencode": "openai/google/gemini-3.8-flash",
+            "codex": "google/gemini-3.8-flash",
+        },
+        configured_runtime_env={},
+        env_mode="docker",
+    )
+
+    for agent in ("opencode", "codex"):
+        plan = plans[agent]
+        assert plan.subprocess_env["OPENAI_API_KEY"] == "fresh-token"
+        assert plan.provider.api_key == "fresh-token"
+        assert plan.subprocess_env["OPENAI_BASE_URL"] == base_url
+
+
+def test_run_harbor_reissues_adc_token_for_bounded_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verify _run_harbor refreshes ADC token before launching each bounded job."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    captured_command: list[str] = []
+    captured_env: dict[str, str] = {}
+
+    def mock_build_cmd(*args, **kwargs):
+        verifier_env = kwargs.get("verifier_env") or {}
+        captured_command.extend(["--verifier-env", f"OPENAI_API_KEY={verifier_env.get('OPENAI_API_KEY')}"])
+        return ["mock-harbor", "run"]
+
+    def mock_run(command, *args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "build_harbor_run_command", mock_build_cmd)
+    monkeypatch.setattr(runner.subprocess, "run", mock_run)
+    monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-reissued-token")
+
+    run_env = {"OPENAI_API_KEY": "stale-initial-token", "PATH": "/usr/bin"}
+    verifier_env = {"OPENAI_BASE_URL": base_url, "OPENAI_API_KEY": "stale-initial-token"}
+
+    ok, _detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="test-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=run_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+        verifier_env=verifier_env,
+    )
+
+    assert ok is True
+    assert "--verifier-env" in captured_command
+    assert "OPENAI_API_KEY=fresh-reissued-token" in captured_command
+    assert captured_env.get("OPENAI_API_KEY") == "fresh-reissued-token"

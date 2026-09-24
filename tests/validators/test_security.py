@@ -4018,6 +4018,21 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert child_env["OPENAI_API_KEY"] == "mock-adc-token"
         assert child_env["OPENAI_BASE_URL"] == base_url
 
+    def test_skillspector_child_environment_maps_generic_openai_key(self, monkeypatch) -> None:
+        """Verify SKILL_EVAL_LLM_PROVIDER=openai with generic key forwards OPENAI_API_KEY."""
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "generic-openai-key")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+
+        child_env = _skillspector_child_env()
+
+        assert child_env is not None
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
+        assert child_env["OPENAI_API_KEY"] == "generic-openai-key"
+        assert child_env["SKILL_EVAL_LLM_API_KEY"] == "generic-openai-key"
+
     def test_partial_llm_verdicts_are_reported_as_partial(self, tmp_path: Path) -> None:
         """A verifier response covering only some findings must not claim full confirmation."""
         result = ValidationResult()

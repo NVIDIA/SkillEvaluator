@@ -420,3 +420,37 @@ def test_claude_mcp_servers_command_nested_logs_dir_layout(tmp_path: Path) -> No
     command = agent._build_register_mcp_servers_command()
     assert command is not None
     assert "nested-mcp" in command
+
+
+def test_claude_mcp_servers_preserves_task_runtime_env_args(tmp_path: Path) -> None:
+    """Verify SkillEvaluatorClaudeCode extracts runtime_env from task.toml and validates MCP args."""
+    trial_dir = tmp_path / "trial_runtime_env"
+    agent_logs = trial_dir / "logs" / "agent"
+    agent_logs.mkdir(parents=True)
+    task_dir = trial_dir / "task"
+    task_dir.mkdir(parents=True)
+
+    mcp_servers = [
+        {
+            "name": "db-server",
+            "transport": "stdio",
+            "command": "python3",
+            "args": ["--db", "${LOCAL_DB_PATH}"],
+        }
+    ]
+    (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
+    (task_dir / "task.toml").write_text(
+        '[environment.env]\nLOCAL_DB_PATH = "/workspace/db.sqlite"\n',
+        encoding="utf-8",
+    )
+    (trial_dir / "config.json").write_text(json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8")
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    resolved = agent._resolve_task_mcp_servers()
+    assert len(resolved) == 1
+    assert resolved[0]["name"] == "db-server"
+
+    command = agent._build_register_mcp_servers_command()
+    assert command is not None
+    assert "db-server" in command
+    assert "${LOCAL_DB_PATH}" in command

@@ -1916,8 +1916,23 @@ def validate_mcp_server_declarations(
     return servers
 
 
-def _load_mcp_servers(skill_path: Path) -> list[dict[str, Any]]:
+def _load_mcp_servers(
+    skill_path: Path,
+    *,
+    allowed_runtime_env: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """Load MCP server declarations from evals/environment/mcp_servers.toml."""
+    if allowed_runtime_env is None:
+        try:
+            from skillevaluator.tier3.evals_config import load_evals_config
+
+            cfg, _ = load_evals_config(skill_path)
+            env_from_cfg = cfg.get("harbor", {}).get("runtime_env", {})
+            if isinstance(env_from_cfg, dict):
+                allowed_runtime_env = env_from_cfg
+        except Exception:
+            pass
+
     evals_dir = skill_path / "evals"
     environment_dir = evals_dir / "environment"
     mcp_file = environment_dir / "mcp_servers.toml"
@@ -1958,7 +1973,11 @@ def _load_mcp_servers(skill_path: Path) -> list[dict[str, Any]]:
                 s = {**s, "transport": "stdio"}
                 logger.debug("mcp_servers.toml: inferred transport=stdio for '%s'", s["name"])
             valid.append(s)
-        validate_mcp_server_declarations(valid, source_label=str(mcp_file))
+        validate_mcp_server_declarations(
+            valid,
+            allowed_runtime_env=allowed_runtime_env,
+            source_label=str(mcp_file),
+        )
         if valid:
             logger.debug("Loaded %d MCP server(s) from %s", len(valid), mcp_file)
         return valid
@@ -5172,7 +5191,7 @@ def _generate_harbor_tasks_into(
     if not input_files_dir.exists():
         input_files_dir = None
 
-    mcp_servers = _load_mcp_servers(evaluator_skill_path)
+    mcp_servers = _load_mcp_servers(evaluator_skill_path, allowed_runtime_env=runtime_env)
     prepared_entries = _preflight_generated_tasks(entries, output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     task_dirs: list[str] = []

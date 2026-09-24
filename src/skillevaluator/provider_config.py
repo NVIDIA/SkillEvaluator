@@ -99,7 +99,7 @@ class ProviderConfig:
         environment: dict[str, str] = {}
         if self.credential_env and self.credential_env != "ADC" and self.api_key:
             environment[self.credential_env] = self.api_key
-        elif self.credential_env == "ADC" and self.provider == "openai" and self.api_key:
+        if self.provider == "openai" and self.api_key:
             environment["OPENAI_API_KEY"] = self.api_key
 
         if self.base_url_env and self.base_url:

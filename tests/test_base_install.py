@@ -56,9 +56,18 @@ assert models_result.exit_code == 1, models_result.output
 assert "No provider is configured" in models_result.output, models_result.output
 
 validate_result = CliRunner().invoke(
-    cli, ["validate", FIXTURE, "--no-llm", "--checks", "schema,quality,lint"]
+    cli, ["validate", FIXTURE, "--tiers", "1", "--no-llm", "--checks", "schema,quality,lint"]
 )
 assert validate_result.exit_code == 0, validate_result.output
+
+for tier in ("tier1", "tier2", "tier3"):
+    help_result = CliRunner().invoke(cli, [tier, "--help"])
+    assert help_result.exit_code == 0, help_result.output
+
+direct_result = CliRunner().invoke(
+    cli, ["tier1", FIXTURE, "--no-llm", "--checks", "schema,quality,lint", "--report", "cli"]
+)
+assert direct_result.exit_code == 0, direct_result.output
 
 leaked = sorted(m for m in BLOCKED if m in sys.modules)
 assert not leaked, f"base path imported extras-only modules: {leaked}"

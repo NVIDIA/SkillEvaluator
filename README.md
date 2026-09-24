@@ -8,6 +8,8 @@
 [![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
 [![NVIDIA Developer Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
 
+> 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
+
 SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent
 artifacts, starting with agent skills: deterministic quality gates, semantic
 overlap detection, synthetic eval dataset generation, and live agent evaluation.
@@ -28,125 +30,153 @@ Skills that pass are published to the
 
 ![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](docs/assets/three-tier-overview.svg)
 
-Tiers are independent entry points; nothing requires running earlier ones first.
+Run each tier independently.
 
-| Tier | Purpose | Representative commands | Requires |
+| Tier | Purpose | Run one tier | Requires |
 | --- | --- | --- | --- |
-| Tier 1: Validation | Safe & well-formed? | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra plus external Semgrep, SkillSpector, and Gitleaks for full scanner coverage; a provider key for LLM checks |
-| Tier 2: Deduplication | Overlap with what exists? | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
-| Tier 3: Live Evaluation | Does it help the agent? | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
+| Tier 1: Validation | Safe & well-formed? | `skillevaluator tier1 ./my-skill` | External scanners for full coverage; a provider enables rubric and LLM security checks |
+| Tier 2: Deduplication | Repeated or overlapping guidance? | `skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
+| Tier 3: Live Evaluation | Does it help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 
-[SkillSpector](https://github.com/NVIDIA/SkillSpector) provides specialized
-security scanning for Tier 1 validation.
-[Harbor](https://github.com/harbor-framework/harbor), the open-source agent
-evaluation framework, powers the sandboxed agent runs in Tier 3 live
-evaluation. Full tier guides live in the
-[documentation](https://docs.nvidia.com/skills/skillevaluator/).
+[SkillSpector](https://github.com/NVIDIA/SkillSpector) provides Tier 1 security
+scanning; [Harbor](https://github.com/harbor-framework/harbor), the open-source agent
+evaluation framework, powers Tier 3 sandboxed agent runs.
+See the [tier guides](https://docs.nvidia.com/skills/skillevaluator/).
 
 ## Quickstart
 
-Install all SkillEvaluator evaluation extras with
-[uv](https://docs.astral.sh/uv/), then run the built-in deterministic validation
-gates. This first result needs no API key, Docker daemon, or repository clone:
+Install with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-skillevaluator validate ./my-skill \
-  --checks schema,pii,license,quality,unicode,lint \
-  --no-dedup
 ```
 
-`./my-skill` is any directory containing a `SKILL.md`. The command checks its
-schema, PII, license, quality, Unicode safety, and scripts. The scoped check
-list keeps this first run keyless; the complete Tier 1 security scan also uses
-external tools described in the
-[installation guide](https://docs.nvidia.com/skills/skillevaluator/installation).
-If your shell cannot find the command after installation, run
-`uv tool update-shell` and open a new terminal.
-
-## LLM provider setup
-
-No OpenAI or Anthropic key yet? Create a free API key at
-[build.nvidia.com](https://build.nvidia.com) — NVIDIA Build offers free
-inferencing, and NVIDIA Build defaults to the open-source Nemotron model
-`nvidia/nemotron-3-nano-30b-a3b` for a quick try. Prefer a different model?
-Pick any free model on [build.nvidia.com](https://build.nvidia.com) and set
-`SKILL_EVAL_LLM_MODEL`. Once that key is set, the same provider works
-seamlessly across Tier 1 LLM checks, Tier 2, and Tier 3 (chat plus embeddings
-with one credential):
+**NVIDIA Build: set just two variables.** [API key](https://build.nvidia.com):
 
 ```bash
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
-skillevaluator models --limit 10
 ```
 
-Other supported provider setups are:
+This key covers chat, Tier 2 embeddings, and supported Tier 3 agents in
+Docker or local mode.
 
-- OpenAI: `SKILL_EVAL_LLM_PROVIDER=openai` and `OPENAI_API_KEY`.
-- Anthropic: `SKILL_EVAL_LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`.
-- Amazon Bedrock: `SKILL_EVAL_LLM_PROVIDER=bedrock` plus the standard AWS
-  credential chain and region.
-- Local or hosted OpenAI-compatible endpoint: set
-  `SKILL_EVAL_LLM_PROVIDER=openai-compatible`,
-  `SKILL_EVAL_LLM_BASE_URL`, `SKILL_EVAL_LLM_MODEL`, and
-  `SKILL_EVAL_LLM_API_KEY`.
+For gateways, set `SKILL_EVAL_LLM_PROVIDER=openai-compatible`,
+`SKILL_EVAL_LLM_BASE_URL`, and `SKILL_EVAL_LLM_API_KEY`.
+[Model defaults are overridable](docs/configuration.mdx#choose-an-llm-provider);
+the gateway must support the selected models and APIs.
 
-The pinned chat defaults are `gpt-5.6-sol` for OpenAI,
-`claude-opus-5` for Anthropic, and
-`us.anthropic.claude-opus-5` for Amazon Bedrock. Override any provider with
-`SKILL_EVAL_LLM_MODEL`; `gpt-5.4-mini` is the documented lower-cost OpenAI
-alternative.
-
-When exactly one of `NVIDIA_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`
-is present, SkillEvaluator can auto-select that provider. Anthropic and Bedrock
-do not provide embeddings, so Tier 2 also needs a separate OpenAI, NVIDIA
-Build, or OpenAI-compatible embedding provider. See
-[Providers & Credentials](https://docs.nvidia.com/skills/skillevaluator/configuration)
-for model defaults, endpoint overrides, and fully local setup.
-
-## Run deeper evaluations
-
-`similarity-check` needs an embeddings provider. `context-optimization-check`
-also needs a chat provider to check one skill for repeated guidance:
+Run all tiers on `./my-skill`, a directory containing `SKILL.md`:
 
 ```bash
-skillevaluator context-optimization-check ./my-skill
-skillevaluator similarity-check ./skills
+skillevaluator validate ./my-skill
 ```
 
-Install Semgrep, SkillSpector, and Gitleaks before a full run; missing Tier 1
-scanner evidence makes validation incomplete. Then verify the selected agent
-runtime and use `validate --full`:
+Run individual tiers:
 
 ```bash
-skillevaluator doctor --agents codex --env-mode docker
-skillevaluator validate ./my-skill \
-  --full \
-  --agents codex \
-  --env-mode docker
+skillevaluator tier1 ./my-skill
+skillevaluator tier2 ./my-skill
+skillevaluator tier3 ./my-skill
 ```
 
-`--full` runs Tiers 1, 2, and 3 and enables autopilot. If the skill has no
-accepted evaluation source, autopilot creates one initial case at
-`evals/evals.json`; if the file already exists, SkillEvaluator reuses it. For a
-broader four-bucket dataset, generate and review it first:
+- **Tier 1** runs static checks, including dependency checks, plus rubric,
+  LLM security analysis, and finding verification when a provider is configured.
+  Without a provider, LLM stages are reported as skipped.
+  Use `--no-llm` to opt out of LLM checks.
+- **Tier 2** checks for repeated content inside the skill. Add
+  `--catalog ./skill-catalog.json` to compare against other skills too; without
+  a catalog, the output explicitly says inter-skill comparison did not run.
+- **Tier 3** creates one starter evaluation case if no dataset or task source
+  exists, then runs the provider-native agent in Docker with and without the
+  skill. Valid existing sources are reused unchanged; invalid ones produce an
+  error. Review starter cases; they provide limited coverage.
+
+A tier without a path shows help.
+Expert commands such as `tier1 security-scan`, `tier2 similarity-check`, and
+`tier3 create-eval-dataset` remain available.
+
+### Runtime requirements
+
+`[all]` installs Python extras; full Tier 1 needs Semgrep, SkillSpector, and Gitleaks,
+and Tier 3 needs an agent runtime and sandbox. Follow the
+[installation guide](https://docs.nvidia.com/skills/skillevaluator/installation),
+then check readiness:
 
 ```bash
-skillevaluator create-eval-dataset ./my-skill --full
+skillevaluator doctor --env-mode docker
 ```
 
-Tier 2 needs chat and embedding providers. Tier 3 also needs the evaluator
-provider, the selected agent's credential, and a Docker, local, or cloud
-sandbox. Live model calls and managed sandboxes can incur charges; local mode
-avoids managed sandbox charges, not hosted model charges. It is experimental
-and only for trusted skills and workspaces; use Docker or cloud for untrusted
-code. Start with one agent and a small dataset.
-See the [Tier 3 guide](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation#plan-for-cost)
-before scaling a run. Tier 1 always gates `validate`. Tier 2 gates by default;
-`--no-block-on-dedup` keeps its scan and reports but makes its findings
-advisory. Tier 3 is advisory by default; `--block-on-agent-eval` promotes its
-findings, including invalid task-source evidence, into the exit gate.
+For a keyless check without external scanners, run
+`skillevaluator quality-check ./my-skill`. If the command is unavailable,
+run `uv tool update-shell` and reopen your terminal.
+
+### Other providers and optional model overrides
+
+OpenAI uses two variables and defaults to Codex for Tier 3:
+
+```bash
+export SKILL_EVAL_LLM_PROVIDER=openai
+export OPENAI_API_KEY='sk-...'
+```
+
+NVIDIA Build defaults to `nvidia/nemotron-3-super-120b-a12b` for evaluator chat,
+Tier 3 agent execution, and judging. Its embedding default is
+`nvidia/nemotron-3-embed-1b`; OpenAI defaults to `gpt-5.6-sol` and
+`text-embedding-3-small`. These are configured defaults, not automatically
+updated selections of the latest models. To select a different evaluator model:
+
+```bash
+export SKILL_EVAL_LLM_MODEL='your-provider-model-id'
+```
+
+The standard judge inherits that model unless overridden. Tier 3 defaults to
+OpenCode for NVIDIA Build, Codex for OpenAI, and Claude Code for Anthropic.
+Use `--agents` and `--agent-model` to override the agent and its model separately.
+
+Anthropic and Bedrock need a separate embedding provider for Tier 2. Custom
+OpenAI-compatible endpoints also require explicit endpoint and model settings.
+See [Providers & Credentials](https://docs.nvidia.com/skills/skillevaluator/configuration)
+for these setups and advanced overrides.
+
+## Run the combined pipeline
+
+`validate` runs Tier 1, Tier 2, and Tier 3 with autopilot by default for skills:
+
+```bash
+skillevaluator validate ./my-skill
+```
+
+`--full` remains supported but is unnecessary.
+Use `--tiers 1,2` or `--no-tier3` to skip live evaluation; `--tiers 1` runs
+only the static suite. `--no-autopilot` requires an existing evaluation source.
+Rules, workflows, and plugins retain their applicable validation stages without
+automatically enabling skill evaluation.
+
+To prepare broader coverage before a run, generate and review a four-bucket dataset:
+
+```bash
+skillevaluator tier3 create-eval-dataset ./my-skill --full
+```
+
+Tier 1 always gates `validate`. Tier 2 gates by default;
+`--no-block-on-dedup` makes its findings advisory. Tier 3 is advisory by default;
+`--block-on-agent-eval` makes its findings gate too. Live model calls and managed
+sandboxes can incur charges; start with one agent and a small dataset. See the
+[Tier 3 guide](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation#plan-for-cost)
+for runtime and cost details.
+
+## Run from a source checkout
+
+```bash
+git clone https://github.com/NVIDIA/SkillEvaluator.git
+cd SkillEvaluator
+uv sync --python 3.13 --extra all
+uv run --extra all skillevaluator tier1 ./my-skill
+```
+
+Use the provider exports above. Prefix other commands with
+`uv run --extra all` to select this checkout.
 
 ## Research and citation
 
@@ -160,10 +190,8 @@ SkillEvaluator release or commit. See [CITATION.cff](CITATION.cff).
 
 ## Documentation
 
-Read the complete documentation at
-[docs.nvidia.com/skills/skillevaluator](https://docs.nvidia.com/skills/skillevaluator/)
-for installation, the quickstart, provider configuration, tier guides, results
-and CI integration, the CLI reference, and contributor guidance.
+See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
+setup, tier guides, reports, CI integration, and the CLI reference.
 
 ## Installation and third-party software
 

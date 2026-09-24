@@ -363,6 +363,25 @@ def passes_required_gate(result: ValidationResult) -> bool:
     return bool(result.passed or is_advisory_agent_eval_skip(result))
 
 
+def additional_errors(result: ValidationResult) -> list[str]:
+    """Return errors not already displayed through a structured finding.
+
+    Findings also populate the legacy error list. Keep independent errors,
+    including execution diagnostics, without repeating those mirrored entries.
+    """
+    represented = {finding.to_legacy_string() for finding in result.findings}
+    for finding in result.findings:
+        # merge_with_prefix puts skill labels before legacy messages but inside
+        # structured finding paths. Recognize both forms, including nested merges.
+        location = finding.location
+        prefix = ""
+        while location.startswith("[") and "] " in location:
+            label, _, location = location.partition("] ")
+            prefix += label + "] "
+            represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+    return [error for error in result.errors if error not in represented]
+
+
 class ReporterBase(ABC):
     """Abstract base class for validation result reporters.
 

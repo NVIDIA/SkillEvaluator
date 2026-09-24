@@ -350,7 +350,7 @@ def test_gke_mode_rejects_claude_code_without_vertex_or_anthropic_key(monkeypatc
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
     errors = _validate_agent_provider_credentials(
-        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        _provider("openai", "gpt-5.5"),
         ["claude-code"],
         {},
         {"claude-code": "claude-sonnet-5"},
@@ -392,7 +392,7 @@ def test_gke_mode_suggests_vertex_suffix_when_anthropic_key_missing(monkeypatch:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
     errors = _validate_agent_provider_credentials(
-        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        _provider("openai", "gpt-5.5"),
         ["claude-code"],
         {},
         {"claude-code": "claude-sonnet-5"},
@@ -407,7 +407,7 @@ def test_docker_mode_does_not_suggest_vertex_suffix(monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
     errors = _validate_agent_provider_credentials(
-        _provider("openai-compatible", "google/gemini-3.8-flash"),
+        _provider("openai", "gpt-5.5"),
         ["claude-code"],
         {},
         {"claude-code": "claude-sonnet-5"},

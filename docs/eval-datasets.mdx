@@ -134,13 +134,15 @@ same templates `--no-llm` uses, so the command always succeeds. Exact defaults
 for every flag are in the
 [CLI Reference](cli-reference.mdx#create-eval-dataset).
 
-You don't have to generate a dataset up front at all: `tier3 evaluate
---autopilot` (and `validate --full` or `validate --autopilot`) creates exactly
+You don't have to generate a dataset up front at all: `validate PATH`,
+`tier3 PATH`, or `tier3 evaluate PATH --autopilot` creates exactly
 one eval case when no evaluation source exists — LLM-generated with your
 configured provider, falling back to a deterministic template case when no
 key is available. Autopilot never overwrites an existing source; if
 `evals/evals.json` (or `evals/harbor/`) is already there, it runs with what
-you wrote.
+you wrote. Dataset generation does not replace the provider and runtime
+requirements for the live evaluation. Use `validate PATH --no-autopilot` to
+require an existing source instead of generating one.
 
 <Warning>
   `--force` overwrites `evals/evals.json` without a backup. `--refine` implies
@@ -243,7 +245,7 @@ grading:
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
 | `harbor.timeout_multiplier` | number > 0 | Scales task timeouts. |
-| `harbor.agent_runtime_preflight` | boolean | Bounded one-task smoke run that checks agent runtime readiness before the full evaluation. Default: `true`. |
+| `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |

@@ -15,7 +15,7 @@ from click.testing import CliRunner
 
 from skillevaluator import cli as cli_module
 from skillevaluator.cli import cli
-from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_agents
+from skillevaluator.tier3.commands import parse_agent_model_overrides, parse_agents, resolve_agents
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "simple"
 
@@ -45,6 +45,7 @@ def test_validate_passes_explicit_previous_version(monkeypatch) -> None:
         cli,
         [
             "validate",
+            "--no-tier3",
             str(FIXTURE),
             "--no-dedup",
             "--checks",
@@ -60,6 +61,24 @@ def test_validate_passes_explicit_previous_version(monkeypatch) -> None:
 
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
     assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("nv_build", ["opencode"]),
+        ("openai", ["codex"]),
+        ("anthropic", ["claude-code"]),
+        ("bedrock", ["claude-code"]),
+        ("openai-compatible", ["codex"]),
+    ],
+)
+def test_agent_default_follows_the_selected_provider(provider: str, expected: list[str]) -> None:
+    assert resolve_agents(None, provider=provider) == expected
+
+
+def test_explicit_agent_selection_overrides_the_provider_default() -> None:
+    assert resolve_agents("codex,claude", provider="nv_build") == ["codex", "claude-code"]
 
 
 def test_claude_alias_model_override_uses_canonical_agent_name() -> None:
@@ -90,7 +109,17 @@ def test_repeated_canonical_model_overrides_are_rejected() -> None:
 
 def test_validate_fixture_no_llm() -> None:
     result = CliRunner().invoke(
-        cli, ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--checks", "schema,quality,lint"]
+        cli,
+        [
+            "validate",
+            "--no-tier3",
+            str(FIXTURE),
+            "--verbose",
+            "--no-llm",
+            "--no-dedup",
+            "--checks",
+            "schema,quality,lint",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -105,6 +134,7 @@ def test_validate_reports_malformed_policy_without_traceback(tmp_path: Path) -> 
         cli,
         [
             "validate",
+            "--no-tier3",
             str(FIXTURE),
             "--no-llm",
             "--no-dedup",
@@ -124,7 +154,17 @@ def test_validate_prints_tier1_section_banner() -> None:
     # The Tier 1 section is announced as it runs so it is visibly reported in
     # CI logs (SkillEvaluator parity), not only inside the final combined report.
     result = CliRunner().invoke(
-        cli, ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--checks", "schema,quality,lint"]
+        cli,
+        [
+            "validate",
+            "--no-tier3",
+            str(FIXTURE),
+            "--verbose",
+            "--no-llm",
+            "--no-dedup",
+            "--checks",
+            "schema,quality,lint",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -135,7 +175,17 @@ def test_validate_tier1_banner_is_stable_in_narrow_terminal(monkeypatch) -> None
     monkeypatch.setenv("COLUMNS", "20")
 
     result = CliRunner().invoke(
-        cli, ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--checks", "schema,quality,lint"]
+        cli,
+        [
+            "validate",
+            "--no-tier3",
+            str(FIXTURE),
+            "--verbose",
+            "--no-llm",
+            "--no-dedup",
+            "--checks",
+            "schema,quality,lint",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -167,7 +217,17 @@ def test_validate_flushes_tier1_results_before_tier3(monkeypatch) -> None:
     with runner.isolated_filesystem():
         result = runner.invoke(
             cli,
-            ["validate", str(FIXTURE), "--verbose", "--no-llm", "--no-dedup", "--agent-eval", "--checks", "schema"],
+            [
+                "validate",
+                "--no-autopilot",
+                str(FIXTURE),
+                "--verbose",
+                "--no-llm",
+                "--no-dedup",
+                "--agent-eval",
+                "--checks",
+                "schema",
+            ],
         )
 
     assert result.exit_code == 0, result.output
@@ -176,6 +236,55 @@ def test_validate_flushes_tier1_results_before_tier3(monkeypatch) -> None:
     assert "Tier 3: Live Agent Evaluation" in out
     # The interim Tier 1 summary table is flushed ahead of the Tier 3 section.
     assert out.index("Validation Results") < out.index("Tier 3: Live Agent Evaluation")
+
+
+def test_validate_help_exposes_optional_agent_runtime_preflight() -> None:
+    result = CliRunner().invoke(cli, ["validate", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--agent-runtime-preflight" in result.output
+    assert "--no-agent-runtime-preflight" in result.output
+    assert "default: disabled" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [
+        ("--agent-runtime-preflight", True),
+        ("--no-agent-runtime-preflight", False),
+    ],
+)
+def test_validate_forwards_agent_runtime_preflight_override(monkeypatch, flag: str, expected: bool) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.models.result import ValidationResult
+
+    captured: dict[str, object] = {}
+
+    def _tier3(*_args, **kwargs) -> ValidationResult:
+        captured.update(kwargs)
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.add_success("agent_eval", "ok")
+        return result
+
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", _tier3)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            "--no-autopilot",
+            str(FIXTURE),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            flag,
+            "--checks",
+            "schema",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["agent_runtime_preflight"] is expected
 
 
 def test_tier1_lint_scripts_fixture() -> None:
@@ -233,7 +342,7 @@ def test_validate_quiet_default_renders_pipeline_view() -> None:
     runner = CliRunner()
     with runner.isolated_filesystem():
         result = runner.invoke(
-            cli, ["validate", str(FIXTURE), "--no-llm", "--no-tier2", "--tier1-checks", "schema,quality"]
+            cli, ["validate", "--no-tier3", str(FIXTURE), "--no-llm", "--no-tier2", "--tier1-checks", "schema,quality"]
         )
 
     out = _plain_text(result.output)
@@ -251,7 +360,9 @@ def test_validate_quiet_default_renders_pipeline_view() -> None:
 def test_validate_quiet_always_writes_html_and_json_reports() -> None:
     runner = CliRunner()
     with runner.isolated_filesystem():
-        result = runner.invoke(cli, ["validate", str(FIXTURE), "--no-llm", "--no-dedup", "--checks", "schema"])
+        result = runner.invoke(
+            cli, ["validate", "--no-tier3", str(FIXTURE), "--no-llm", "--no-dedup", "--checks", "schema"]
+        )
         assert result.exit_code == 0, result.output
         reports = list(Path("reports").iterdir())
         assert any(p.suffix == ".html" for p in reports), reports
@@ -287,14 +398,16 @@ def test_validate_tier_aliases_and_selector(monkeypatch) -> None:
 
     runner = CliRunner()
     with runner.isolated_filesystem():
-        result = runner.invoke(cli, ["validate", str(FIXTURE), "--no-llm", "--tiers", "1,3", "--checks", "schema"])
+        result = runner.invoke(
+            cli, ["validate", "--no-autopilot", str(FIXTURE), "--no-llm", "--tiers", "1,3", "--checks", "schema"]
+        )
     assert result.exit_code == 0, result.output
     assert calls == {"tier3": True}
 
     calls.clear()
     with runner.isolated_filesystem():
         result = runner.invoke(
-            cli, ["validate", str(FIXTURE), "--no-llm", "--no-tier2", "--tier3", "--checks", "schema"]
+            cli, ["validate", "--no-autopilot", str(FIXTURE), "--no-llm", "--no-tier2", "--tier3", "--checks", "schema"]
         )
     assert result.exit_code == 0, result.output
     assert calls == {"tier3": True}
@@ -342,7 +455,17 @@ def test_validate_catalog_runs_each_skill_as_separate_job() -> None:
         second.write_text(second.read_text(encoding="utf-8").replace("name: simple", "name: simple2"), encoding="utf-8")
         result = runner.invoke(
             cli,
-            ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "quality", "-o", "out"],
+            [
+                "validate",
+                "--no-tier3",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "quality",
+                "-o",
+                "out",
+            ],
         )
 
         out = _plain_text(result.output)
@@ -377,6 +500,7 @@ def test_validate_catalog_workers_runs_skills_in_parallel() -> None:
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(catalog.resolve()),
                 "--workers",
                 "2",
@@ -484,6 +608,7 @@ def test_validate_catalog_workers_records_the_evaluated_source_on_every_card() -
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(catalog.resolve()),
                 "--workers",
                 "2",
@@ -521,6 +646,7 @@ def test_validate_catalog_workers_accepts_options_before_target_path() -> None:
             cli,
             [
                 "validate",
+                "--no-tier3",
                 "--workers",
                 "2",
                 str(catalog.resolve()),
@@ -548,6 +674,7 @@ def test_validate_catalog_workers_preserves_min_score_and_json_format() -> None:
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(catalog.resolve()),
                 "--workers",
                 "2",
@@ -574,6 +701,7 @@ def test_validate_catalog_workers_cli_only_report_format() -> None:
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(catalog.resolve()),
                 "--workers",
                 "2",
@@ -601,6 +729,7 @@ def test_validate_catalog_workers_implicit_default_reports() -> None:
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(catalog.resolve()),
                 "--workers",
                 "2",
@@ -627,7 +756,7 @@ def test_validate_records_json_report_name_for_catalog_binding(monkeypatch) -> N
     with runner.isolated_filesystem():
         result = runner.invoke(
             cli,
-            ["validate", str(FIXTURE), "--no-llm", "--no-tier2", "--checks", "schema", "-o", "out"],
+            ["validate", "--no-tier3", str(FIXTURE), "--no-llm", "--no-tier2", "--checks", "schema", "-o", "out"],
         )
 
     assert result.exit_code == 0, result.output
@@ -734,7 +863,9 @@ def test_catalog_summary_binds_exact_json_report_not_sarif_sidecar(monkeypatch) 
         sarif.write_text("{}", encoding="utf-8")
         return all(result.passed for result in results)
 
-    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [ValidationResult(validator_name="Schema")])
+    monkeypatch.setattr(
+        cli_module, "run_validation", lambda *_args, **_kwargs: [ValidationResult(validator_name="Schema")]
+    )
     monkeypatch.setattr(cli_module, "emit_reports", _emit)
 
     runner = CliRunner()
@@ -745,6 +876,7 @@ def test_catalog_summary_binds_exact_json_report_not_sarif_sidecar(monkeypatch) 
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(catalog.resolve()),
                 "--no-llm",
                 "--no-dedup",
@@ -814,11 +946,35 @@ def test_catalog_summary_same_second_rerun_overwrites_json(monkeypatch) -> None:
         shutil.copytree(FIXTURE, catalog / "simple")
         first = runner.invoke(
             cli,
-            ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-r", "json", "-o", "out"],
+            [
+                "validate",
+                "--no-tier3",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "-r",
+                "json",
+                "-o",
+                "out",
+            ],
         )
         second = runner.invoke(
             cli,
-            ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-r", "json", "-o", "out"],
+            [
+                "validate",
+                "--no-tier3",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "-r",
+                "json",
+                "-o",
+                "out",
+            ],
         )
 
         assert first.exit_code == 0, first.output
@@ -875,6 +1031,7 @@ def test_validate_catalog_rejects_one_previous_version_for_every_skill() -> None
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(catalog.resolve()),
                 "--no-llm",
                 "--no-dedup",
@@ -912,7 +1069,9 @@ def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatc
 
     runner = CliRunner()
     with runner.isolated_filesystem():
-        result = runner.invoke(cli, ["validate", str(FIXTURE), "--no-llm", "--no-tier2", "--checks", "schema"])
+        result = runner.invoke(
+            cli, ["validate", "--no-tier3", str(FIXTURE), "--no-llm", "--no-tier2", "--checks", "schema"]
+        )
 
     out = _plain_text(result.output)
     assert result.exit_code != 0
@@ -966,7 +1125,7 @@ def test_validate_quiet_tier3_execution_errors_do_not_render_green(monkeypatch) 
     runner = CliRunner()
     with runner.isolated_filesystem():
         result = runner.invoke(
-            cli, ["validate", str(FIXTURE), "--no-llm", "--no-tier2", "--tier3", "--checks", "schema"]
+            cli, ["validate", "--no-autopilot", str(FIXTURE), "--no-llm", "--no-tier2", "--tier3", "--checks", "schema"]
         )
 
     out = _plain_text(result.output)
@@ -1130,10 +1289,10 @@ def test_validate_tier2_default_is_blocking_and_can_be_advisory(monkeypatch) -> 
 
     runner = CliRunner()
     with runner.isolated_filesystem():
-        blocking = runner.invoke(cli, ["validate", str(FIXTURE), "--checks", "schema"])
+        blocking = runner.invoke(cli, ["validate", "--no-tier3", str(FIXTURE), "--checks", "schema"])
         advisory = runner.invoke(
             cli,
-            ["validate", str(FIXTURE), "--checks", "schema", "--no-block-on-dedup"],
+            ["validate", "--no-tier3", str(FIXTURE), "--checks", "schema", "--no-block-on-dedup"],
         )
 
     assert blocking.exit_code != 0
@@ -1163,6 +1322,7 @@ def test_validate_missing_tier3_source_respects_blocking_flag(monkeypatch, tmp_p
         cli,
         [
             "validate",
+            "--no-autopilot",
             str(skill),
             "--no-tier2",
             "--tier3",
@@ -1177,6 +1337,7 @@ def test_validate_missing_tier3_source_respects_blocking_flag(monkeypatch, tmp_p
         cli,
         [
             "validate",
+            "--no-autopilot",
             str(skill),
             "--no-tier2",
             "--tier3",
@@ -1212,7 +1373,19 @@ def test_validate_quiet_honors_explicit_report_formats() -> None:
     with runner.isolated_filesystem():
         result = runner.invoke(
             cli,
-            ["validate", str(FIXTURE), "--no-llm", "--no-dedup", "--checks", "schema", "-r", "cli", "-o", "out"],
+            [
+                "validate",
+                "--no-tier3",
+                str(FIXTURE),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "-r",
+                "cli",
+                "-o",
+                "out",
+            ],
         )
         assert result.exit_code == 0, result.output
         assert "Validation Results" in _plain_text(result.output)
@@ -1222,7 +1395,19 @@ def test_validate_quiet_honors_explicit_report_formats() -> None:
     with runner.isolated_filesystem():
         result = runner.invoke(
             cli,
-            ["validate", str(FIXTURE), "--no-llm", "--no-dedup", "--checks", "schema", "-r", "json", "-o", "out"],
+            [
+                "validate",
+                "--no-tier3",
+                str(FIXTURE),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "-r",
+                "json",
+                "-o",
+                "out",
+            ],
         )
         assert result.exit_code == 0, result.output
         assert list(Path("out").glob("*.json"))
@@ -1257,7 +1442,18 @@ def test_validate_catalog_survives_failing_skills(monkeypatch) -> None:
         for name in ("simple", "simple2"):
             shutil.copytree(FIXTURE, catalog / name)
         result = runner.invoke(
-            cli, ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-o", "out"]
+            cli,
+            [
+                "validate",
+                "--no-tier3",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "-o",
+                "out",
+            ],
         )
 
         out = _plain_text(result.output)
@@ -1405,7 +1601,18 @@ def test_validate_catalog_reports_unexpected_errors(monkeypatch) -> None:
         for name in ("simple", "simple2"):
             shutil.copytree(FIXTURE, catalog / name)
         result = runner.invoke(
-            cli, ["validate", str(catalog.resolve()), "--no-llm", "--no-dedup", "--checks", "schema", "-o", "out"]
+            cli,
+            [
+                "validate",
+                "--no-tier3",
+                str(catalog.resolve()),
+                "--no-llm",
+                "--no-dedup",
+                "--checks",
+                "schema",
+                "-o",
+                "out",
+            ],
         )
 
         out = _plain_text(result.output)

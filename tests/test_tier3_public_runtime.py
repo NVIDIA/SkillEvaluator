@@ -61,7 +61,7 @@ def test_live_eval_exposes_only_harbor_native_environments() -> None:
     assert "modal" in result.output
     assert "harbor-environment" not in result.output
     assert "k8s-sandbox" not in result.output
-    assert "local" not in result.output
+    assert "local" in result.output
     assert "base-image-mode" not in result.output
     assert "--agent-runtime-preflight" in result.output
 
@@ -202,15 +202,24 @@ def test_local_bridge_command_uses_custom_agent_import_path() -> None:
     assert "-a" not in command
 
 
-def test_custom_agent_import_path_is_rejected_for_native_cloud() -> None:
-    with pytest.raises(ValueError, match="agent_import_path is supported only with --env docker or local"):
-        build_harbor_run_command(
-            dataset_path="/tmp/dataset",
-            agent="codex",
-            job_name="bridge-test",
-            env_mode="e2b",
-            agent_import_path="example:Agent",
-        )
+@pytest.mark.parametrize("env_mode", ["e2b", "daytona"])
+def test_custom_agent_import_path_preserves_native_cloud_environment(env_mode: str) -> None:
+    import_path = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
+    model = "openai/openai/gpt-5.6-sol"
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="gateway-test",
+        env_mode=env_mode,
+        agent_import_path=import_path,
+        model=model,
+    )
+
+    assert command[command.index("--agent-import-path") + 1] == import_path
+    assert command[command.index("--env") + 1] == env_mode
+    assert command[command.index("--model") + 1] == model
+    assert "-a" not in command
+    assert "--environment-import-path" not in command
 
 
 def test_evaluate_forwards_native_environment_without_legacy_sandbox_configuration(monkeypatch, tmp_path) -> None:
@@ -769,7 +778,7 @@ def test_nvidia_build_opencode_default_model_is_prefixed_for_local_runtime() -> 
     ("provider_name", "expected"),
     [
         ("openai", "openai/test-model"),
-        ("openai-compatible", "openai/test-model"),
+        ("openai-compatible", "openai/nvidia/nvidia/nemotron-3-super-120b-long-ctx"),
         ("anthropic", "anthropic/test-model"),
     ],
 )
@@ -784,7 +793,7 @@ def test_opencode_default_model_is_provider_qualified(provider_name: str, expect
 
     assert _model_for_agent("opencode", cli_model=None, config_agents={}, provider=provider) == (
         expected,
-        "public provider default",
+        "openai-compatible agent default" if provider_name == "openai-compatible" else "public provider default",
     )
 
 

@@ -1303,6 +1303,7 @@ def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=No
         "model": model,
         token_key: max_tokens,
         "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
@@ -1500,6 +1501,7 @@ def _call_anthropic(prompt, model, max_tokens, temperature):
         "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature

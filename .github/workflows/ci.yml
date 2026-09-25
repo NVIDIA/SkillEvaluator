@@ -80,27 +80,22 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
       - name: Set up Node.js for docs
-        if: ${{ needs.classify-changes.outputs.docs_only == 'true' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
       - name: Validate Fern documentation
-        if: ${{ needs.classify-changes.outputs.docs_only == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          FERN_VERSION="$(node -p "require('./fern/fern.config.json').version")"
-          if [[ ! "$FERN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error file=fern/fern.config.json::Invalid Fern CLI version: $FERN_VERSION"
-            exit 1
-          fi
-          npm install --global "fern-api@$FERN_VERSION"
-          fern check
+          # npm ci reproduces fern/package-lock.json exactly. tests/test_ci_workflows.py
+          # asserts fern/package.json and fern/fern.config.json name the same version.
+          npm ci --prefix fern --ignore-scripts --omit=optional
+          FERN_VERSION="$(node -p "require('./fern/package.json').dependencies['fern-api']")"
+          ./fern/node_modules/.bin/fern check
           {
-            echo "### Documentation-only CI"
+            echo "### Fern documentation validation"
             echo
             echo "Validated docs and Fern configuration with Fern CLI $FERN_VERSION."
-            echo "The platform test matrix was skipped because only docs/** and fern/** changed."
           } >> "$GITHUB_STEP_SUMMARY"
 
   test-python-313:

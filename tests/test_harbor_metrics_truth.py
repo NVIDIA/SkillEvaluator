@@ -20,6 +20,7 @@ from skillevaluator.tier3.harbor.collector import (
     _compute_lift,
     _condition_execution_summary,
     _count_derived_pass_rate_delta,
+    _logical_attempt_rewards,
     _mcnemar_exact_p_value,
     _mcnemar_exact_probability,
     _minimum_attainable_mcnemar_p_value,
@@ -27,15 +28,18 @@ from skillevaluator.tier3.harbor.collector import (
     _pass_rate_delta,
     _pass_summary,
     _probability_text,
+    _score_policy_for_rewards,
     _wilson_score_interval,
 )
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
+    CUSTOM_SCORE_POLICY,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
+    LEGACY_SCORE_POLICY,
     average_metrics,
     canonical_dimension_mean,
     extract_custom_metrics,
@@ -84,6 +88,15 @@ def test_overall_score_requires_a_complete_finite_metric_set() -> None:
     assert overall_score({"metric_set": CUSTOM_ONLY_METRIC_SET, "overall": float("nan")}) is None
 
 
+@pytest.mark.parametrize("invalid", [-0.1, 1.1])
+def test_default_overall_rejects_out_of_range_evaluator_scores(invalid: float) -> None:
+    scores = dict.fromkeys(DEFAULT_METRICS, 0.5)
+    scores["security"] = invalid
+
+    assert overall_score_from_metrics(scores) is None
+    assert overall_score({"metric_set": DEFAULT_METRIC_SET, **scores}) is None
+
+
 def test_default_overall_score_uses_the_canonical_dimension_mean() -> None:
     reward = {
         "metric_set": DEFAULT_METRIC_SET,
@@ -102,6 +115,72 @@ def test_default_overall_score_uses_the_canonical_dimension_mean() -> None:
     assert "mean(Security, Correctness, Discoverability, Effectiveness, Efficiency)" in score_definition(
         DEFAULT_METRICS
     )
+
+
+def test_pre_policy_default_reward_preserves_its_persisted_overall() -> None:
+    reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+        "overall": 0.5583,
+    }
+
+    assert "score_policy" not in reward
+    assert overall_score(reward) == pytest.approx(0.5583)
+
+
+def test_default_overall_rounds_at_the_canonical_policy_boundary() -> None:
+    scores = dict.fromkeys(DEFAULT_METRICS, 0.0)
+    scores["security"] = 0.0001
+
+    assert overall_score_from_metrics(scores) == 0.0
+
+
+def test_score_policy_metadata_is_not_a_custom_metric() -> None:
+    assert extract_custom_metrics({"score_policy": 0.75}) == {}
+
+
+def test_known_legacy_policy_uses_metrics_even_if_stored_overall_disagrees() -> None:
+    reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": LEGACY_SCORE_POLICY,
+        **dict.fromkeys(DEFAULT_METRICS, 0.2),
+        "overall": 0.9,
+    }
+
+    assert overall_score(reward) == 0.2
+
+
+def test_unknown_reward_policy_cannot_score_a_new_attempt() -> None:
+    reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": "future-weighted-policy-v2",
+        **dict.fromkeys(DEFAULT_METRICS, 0.2),
+        "overall": 0.9,
+    }
+
+    assert overall_score(reward) is None
+
+
+@pytest.mark.parametrize(
+    ("metric_set", "policy", "metrics", "score"),
+    [
+        (DEFAULT_METRIC_SET, CUSTOM_SCORE_POLICY, DEFAULT_METRICS, 0.9),
+        (LEGACY_METRIC_SET, DEFAULT_SCORE_POLICY, LEGACY_METRICS, 0.9),
+        (CUSTOM_ONLY_METRIC_SET, DEFAULT_SCORE_POLICY, (), 0.9),
+        (CUSTOM_ONLY_METRIC_SET, CUSTOM_SCORE_POLICY, (), 1.1),
+    ],
+)
+def test_reward_rejects_incompatible_policy_or_out_of_range_custom_overall(
+    metric_set: str, policy: str, metrics: tuple[str, ...], score: float
+) -> None:
+    reward = {"metric_set": metric_set, "score_policy": policy, **dict.fromkeys(metrics, 0.2), "overall": score}
+
+    assert overall_score(reward) is None
 
 
 def test_best_agent_selection_uses_the_canonical_dimension_mean() -> None:
@@ -123,6 +202,33 @@ def test_best_agent_selection_uses_the_canonical_dimension_mean() -> None:
 
     assert sum(direction_reversing.values()) / len(direction_reversing) > 0.5
     assert _pick_best_agent(agents) == "dimension-mean-winner"
+
+
+def test_best_agent_selection_respects_historical_policy_scores() -> None:
+    historical_scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+    agents = {
+        "historical-winner": {
+            "execution_status": "succeeded",
+            "with_skill": historical_scores,
+            "overall_with_skill": 0.5583,
+            "score_policy_with_skill": LEGACY_SCORE_POLICY,
+        },
+        "current-winner": {
+            "execution_status": "succeeded",
+            "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.52),
+            "overall_with_skill": 0.52,
+            "score_policy_with_skill": DEFAULT_SCORE_POLICY,
+        },
+    }
+
+    assert _pick_best_agent(agents) == "historical-winner"
 
 
 def test_standalone_harbor_metric_aggregation_uses_the_canonical_dimension_mean(tmp_path: Path) -> None:
@@ -148,7 +254,9 @@ def test_standalone_harbor_metric_aggregation_uses_the_canonical_dimension_mean(
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert json.loads(output_path.read_text(encoding="utf-8"))["overall"] == 0.49
+    artifact = json.loads(output_path.read_text(encoding="utf-8"))
+    assert artifact["overall"] == 0.49
+    assert artifact["score_policy"] == DEFAULT_SCORE_POLICY
 
     precision_reward = {
         "metric_set": DEFAULT_METRIC_SET,
@@ -169,6 +277,111 @@ def test_standalone_harbor_metric_aggregation_uses_the_canonical_dimension_mean(
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(output_path.read_text(encoding="utf-8"))["overall"] == 0.0001
+
+
+def test_standalone_harbor_metric_aggregation_preserves_explicit_legacy_policy(tmp_path: Path) -> None:
+    reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": LEGACY_SCORE_POLICY,
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+    input_path = tmp_path / "rewards.jsonl"
+    output_path = tmp_path / "metrics.json"
+    input_path.write_text(json.dumps(reward) + "\n", encoding="utf-8")
+    metric_script = Path(__file__).parents[1] / "src/skillevaluator/tier3/harbor/templates/metric.py"
+
+    completed = subprocess.run(
+        [sys.executable, str(metric_script), "-i", str(input_path), "-o", str(output_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    artifact = json.loads(output_path.read_text(encoding="utf-8"))
+    assert artifact["overall"] == 0.5583
+    assert artifact["score_policy"] == LEGACY_SCORE_POLICY
+
+    input_path.write_text(
+        json.dumps(reward) + "\n" + json.dumps({**reward, "score_policy": DEFAULT_SCORE_POLICY}) + "\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(metric_script), "-i", str(input_path), "-o", str(output_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+
+
+def test_explicit_legacy_policy_rejects_out_of_range_metric_values() -> None:
+    reward = {
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": LEGACY_SCORE_POLICY,
+        **dict.fromkeys(DEFAULT_METRICS, 0.5),
+        "security": 1.5,
+    }
+
+    assert overall_score(reward) is None
+
+
+def test_collapsed_equal_score_steps_remain_policy_ambiguous() -> None:
+    equal = {
+        "entry_id": "case-001",
+        "metric_set": DEFAULT_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 0.5),
+        "overall": 0.5,
+        "_trial_root_name": "case-001__attempt",
+        "_step_name": "step-1",
+    }
+    historical = {
+        "entry_id": "case-002",
+        "metric_set": DEFAULT_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 0.3875),
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+        "overall": 0.5583,
+        "_trial_root_name": "case-002__attempt",
+    }
+
+    logical = _logical_attempt_rewards([equal, {**equal, "_step_name": "step-2"}, historical])
+
+    assert "score_policy" not in logical[0]
+    assert _score_policy_for_rewards(logical, DEFAULT_METRICS) == (LEGACY_SCORE_POLICY, False)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"behavior_check": None},
+        {"security": float("nan")},
+        {"security": 1.1},
+    ],
+)
+def test_standalone_metric_rejects_incomplete_or_invalid_default_rewards(
+    tmp_path: Path, change: dict[str, object]
+) -> None:
+    reward = {"metric_set": DEFAULT_METRIC_SET, **dict.fromkeys(DEFAULT_METRICS, 0.5), **change}
+    input_path = tmp_path / "rewards.jsonl"
+    output_path = tmp_path / "metrics.json"
+    input_path.write_text(json.dumps(reward) + "\n", encoding="utf-8")
+    metric_script = Path(__file__).parents[1] / "src/skillevaluator/tier3/harbor/templates/metric.py"
+
+    completed = subprocess.run(
+        [sys.executable, str(metric_script), "-i", str(input_path), "-o", str(output_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert not output_path.exists()
 
 
 def test_legacy_overall_score_preserves_the_historical_metric_mean() -> None:

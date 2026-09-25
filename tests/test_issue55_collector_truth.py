@@ -30,6 +30,7 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_SCORE_POLICY,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
+    LEGACY_SCORE_POLICY,
     overall_score,
 )
 
@@ -217,6 +218,208 @@ def test_collection_and_canonical_report_share_one_versioned_overall_score_polic
     persisted_policy = json.loads((tmp_path / "results" / "attempt_policy.json").read_text(encoding="utf-8"))
     assert persisted_policy["score_policy"] == DEFAULT_SCORE_POLICY
     assert DEFAULT_SCORE_POLICY in persisted_policy["score_definition"]
+
+
+def test_recollecting_historical_rewards_keeps_pass_summary_and_report_consistent(tmp_path: Path) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    with_skill = {
+        "entry_id": "case-001",
+        "metric_set": DEFAULT_METRIC_SET,
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+        "overall": 0.5583,
+    }
+    baseline = {
+        "entry_id": "case-001",
+        "metric_set": DEFAULT_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 0.5),
+        "overall": 0.5,
+    }
+    for variant, reward in (("with", with_skill), ("without", baseline)):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        _write_reward(job_dir, "case-001__attempt", reward)
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
+    with_summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    report = build_agent_eval_payload(
+        "demo", result["agents"], attempt_policy=result["attempt_policy"], use_llm_judge=False
+    )
+
+    assert result["score_policy"] == LEGACY_SCORE_POLICY
+    assert with_summary["score_policy"] == LEGACY_SCORE_POLICY
+    assert with_summary["overall_score"] == 0.5583
+    assert result["agents"]["opencode"]["pass_at_k"]["with_skill"]["cases"]["case-001"]["best_score"] == 0.5583
+    assert result["agents"]["opencode"]["lift"]["overall"]["delta"] == 0.0583
+    assert report is not None
+    assert report["overall_score"] == 0.5583
+
+
+def test_historical_condition_accepts_cases_where_both_formulas_agree(tmp_path: Path) -> None:
+    historical = {
+        "entry_id": "case-001",
+        "metric_set": DEFAULT_METRIC_SET,
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+        "overall": 0.5583,
+    }
+    equal_formulas = {
+        "entry_id": "case-002",
+        "metric_set": DEFAULT_METRIC_SET,
+        **dict.fromkeys(DEFAULT_METRICS, 0.5),
+        "overall": 0.5,
+    }
+    for variant, rewards in (
+        ("with", [historical, equal_formulas]),
+        ("without", [dict(equal_formulas, entry_id="case-001"), equal_formulas]),
+    ):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        for index, reward in enumerate(rewards, start=1):
+            _write_reward(job_dir, f"case-{index:03d}__attempt", reward)
+        _write_complete_job_result(job_dir, ["case-001__attempt", "case-002__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001", "case-002"])
+
+    assert result["execution_status"] == "succeeded"
+    assert result["score_policy"] == LEGACY_SCORE_POLICY
+    assert result["agents"]["opencode"]["lift"]["overall"]["delta"] == 0.0292
+
+
+def test_mixed_explicit_reward_policies_fail_the_condition(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    for index, policy in enumerate((DEFAULT_SCORE_POLICY, LEGACY_SCORE_POLICY), start=1):
+        _write_reward(
+            job_dir,
+            f"case-{index:03d}__attempt",
+            {
+                "entry_id": f"case-{index:03d}",
+                "metric_set": DEFAULT_METRIC_SET,
+                "score_policy": policy,
+                **dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "overall": 0.5,
+            },
+        )
+    _write_complete_job_result(job_dir, ["case-001__attempt", "case-002__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001", "case-002"])
+    summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+
+    assert result["execution_status"] == "failed"
+    assert summary["execution_status"] == "failed"
+    assert summary["overall_score"] is None
+    assert any("score policies" in error.lower() for error in result["execution_errors"])
+
+
+def test_paired_conditions_with_different_policies_have_no_publishable_scores(tmp_path: Path) -> None:
+    for variant, policy, score in (
+        ("with", DEFAULT_SCORE_POLICY, 0.8),
+        ("without", LEGACY_SCORE_POLICY, 0.2),
+    ):
+        job_dir = tmp_path / "jobs" / f"demo-opencode-{variant}"
+        _write_reward(
+            job_dir,
+            "case-001__attempt",
+            {
+                "entry_id": "case-001",
+                "metric_set": DEFAULT_METRIC_SET,
+                "score_policy": policy,
+                **dict.fromkeys(DEFAULT_METRICS, score),
+                "overall": score,
+            },
+        )
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
+    agent = result["agents"]["opencode"]
+    with_summary = json.loads(
+        (tmp_path / "results" / "opencode" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    without_summary = json.loads(
+        (tmp_path / "results" / "opencode" / "without-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+
+    assert result["execution_status"] == "failed"
+    assert agent["lift"] == {}
+    assert with_summary["execution_status"] == "failed"
+    assert without_summary["execution_status"] == "failed"
+    assert with_summary["scores"] == without_summary["scores"] == {}
+
+
+def test_multi_agent_collection_rejects_incomparable_score_policies(tmp_path: Path) -> None:
+    for agent, policy in (("opencode", DEFAULT_SCORE_POLICY), ("codex", LEGACY_SCORE_POLICY)):
+        job_dir = tmp_path / "jobs" / f"demo-{agent}-with"
+        _write_reward(
+            job_dir,
+            "case-001__attempt",
+            {
+                "entry_id": "case-001",
+                "metric_set": DEFAULT_METRIC_SET,
+                "score_policy": policy,
+                **dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "overall": 0.5,
+            },
+        )
+        _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode", "codex"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["score_policy"] == "mixed-score-policies"
+    assert "comparison" not in result
+    assert any("score policies" in error.lower() for error in result["execution_errors"])
+
+
+def test_failed_later_agent_does_not_relabel_a_successful_legacy_agent(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    _write_reward(
+        job_dir,
+        "case-001__attempt",
+        {
+            "entry_id": "case-001",
+            "metric_set": DEFAULT_METRIC_SET,
+            "score_policy": LEGACY_SCORE_POLICY,
+            **dict.fromkeys(DEFAULT_METRICS, 0.5),
+            "overall": 0.5,
+        },
+    )
+    _write_complete_job_result(job_dir, ["case-001__attempt"])
+
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode", "codex"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert result["execution_status"] == "failed"
+    assert result["score_policy"] == LEGACY_SCORE_POLICY
+    assert LEGACY_SCORE_POLICY in result["attempt_policy"]["score_definition"]
 
 
 def test_failed_judge_sidecar_is_merged_but_never_scored_and_reason_is_safe(tmp_path: Path) -> None:

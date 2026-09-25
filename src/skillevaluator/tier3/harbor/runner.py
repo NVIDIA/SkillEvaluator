@@ -54,11 +54,12 @@ from skillevaluator.tier3.harbor.adapter import (
 )
 from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle, RetentionOutcome
 from skillevaluator.tier3.harbor.collector import (
+    _score_definition_for_policy,
     collect_harbor_results,
     harbor_job_passed,
     validate_harbor_job_result,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition, score_policy_for_metrics
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_policy_for_metrics
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
     ProgressEvent,
@@ -2616,15 +2617,25 @@ def _run_harbor_eval_impl(
             "dataset_digest": dataset_truth["dataset_digest"],
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
             "run_config": run_config,
-            "attempt_policy": {
-                "max_attempts": n_attempts,
-                "pass_threshold": float(pass_threshold),
-                "stop_on_pass": bool(stop_on_pass),
-                "score_definition": score_definition(tuple(results.get("metrics", DEFAULT_METRICS))),
-                "score_policy": score_policy_for_metrics(tuple(results.get("metrics", DEFAULT_METRICS))),
-            },
         }
     )
+    selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
+    collected_attempt_policy = results.get("attempt_policy")
+    attempt_policy = dict(collected_attempt_policy) if isinstance(collected_attempt_policy, dict) else {}
+    selected_policy = results.get("score_policy") or attempt_policy.get("score_policy")
+    if not isinstance(selected_policy, str) or not selected_policy.strip():
+        selected_policy = score_policy_for_metrics(selected_metrics)
+    attempt_policy.update(
+        {
+            "max_attempts": n_attempts,
+            "pass_threshold": float(pass_threshold),
+            "stop_on_pass": bool(stop_on_pass),
+            "score_policy": selected_policy,
+            "score_definition": attempt_policy.get("score_definition")
+            or _score_definition_for_policy(selected_metrics, selected_policy),
+        }
+    )
+    results["attempt_policy"] = attempt_policy
     _finalize_harbor_artifacts(
         run_dir_value=run_dir,
         keep_requested=keep_harbor_jobs,

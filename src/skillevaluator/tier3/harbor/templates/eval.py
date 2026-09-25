@@ -149,6 +149,7 @@ WASTE_INDICATORS = [
 ]
 
 DEFAULT_METRIC_SET = "skill-evaluator-default-v2"
+DEFAULT_SCORE_POLICY = "skill-evaluator-dimension-mean-v1"
 DISPLAY_METRICS = [
     "security",
     "skill_execution",
@@ -4413,6 +4414,7 @@ def main():
             "goal_accuracy": 0,
             "behavior_check": 0,
             "metric_set": DEFAULT_METRIC_SET,
+            "score_policy": DEFAULT_SCORE_POLICY,
             "error": "No trajectory or reconstructible agent log",
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
@@ -4548,6 +4550,7 @@ def main():
         "goal_accuracy": ga_score,
         "behavior_check": bc_score,
         "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
         "entry_id": entry.get("id"),
         "has_skill": entry.get("has_skill", True),
         "trajectory_source": traj_meta.get("source"),

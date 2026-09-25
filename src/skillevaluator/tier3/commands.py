@@ -38,10 +38,12 @@ from skillevaluator.tier3.harbor import (
     canonical_agent_name,
 )
 from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_SCORE_POLICY,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
+    PARTIAL_SCORE_POLICY,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import (
@@ -1032,14 +1034,17 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                     data = json.loads(summary.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     continue
+                if not isinstance(data, dict):
+                    continue
                 scores = _summary_scores(data, allow_missing_status=allow_missing_status)
-                if scores:
+                overall = _summary_overall(data) if _summary_is_scoreable(data, allow_missing_status) else None
+                if scores or overall is not None:
                     root_with[agent_name] = scores
                     root_meta[agent_name] = {
                         "timestamp": ts_dir.name,
                         "path": str(agent_dir),
                         "num_trials": data.get("num_trials", "?"),
-                        "overall_with_skill": _summary_overall(data),
+                        "overall_with_skill": overall,
                         "score_policy_with_skill": _summary_score_policy(data),
                     }
                     wo_summary = agent_dir / "without-skill" / "summary.json"
@@ -1050,11 +1055,21 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                                 wo_data,
                                 allow_missing_status=allow_missing_status,
                             )
-                            if wo_scores:
+                            wo_overall = (
+                                _summary_overall(wo_data)
+                                if isinstance(wo_data, dict) and _summary_is_scoreable(wo_data, allow_missing_status)
+                                else None
+                            )
+                            if (wo_scores or wo_overall is not None) and (
+                                _effective_compare_policy(
+                                    root_meta[agent_name]["score_policy_with_skill"], root_with[agent_name]
+                                )
+                                == _effective_compare_policy(_summary_score_policy(wo_data), wo_scores)
+                            ):
                                 root_without[agent_name] = wo_scores
                                 root_meta[agent_name].update(
                                     {
-                                        "overall_without_skill": _summary_overall(wo_data),
+                                        "overall_without_skill": wo_overall,
                                         "score_policy_without_skill": _summary_score_policy(wo_data),
                                     }
                                 )
@@ -1069,6 +1084,16 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         return 1
 
     agents = sorted(agent_with)
+    comparison_policies = {
+        _effective_compare_policy(agent_meta[agent].get("score_policy_with_skill"), agent_with[agent])
+        for agent in agents
+    }
+    if len(comparison_policies) > 1:
+        console.print(
+            "[red]Cannot compare overall scores across agents with different score policies. "
+            "Rerun the agents under one policy.[/red]"
+        )
+        return 1
     display_metrics, overall_metrics = _display_metrics(agent_with)
 
     table = Table(show_header=True, header_style="bold dim", box=SIMPLE, padding=(0, 1), show_edge=False, expand=True)
@@ -1082,11 +1107,17 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         row: list[str | Text] = [Text(metric)]
         for agent in agents:
             with_score = _safe_score(agent_with[agent], metric)
-            row.append(Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}"))
+            row.append(
+                Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}")
+                if with_score is not None
+                else Text("-", style="dim")
+            )
             if agent in agent_without:
                 without_score = _safe_score(agent_without[agent], metric)
-                delta = with_score - without_score
-                if delta > 0:
+                delta = with_score - without_score if with_score is not None and without_score is not None else None
+                if delta is None:
+                    row.append(Text("-", style="dim"))
+                elif delta > 0:
                     row.append(Text(f"+{delta:.2f}", style="green"))
                 elif delta < 0:
                     row.append(Text(f"{delta:.2f}", style="red"))
@@ -1104,7 +1135,11 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
             persisted_overall=meta.get("overall_with_skill"),
             score_policy=meta.get("score_policy_with_skill"),
         )
-        overall_row.append(Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}"))
+        overall_row.append(
+            Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}")
+            if with_avg is not None
+            else Text("-", style="dim")
+        )
         if agent in agent_without:
             without_avg = _overall_score_for_display(
                 agent_without[agent],
@@ -1112,10 +1147,13 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                 persisted_overall=meta.get("overall_without_skill"),
                 score_policy=meta.get("score_policy_without_skill"),
             )
-            delta = with_avg - without_avg
-            delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
-            delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
-            overall_row.append(Text(delta_text, style=delta_style))
+            if with_avg is None or without_avg is None:
+                overall_row.append(Text("-", style="dim"))
+            else:
+                delta = with_avg - without_avg
+                delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
+                delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
+                overall_row.append(Text(delta_text, style=delta_style))
     table.add_row(*overall_row)
 
     console.print()
@@ -1133,21 +1171,36 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False) -> dict[str, float]:
     if not isinstance(data, dict):
         return {}
-    status = data.get("execution_status")
-    if status != "succeeded" and not (allow_missing_status and status is None):
+    if not _summary_is_scoreable(data, allow_missing_status):
         return {}
     scores: dict[str, float] = {}
     raw_scores = data.get("scores", data)
     if isinstance(raw_scores, dict):
         for key, value in raw_scores.items():
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                scores[str(key)] = float(value)
+            numeric = _unit_interval_score(value) if key in DEFAULT_METRICS else _finite_numeric(value)
+            if numeric is not None:
+                scores[str(key)] = numeric
     custom_scores = data.get("custom_scores")
     if isinstance(custom_scores, dict):
         for key, value in custom_scores.items():
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                scores[f"custom: {key}"] = float(value)
+            if (numeric := _finite_numeric(value)) is not None:
+                scores[f"custom: {key}"] = numeric
     return scores
+
+
+def _summary_is_scoreable(data: dict[str, Any], allow_missing_status: bool) -> bool:
+    status = data.get("execution_status")
+    return status == "succeeded" or (allow_missing_status and status is None)
+
+
+def _finite_numeric(value: object) -> float | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def _summary_overall(data: dict[str, Any]) -> float | None:
@@ -1157,6 +1210,15 @@ def _summary_overall(data: dict[str, Any]) -> float | None:
 def _summary_score_policy(data: dict[str, Any]) -> str | None:
     value = data.get("score_policy")
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _effective_compare_policy(policy: object, scores: dict[str, float]) -> str:
+    """Treat unversioned complete SkillEvaluator summaries as historical scores."""
+    if isinstance(policy, str) and policy.strip():
+        return policy.strip()
+    if any(metric in scores for metric in DEFAULT_METRICS):
+        return LEGACY_SCORE_POLICY if set(DEFAULT_METRICS).issubset(scores) else PARTIAL_SCORE_POLICY
+    return CUSTOM_SCORE_POLICY
 
 
 def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1173,9 +1235,8 @@ def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str
     return metrics, metrics
 
 
-def _safe_score(scores: dict[str, float], metric: str) -> float:
-    value = scores.get(metric, 0.0)
-    return float(value) if isinstance(value, int | float) else 0.0
+def _safe_score(scores: dict[str, float], metric: str) -> float | None:
+    return _finite_numeric(scores.get(metric))
 
 
 def _unit_interval_score(value: object) -> float | None:
@@ -1195,7 +1256,7 @@ def _overall_score_for_display(
     *,
     persisted_overall: object = None,
     score_policy: object = DEFAULT_SCORE_POLICY,
-) -> float:
+) -> float | None:
     """Honor persisted score truth before inferring a policy from metric names."""
     recorded_overall = _unit_interval_score(persisted_overall)
 
@@ -1208,16 +1269,13 @@ def _overall_score_for_display(
         return recorded_overall
 
     if score_policy == LEGACY_SCORE_POLICY or (score_policy is None and metrics == DEFAULT_METRICS):
-        values = tuple(scores.get(metric) for metric in metrics)
-        if values and all(
-            isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) for value in values
-        ):
-            return round(sum(float(value) for value in values) / len(values), 4)
+        values = tuple(_safe_score(scores, metric) for metric in metrics)
+        if values and all(value is not None for value in values):
+            return round(sum(value for value in values if value is not None) / len(values), 4)
 
-    score = overall_score_from_metrics(scores, metrics)
-    if score is not None:
-        return score
-    return sum(_safe_score(scores, metric) for metric in metrics) / len(metrics)
+    if score_policy is None:
+        return overall_score_from_metrics(scores, metrics)
+    return None
 
 
 def _score_style(score: float) -> str:

@@ -312,6 +312,7 @@ def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path:
         pytest.param(2.0, None, LEGACY_SCORE_POLICY, 0.5583, id="out-of-range-overall"),
         pytest.param(10**4000, None, LEGACY_SCORE_POLICY, 0.5583, id="overflowing-overall"),
         pytest.param(None, DEFAULT_SCORE_POLICY, DEFAULT_SCORE_POLICY, 0.49, id="current-policy"),
+        pytest.param(0.5583, "future-weighted-policy-v2", "future-weighted-policy-v2", 0.5583, id="future-policy"),
     ],
 )
 @pytest.mark.parametrize(
@@ -356,9 +357,7 @@ def test_default_v2_rerender_respects_recorded_or_historical_policy(
         summary_payload["score_policy"] = recorded_policy
     summary.write_text(json.dumps(summary_payload), encoding="utf-8")
     if evaluated_source is not None:
-        (run_dir / "run_config.json").write_text(
-            json.dumps({"evaluated_source": evaluated_source}), encoding="utf-8"
-        )
+        (run_dir / "run_config.json").write_text(json.dumps({"evaluated_source": evaluated_source}), encoding="utf-8")
     if recorded_policy is None:
         comparison_summary = run_dir / "codex" / "with-skill" / "summary.json"
         comparison_summary.parent.mkdir(parents=True)
@@ -400,8 +399,210 @@ def test_default_v2_rerender_respects_recorded_or_historical_policy(
     definition = payload["attempt_policy"]["score_definition"]
     if expected_policy == LEGACY_SCORE_POLICY:
         assert definition.startswith("overall = mean(security,")
+    elif expected_policy == "future-weighted-policy-v2":
+        assert "future-weighted-policy-v2" in definition
+        assert DEFAULT_SCORE_POLICY not in definition
     else:
         assert "mean(Security, Correctness, Discoverability, Effectiveness, Efficiency)" in definition
+
+
+def test_canonical_report_fails_closed_on_mixed_recorded_score_policies() -> None:
+    scores = dict.fromkeys(DEFAULT_METRICS, 0.5)
+    payload = build_agent_eval_payload(
+        "mixed-policy-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": scores,
+                "overall_with_skill": 0.5,
+                "score_policy_with_skill": DEFAULT_SCORE_POLICY,
+            },
+            "opencode": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": scores,
+                "overall_with_skill": 0.5,
+                "score_policy_with_skill": LEGACY_SCORE_POLICY,
+            },
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["execution_status"] == "failed"
+    assert payload["overall_score"] is None
+    assert payload["best_agent"] == ""
+    assert any("conflicting score policies" in error.lower() for error in payload["execution_errors"])
+
+
+def test_canonical_report_fails_closed_on_different_condition_policies() -> None:
+    payload = build_agent_eval_payload(
+        "mixed-condition-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.2),
+                "overall_with_skill": 0.5,
+                "overall_without_skill": 0.2,
+                "score_policy_with_skill": DEFAULT_SCORE_POLICY,
+                "score_policy_without_skill": LEGACY_SCORE_POLICY,
+            }
+        },
+        attempt_policy={"score_policy": DEFAULT_SCORE_POLICY},
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["execution_status"] == "failed"
+    assert payload["overall_score"] is None
+    assert payload["overall_lift"] is None
+    assert any("conflicting score policies" in error.lower() for error in payload["execution_errors"])
+
+
+def test_current_policy_overall_uses_raw_evaluators_not_cached_dimensions() -> None:
+    payload = build_agent_eval_payload(
+        "stale-dimensions-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "dimensions_with_skill": {
+                    dimension: {"score": 1.0}
+                    for dimension in ("security", "correctness", "discoverability", "effectiveness", "efficiency")
+                },
+                "score_policy_with_skill": DEFAULT_SCORE_POLICY,
+            }
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["overall_score"] == 0.5
+    assert payload["agents"]["opencode"]["with_skill"] == 0.5
+
+
+def test_known_legacy_policy_overall_uses_raw_metrics_when_stored_value_disagrees() -> None:
+    payload = build_agent_eval_payload(
+        "legacy-integrity-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.2),
+                "overall_with_skill": 0.9,
+                "score_policy_with_skill": LEGACY_SCORE_POLICY,
+            }
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["score_policy"] == LEGACY_SCORE_POLICY
+    assert payload["overall_score"] == 0.2
+
+
+def test_known_legacy_policy_lift_uses_condition_scores_not_stale_lift_artifact() -> None:
+    payload = build_agent_eval_payload(
+        "legacy-lift-integrity-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.6),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                "lift": {"overall": {"delta": -0.5}},
+                "score_policy_with_skill": LEGACY_SCORE_POLICY,
+                "score_policy_without_skill": LEGACY_SCORE_POLICY,
+            }
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["overall_score"] == 0.6
+    assert payload["overall_lift"] == 0.2
+    assert payload["agents"]["opencode"]["lift"] == 0.2
+
+
+def test_unknown_report_policy_without_a_persisted_score_is_incomplete() -> None:
+    payload = build_agent_eval_payload(
+        "unknown-policy-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "score_policy_with_skill": "future-weighted-policy-v2",
+            }
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["execution_status"] == "failed"
+    assert payload["overall_score"] is None
+    assert any("persisted" in error.lower() for error in payload["execution_errors"])
+
+
+def test_report_replaces_stale_formula_when_recorded_policy_is_unknown() -> None:
+    payload = build_agent_eval_payload(
+        "unknown-policy-definition-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "overall_with_skill": 0.8,
+                "score_policy_with_skill": "future-weighted-policy-v2",
+            }
+        },
+        attempt_policy={
+            "score_policy": "future-weighted-policy-v2",
+            "score_definition": "overall = mean(Security, Correctness, Discoverability, Effectiveness, Efficiency)",
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    definition = payload["attempt_policy"]["score_definition"]
+    assert "future-weighted-policy-v2" in definition
+    assert "formula unavailable" in definition
+    assert "mean(Security" not in definition
+
+
+def test_policy_only_attempt_artifact_gets_its_matching_definition(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "20260709_120099"
+    _write_summary(run_dir, score=0.5)
+    (run_dir / "attempt_policy.json").write_text(json.dumps({"score_policy": LEGACY_SCORE_POLICY}), encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    definition = tier3.metadata["agent_eval"]["attempt_policy"]["score_definition"]
+    assert LEGACY_SCORE_POLICY in definition
+    assert DEFAULT_SCORE_POLICY not in definition
 
 
 def test_default_v2_rerender_preserves_historical_baseline_lift_and_pass_at_k(tmp_path: Path) -> None:

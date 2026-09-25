@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
+REVIEWED_NPM_COMMAND = ["npm", "ci", "--prefix", "fern", "--ignore-scripts", "--omit=optional"]
 
 REQUIRED_CI_JOBS = {
     "test-python-312": "Tests (Python 3.12)",
@@ -29,7 +31,6 @@ REQUIRED_CI_JOBS = {
 HEAVY_CI_JOBS = set(REQUIRED_CI_JOBS) - {"test-python-312"}
 RUN_UNLESS_CANCELLED_IF = "${{ !cancelled() }}"
 FULL_LANE_IF = "${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}"
-DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only == 'true' }}"
 NOT_DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only != 'true' }}"
 PR_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
@@ -121,7 +122,7 @@ def test_ci_classifier_is_pull_request_only_and_exports_docs_only() -> None:
     }
 
 
-def test_ci_docs_lane_uses_the_required_python_312_context() -> None:
+def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     job = _load("ci.yml")["jobs"]["test-python-312"]
 
     assert job["needs"] == "classify-changes"
@@ -143,12 +144,13 @@ def test_ci_docs_lane_uses_the_required_python_312_context() -> None:
 
     node_step = next(step for step in job["steps"] if step.get("name") == "Set up Node.js for docs")
     docs_step = next(step for step in job["steps"] if step.get("name") == "Validate Fern documentation")
-    assert node_step["if"] == DOCS_ONLY_IF
+    assert "if" not in node_step, "Fern validation must run for mixed and Fern dependency PRs"
     assert len(node_step["uses"].split("@", 1)[1]) == 40
-    assert docs_step["if"] == DOCS_ONLY_IF
+    assert "if" not in docs_step, "Fern validation must run for mixed and Fern dependency PRs"
     assert "npm ci --prefix fern --ignore-scripts --omit=optional" in docs_step["run"]
     assert "./fern/node_modules/.bin/fern check" in docs_step["run"]
     assert "GITHUB_STEP_SUMMARY" in docs_step["run"]
+    assert "platform test matrix was skipped" not in docs_step["run"]
 
 
 def test_ci_skips_every_other_required_job_only_after_classification() -> None:
@@ -301,20 +303,8 @@ def test_publish_docs_installs_the_fern_cli_from_the_committed_lockfile() -> Non
     """
     job = _load("publish-docs.yml")["jobs"]["run"]
     install_commands = [argv for step in job["steps"] for argv in _npm_commands(step.get("run", ""))]
-    install_command = next(
-        (
-            argv
-            for argv in install_commands
-            if _npm_subcommands(argv) & NPM_INSTALL_SUBCOMMANDS
-            and not _npm_subcommands(argv) & NPM_REGISTRY_SUBCOMMANDS
-        ),
-        None,
-    )
-
-    assert install_command is not None, "publish-docs.yml no longer installs the Fern CLI from the lockfile"
-    assert _npm_flag_active(install_command, "ignore-scripts")
-    assert not any(token.startswith("fern-api@") for token in install_command), (
-        "the version belongs in fern/package.json"
+    assert install_commands == [REVIEWED_NPM_COMMAND], (
+        "publish-docs.yml must install the pinned Fern CLI with the reviewed command"
     )
 
     publish_step = next(step for step in job["steps"] if "fern generate" in step.get("run", ""))
@@ -346,38 +336,15 @@ def test_every_workflow_declares_explicit_permissions() -> None:
 # fail closed on any npm mention this parser cannot resolve to a plain
 # invocation, because a guard that silently sees nothing is worse than one that
 # is noisy.
-NPM_EXECUTABLE = re.compile(r"^(?:.*[/\\])?npm(?:\.cmd|\.exe)?$")
-NPM_MENTION = re.compile(r"""(?:^|[\s'"`(;&|])(?:[\w./\\-]*[/\\])?npm(?:\.cmd|\.exe)?(?=$|[\s'"`);&|])""")
+NPM_EXECUTABLE = re.compile(r"^(?:.*[/\\])?npm(?:\.cmd|\.exe|\.ps1)?$", re.IGNORECASE)
+NPM_MENTION = re.compile(
+    r"""(?:^|[\s'"`(;&|=])(?:[\w./\\-]*[/\\])?npm(?:\.cmd|\.exe|\.ps1)?(?=$|[\s'"`);&|])""",
+    re.IGNORECASE,
+)
 SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 SHELL_OPERATOR = re.compile(r"&&|\|\||[;&|()]")
 SHELL_WRAPPERS = frozenset({"command", "env", "exec", "ionice", "nice", "setsid", "stdbuf", "sudo", "time"})
 SHELL_KEYWORDS = frozenset({"!", "do", "elif", "else", "if", "then", "until", "while", "{"})
-NPM_INSTALL_SUBCOMMANDS = frozenset({"add", "ci", "cit", "i", "install", "install-ci-test", "install-test", "it"})
-NPM_REGISTRY_SUBCOMMANDS = NPM_INSTALL_SUBCOMMANDS - {"ci", "cit", "install-ci-test"}
-NPM_OTHER_SUBCOMMANDS = frozenset(
-    {
-        "audit",
-        "cache",
-        "config",
-        "docs",
-        "help",
-        "list",
-        "ls",
-        "outdated",
-        "ping",
-        "prefix",
-        "root",
-        "run",
-        "run-script",
-        "test",
-        "version",
-        "view",
-        "whoami",
-        "why",
-    }
-)
-# `npm --version` names no subcommand at all, and is no reason to fail a build.
-NPM_SELF_REPORTING_FLAGS = frozenset({"-h", "-v", "--help", "--version"})
 
 
 def _logical_lines(run: str) -> list[str]:
@@ -485,79 +452,6 @@ def _npm_commands(run: str) -> list[list[str]]:
     return invocations
 
 
-def _npm_subcommands(argv: Sequence[str]) -> set[str]:
-    """Every npm subcommand named in ``argv``.
-
-    npm's own options can take a value (``npm --prefix fern install``), so the
-    subcommand is not simply the first non-flag token. Every recognised name is
-    collected instead, and a command naming more than one is held to the
-    strictest guard that applies -- a value that happens to read as a
-    subcommand can only make this stricter, never blinder.
-    """
-    known = NPM_INSTALL_SUBCOMMANDS | NPM_OTHER_SUBCOMMANDS | NPM_SELF_REPORTING_FLAGS
-    found = {token for token in argv[1:] if token in known}
-    assert found, f"npm invocation naming no subcommand these guards know: {' '.join(argv)}"
-    return found
-
-
-def _npm_flag_active(argv: Sequence[str], flag: str) -> bool:
-    """Whether ``--flag`` is in effect on an npm command's argv.
-
-    A boolean npm flag can be switched back off three ways after it appears to
-    be set: ``--no-<flag>``, ``--<flag>=false``, and ``--<flag> false`` -- npm
-    consumes a following literal ``true``/``false`` as the flag's value, which
-    running ``npm --ignore-scripts false config get ignore-scripts`` confirms.
-    A substring check for ``--<flag>`` cannot tell any of those from the flag
-    being on, which is the bypass this exists to close. Anything else npm
-    rejects outright (``--<flag>=0`` exits with its usage text), so this reads
-    only the two literals it accepts and treats every other value as off --
-    failing the guard rather than trusting a form npm will not run. When the
-    flag appears more than once npm applies the last occurrence, so this does too.
-    """
-    state = False
-    for index, token in enumerate(argv):
-        name, separator, value = token.partition("=")
-        if not name.startswith("--"):
-            continue
-        negated = name.startswith("--no-")
-        if (name[len("--no-") :] if negated else name[len("--") :]) != flag:
-            continue
-        if negated:
-            state = False
-        elif separator:
-            state = value == "true"
-        else:
-            state = (argv[index + 1] if index + 1 < len(argv) else "") != "false"
-    return state
-
-
-def test_npm_flag_active_rejects_negated_and_false_valued_flags() -> None:
-    assert _npm_flag_active(shlex.split("npm ci --ignore-scripts"), "ignore-scripts")
-    assert _npm_flag_active(shlex.split("npm ci --ignore-scripts=true"), "ignore-scripts")
-    assert not _npm_flag_active(shlex.split("npm ci --ignore-scripts=false"), "ignore-scripts")
-    assert not _npm_flag_active(shlex.split("npm ci --ignore-scripts=0"), "ignore-scripts")
-    assert not _npm_flag_active(shlex.split("npm ci --no-ignore-scripts"), "ignore-scripts")
-    assert not _npm_flag_active(shlex.split("npm ci"), "ignore-scripts")
-    assert not _npm_flag_active(shlex.split("npm install --package-lock-only=false"), "package-lock-only")
-
-
-def test_npm_flag_active_reads_the_space_separated_value_npm_accepts() -> None:
-    """``npm ci --ignore-scripts false`` really does turn the flag off."""
-    assert not _npm_flag_active(shlex.split("npm ci --ignore-scripts false"), "ignore-scripts")
-    assert _npm_flag_active(shlex.split("npm ci --ignore-scripts true"), "ignore-scripts")
-    assert _npm_flag_active(shlex.split("npm ci --ignore-scripts --omit=optional"), "ignore-scripts")
-    assert not _npm_flag_active(shlex.split("npm install --package-lock-only false"), "package-lock-only")
-
-
-def test_npm_flag_active_is_not_fooled_by_a_look_alike_flag_name() -> None:
-    assert not _npm_flag_active(shlex.split("npm ci --ignore-scripts-if-untrusted"), "ignore-scripts")
-
-
-def test_npm_flag_active_takes_the_last_occurrence_like_npm_does() -> None:
-    assert _npm_flag_active(shlex.split("npm ci --no-ignore-scripts --ignore-scripts"), "ignore-scripts")
-    assert not _npm_flag_active(shlex.split("npm ci --ignore-scripts --no-ignore-scripts"), "ignore-scripts")
-
-
 def test_npm_commands_sees_invocations_that_do_not_open_the_line() -> None:
     """The forms a line-anchored pattern silently missed."""
     assert _npm_commands("cd fern && npm install --ignore-scripts") == [["npm", "install", "--ignore-scripts"]]
@@ -569,6 +463,12 @@ def test_npm_commands_sees_invocations_that_do_not_open_the_line() -> None:
         ["npm", "ci", "--ignore-scripts"],
         ["npm", "run", "build"],
     ]
+
+
+def test_npm_commands_recognizes_windows_case_insensitive_executable_names() -> None:
+    assert _npm_commands("NPM install --ignore-scripts") == [["NPM", "install", "--ignore-scripts"]]
+    assert _npm_commands("NpM.CmD ci --ignore-scripts") == [["NpM.CmD", "ci", "--ignore-scripts"]]
+    assert _npm_commands("npm.ps1 ci --ignore-scripts") == [["npm.ps1", "ci", "--ignore-scripts"]]
 
 
 def test_npm_commands_reads_quoting_and_comments_the_way_a_shell_does() -> None:
@@ -584,7 +484,6 @@ def test_npm_commands_reads_quoting_and_comments_the_way_a_shell_does() -> None:
 
     quoted = _npm_commands("npm ci --ignore-scripts ';' --no-ignore-scripts")
     assert quoted == [["npm", "ci", "--ignore-scripts", ";", "--no-ignore-scripts"]]
-    assert not _npm_flag_active(quoted[0], "ignore-scripts"), "a quoted argument must not truncate the command"
 
 
 def test_npm_commands_ignores_npm_outside_a_command() -> None:
@@ -599,6 +498,7 @@ def test_npm_commands_fails_closed_on_forms_it_cannot_classify() -> None:
         'bash -c "npm install"',
         "sudo -u builder npm ci --ignore-scripts",
         "xargs npm install --ignore-scripts",
+        'NPM_BIN=npm && "$NPM_BIN" ci --ignore-scripts',
         "$(which npm) ci --ignore-scripts",
         "npm ci --ignore-scripts 'unbalanced",
     ):
@@ -606,62 +506,48 @@ def test_npm_commands_fails_closed_on_forms_it_cannot_classify() -> None:
             _npm_commands(run)
 
 
-def test_npm_subcommands_fails_closed_on_a_subcommand_it_does_not_know() -> None:
-    assert _npm_subcommands(shlex.split("npm --prefix fern install")) == {"install"}
-    assert _npm_subcommands(shlex.split("npm ci --prefix fern")) == {"ci"}
-    assert _npm_subcommands(shlex.split("npm --version")) == {"--version"}
+@pytest.mark.parametrize(
+    "run",
+    [
+        "npm install --package-lock-only --ignore-scripts",
+        "npm ci --ignore-scripts --omit=optional",
+        "npm ci --prefix fern --ignore-scripts --omit=optional --no-omit",
+        "npm exec --yes --ignore-scripts --package-lock-only install",
+        "npm ci -- --ignore-scripts",
+        "npm ci --prefix fern --ignore-scripts --no-ignore-s --omit=optional",
+        "npm cit --prefix fern --ignore-scripts --omit=optional",
+    ],
+)
+def test_unreviewed_npm_commands_fail_the_workflow_guard(
+    run: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "probe.yml").write_text(
+        yaml.safe_dump({"jobs": {"probe": {"steps": [{"run": run}]}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "WORKFLOWS", tmp_path)
+
     with pytest.raises(AssertionError):
-        _npm_subcommands(shlex.split("npm exec --yes some-package"))
+        test_every_workflow_uses_only_the_reviewed_npm_command()
 
 
-def test_an_option_value_reading_as_a_subcommand_cannot_pass_for_a_lockfile_install() -> None:
-    """``npm install --prefix ci`` names ``ci`` without being one.
+def test_every_workflow_uses_only_the_reviewed_npm_command() -> None:
+    """The reviewed lockfile install is the only npm command in workflows.
 
-    Collecting every recognised name keeps the install guards strict, but a
-    check that merely asks whether ``ci`` is in that set would accept this as
-    the reviewed, lockfile-pinned install it is not.
-    """
-    argv = shlex.split("npm install --prefix ci fern-api")
-    subcommands = _npm_subcommands(argv)
-
-    assert subcommands == {"ci", "install"}
-    assert subcommands & NPM_REGISTRY_SUBCOMMANDS, "a registry install must stay visible as one"
-
-
-def test_every_workflow_npm_command_ignores_lifecycle_scripts() -> None:
-    """A dependency must not get to run install-time code in a CI job.
-
-    ``--ignore-scripts`` is the only half of this that a global install honours,
-    so it is asserted on every npm install regardless of how the tree is resolved.
+    npm accepts option abbreviations, aliases, and a changing command grammar.
+    An exact argv comparison keeps those forms from silently broadening what
+    runs in a workflow. Any new npm use needs explicit review here.
     """
     for workflow_name in _workflow_names():
         for step in _all_steps(_load(workflow_name)):
             for argv in _npm_commands(step.get("run", "")):
-                if _npm_subcommands(argv) & NPM_INSTALL_SUBCOMMANDS:
-                    assert _npm_flag_active(argv, "ignore-scripts"), f"{workflow_name}: {' '.join(argv)}"
-
-
-def test_no_workflow_resolves_a_node_dependency_tree_from_the_registry() -> None:
-    """Only ``npm ci`` against the committed lockfile may install into a job.
-
-    ``npm install`` re-resolves every transitive dependency from semver ranges on
-    each run, so pinning the top-level version pins nothing beneath it. ``npm ci``
-    installs exactly the versions and integrity hashes in ``fern/package-lock.json``.
-    """
-    for workflow_name in _workflow_names():
-        for step in _all_steps(_load(workflow_name)):
-            for argv in _npm_commands(step.get("run", "")):
-                if not _npm_subcommands(argv) & NPM_REGISTRY_SUBCOMMANDS:
-                    continue
-                if not _npm_flag_active(argv, "package-lock-only"):
-                    raise AssertionError(f"{workflow_name}: use `npm ci` against the lockfile, not `{' '.join(argv)}`")
+                assert argv == REVIEWED_NPM_COMMAND, f"{workflow_name}: unreviewed npm command: {' '.join(argv)}"
 
 
 def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
-    """``fern/package.json`` and ``fern/fern.config.json`` both name a CLI version.
+    """The Fern config, manifest, and lockfile describe one reviewed CLI tree.
 
-    They are two declarations of one fact. If they drift, docs are validated and
-    published by a different CLI than the one Fern itself is configured for.
+    If they drift, docs may be validated or published with a different CLI or
+    additional packages that were not reviewed for the token-bearing job.
     """
     manifest = json.loads((ROOT / "fern" / "package.json").read_text(encoding="utf-8"))
     fern_config = json.loads((ROOT / "fern" / "fern.config.json").read_text(encoding="utf-8"))
@@ -670,7 +556,18 @@ def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
     declared = manifest["dependencies"]["fern-api"]
     assert declared == fern_config["version"], "fern/package.json and fern/fern.config.json disagree"
     assert re.fullmatch(r"\d+\.\d+\.\d+", declared), f"pin an exact version, not {declared!r}"
+    assert manifest["dependencies"] == {"fern-api": declared}, "review new direct Fern dependencies"
+    root_package = lockfile["packages"][""]
+    assert root_package["dependencies"] == manifest["dependencies"], "lockfile root is stale"
+    for dependency_group in ("devDependencies", "optionalDependencies", "peerDependencies"):
+        assert not manifest.get(dependency_group), f"review new {dependency_group} in the Fern manifest"
+        assert not root_package.get(dependency_group), f"review new {dependency_group} in the Fern lockfile"
     assert lockfile["packages"]["node_modules/fern-api"]["version"] == declared, "lockfile is stale"
+    for path, package in lockfile["packages"].items():
+        if not path:
+            continue
+        assert package.get("resolved", "").startswith("https://registry.npmjs.org/"), path
+        assert package.get("integrity", "").startswith("sha512-"), path
 
     # NVIDIA's Fern organization rejects the authenticated docs-publish path below this
     # version (a review comment on PR #126 surfaced the "Org 'nvidia' requires Fern CLI
@@ -680,3 +577,31 @@ def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
     assert tuple(int(part) for part in declared.split(".")) >= minimum_required, (
         f"fern-api {declared} is older than the {'.'.join(map(str, minimum_required))} NVIDIA's org requires"
     )
+
+
+@pytest.mark.parametrize("mutation", ["extra_dependency", "root_drift", "missing_integrity"])
+def test_fern_pin_guard_rejects_unreviewed_dependency_changes(
+    mutation: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_fern = ROOT / "fern"
+    isolated_fern = tmp_path / "fern"
+    isolated_fern.mkdir()
+    for name in ("package.json", "package-lock.json", "fern.config.json"):
+        (isolated_fern / name).write_bytes((source_fern / name).read_bytes())
+
+    manifest_path = isolated_fern / "package.json"
+    lockfile_path = isolated_fern / "package-lock.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    lockfile = json.loads(lockfile_path.read_text(encoding="utf-8"))
+    if mutation == "extra_dependency":
+        manifest["dependencies"]["extra-package"] = "1.0.0"
+    elif mutation == "root_drift":
+        lockfile["packages"][""]["dependencies"]["fern-api"] = "0.0.0"
+    else:
+        del lockfile["packages"]["node_modules/fern-api"]["integrity"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    lockfile_path.write_text(json.dumps(lockfile), encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+
+    with pytest.raises(AssertionError):
+        test_the_pinned_fern_cli_version_matches_the_fern_config()

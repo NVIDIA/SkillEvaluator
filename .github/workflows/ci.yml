@@ -80,12 +80,10 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
       - name: Set up Node.js for docs
-        if: ${{ needs.classify-changes.outputs.docs_only == 'true' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
       - name: Validate Fern documentation
-        if: ${{ needs.classify-changes.outputs.docs_only == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -95,10 +93,9 @@ jobs:
           FERN_VERSION="$(node -p "require('./fern/package.json').dependencies['fern-api']")"
           ./fern/node_modules/.bin/fern check
           {
-            echo "### Documentation-only CI"
+            echo "### Fern documentation validation"
             echo
             echo "Validated docs and Fern configuration with Fern CLI $FERN_VERSION."
-            echo "The platform test matrix was skipped because only docs/** and fern/** changed."
           } >> "$GITHUB_STEP_SUMMARY"
 
   test-python-313:

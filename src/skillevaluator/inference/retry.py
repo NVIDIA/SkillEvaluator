@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import random
 import time
@@ -88,7 +89,7 @@ def _float_env(environ: Mapping[str, str], name: str, fallback: float) -> float:
     if raw:
         try:
             val = float(raw)
-            return val if val >= 0.0 else fallback
+            return val if math.isfinite(val) and val >= 0.0 else fallback
         except ValueError:
             return fallback
     return fallback

@@ -797,8 +797,12 @@ def test_persistent_400_after_schema_downgrade_fails_fast_without_infinite_loop(
     assert "response_format" not in sdk_calls[1]
 
 
+@pytest.mark.parametrize(
+    "schema_error",
+    ["output_config: Extra inputs are not permitted", "output_config.format is not supported"],
+)
 def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, schema_error: str
 ) -> None:
     """Verify Anthropic provider downgrades output_config on HTTP 400 and memoizes across calls."""
     import importlib.util
@@ -831,7 +835,7 @@ def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
     def fake_messages_create(**kwargs):
         anth_calls.append(kwargs)
         if "output_config" in kwargs:
-            raise _BadRequestError("output_config: Extra inputs are not permitted")
+            raise _BadRequestError(schema_error)
         block = MagicMock()
         block.type = "text"
         block.text = valid_response
@@ -880,7 +884,7 @@ def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
                 400,
                 "Bad Request",
                 {},
-                io.BytesIO(b'{"error": "output_config not supported"}'),
+                io.BytesIO(json.dumps({"error": schema_error}).encode()),
             )
         return _Resp()
 
@@ -1004,8 +1008,16 @@ def test_schema_builders_and_downgrade_warning_log(monkeypatch, caplog):
     assert any("Structured output schema unsupported" in rec.message for rec in caplog.records)
 
 
-def test_unrelated_400_context_length_does_not_disable_schema_flags() -> None:
-    """Verify unrelated HTTP 400 context_length_exceeded errors do not disable schema for valid requests."""
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "context_length_exceeded: maximum context length is 8192 tokens",
+        "Invalid parameter: max_tokens. response_format is supported for this model.",
+        "response_format is supported but max_tokens is not allowed",
+    ],
+)
+def test_unrelated_400_does_not_disable_schema_flags(error_message: str) -> None:
+    """An unrelated bad parameter must not disable schema even when the error mentions it."""
     import httpx
     import openai
 
@@ -1023,7 +1035,7 @@ def test_unrelated_400_context_length_does_not_disable_schema_flags() -> None:
                 400,
                 json={
                     "error": {
-                        "message": "context_length_exceeded: maximum context length is 8192 tokens",
+                        "message": error_message,
                         "type": "invalid_request_error",
                         "code": "context_length_exceeded",
                     }
@@ -1135,7 +1147,17 @@ def test_schema_downgrade_memoized_only_on_confirmed_success() -> None:
     assert target_key in client_mod._SCHEMA_UNSUPPORTED_TARGETS
 
 
-def test_harbor_eval_template_unrelated_400_does_not_disable_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "context_length_exceeded",
+        "Invalid parameter: max_tokens. response_format is supported for this model.",
+        "response_format is supported but max_tokens is not allowed",
+    ],
+)
+def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
+    monkeypatch: pytest.MonkeyPatch, error_message: str
+) -> None:
     """Verify template eval.py does not treat unrelated 400 as schema capability failure."""
     import importlib.util
     import io
@@ -1201,7 +1223,7 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(monkeypatch:
                 400,
                 "Bad Request",
                 {},
-                io.BytesIO(b'{"error": {"message": "context_length_exceeded", "code": "context_length_exceeded"}}'),
+                io.BytesIO(json.dumps({"error": {"message": error_message}}).encode()),
             )
         return _Resp()
 
@@ -1219,3 +1241,28 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(monkeypatch:
     assert len(http_requests) == 2
     assert "response_format" in http_requests[1]
     assert len(eval_template._SCHEMA_UNSUPPORTED_TARGETS) == 0
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Unrecognized request argument supplied: response_format",
+        "response_format is an unknown parameter",
+        "output_config.format is an unexpected argument",
+    ],
+)
+def test_schema_rejection_grammar_accepts_direct_option_errors(message: str) -> None:
+    import importlib.util
+    from pathlib import Path
+
+    from skillevaluator.inference import client as client_mod
+
+    template_path = (
+        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
+    )
+    spec = importlib.util.spec_from_file_location("harbor_template_eval_rejection_grammar", template_path)
+    assert spec and spec.loader
+    eval_template = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(eval_template)
+    assert client_mod._message_rejects_schema_option(message)
+    assert eval_template._message_rejects_schema_option(message)

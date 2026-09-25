@@ -148,6 +148,65 @@ def test_resolve_retry_config_negative_values_fallback() -> None:
     assert config.max_delay == DEFAULT_MAX_DELAY
 
 
+@pytest.mark.parametrize("variable", ["SKILL_EVAL_LLM_RETRY_BASE_DELAY", "SKILL_EVAL_LLM_RETRY_MAX_DELAY"])
+def test_nonfinite_retry_delay_falls_back_in_host_and_verifier(monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
+    """Nonfinite configuration must not become an invalid sleep duration on HTTP 429."""
+    import importlib.util
+    from pathlib import Path
+
+    config = resolve_retry_config({variable: "inf"})
+    assert config.base_delay == DEFAULT_BASE_DELAY
+    assert config.max_delay == DEFAULT_MAX_DELAY
+
+    template_path = (
+        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
+    )
+    spec = importlib.util.spec_from_file_location("harbor_template_retry_nonfinite", template_path)
+    assert spec and spec.loader
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    monkeypatch.setenv(variable, "inf")
+    assert verifier._resolve_eval_retry_config() == (
+        verifier._DEFAULT_MAX_RETRIES,
+        verifier._DEFAULT_BASE_DELAY,
+        verifier._DEFAULT_MAX_DELAY,
+    )
+
+
+def test_verifier_preserves_rate_limit_error_body_when_retry_after_exceeds_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal 429 report must retain its provider diagnostic body."""
+    import importlib.util
+    import io
+    from pathlib import Path
+
+    template_path = (
+        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
+    )
+    spec = importlib.util.spec_from_file_location("harbor_template_retry_after_diagnostic", template_path)
+    assert spec and spec.loader
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_MAX_DELAY", "30")
+
+    def rate_limited(request, timeout=90):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            429,
+            "Too Many Requests",
+            {"Retry-After": "3600"},
+            io.BytesIO(b'{"error":"capacity returns in one hour"}'),
+        )
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", rate_limited)
+    request = verifier.urllib.request.Request("https://example.test/v1/chat/completions")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        verifier._urlopen_with_retry(request)
+
+    assert "capacity returns in one hour" in verifier._format_http_error(exc_info.value)
+
+
 def test_retry_call_with_backoff_immediate_success() -> None:
     """Verify retry_call_with_backoff executes operation and returns immediately on success."""
     calls = 0

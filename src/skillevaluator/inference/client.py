@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import urllib.error
 from dataclasses import replace
 from typing import Any
@@ -132,18 +133,6 @@ def _build_anthropic_output_config(schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-_SCHEMA_OPTION_INDICATORS: frozenset[str] = frozenset(
-    {
-        "response_format",
-        "output_config",
-        "json_schema",
-        "structured output",
-        "structured outputs",
-        "structured_output",
-        "structured_outputs",
-    }
-)
-
 _UNSUPPORTED_REASON_INDICATORS: tuple[str, ...] = (
     "unsupported",
     "not supported",
@@ -163,6 +152,36 @@ _UNSUPPORTED_REASON_INDICATORS: tuple[str, ...] = (
     "disallowed",
 )
 
+_SCHEMA_OPTION_PATTERN = r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?)"
+_SCHEMA_REJECTION_REASON = (
+    r"(?:unsupported|not supported|not permitted|not allowed|disallowed|"
+    r"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
+    r"unexpected (?:keyword )?argument|extra inputs?(?: are not permitted)?)"
+)
+_SCHEMA_REJECTION_AFTER_OPTION = re.compile(
+    rf"\b{_SCHEMA_OPTION_PATTERN}\b(?:\.[a-z0-9_]+)*"
+    rf"(?:\s+of\s+type\s+['\"]?[a-z0-9_]+['\"]?)?"
+    rf"\s*(?:(?:is|are|was|were)\s+(?:an?\s+)?|:\s*)?"
+    rf"{_SCHEMA_REJECTION_REASON}\b",
+    re.IGNORECASE,
+)
+_SCHEMA_REJECTION_BEFORE_OPTION = re.compile(
+    rf"\b(?:unsupported|not supported|extra inputs?(?: are not permitted)?|unknown (?:parameter|field|argument)|"
+    rf"unrecognized (?:request argument|parameter)|unexpected (?:keyword argument|argument)|"
+    rf"invalid (?:parameter|argument)|not permitted|not allowed|disallowed)\b"
+    rf"(?:\s+supplied)?[\s:'\"\[\]{{}}(),-]{{0,32}}\b{_SCHEMA_OPTION_PATTERN}\b",
+    re.IGNORECASE,
+)
+
+
+def _message_rejects_schema_option(text: str, param: str | None = None) -> bool:
+    """Match a rejection of the schema option itself, not unrelated error text."""
+    if param:
+        if not re.search(rf"\b{_SCHEMA_OPTION_PATTERN}\b", param, re.IGNORECASE):
+            return False
+        return any(indicator in text.lower() for indicator in _UNSUPPORTED_REASON_INDICATORS)
+    return bool(_SCHEMA_REJECTION_AFTER_OPTION.search(text) or _SCHEMA_REJECTION_BEFORE_OPTION.search(text))
+
 
 def _is_schema_unsupported_error(exc: Exception) -> bool:
     """Determine whether an exception indicates structured output schema is unsupported."""
@@ -178,6 +197,7 @@ def _is_schema_unsupported_error(exc: Exception) -> bool:
         return False
 
     parts: list[str] = [str(exc), getattr(exc, "message", "")]
+    error_param: str | None = None
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
         parts.append(str(body))
@@ -185,8 +205,8 @@ def _is_schema_unsupported_error(exc: Exception) -> bool:
         if isinstance(error_dict, dict):
             parts.append(str(error_dict.get("message", "")))
             param = error_dict.get("param")
-            if param:
-                parts.append(str(param))
+            if isinstance(param, str):
+                error_param = param
     elif isinstance(body, str):
         parts.append(body)
 
@@ -204,12 +224,8 @@ def _is_schema_unsupported_error(exc: Exception) -> bool:
         except Exception:
             pass
 
-    full_text = " ".join(part for part in parts if part).lower()
-    has_option = any(indicator in full_text for indicator in _SCHEMA_OPTION_INDICATORS)
-    if not has_option and "schema" in full_text and ("unsupported" in full_text or "not supported" in full_text):
-        has_option = True
-    has_reason = any(indicator in full_text for indicator in _UNSUPPORTED_REASON_INDICATORS)
-    return has_option and has_reason
+    full_text = " ".join(part for part in parts if part)
+    return _message_rejects_schema_option(full_text, error_param)
 
 
 def _call_with_schema_fallback(

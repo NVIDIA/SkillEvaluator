@@ -31,11 +31,14 @@ import os
 import random
 import re
 import shlex
+import signal
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
@@ -1531,6 +1534,21 @@ _RETRIABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BASE_DELAY = 1.0
 _DEFAULT_MAX_DELAY = 30.0
+# Three required judges run sequentially under the managed 600-second Harbor
+# verifier timeout. Reserve one minute for deterministic checks and artifacts.
+_JUDGE_WALL_TIME_BUDGET_SEC = 180.0
+_ACTIVE_JUDGE_DEADLINE = ContextVar("active_judge_deadline", default=None)
+
+
+def _remaining_judge_timeout(timeout):
+    """Bound one provider request by the remaining time for its judge."""
+    deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("LLM judge time budget exhausted")
+    return min(timeout, remaining)
 
 
 def _parse_retry_after(header_value, fallback_delay):
@@ -1581,7 +1599,7 @@ def _resolve_eval_retry_config():
         if raw:
             try:
                 val = float(raw)
-                return val if val >= 0.0 else default
+                return val if math.isfinite(val) and val >= 0.0 else default
             except ValueError:
                 return default
         return default
@@ -1597,8 +1615,9 @@ def _urlopen_with_retry(request, timeout=90):
     max_retries, base_delay, max_delay = _resolve_eval_retry_config()
     attempt = 0
     while True:
+        request_timeout = _remaining_judge_timeout(timeout)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:  # nosec B310
                 return response.read()
         except Exception as error:
             is_http = isinstance(error, urllib.error.HTTPError)
@@ -1611,10 +1630,8 @@ def _urlopen_with_retry(request, timeout=90):
                 raise
 
             retry_after_str = None
-            if is_http:
-                if error.headers:
-                    retry_after_str = error.headers.get("retry-after") or error.headers.get("Retry-After")
-                error.close()
+            if is_http and error.headers:
+                retry_after_str = error.headers.get("retry-after") or error.headers.get("Retry-After")
 
             if retry_after_str is not None:
                 parsed = _parse_retry_after(retry_after_str, fallback_delay=base_delay)
@@ -1625,6 +1642,9 @@ def _urlopen_with_retry(request, timeout=90):
                 delay = _calculate_jitter_delay(attempt, base_delay=base_delay, max_delay=max_delay)
 
             sleep_duration = min(delay, max_delay)
+            deadline = _ACTIVE_JUDGE_DEADLINE.get()
+            if deadline is not None and time.monotonic() + sleep_duration >= deadline:
+                raise TimeoutError("LLM judge time budget exhausted before retry") from error
             status_label = f"HTTP {error.code}" if is_http else type(error).__name__
             logger.warning(
                 "LLM judge transient error (%s). Retrying in %.2fs (attempt %d/%d)...",
@@ -1633,19 +1653,11 @@ def _urlopen_with_retry(request, timeout=90):
                 attempt + 1,
                 max_retries,
             )
+            if is_http:
+                error.close()
             time.sleep(sleep_duration)
             attempt += 1
 
-
-_SCHEMA_OPTION_INDICATORS = (
-    "response_format",
-    "output_config",
-    "json_schema",
-    "structured output",
-    "structured outputs",
-    "structured_output",
-    "structured_outputs",
-)
 
 _UNSUPPORTED_REASON_INDICATORS = (
     "unsupported",
@@ -1666,6 +1678,36 @@ _UNSUPPORTED_REASON_INDICATORS = (
     "disallowed",
 )
 
+_SCHEMA_OPTION_PATTERN = r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?)"
+_SCHEMA_REJECTION_REASON = (
+    r"(?:unsupported|not supported|not permitted|not allowed|disallowed|"
+    r"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
+    r"unexpected (?:keyword )?argument|extra inputs?(?: are not permitted)?)"
+)
+_SCHEMA_REJECTION_AFTER_OPTION = re.compile(
+    rf"\b{_SCHEMA_OPTION_PATTERN}\b(?:\.[a-z0-9_]+)*"
+    rf"(?:\s+of\s+type\s+['\"]?[a-z0-9_]+['\"]?)?"
+    rf"\s*(?:(?:is|are|was|were)\s+(?:an?\s+)?|:\s*)?"
+    rf"{_SCHEMA_REJECTION_REASON}\b",
+    re.IGNORECASE,
+)
+_SCHEMA_REJECTION_BEFORE_OPTION = re.compile(
+    rf"\b(?:unsupported|not supported|extra inputs?(?: are not permitted)?|unknown (?:parameter|field|argument)|"
+    rf"unrecognized (?:request argument|parameter)|unexpected (?:keyword argument|argument)|"
+    rf"invalid (?:parameter|argument)|not permitted|not allowed|disallowed)\b"
+    rf"(?:\s+supplied)?[\s:'\"\[\]{{}}(),-]{{0,32}}\b{_SCHEMA_OPTION_PATTERN}\b",
+    re.IGNORECASE,
+)
+
+
+def _message_rejects_schema_option(text, param=None):
+    """Match a rejection of the schema option itself, not unrelated error text."""
+    if param:
+        if not re.search(rf"\b{_SCHEMA_OPTION_PATTERN}\b", param, re.IGNORECASE):
+            return False
+        return any(indicator in text.lower() for indicator in _UNSUPPORTED_REASON_INDICATORS)
+    return bool(_SCHEMA_REJECTION_AFTER_OPTION.search(text) or _SCHEMA_REJECTION_BEFORE_OPTION.search(text))
+
 
 def _is_schema_unsupported_http_error(error):
     """Determine whether an HTTP error indicates structured output schema is unsupported."""
@@ -1678,12 +1720,17 @@ def _is_schema_unsupported_http_error(error):
         body_text = body_bytes.decode("utf-8", "replace")
     except Exception:
         pass
-    text = f"{error} {getattr(error, 'reason', '')} {body_text}".lower()
-    has_option = any(indicator in text for indicator in _SCHEMA_OPTION_INDICATORS)
-    if not has_option and "schema" in text and ("unsupported" in text or "not supported" in text):
-        has_option = True
-    has_reason = any(indicator in text for indicator in _UNSUPPORTED_REASON_INDICATORS)
-    return has_option and has_reason
+    error_param = None
+    try:
+        body = json.loads(body_text)
+        if isinstance(body, dict) and isinstance(body.get("error"), dict):
+            param = body["error"].get("param")
+            if isinstance(param, str):
+                error_param = param
+    except (TypeError, ValueError):
+        pass
+    text = f"{error} {getattr(error, 'reason', '')} {body_text}"
+    return _message_rejects_schema_option(text, error_param)
 
 
 _SCHEMA_UNSUPPORTED_TARGETS = set()
@@ -4486,7 +4533,9 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
 
     loop = asyncio.new_event_loop()
     try:
-        result = loop.run_until_complete(metric.ascore(sample))
+        result = loop.run_until_complete(
+            asyncio.wait_for(metric.ascore(sample), timeout=_remaining_judge_timeout(_JUDGE_WALL_TIME_BUDGET_SEC))
+        )
     finally:
         loop.close()
 
@@ -4712,10 +4761,43 @@ def _normalize_required_judge_result(metric, result):
 
 
 def _call_required_judge(metric, judge, *args, **kwargs):
+    previous_deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    own_deadline = time.monotonic() + _JUDGE_WALL_TIME_BUDGET_SEC
+    deadline = min(previous_deadline, own_deadline) if previous_deadline is not None else own_deadline
+    token = _ACTIVE_JUDGE_DEADLINE.set(deadline)
+    alarm_armed = False
+    previous_alarm_handler = None
+
+    # The standalone Harbor verifier runs judges on its main thread. Its
+    # interval timer also interrupts a response body that keeps trickling data
+    # inside one socket read, where urllib's idle timeout cannot help.
     try:
-        result = judge(*args, **kwargs)
+        try:
+            if hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread():
+                active_alarm, repeat_interval = signal.getitimer(signal.ITIMER_REAL)
+                if active_alarm == 0 and repeat_interval == 0:
+                    previous_alarm_handler = signal.getsignal(signal.SIGALRM)
+
+                    def _raise_judge_timeout(_signum, _frame):
+                        raise TimeoutError("LLM judge time budget exhausted")
+
+                    signal.signal(signal.SIGALRM, _raise_judge_timeout)
+                    try:
+                        signal.setitimer(signal.ITIMER_REAL, max(deadline - time.monotonic(), 1e-6))
+                        alarm_armed = True
+                    except OSError:
+                        signal.signal(signal.SIGALRM, previous_alarm_handler)
+            result = judge(*args, **kwargs)
+        finally:
+            if alarm_armed:
+                try:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                finally:
+                    signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
         result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+    finally:
+        _ACTIVE_JUDGE_DEADLINE.reset(token)
     return _normalize_required_judge_result(metric, result)
 
 

@@ -46,7 +46,7 @@ def test_validate_code_integrity_handles_raw_html_on_supported_python_patches(
 
     result = CliRunner().invoke(
         cli,
-        ["validate", str(skill), "--checks", "code-integrity", "--no-dedup", "-r", "cli"],
+        ["validate", "--no-tier3", str(skill), "--checks", "code-integrity", "--no-dedup", "-r", "cli"],
     )
 
     assert result.exit_code == 0, result.output

@@ -73,6 +73,13 @@ from skillevaluator.tier3.toml_utils import toml_quote
 console = Console()
 
 _HARBOR_RESERVED_CASE_NAMES = frozenset({"dataset.toml", "readme.md", "metric.py", "results"})
+_DEFAULT_AGENT_BY_PROVIDER = {
+    "nv_build": "opencode",
+    "openai": "codex",
+    "anthropic": "claude-code",
+    "bedrock": "claude-code",
+    "openai-compatible": "codex",
+}
 
 
 def _engine_env_mode(value: str) -> str:
@@ -338,7 +345,7 @@ def _write_harbor_dataset(harbor_dir: Path, case_id: str) -> None:
 def parse_agents(raw_agents: str | None) -> list[str]:
     """Parse a comma-separated Harbor agent list."""
     if not raw_agents:
-        return ["codex"]
+        return []
     agents = [canonical_agent_name(item.strip()) for item in raw_agents.split(",") if item.strip()]
     seen: set[str] = set()
     deduped: list[str] = []
@@ -347,6 +354,18 @@ def parse_agents(raw_agents: str | None) -> list[str]:
             deduped.append(agent)
             seen.add(agent)
     return deduped
+
+
+def resolve_agents(raw_agents: str | None, *, provider: str) -> list[str]:
+    """Resolve an explicit agent list or choose the provider's native default."""
+    if raw_agents is not None:
+        return parse_agents(raw_agents)
+    try:
+        return [_DEFAULT_AGENT_BY_PROVIDER[provider]]
+    except KeyError as exc:
+        raise ValueError(
+            f"No automatic Harbor agent is configured for provider '{provider}'; select one with --agents."
+        ) from exc
 
 
 def parse_agent_model_overrides(raw_overrides: tuple[str, ...]) -> dict[str, list[str]]:
@@ -637,7 +656,16 @@ def evaluate(
     """Run Harbor live-agent evaluation for a skill."""
     env_mode = _engine_env_mode(env_mode)
 
-    agent_list = parse_agents(agents)
+    if agents is None:
+        try:
+            provider = resolve_llm_provider()
+        except ProviderConfigurationError as exc:
+            raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
+        agent_list = resolve_agents(None, provider=provider.provider)
+    else:
+        agent_list = parse_agents(agents)
+        if not agent_list:
+            raise ValueError("Select at least one agent with --agents.")
     reporter = safe_progress_reporter(progress_reporter or NullProgressReporter())
     engine_started = False
     try:
@@ -660,10 +688,11 @@ def evaluate(
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
             raise ValueError(f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}")
 
-        try:
-            resolve_llm_provider()
-        except ProviderConfigurationError as exc:
-            raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
+        if agents is not None:
+            try:
+                resolve_llm_provider()
+            except ProviderConfigurationError as exc:
+                raise ValueError(f"A public LLM provider is required for live evaluation: {exc}") from exc
 
         agent_models = parse_agent_model_overrides(agent_model)
         unknown_model_agents = sorted(set(agent_models) - set(agent_list))
@@ -719,7 +748,7 @@ def doctor(
 ) -> int:
     """Check whether live evaluation dependencies are available."""
     env_mode = _engine_env_mode(env_mode)
-    agent_list = parse_agents(agents)
+    agent_list = parse_agents(agents) if agents is not None else []
     rows: list[tuple[str, str, str]] = []
     rows.append(("CLI package", "pass", f"skillevaluator {__version__}"))
 
@@ -731,6 +760,7 @@ def doctor(
     except ProviderConfigurationError as exc:
         rows.append(("Public LLM provider", "fail", str(exc)))
     else:
+        agent_list = resolve_agents(agents, provider=provider.provider)
         rows.append(("Public LLM provider", "pass", f"{provider.provider} / {provider.model}"))
         try:
             overrides = parse_agent_model_overrides(agent_model)
@@ -786,6 +816,10 @@ def doctor(
     unknown = validate_agents(agent_list)
     if unknown:
         rows.append(("Harbor agents", "fail", f"Unknown: {', '.join(unknown)}"))
+    elif agents is not None and not agent_list:
+        rows.append(("Harbor agents", "fail", "Select at least one agent with --agents."))
+    elif not agent_list:
+        rows.append(("Harbor agents", "warn", "automatic selection requires a configured provider"))
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 

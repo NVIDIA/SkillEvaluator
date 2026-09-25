@@ -106,11 +106,7 @@ class JSONReporter(ReporterBase):
         }
 
         policy = next(
-            (
-                result.metadata.get("policy")
-                for result in results
-                if isinstance(result.metadata.get("policy"), dict)
-            ),
+            (result.metadata.get("policy") for result in results if isinstance(result.metadata.get("policy"), dict)),
             None,
         )
         if policy is not None:
@@ -137,6 +133,10 @@ class JSONReporter(ReporterBase):
             tier_entry["validators"].append(result.validator_name)
         if gating_by_tier:
             data["gating"] = {"tiers": gating_by_tier}
+
+        workflow = next((r.metadata["workflow"] for r in results if r.metadata.get("workflow")), None)
+        if workflow is not None:
+            data["workflow"] = workflow
 
         # Quality summary from any QUALITY validator results
         quality_results = [r.metadata["quality_scores"] for r in results if r.metadata.get("quality_scores")]
@@ -235,6 +235,16 @@ class JSONReporter(ReporterBase):
         gating = result.metadata.get("gating")
         if isinstance(gating, dict):
             data["gating"] = gating
+
+        workflow = result.metadata.get("workflow")
+        if isinstance(workflow, dict):
+            data["workflow"] = workflow
+
+        # Tier 2 records bounded provider diagnostics and completed/failed
+        # cluster counts independently of duplicate-content findings.
+        llm_analysis = result.metadata.get("llm_analysis")
+        if isinstance(llm_analysis, dict):
+            data["llm_analysis"] = llm_analysis
 
         return data
 

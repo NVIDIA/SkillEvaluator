@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Keep headings and comments inside fenced code examples in their enclosing Markdown
+  section during Tier 2 content chunking, preserving original source line numbers.
+
 - Preserve full Codex gateway model IDs in cloud environments, including E2B
   and Daytona, while retaining local runtime setup and native provider routing.
 - Keep Tier 2 execution diagnostics visible alongside duplicate findings in

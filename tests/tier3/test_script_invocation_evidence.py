@@ -1031,3 +1031,489 @@ def test_a_binding_made_inside_a_pipeline_does_not_outlive_it(check, command, ex
     """
     result = check(_bash(command, "done"), EXPECTED_SCRIPT)
     assert result["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("attached", "spaced", "expected"),
+    [
+        ("python3 0<run.py", "python3 0< run.py", 0.75),
+        ("python3 <run.py", "python3 < run.py", 0.75),
+        ("python3 0<other.py run.py", "python3 0< other.py run.py", 1.0),
+        ("python3 0</dev/null run.py", "python3 0< /dev/null run.py", 1.0),
+        ("python3 2>err.txt run.py", "python3 2> err.txt run.py", 1.0),
+        ("python3 2>>err.txt run.py", "python3 2>> err.txt run.py", 1.0),
+        ("python3 3<>notes.txt run.py", "python3 3<> notes.txt run.py", 1.0),
+        ("python3 2>&1 run.py", "python3 2>&1 run.py", 1.0),
+        ("python3 2>&- run.py", "python3 2>&- run.py", 1.0),
+        ("python3 2>1.log run.py", "python3 2> 1.log run.py", 1.0),
+        ("python3 1>2.txt run.py", "python3 1> 2.txt run.py", 1.0),
+        ("python3 run.py 2>err.txt", "python3 run.py 2> err.txt", 1.0),
+        ("cat 0<run.py", "cat 0< run.py", 0.75),
+    ],
+)
+def test_an_operand_written_flush_against_its_descriptor_tokenizes_as_the_spaced_form(
+    check, attached, spaced, expected
+) -> None:
+    """``0<run.py`` and ``0< run.py`` are the same redirection, so they must
+    score the same. The descriptor stays with its operator, and the operand
+    becomes its own word rather than concatenating onto the quoted operator.
+    A descriptor duplication (``2>&1``) or close (``2>&-``) has no operand;
+    ``2>1.log`` has one, and its whole name is kept. A script fed to standard
+    input is unresolved, whichever
+    command reads it, as ``python3 < run.py`` already was.
+    """
+    assert check(_bash(attached, "done"), EXPECTED_SCRIPT)["score"] == expected
+    assert check(_bash(spaced, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize(
+    "reads_skill_md",
+    [
+        pytest.param(shared_checks._cmd_reads_skill_md, id="host"),
+        pytest.param(TEMPLATE._cmd_reads_skill_md, id="harbor-verifier"),
+    ],
+)
+def test_a_skill_md_read_through_an_attached_input_redirection_is_a_read(reads_skill_md) -> None:
+    """``cat 0<SKILL.md`` reads the file just as ``cat 0< SKILL.md`` does, and
+    ``cat 2>SKILL.md`` overwrites it with standard error and reads nothing.
+    """
+    assert reads_skill_md("cat 0<SKILL.md") is True
+    assert reads_skill_md("cat 0< SKILL.md") is True
+    assert reads_skill_md("cat <SKILL.md") is True
+    assert reads_skill_md("cat 2>SKILL.md") is False
+    assert reads_skill_md("cat 2> SKILL.md") is False
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=run.py; for f in; do :; done; python3 "$f"', 1.0),
+        ('f=run.py; select f in; do :; done; python3 "$f"', 1.0),
+        ('for f in run.py; do :; done; for f in; do :; done; python3 "$f"', 1.0),
+        ("for f in; do :; done; python3 run.py", 1.0),
+        ('for f in ""; do python3 run.py; done', 1.0),
+        ("for f in; do python3 run.py; done", 0.0),
+        ('f=run.py; for f in; do python3 "$f"; done', 0.0),
+        ('f=run.py; for f in; do :; done; cat "$f"', 0.0),
+        ("for f in run.py; do cat $f; done; for f in; do python3 $f; done", 0.0),
+        ('f=run.py; printf "" | for f in; do :; done; python3 "$f"', 1.0),
+    ],
+)
+def test_a_loop_over_an_empty_list_keeps_the_binding_and_runs_no_body(check, command, expected) -> None:
+    """``for f in; do ...; done`` runs zero iterations and never assigns ``f``,
+    so a value it held before still stands for the command after the loop.
+    Every shell tested (bash, dash, zsh, ksh, mksh) agrees, for ``select`` too.
+    The body never runs, so an invocation written inside it is no evidence,
+    while ``for f in ""`` iterates once over the empty string and its body
+    does run. ``for f; do`` (no ``in``) is different: it iterates the
+    positional parameters, which the text does not carry.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('zsh -c \'printf "" | for f in run.py; do cat "$f"; done; python3 "$f"\'', 1.0),
+        ('ksh -c \'printf "" | for f in run.py; do cat "$f"; done; python3 "$f"\'', 1.0),
+        ('bash -c \'printf "" | for f in run.py; do cat "$f"; done; python3 "$f"\'', 0.0),
+        ('sh -c \'printf "" | for f in run.py; do cat "$f"; done; python3 "$f"\'', 0.0),
+        ('dash -c \'printf "" | for f in run.py; do cat "$f"; done; python3 "$f"\'', 0.0),
+        ('mksh -c \'printf "" | for f in run.py; do cat "$f"; done; python3 "$f"\'', 0.0),
+        ('printf "" | for f in run.py; do cat "$f"; done; python3 "$f"', 0.0),
+        ('zsh -c \'for f in run.py; do cat "$f"; done | cat; python3 "$f"\'', 0.0),
+        ('zsh -c \'printf "" | f=run.py; python3 "$f"\'', 1.0),
+        ('bash -c \'printf "" | f=run.py; python3 "$f"\'', 0.0),
+        ("zsh -c 'echo x | if true; then f=run.py; fi; python3 \"$f\"'", 1.0),
+        ('zsh -c \'printf "" | { f=run.py; }; python3 "$f"\'', 1.0),
+        ('zsh -c \'printf "" | for f in run.py; do python3 "$f"; done\'', 1.0),
+        ('bash -c \'zsh -c "printf \\"\\" | for f in run.py; do :; done; python3 \\$f"\'', 1.0),
+        ('bash -c \'shopt -s lastpipe; printf "" | for f in run.py; do :; done; python3 "$f"\'', 0.75),
+        ('bash -O lastpipe -c \'printf "" | for f in run.py; do :; done; python3 "$f"\'', 0.75),
+    ],
+)
+def test_the_last_stage_of_a_pipeline_keeps_its_binding_where_the_shell_does(check, command, expected) -> None:
+    """zsh and ksh run the last command of a pipeline in the current shell, so
+    a loop variable or assignment made there outlives the pipeline; bash, sh,
+    dash and mksh fork it like every other stage, so it is gone. A command
+    piped into another stage is in a subshell in every shell. The ``-c``
+    payload carries its shell into the walk, nested shells included. The tool
+    call's own shell is read as bash. bash with ``lastpipe`` named keeps the
+    binding only if that option is in force when the pipeline runs, which the
+    text does not settle, so the walk runs under both readings and reports
+    their disagreement as unresolved rather than as "did not run".
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('(f=run.py); python3 "$f"', 0.0),
+        ("(for f in run.py; do :; done); python3 $f", 0.0),
+        ('(printf "" | for f in run.py; do cat "$f"; done; python3 "$f")', 0.0),
+        ('zsh -c \'printf "" | (f=run.py); python3 "$f"\'', 0.0),
+        ("(f=run.py) | cat; python3 $f", 0.0),
+        ("(cd x); (f=run.py); python3 $f", 0.0),
+        ('(f=run.py; python3 "$f")', 1.0),
+        ('{ f=run.py; }; python3 "$f"', 1.0),
+        ("f=run.py; (g=x); python3 $f", 1.0),
+        ("f=run.py; (python3 $f)", 1.0),
+        ('(printf "" | for f in run.py; do python3 "$f"; done)', 1.0),
+        ("((f=1)); f=run.py; python3 $f", 1.0),
+    ],
+)
+def test_a_binding_made_inside_a_subshell_group_never_escapes_it(check, command, expected) -> None:
+    """``( ... )`` runs in a subshell in every shell, so what is bound inside
+    the parentheses is gone after them, whether the binding was an assignment,
+    a loop variable, or made inside a pipeline within the group. A ``{ ... }``
+    group runs in the current shell and its bindings stay. Commands inside the
+    group still read what was bound before it, and still run the script.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("ksh run.sh", 1.0),
+        ("mksh run.sh", 1.0),
+        ("ash run.sh", 1.0),
+        ("ksh -c './run.sh'", 1.0),
+        ("mksh -c 'sh run.sh'", 1.0),
+        ("ksh -c 'cat run.sh'", 0.0),
+        ("ksh -n run.sh", 0.0),
+        ("ksh -x run.sh", 1.0),
+    ],
+)
+def test_ksh_mksh_and_ash_are_shells(check, command, expected) -> None:
+    """They run a script named as their operand and carry a ``-c`` payload
+    into the walk like sh, with sh's options: ``-n`` only parses, ``-x`` traces
+    while running.
+    """
+    assert check(_bash(command, "done"), "run.sh")["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("for f in; do :; 'done'; python3 run.py; done", 0.0),
+        ("for f in; do d'on'e; python3 run.py; done", 0.0),
+        ("for f in; do :; d\\one; python3 run.py; done", 0.0),
+        ("for f in; do \\done; python3 run.py; done", 0.0),
+        ("for f in; do 'for'; done; python3 run.py", 1.0),
+        ('f=run.py; for g in; do printf done; done; python3 "$f"', 1.0),
+        ('f=run.py; for g in; do for f in other.py; do :; done; done; python3 "$f"', 1.0),
+        ('f=run.py; printf "("; f=other.py; printf ")"; python3 "$f"', 0.0),
+        ('f=run.py; printf \\(; f=other.py; printf \\); python3 "$f"', 0.0),
+        ('f=run.py; printf "{"; f=other.py; printf "}"; python3 "$f"', 0.0),
+        ("python3 '|' run.py", 0.0),
+        ("python3 ';' run.py", 0.0),
+        ("python3 '>' run.py", 0.0),
+        ("python3 '0<run.py'", 0.0),
+        ("'python3' run.py", 1.0),
+        ('"python3" ./run.py', 1.0),
+        ("python3 run.py '|' cat", 1.0),
+        ("printf '(' ; python3 run.py", 1.0),
+    ],
+)
+def test_a_quoted_or_escaped_word_is_not_shell_syntax(check, command, expected) -> None:
+    """``'done'`` is a command named done, ``printf "("`` prints a parenthesis
+    and ``python3 '|' run.py`` runs a script named ``|``. The tokenizer drops
+    the quotes, so a word that would read as syntax once unquoted is marked
+    before tokenizing and the walk reads it as the ordinary word it is: the
+    empty loop's real ``done`` still ends the skipped body, a quoted
+    parenthesis opens no subshell, and a quoted separator splits no command.
+    Quoting a command name changes nothing: ``'python3' run.py`` runs it.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        'zsh -c \'emulate sh; printf "" | for f in run.py; do :; done; python3 "$f"\'',
+        'zsh -c \'setopt shwordsplit; printf "" | for f in run.py; do :; done; python3 "$f"\'',
+        'bash -c \'shopt -s lastpipe; printf "" | for f in run.py; do :; done; python3 "$f"\'',
+    ],
+)
+def test_a_shell_option_change_leaves_the_pipeline_rule_unsettled(check, command) -> None:
+    """``emulate sh`` makes zsh fork the last stage (measured), and
+    ``shopt -s lastpipe`` makes bash keep it. Which options are in force when
+    the pipeline runs is not something the text settles, so a command that
+    names one is walked under both readings and their disagreement is
+    unresolved.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == 0.75
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=run.py; for f in; do :; done; for f; do :; done; python3 "$f"', 1.0),
+        ("f=run.py; for f; do :; done; python3 $f", 1.0),
+        ("for f; do python3 run.py; done", 0.0),
+        ("for f in run.py; do cat $f; done; for f; do python3 $f; done", 0.0),
+        ("set -- run.py; for f; do python3 $f; done", 0.75),
+        ("f=run.py; shift; for f; do :; done; python3 $f", 0.75),
+        ("bash -c 'for f; do python3 $f; done' _ run.py", 0.75),
+        ("bash -c 'for f; do python3 $f; done' run.py", 0.0),
+        ("bash -c 'python3 $1' _ run.py", 0.75),
+        ("bash -c 'python3 \"$@\"' _ run.py", 0.75),
+        ("bash -c '\"$0\"' ./run.py", 0.75),
+        ("bash -c 'python3 other.py' _ run.py", 0.0),
+        ("bash -c 'echo done' run.py", 0.0),
+    ],
+)
+def test_the_positional_parameters_are_empty_unless_the_text_gives_some(check, command, expected) -> None:
+    """A tool call runs with no positional parameters, so ``for f; do`` at the
+    top level runs zero times and keeps the variable's earlier value, like
+    ``for f in;``. Where the text can give it some (``set --``, ``shift``, or
+    operands after a ``-c`` payload beyond its ``$0``) a later read of the
+    variable is unresolved rather than a settled miss, and an operand that
+    names the script reaches the payload only through ``$1``, ``$@``, ``$0``
+    or ``for f; do`` written in it.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cat run.py | python3", 0.75),
+        ("cat 'run.py' | python3", 0.75),
+        ("cat run.py | python3 -", 0.75),
+        ("cat run.py | python3 -u", 0.75),
+        ("python3 - < run.py", 0.75),
+        ("cat run.py | python3 -c 'print(1)'", 0.0),
+        ("cat run.py | python3 --version", 0.0),
+        ("cat run.py | python3 other.py", 0.0),
+        ("cat run.py | wc -l", 0.0),
+        ("cat run.py | grep x | python3", 0.75),
+        ("cat other.py | python3; cat run.py", 0.0),
+    ],
+)
+def test_an_interpreter_reading_its_program_from_a_pipe_is_unresolved(check, command, expected) -> None:
+    """``cat run.py | python3`` runs the script and ``cat run.py | wc -l`` does
+    not; an interpreter with no script, no inline code and no terminal option
+    reads its program from standard input, the same shape as
+    ``python3 < run.py``, so when an earlier stage of its pipeline names the
+    script the command is unresolved. ``-`` names standard input.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("printf '%s' ';|' python3 run.py", 0.75),
+        ("printf '%s' \\;\\| python3 run.py", 0.75),
+        ("python3 ';;' run.py", 0.0),
+        ("python3 '|&' run.py", 0.0),
+        ("python3 '&&' run.py", 0.0),
+        ("python3 '2>' run.py", 0.0),
+        ("python3 '<<-' run.py", 0.0),
+        ("python3 run.py ';|'", 1.0),
+        ("python3 run.py '&&' cat", 1.0),
+        ("python3 '\\ue000run.py'", 0.0),
+        ("python3 \\ue000run.py", 0.0),
+        ("python3 '\\ue000\\ue000run.py'", 0.0),
+        ("python3 run.py '\\ue000'", 1.0),
+    ],
+)
+def test_a_quoted_run_of_metacharacters_is_one_word_and_a_mark_character_is_data(check, command, expected) -> None:
+    """A quoted word made of metacharacters (``';|'``, ``'2>'``) would be split
+    into operators after tokenizing, so it is marked like a quoted reserved
+    word; ``printf '%s' ';|' python3 run.py`` is one printf, which names the
+    interpreter and the script and is unresolved, not a separate python3
+    command. A file whose name carries the mark character itself is a
+    different file: the character is doubled before marking, so ``\\ue000run.py``
+    never reads as ``run.py``.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=other.py; { f=run.py; :; } | cat; python3 "$f"', 0.0),
+        ('f=other.py; { :; f=run.py; } | cat | cat; python3 "$f"', 0.0),
+        ('f=other.py; printf "" | { :; f=run.py; } | cat; python3 "$f"', 0.0),
+        ('f=other.py; printf "" | { :; f=run.py; }; python3 "$f"', 0.0),
+        ('zsh -c \'f=other.py; printf "" | { f=run.py; :; } | cat; python3 "$f"\'', 0.0),
+        ('zsh -c \'f=other.py; printf "" | { :; f=run.py; }; python3 "$f"\'', 1.0),
+        ('bash -c \'zsh -c "printf \\\\"\\\\" | { f=run.py; :; } | cat; python3 \\$f"\'', 0.0),
+        ('f=other.py; { f=run.py; :; }; python3 "$f"', 1.0),
+        ('f=other.py; printf "" | (f=run.py; python3 "$f"); python3 "$f"', 1.0),
+        ('f=other.py; printf "" | (f=run.py; python3 "$f") | cat; python3 "$f"', 1.0),
+        ('printf "" | (for f in run.py; do :; done; python3 $f)', 1.0),
+        ('printf "" | (f=run.py); python3 "$f"', 0.0),
+    ],
+)
+def test_a_brace_group_is_one_pipeline_stage_and_a_subshell_keeps_its_own_bindings(check, command, expected) -> None:
+    """``{ ...; } | cat`` runs the whole group as one stage of the pipeline, so
+    a binding made inside it is gone afterwards in bash, and stays only when
+    the group is the last stage under zsh. A ``( ... )`` group in a pipeline
+    is its own scope: a binding made inside it reaches the group's later
+    commands, and the pipe before ``(`` belongs to the group, not to the
+    first command inside it.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=run.py; (f=other.py; for g in; do :; done); python3 "$f"', 1.0),
+        ('f=run.py; (f=other.py; for g in; do :; done) | cat; python3 "$f"', 1.0),
+        ('f=run.py; (f=other.py; for g in; do :; done); (:); python3 "$f"', 1.0),
+        ('f=run.py; (f=other.py; for g in; do for h in; do :; done; done); python3 "$f"', 1.0),
+        ('f=other.py; (f=run.py; for g in; do :; done); python3 "$f"', 0.0),
+        ('f=other.py; (f=run.py; for g in; do for h in; do :; done; done) | cat; python3 "$f"', 0.0),
+        ("bash -c 'bash -c '\"'\"'f=run.py; (f=other.py; for g in; do :; done); python3 \"$f\"'\"'\"''", 1.0),
+        ("zsh -c 'zsh -c '\"'\"'f=run.py; (f=other.py; for g in; do :; done); python3 \"$f\"'\"'\"''", 1.0),
+        ('f=run.py; (for g in; do :; done; f=other.py); python3 "$f"', 1.0),
+        ('f=other.py; for g in; do (f=run.py); done; python3 "$f"', 0.0),
+    ],
+)
+def test_an_empty_loop_skipped_inside_a_subshell_still_closes_the_subshell(check, command, expected) -> None:
+    """Skipping the body of an empty loop must not skip the ``)`` that ends the
+    group it sits in: the group's bindings stay inside the group, and the
+    command after it reads the outer value. A parenthesis inside the skipped
+    body counts too.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('(f=run.py; f=other.py | cat; python3 "$f")', 1.0),
+        ('(f=other.py; f=run.py | cat; python3 "$f")', 0.0),
+        ('(f=run.py; printf "" | f=other.py; python3 "$f")', 1.0),
+        ('(f=other.py; printf "" | f=run.py; python3 "$f")', 0.0),
+        ('(f=run.py; { f=other.py; } | cat; python3 "$f")', 1.0),
+        ('(f=other.py; { f=run.py; } | cat; python3 "$f")', 0.0),
+        ('((f=other.py; f=run.py | cat); python3 "$f")', 0.0),
+        ('f=run.py; ((f=other.py) | cat; python3 "$f")', 1.0),
+        ('(f=run.py; (f=other.py | cat); python3 "$f")', 1.0),
+        ('{ f=run.py; f=other.py | cat; python3 "$f"; }', 1.0),
+        ('(f=other.py; for g in run.py; do :; done | cat; python3 "$g")', 0.0),
+        ('zsh -c \'(f=other.py; printf "" | f=run.py; python3 "$f")\'', 1.0),
+        ("zsh -c '(f=other.py; f=run.py | cat; python3 \"$f\")'", 0.0),
+        ('zsh -c \'(f=run.py; printf "" | f=other.py; python3 "$f")\'', 0.0),
+        ('printf "" | (f=run.py; python3 "$f")', 1.0),
+        ('printf "" | (f=run.py; python3 "$f") | cat', 1.0),
+    ],
+)
+def test_a_pipeline_inside_a_subshell_still_isolates_its_own_stages(check, command, expected) -> None:
+    """The group's scope is shared by the commands inside it, but a pipeline
+    written inside the group still runs each stage in its own subshell:
+    ``(f=run.py; f=other.py | cat; python3 "$f")`` runs run.py under bash,
+    and under zsh the last stage's binding survives inside the group as it
+    would outside. Only the pipe before ``(`` belongs to the group itself.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('bash -c \'printf "" | { f=run.py; (f=other.py); python3 "$f"; }\'', 1.0),
+        ('bash -c \'printf "" | { f=other.py; (f=run.py); python3 "$f"; }\'', 0.0),
+        ('zsh -c \'printf "" | { f=run.py; (f=other.py); python3 "$f"; }\'', 1.0),
+        ('zsh -c \'printf "" | { f=other.py; (f=run.py); python3 "$f"; }\'', 0.0),
+        ('printf "" | for g in 1; do f=run.py; (f=other.py); python3 "$f"; done', 1.0),
+        ('if true; then f=other.py; (f=run.py); python3 "$f"; fi | cat', 0.0),
+        ('f=run.py; { { f=other.py; } | cat; }; python3 "$f"', 1.0),
+        ('f=other.py; { if true; then f=run.py; fi | cat; }; python3 "$f"', 0.0),
+        ('f=run.py; printf "" | { printf "" | { f=other.py; }; }; python3 "$f"', 1.0),
+        (
+            'zsh -c \'f=other.py; printf "x\\n" | while read -r l; do { printf "" | f=run.py; }; done; python3 "$f"\'',
+            1.0,
+        ),
+        ('zsh -c \'f=other.py; { printf "" | f=run.py; }; python3 "$f"\'', 1.0),
+        ('f=other.py; { printf "" | f=run.py; }; python3 "$f"', 0.0),
+        ('f=run.py; { for g in; do :; done; f=other.py | cat; }; python3 "$f"', 1.0),
+    ],
+)
+def test_every_scope_nests_in_either_order_and_each_compound_has_its_own_pipe(check, command, expected) -> None:
+    """Groups and compound pipeline stages are one stack of scopes, innermost
+    last: a ``( ... )`` inside a compound stage copies the stage's bindings and
+    drops its own at ``)``, so the stage's value stands after it. Each compound
+    a segment opens is tested for its own pipe: in ``{ if ...; fi | cat; }``
+    only the ``if`` is a pipeline stage, and in ``{ printf "" | f=x; }`` the
+    pipe belongs to the command inside the braces, not to the braces.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=run.py; ((f=other.py)); python3 "$f"', 0.75),
+        ("ksh -c 'f=run.py; ((f=other.py)); python3 \"$f\"'", 0.75),
+        ("f=run.py; ((f++)); python3 $f", 0.75),
+        ("f=run.py; ((g=1)); python3 $f", 1.0),
+        ('f=other.py; ((f=run.py)); python3 "$f"', 0.0),
+        ("((f=1)); python3 $f", 0.0),
+        ("f=run.py; ((n > 0)); python3 $f", 1.0),
+        ('f=run.py; ((f=other.py; g=1); python3 "$f")', 1.0),
+        ('((f=other.py; f=run.py | cat); python3 "$f")', 0.0),
+        ("echo $((2 << 1)); python3 run.py", 1.0),
+        ("for ((i=0; i<1; i++)); do python3 run.py; done", 1.0),
+    ],
+)
+def test_an_arithmetic_command_is_not_a_pair_of_subshells(check, command, expected) -> None:
+    """``((f=x))`` at command position is arithmetic and runs in the current
+    shell: the value it gives a variable is a number, never a script path; on
+    an error bash, zsh and mksh leave the variable as it was, and ksh aborts
+    the rest of the text. So a variable that held the script is unsettled
+    afterwards, and any other stays not the script. ``((f=x; g=y); z)``, closed by a single ``)``, is two nested
+    subshells, as every shell reads it; ``$((`` and ``for ((`` are unchanged.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=other.py; ((f=run.py; python3 "$f")); python3 "$f"', 0.0),
+        ('zsh -c \'f=other.py; ((printf "" | for g in 1; do f=run.py; python3 "$f"; done)); python3 "$f"\'', 0.0),
+        ('zsh -c \'f=other.py; (({ f=run.py; }; python3 "$f")); python3 "$f"\'', 0.0),
+        ('mksh -c \'f=other.py; ((f=run.py; python3 "$f")); python3 "$f"\'', 0.0),
+        ('dash -c \'f=other.py; ((f=run.py; python3 "$f")); python3 "$f"\'', 1.0),
+        ('sh -c \'f=other.py; ((f=run.py; python3 "$f")); python3 "$f"\'', 0.75),
+        ('f=other.py; ((f=run.py; python3 "$f") ); python3 "$f"', 1.0),
+        ('f=other.py; ((f=run.py) ; python3 "$f"); python3 "$f"', 0.0),
+        ("f=run.py; ((x=(1+2)*3)); python3 $f", 1.0),
+        ("f=run.py; ((f=(1+2))); python3 $f", 0.75),
+        ("f=run.py; ((a*(b+c))) 2>/dev/null; python3 $f", 1.0),
+    ],
+)
+def test_double_parentheses_are_read_by_how_they_close_and_by_shell(check, command, expected) -> None:
+    """bash, zsh, ksh and mksh read ``((`` as arithmetic when its two halves
+    close together as ``))``, whatever is written between: ``((f=x; cmd))`` is
+    an arithmetic expression that fails and runs nothing. ``((cmd) )`` and
+    ``((f=x) ; cmd)`` close apart and are nested subshells. dash has no
+    arithmetic command and always reads subshells; ``sh`` is dash on some
+    systems and not others, so there the reading is unresolved. Parentheses
+    inside the arithmetic body are counted and stay in it.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected

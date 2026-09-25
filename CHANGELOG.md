@@ -42,12 +42,28 @@ All notable changes to SkillEvaluator are documented in this file.
   (`python3 < /dev/null run.py`), a script's own arguments that look like shell
   options (`bash run.sh -c '...'`), invocations inside `if`, `while`, `until`
   and `for` bodies, and versioned interpreter names (`perl5.38.2`, `python3.13`)
-  resolve as the shell runs them. Applied to both the host checker and the
-  bundled Harbor verifier.
+  resolve as the shell runs them. A loop over an empty list keeps the earlier
+  binding and its body is not read; a binding made inside `( ... )` stays
+  there; the last command of a pipeline keeps its bindings where the shell
+  does (zsh, ksh) and not where it forks it (bash, dash, mksh), with an
+  option change that could move it (`shopt -s lastpipe`, `emulate sh`)
+  read as unresolved; a quoted or escaped word that would read as syntax
+  (`'done'`, `printf "("`, `';|'`) is the ordinary word it is; groups and
+  compound pipeline stages nest in either order, each compound tested for its
+  own pipe; `((` closed by `))` is an arithmetic command where the shell has
+  one; the positional
+  parameters are empty unless the text gives some, so `for f; do` at the top
+  level runs nothing and keeps the variable's value; an interpreter fed its
+  program by a pipe (`cat run.py | python3`) is unresolved like
+  `python3 < run.py`; and `ksh`, `mksh` and `ash` are recognised shells.
+  Applied to both the host checker and the bundled Harbor verifier.
 
 - Added `scripts/script_invocation_differential.py`, a differential harness that
   executes each command for real against fixtures that record whether they ran,
-  and compares the result against both implementations.
+  and compares the result against both implementations. `--baseline REF` also
+  scores every command with the checker at an earlier ref and lists each score
+  that moved, so a change that lowers a command that ran, or raises one that
+  did not, is seen before it is pushed.
 
 ### Added
 

@@ -272,6 +272,128 @@ _HEREDOC_REDIRECTS = {"<<", "<<<"}
 _ATTACHED_DESCRIPTOR_RE = re.compile(r"(\d+)(>>|>\||>&|<&|<>|>|<)(?![<])")
 
 
+# Words the walk reads as shell syntax when they stand unquoted. Quoted or
+# escaped, each is an ordinary word: `'done'` is a command named done, and
+# `printf "("` prints a parenthesis. The tokenizer drops quotes, so such a
+# word is prefixed with a private-use character before tokenizing and the
+# prefix is removed wherever a word is read as a value.
+_QUOTED_SYNTAX_MARK = "\ue000"
+_SYNTAX_WORDS = frozenset(
+    {
+        "for",
+        "select",
+        "while",
+        "until",
+        "if",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "do",
+        "done",
+        "case",
+        "esac",
+        "in",
+        "!",
+        "{",
+        "}",
+        "(",
+        ")",
+        "--",
+        ";",
+        ";;",
+        "&",
+        "&&",
+        "|",
+        "||",
+        "<",
+        ">",
+        ">>",
+        ">|",
+        "<<",
+        "<<<",
+        "<&",
+        ">&",
+        "&>",
+        "&>>",
+        "<>",
+    }
+)
+_SHELL_METACHARS = ";&|()<>"
+# A quoted word made of metacharacters (``';|'``, ``'2>'``, ``'<<-'``) would be
+# split into operators after tokenizing; it is marked like a listed word.
+_SYNTAX_SHAPE_RE = re.compile(r"\d*[;&|<>(){}]+-?|!|--")
+
+
+def _mark_quoted_syntax(text: str) -> str:
+    """Prefix each quoted or escaped word that would otherwise read as syntax.
+
+    Words are delimited as the shell delimits them: at unquoted whitespace
+    and unquoted metacharacters. A word that contains a quote or an escape
+    and whose unquoted text is in ``_SYNTAX_WORDS`` or shaped like syntax
+    gets the mark; every other character is copied through unchanged,
+    quotes included, so the tokenizer still sees the original quoting. A
+    mark character already present in the text is doubled first, so the
+    reader can tell a mark (one, at the start of a word) from data (always
+    two), and a file whose name carries that character keeps its identity.
+    """
+    text = text.replace(_QUOTED_SYNTAX_MARK, _QUOTED_SYNTAX_MARK * 2)
+    out = []
+    raw = []
+    plain = []
+    quoted = False
+    quote = None
+    index = 0
+
+    def flush() -> None:
+        nonlocal quoted
+        if raw:
+            if quoted and ("".join(plain) in _SYNTAX_WORDS or _SYNTAX_SHAPE_RE.fullmatch("".join(plain))):
+                out.append(_QUOTED_SYNTAX_MARK)
+            out.extend(raw)
+            raw.clear()
+            plain.clear()
+        quoted = False
+
+    while index < len(text):
+        char = text[index]
+        if quote:
+            raw.append(char)
+            if char == quote:
+                quote = None
+            elif char == "\\" and quote == '"' and index + 1 < len(text) and text[index + 1] in '"\\':
+                raw.append(text[index + 1])
+                plain.append(text[index + 1])
+                index += 1
+            else:
+                plain.append(char)
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            quoted = True
+            raw.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(text):
+            quoted = True
+            raw.append(char)
+            raw.append(text[index + 1])
+            plain.append(text[index + 1])
+            index += 2
+            continue
+        if char.isspace() or char in _SHELL_METACHARS:
+            flush()
+            out.append(char)
+            index += 1
+            continue
+        raw.append(char)
+        plain.append(char)
+        index += 1
+    flush()
+    return "".join(out)
+
+
 def _keep_attached_descriptors(text: str) -> str:
     """Quote ``2>`` so the lexer keeps the descriptor with its operator.
 
@@ -314,6 +436,13 @@ def _keep_attached_descriptors(text: str) -> str:
             if match:
                 out.append("'" + match.group(1) + match.group(2) + "'")
                 index = match.end()
+                # An operand written flush against the operator
+                # (``0<run.py``) would concatenate onto the quoted
+                # operator as one word, hiding the filename from the
+                # walk. A space splits it into its own token, as the
+                # spaced form already tokenizes.
+                if index < len(text) and not text[index].isspace() and text[index] not in ";&|(){}<>":
+                    out.append(" ")
                 at_word_start = False
                 continue
         out.append(char)
@@ -324,7 +453,7 @@ def _keep_attached_descriptors(text: str) -> str:
 
 def _shell_tokens(cmd: Any) -> list[str]:
     normalized = str(cmd).replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
-    normalized = _keep_attached_descriptors(normalized)
+    normalized = _keep_attached_descriptors(_mark_quoted_syntax(normalized))
     lexer = shlex.shlex(normalized, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -344,7 +473,10 @@ def _skill_md_arg(arg: str, assignments: dict[str, str]) -> bool:
 
 
 def _resolved_shell_arg(arg: str, assignments: dict[str, str]) -> str:
-    value = str(arg).lstrip("<>")
+    value = str(arg)
+    if value.startswith(_QUOTED_SYNTAX_MARK) and not value.startswith(_QUOTED_SYNTAX_MARK * 2):
+        value = value[1:]
+    value = value.replace(_QUOTED_SYNTAX_MARK * 2, _QUOTED_SYNTAX_MARK).lstrip("<>")
     for _ in range(2):
         resolved = _SHELL_VARIABLE_RE.sub(
             lambda match: assignments.get(match.group(1) or match.group(2), match.group(0)),
@@ -358,11 +490,15 @@ def _resolved_shell_arg(arg: str, assignments: dict[str, str]) -> str:
 
 def _is_output_redirect(token: str) -> bool:
     token = str(token)
+    if token.startswith(_QUOTED_SYNTAX_MARK):
+        return False
     return token in _OUTPUT_REDIRECTS or any(token.endswith(op) for op in _OUTPUT_REDIRECTS)
 
 
 def _is_heredoc_redirect(token: str) -> bool:
     token = str(token)
+    if token.startswith(_QUOTED_SYNTAX_MARK):
+        return False
     return token in _HEREDOC_REDIRECTS or any(token.endswith(op) for op in _HEREDOC_REDIRECTS)
 
 
@@ -420,8 +556,8 @@ def _cmd_reads_skill_md(cmd) -> bool:
     return False
 
 
-_SCRIPT_INTERPRETERS = {"bash", "dash", "node", "perl", "python", "python3", "ruby", "sh", "zsh"}
-_SHELL_COMMAND_INTERPRETERS = {"bash", "dash", "sh", "zsh"}
+_SCRIPT_INTERPRETERS = {"ash", "bash", "dash", "ksh", "mksh", "node", "perl", "python", "python3", "ruby", "sh", "zsh"}
+_SHELL_COMMAND_INTERPRETERS = {"ash", "bash", "dash", "ksh", "mksh", "sh", "zsh"}
 _INERT_SHELL_PRODUCERS = {"echo", "printf"}
 _MAX_SHELL_REFERENCE_CHARS = 32_768
 _MAX_SHELL_REFERENCE_TOKENS = 256
@@ -758,6 +894,22 @@ def _unwrap_shell_command(
             continue
         return cmd_idx
     return None
+
+
+def _shell_c_positional(command: list[str], cmd_idx: int, assignments: dict[str, str]) -> list[str]:
+    """The operands after the ``-c`` payload: ``bash -c '...' a b`` gives the
+    payload positional parameters, so ``for f; do`` inside it iterates them
+    and ``$1`` names one of them.
+    """
+    operands = _interpreter_operands(command, cmd_idx, assignments)
+    for index in range(len(operands) - 1):
+        option = operands[index].strip("\"'")
+        if option.startswith("-") and "c" in option[1:]:
+            payload_index = index + 1
+            if operands[payload_index].strip("\"'") == "--":
+                payload_index += 1
+            return operands[payload_index + 1 :]
+    return []
 
 
 def _shell_c_payload(command: list[str], cmd_idx: int, assignments: dict[str, str]) -> str | None:
@@ -1910,6 +2062,11 @@ _INTERPRETER_GRAMMARS: dict[str, dict[str, frozenset[str]]] = {
     },
 }
 _INTERPRETER_GRAMMARS["dash"] = _INTERPRETER_GRAMMARS["sh"]
+# ksh, mksh and ash take the POSIX sh options this grammar lists; an option
+# outside it leaves the command unresolved, as for sh.
+_INTERPRETER_GRAMMARS["ksh"] = _INTERPRETER_GRAMMARS["sh"]
+_INTERPRETER_GRAMMARS["mksh"] = _INTERPRETER_GRAMMARS["sh"]
+_INTERPRETER_GRAMMARS["ash"] = _INTERPRETER_GRAMMARS["sh"]
 _INTERPRETER_GRAMMARS["zsh"] = _INTERPRETER_GRAMMARS["bash"]
 _SOURCING_COMMANDS = frozenset({".", "source"})
 _VERSION_SUFFIX_RE = re.compile(r"\d+(?:\.\d+)*$")
@@ -2014,6 +2171,17 @@ _COMMAND_INTRODUCING_WORDS = frozenset({"if", "then", "else", "elif", "while", "
 # Loop headers name the values a variable will take and run nothing themselves;
 # what the body does with that variable is not something this text settles.
 _LOOP_HEADER_WORDS = frozenset({"for", "select"})
+# The value of a variable a header rebound to the positional parameters,
+# when the text does not say what they are: a later read of it is
+# unresolved rather than a settled miss.
+_UNSETTLED_VALUE = "\ue001"
+# Text that sets or shifts the positional parameters, so ``for f; do`` may
+# iterate something even where the caller passed none.
+_POSITIONAL_SET_RE = re.compile(r"(?:^|[;&|(\s])(?:shift\b|set\s+(?:--|[^-\s]))")
+# Text that reads the positional parameters or ``$0``, the only ways an
+# operand after a ``-c`` payload reaches the payload.
+_READS_POSITIONAL_RE = re.compile(r"\$[@*1-9]|\$\{[@*1-9]|\bshift\b|\bfor\s+[A-Za-z_]\w*\s*(?:;|\bdo\b)")
+_READS_ARGV0_RE = re.compile(r"\$0\b|\$\{0[}:]")
 # Control syntax this walk does not model, so a script inside it is unresolved.
 _UNMODELLED_CONTROL_WORDS = frozenset({"case"})
 
@@ -2050,9 +2218,9 @@ def _redirects_script_to_stdin(command: list[str], assignments: dict[str, str], 
     """
     for position, word in enumerate(command[:-1]):
         token = str(word)
-        if (token in _INPUT_REDIRECTS or token.endswith("<")) and _script_path_matches(
-            _resolved_shell_arg(str(command[position + 1]), assignments), expected
-        ):
+        if (
+            token in _INPUT_REDIRECTS or (token.endswith("<") and not token.startswith(_QUOTED_SYNTAX_MARK))
+        ) and _script_path_matches(_resolved_shell_arg(str(command[position + 1]), assignments), expected):
             return True
     return False
 
@@ -2085,9 +2253,21 @@ def _names_script_anywhere(command_text: str, expected_script: str) -> bool:
 
 # Words that open and close a compound command, for scoping a pipeline that
 # runs one: ``echo x | while read -r l; do ...; done``.
-_COMPOUND_OPENERS = frozenset({"for", "while", "until", "if", "case"})
-_COMPOUND_CLOSERS = frozenset({"done", "fi", "esac"})
+# ``{`` and ``}`` are here too: ``{ f=x; } | cat`` is one pipeline stage.
+_COMPOUND_OPENERS = frozenset({"for", "select", "while", "until", "if", "case", "{"})
+_COMPOUND_CLOSERS = frozenset({"done", "fi", "esac", "}"})
 _COMMAND_POSITION_LEADERS = frozenset({"then", "do", "else", "elif", "!", "{", "("})
+# Whether the last command of a pipeline runs in the current shell, so a
+# binding it makes outlives the pipeline. zsh and ksh run it there; bash,
+# dash and mksh fork it like the other stages, unless bash has `lastpipe`
+# set, which is a run-time option the text cannot settle. Measured on each
+# shell with `printf "" | for f in x; do :; done; echo "$f"`.
+_LAST_STAGE_IN_CURRENT_SHELL = frozenset({"zsh", "ksh"})
+_LAST_STAGE_IN_SUBSHELL = frozenset({"bash", "sh", "dash", "ash", "mksh"})
+# Option changes that can move the last stage between the two rules: bash's
+# `shopt -s lastpipe`, and zsh's `emulate sh` (measured: it forks the last
+# stage). Any of these words in the text leaves the rule unsettled.
+_PIPELINE_OPTION_RE = re.compile(r"\b(?:lastpipe|shopt|setopt|unsetopt|emulate)\b")
 
 
 def _command_position_words(command: list[str]) -> list[str]:
@@ -2105,16 +2285,35 @@ def _command_position_words(command: list[str]) -> list[str]:
     return words
 
 
-def _compound_feeds_a_pipeline(tokens: list[str], idx: int) -> bool:
-    """Whether the compound command opening at ``idx`` is piped into another.
+def _scope_events(command: list[str]) -> list[str]:
+    """The groups and compound openers of one segment, in the order they open.
 
-    Its closing word is found by counting openers and closers over the
-    segments that follow; when the token after that closing segment is ``|``,
-    every command inside ran in a subshell.
+    ``{ ( for f in x`` opens a brace group, a subshell group and a loop, one
+    inside the next. A ``(`` is a group wherever it stands; an opener word
+    counts only at command position, where the shell reads it as one.
     """
-    depth = 0
-    position = idx
-    while position < len(tokens):
+    events = []
+    expect = True
+    for token in command:
+        word = str(token).strip("\"'")
+        if token == "(":
+            events.append("(")
+        elif expect and word in _COMPOUND_OPENERS:
+            events.append(word)
+        expect = word in _COMMAND_POSITION_LEADERS
+    return events
+
+
+def _compound_closer_ends(tokens: list[str], end: int, count: int) -> list[int]:
+    """For each of the ``count`` compounds a segment ending at ``end`` opens,
+    outermost first, the index just past the segment holding its closing
+    word; ``len(tokens)`` for one that never closes. The token there tells
+    whether that compound, and only that one, is piped into another stage.
+    """
+    ends = [len(tokens)] * count
+    depth = count
+    position = end
+    while position < len(tokens) and depth > 0:
         if tokens[position] in _SHELL_SEPARATORS:
             position += 1
             continue
@@ -2126,13 +2325,30 @@ def _compound_feeds_a_pipeline(tokens: list[str], idx: int) -> bool:
                 depth += 1
             elif word in _COMPOUND_CLOSERS:
                 depth -= 1
-                if depth == 0:
-                    return segment_end < len(tokens) and tokens[segment_end] == "|"
+                if 0 <= depth < count and ends[depth] == len(tokens):
+                    ends[depth] = segment_end
         position = segment_end
-    return False
+    return ends
 
 
 _SHELL_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _loop_header_is_empty(
+    command: list[str], cmd_idx: int, assignments: dict[str, str], positional_known_empty: bool
+) -> bool:
+    """``for f in; do`` with nothing after ``in``: the loop runs zero times.
+
+    Its variable keeps whatever it held, and its body never runs, so the
+    body is not evidence of anything. ``for f; do`` (no ``in``) is different:
+    it iterates the positional parameters, which the text does not carry.
+    """
+    words = [_resolved_shell_arg(str(word), assignments).strip("\"'") for word in command[cmd_idx + 1 :]]
+    if len(words) == 1 and _SHELL_NAME_RE.fullmatch(words[0]):
+        # ``for f; do`` iterates the positional parameters: empty when the
+        # text runs with none, which is what a tool call gets.
+        return positional_known_empty
+    return len(words) == 2 and bool(_SHELL_NAME_RE.fullmatch(words[0])) and words[1] == "in"
 
 
 def _loop_header_is_unresolved(command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str) -> bool:
@@ -2147,13 +2363,21 @@ def _loop_header_is_unresolved(command: list[str], cmd_idx: int, assignments: di
     """
     words = [_resolved_shell_arg(str(word), assignments).strip("\"'") for word in command[cmd_idx + 1 :]]
     if words and _SHELL_NAME_RE.fullmatch(words[0]):
+        if len(words) == 1:
+            # The positional parameters, which this text does not carry: a
+            # later read of the variable is unresolved, not a settled miss.
+            assignments[words[0]] = _UNSETTLED_VALUE
+            return _command_names_script(command, cmd_idx, assignments, expected)
         if len(words) >= 2 and words[1] == "in":
             values = words[2:]
             if len(values) == 1:
                 assignments[words[0]] = values[0]
                 return False
-        # This header rebinds the variable to values the text does not settle,
-        # so a value an earlier single-value header gave it no longer holds.
+        # This header gives the variable several values the text does not
+        # settle, or is ``for f; do`` over the positional parameters, so a
+        # value an earlier single-value header gave it no longer holds. An
+        # empty ``in`` list never reaches here: the walk skips that loop
+        # whole (see ``_loop_header_is_empty``).
         assignments.pop(words[0], None)
     return _command_names_script(command, cmd_idx, assignments, expected)
 
@@ -2260,15 +2484,77 @@ _PUNCTUATION_RUN_RE = re.compile(r"\A[();|&]+\Z")
 _PUNCTUATION_PIECE_RE = re.compile(r"&&|\|\||[();|&]")
 
 
-def _split_punctuation_runs(tokens: list[str]) -> list[str]:
-    """Separate a grouped run of punctuation into the operators it is made of."""
+def _arithmetic_close(tokens: list[str], start: int) -> tuple[int, int] | None:
+    """Where the ``((`` before ``start`` is closed as an arithmetic command.
+
+    bash, zsh, ksh and mksh read ``((`` as arithmetic when the parenthesis that
+    closes its inner half is written directly before the one that closes its
+    outer half, as ``))``, whatever the text between: ``((f=x; g=y))`` is
+    arithmetic (and fails), ``((f=x; g=y) )`` and ``((f=x) ; g)`` are two
+    nested subshells. Parentheses opened inside are counted. Returns the index
+    of the token holding that ``))`` and the offset of its first character, or
+    ``None`` when the text closes some other way.
+    """
+    depth = 0
+    for index in range(start, len(tokens)):
+        token = tokens[index]
+        if not _PUNCTUATION_RUN_RE.match(token):
+            continue
+        for offset, char in enumerate(token):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth:
+                    depth -= 1
+                else:
+                    return (index, offset) if token[offset + 1 : offset + 2] == ")" else None
+    return None
+
+
+def _split_punctuation_runs(tokens: list[str], arithmetic: bool = True) -> list[str]:
+    """Separate a grouped run of punctuation into the operators it is made of.
+
+    With ``arithmetic``, a ``((`` at command position that closes as an
+    arithmetic command is emitted as three tokens, ``((``, its whole body as
+    one word, and ``))``, so the walk neither splits the body at its
+    separators nor reads its parentheses as subshells. dash has no
+    arithmetic command, so its caller passes ``arithmetic=False`` and every
+    ``((`` is two subshells. ``$((`` and ``for ((`` are not at command
+    position and split as before.
+    """
     separated: list[str] = []
-    for token in tokens:
+    position = 0
+    while position < len(tokens):
+        token = tokens[position]
+        at_command_position = (
+            not separated or separated[-1] in _SHELL_SEPARATORS or separated[-1] in _COMMAND_POSITION_LEADERS
+        )
+        if arithmetic and token == "((" and at_command_position:
+            close = _arithmetic_close(tokens, position + 1)
+            if close is not None:
+                close_index, close_offset = close
+                body = [*tokens[position + 1 : close_index], tokens[close_index][:close_offset]]
+                separated.append("((")
+                separated.append(" ".join(word for word in body if word))
+                separated.append("))")
+                separated.extend(_PUNCTUATION_PIECE_RE.findall(tokens[close_index][close_offset + 2 :]))
+                position = close_index + 1
+                continue
         if len(token) > 1 and _PUNCTUATION_RUN_RE.match(token):
             separated.extend(_PUNCTUATION_PIECE_RE.findall(token))
         else:
             separated.append(token)
+        position += 1
     return separated
+
+
+# An assignment inside an arithmetic command: ``f=1``, ``f+=2``, ``f<<=1``,
+# ``f++`` and ``--f``. The value is a number, never a script path; on an
+# error bash, zsh and mksh leave the variable as it was, and ksh aborts
+# the rest of the text.
+_ARITHMETIC_ASSIGNMENT_RE = re.compile(
+    r"([A-Za-z_]\w*)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)|([A-Za-z_]\w*)\s*(?:\+\+|--)|(?:\+\+|--)\s*([A-Za-z_]\w*)"
+)
 
 
 def _unquoted_separator_index(text: str) -> int:
@@ -2389,6 +2675,39 @@ def _runs_inline_code(executable: str, command: list[str], cmd_idx: int, assignm
     """
     status, _ = _interpreter_script_arg(executable, command, cmd_idx, assignments)
     return status == _INLINE_CODE
+
+
+def _reads_program_from_stdin(interpreter: str, command: list[str], cmd_idx: int, assignments: dict[str, str]) -> bool:
+    """An interpreter given no script, no inline code and no terminal option
+    reads its program from standard input; ``-`` names standard input.
+    """
+    grammar = _INTERPRETER_GRAMMARS.get(interpreter)
+    if grammar is None:
+        return False
+    for arg in _interpreter_operands(command, cmd_idx, assignments):
+        word = str(arg).strip("\"'")
+        if word == "-":
+            continue
+        if word in grammar["code"] or word in grammar["terminal"] or word in grammar["value"]:
+            return False
+        if not word.startswith("-"):
+            return False
+    return True
+
+
+def _pipeline_upstream_names_script(tokens: list[str], idx: int, assignments: dict[str, str], expected: str) -> bool:
+    """Whether an earlier stage of the pipeline that the segment at ``idx``
+    ends names the expected script as one of its words.
+    """
+    position = idx - 1
+    while position >= 0:
+        token = tokens[position]
+        if token in _SHELL_SEPARATORS and token != "|":
+            return False
+        if token != "|" and _script_path_matches(_resolved_shell_arg(token, assignments), expected):
+            return True
+        position -= 1
+    return False
 
 
 def _interpreter_script_arg(
@@ -2552,7 +2871,71 @@ def _skip_transparent_prefixes(
     return (_WRAPPER_OK, cmd_idx)
 
 
-def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> bool | None:
+def _double_parens_are_arithmetic(shell: str | None) -> bool | None:
+    """Whether ``((`` closed by ``))`` is an arithmetic command in this shell.
+
+    bash, zsh, ksh and mksh have one (measured); dash has none and reads two
+    subshells. ``sh`` and ``ash`` are dash on some systems and bash or
+    busybox on others, so the text does not settle it. The tool call's own
+    shell is read as bash.
+    """
+    if shell == "dash":
+        return False
+    if shell in {"sh", "ash"}:
+        return None
+    return True
+
+
+def _pipeline_last_stage_keeps_bindings(shell: str | None, command_text: str) -> bool | None:
+    """Whether a binding made in a pipeline's last command survives it.
+
+    ``True`` and ``False`` when the shell settles it; ``None`` when the text
+    does not: an unmodelled shell, or an option change named in the text
+    (``shopt -s lastpipe`` in bash, ``emulate sh`` in zsh) that moves that
+    stage between the two rules at run time.
+    """
+    if _PIPELINE_OPTION_RE.search(command_text):
+        return None
+    if shell in _LAST_STAGE_IN_CURRENT_SHELL:
+        return True
+    if shell is None or shell in _LAST_STAGE_IN_SUBSHELL:
+        # The tool's own shell is read as bash, which is what runs an
+        # agent's command and what the differential harness executes.
+        return False
+    return None
+
+
+def _cmd_executes_script(
+    cmd: Any,
+    expected_script: str,
+    *,
+    _depth: int = 0,
+    _shell: str | None = None,
+    _positional: bool = False,
+) -> bool | None:
+    """Whether a shell command invokes ``expected_script``.
+
+    ``_shell`` names the interpreter running this text, when it is known:
+    a ``-c`` payload carries its shell, the tool call itself carries none.
+    Two rules in the walk depend on the shell: whether the last command of
+    a pipeline keeps its bindings, and whether ``((`` is arithmetic. Where
+    the shell does not settle one, the walk runs under both readings, and
+    disagreement is unresolved rather than one shell's answer presented as
+    every shell's.
+    """
+    keep = _pipeline_last_stage_keeps_bindings(_shell, str(cmd))
+    arithmetic = _double_parens_are_arithmetic(_shell)
+    results = {
+        _walk_for_invocation(cmd, expected_script, _depth, keep_stage, _positional, arithmetic_parens)
+        for keep_stage in ([keep] if keep is not None else [False, True])
+        for arithmetic_parens in ([arithmetic] if arithmetic is not None else [True, False])
+    }
+    return results.pop() if len(results) == 1 else None
+
+
+def _walk_for_invocation(
+    cmd: Any, expected_script: str, _depth: int, keep_last_stage: bool, positional: bool, arithmetic_parens: bool
+) -> bool | None:
     """Whether a shell command invokes ``expected_script``.
 
     Credit is given only for a recognised way of running a script: the script
@@ -2581,13 +2964,40 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
     # A heredoc or here-string operand is data rather than further commands, but
     # the tokenizer turns its newlines into separators, so it is split out.
     analysed_text, unexamined_text = _split_heredocs(command_text)
-    tokens = _split_punctuation_runs(_shell_tokens(analysed_text))
+    tokens = _split_punctuation_runs(_shell_tokens(analysed_text), arithmetic_parens)
     if not tokens:
         return None if str(expected_script) in command_text else False
 
     assignments: dict[str, str] = {}
-    pipeline_scope: dict[str, str] | None = None
-    pipeline_depth = 0
+    # Every scope a command can run in, innermost last. A ``( ... )`` group
+    # and a compound command isolated as a pipeline stage each run in a
+    # subshell, with a copy of the bindings around them that is dropped
+    # when they end. A frame is (kind, bindings, the compound depth it
+    # opened at): "group" for ``(``, "stage" for a compound stage. A
+    # command reads and binds the innermost frame, and a frame opened
+    # inside another copies that one, so groups and stages nest in either
+    # order.
+    frames: list[tuple[str, dict[str, str], int]] = []
+    compound_depth = 0
+    closing_parens = 0
+
+    def innermost() -> dict[str, str]:
+        return frames[-1][1] if frames else assignments
+
+    def close_frames(parens: int) -> None:
+        """Drop what ended with the previous segment, innermost first: a
+        stage whose compound has closed, and a group for each ``)``."""
+        while frames:
+            kind, _, opened_at = frames[-1]
+            if kind == "stage" and compound_depth <= opened_at:
+                frames.pop()
+            elif kind == "group" and parens > 0:
+                frames.pop()
+                parens -= 1
+            else:
+                break
+
+    positional_known_empty = not positional and not _POSITIONAL_SET_RE.search(command_text)
     current_directory: str | None = None
     undecidable = False
     ran_a_wrapper_help = False
@@ -2600,32 +3010,69 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
         while end < len(tokens) and tokens[end] not in _SHELL_SEPARATORS:
             end += 1
         command = tokens[idx:end]
-        # A pipeline runs each of its commands in a subshell, so a loop
-        # variable or assignment made in one does not survive past the
-        # pipeline: ``printf '' | for f in run.py; do cat $f; done; python3 $f``
-        # runs python3 with an empty ``$f``. Such a command reads and writes a
-        # copy of the bindings that is dropped when it ends; a compound command
-        # piped into keeps its copy until its closing word, so its own body
-        # still sees the header's binding.
+        close_frames(closing_parens)
+        closing_parens = 0
+        # A pipeline runs each of its commands in a subshell, so a binding
+        # made in one does not survive past the pipeline:
+        # ``printf '' | for f in run.py; do cat $f; done; python3 $f`` runs
+        # python3 with an empty ``$f``. Each group and compound this segment
+        # opens is placed in turn: a ``(`` always runs in a subshell, and a
+        # compound runs in one when it is itself a pipeline stage, piped from
+        # (the segment's first command) or piped into (its own closing word
+        # is followed by ``|``), except as the last stage where the shell
+        # keeps it. Each such scope copies the innermost one around it and
+        # lasts until its closing word, so its own body sees its bindings.
         position_words = _command_position_words(command)
-        opens = sum(word in _COMPOUND_OPENERS for word in position_words)
         closes = sum(word in _COMPOUND_CLOSERS for word in position_words)
-        if pipeline_scope is None:
-            in_pipeline = (idx > 0 and tokens[idx - 1] == "|") or (end < len(tokens) and tokens[end] == "|")
-            if opens and not in_pipeline:
-                # ``for ...; done | true`` runs the whole loop in a subshell.
-                in_pipeline = _compound_feeds_a_pipeline(tokens, idx)
-            if in_pipeline and opens:
-                pipeline_scope = dict(assignments)
-                pipeline_depth = opens - closes
-                scope = pipeline_scope
-            else:
-                scope = dict(assignments) if in_pipeline else assignments
+        compound_depth -= closes
+        events = _scope_events(command)
+        opener_count = sum(event != "(" for event in events)
+        closer_ends = _compound_closer_ends(tokens, end, opener_count)
+        piped_from = idx > 0 and tokens[idx - 1] == "|"
+        piped_into = end < len(tokens) and tokens[end] == "|"
+        lead = next((word for word in position_words if word != "!"), None)
+        opened = 0
+        for event in events:
+            if event == "(":
+                frames.append(("group", dict(innermost()), compound_depth))
+                continue
+            compound_end = closer_ends[opened]
+            feeds = compound_end < len(tokens) and tokens[compound_end] == "|"
+            fed = opened == 0 and piped_from and lead == event
+            if feeds or (fed and not keep_last_stage):
+                frames.append(("stage", dict(innermost()), compound_depth))
+            compound_depth += 1
+            opened += 1
+        closing_parens = command.count(")")
+        if opened:
+            # The command after the opening words runs inside the innermost
+            # compound, so a pipe after this segment is that command's.
+            in_pipeline = piped_into
         else:
-            scope = pipeline_scope
-            pipeline_depth += opens - closes
-            if pipeline_depth <= 0:
-                pipeline_scope = None
+            # A pipe before ``(`` belongs to the group, not to the command
+            # inside it, which runs in the group's own scope.
+            preceded = piped_from and command[0] != "("
+            in_pipeline = preceded or piped_into
+            if keep_last_stage and preceded and not piped_into:
+                # The last command of the pipeline runs in the current
+                # shell here (zsh, ksh), so what it binds is kept.
+                in_pipeline = False
+        scope = dict(innermost()) if in_pipeline else innermost()
+        if "((" in command:
+            body_index = command.index("((") + 1
+            arithmetic_text = str(command[body_index]) if body_index < len(command) else ""
+            numeric_script = str(expected_script).rsplit("/", 1)[-1].isdigit()
+            for match in _ARITHMETIC_ASSIGNMENT_RE.finditer(arithmetic_text):
+                name = next(group for group in match.groups() if group)
+                # The variable ends as a number, unchanged after an error, or
+                # never read because ksh aborted. Only when it held the script
+                # (or the script's name is a number) is that a question.
+                if numeric_script or _script_path_matches(
+                    _resolved_shell_arg(scope.get(name, ""), scope), expected_script
+                ):
+                    scope[name] = _UNSETTLED_VALUE
+            idx = end + 1
+            continue
 
         cmd_idx = _command_start(command, scope)
         if cmd_idx >= len(command):
@@ -2633,6 +3080,24 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
             idx = end + 1
             continue
         if command[cmd_idx] in _LOOP_HEADER_WORDS:
+            if _loop_header_is_empty(command, cmd_idx, scope, positional_known_empty):
+                # Zero iterations: the body is skipped whole, and the
+                # closing word it ends with is accounted for here.
+                # The loop is the last compound this segment opens; any before it
+                # encloses it and stays open.
+                skip_to = closer_ends[-1]
+                for token in tokens[end:skip_to]:
+                    # Nothing in the body runs, but a parenthesis in it still
+                    # opens or closes a subshell around what follows.
+                    if token == "(":
+                        frames.append(("group", dict(innermost()), compound_depth))
+                    elif token == ")":
+                        closing_parens += 1
+                # The skipped tokens hold the loop's own closing word; any
+                # compound opened inside the body closes there too.
+                compound_depth -= 1
+                idx = skip_to
+                continue
             # The header runs nothing itself. With a single value the loop
             # variable is bound for the body that follows; otherwise a script
             # named here is unresolved, never a settled non-invocation.
@@ -2687,6 +3152,10 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
                 _resolved_shell_arg(command[cmd_idx], scope),
                 current_directory,
             )
+            if _UNSETTLED_VALUE in executable_path:
+                undecidable = True
+                idx = end + 1
+                continue
             executable = _shell_executable(executable_path)
 
             if executable == "cd":
@@ -2707,10 +3176,27 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
             if interpreter in _SHELL_COMMAND_INTERPRETERS and _runs_inline_code(executable, command, cmd_idx, scope):
                 payload = _shell_c_payload(command, cmd_idx, scope)
                 if payload is not None:
-                    nested = _cmd_executes_script(payload, expected_script, _depth=_depth + 1)
+                    # After the payload, the first operand is its $0 and the rest
+                    # its positional parameters; they reach the payload only
+                    # through a reference to them in its text.
+                    after = _shell_c_positional(command, cmd_idx, scope)
+                    argv0, params = after[:1], after[1:]
+                    nested = _cmd_executes_script(
+                        payload,
+                        expected_script,
+                        _depth=_depth + 1,
+                        _shell=interpreter,
+                        _positional=bool(params),
+                    )
                     if nested is True:
                         return True
-                    if nested is None:
+                    reaches = (
+                        _READS_POSITIONAL_RE.search(payload)
+                        and any(_script_path_matches(w, expected_script) for w in params)
+                    ) or (
+                        _READS_ARGV0_RE.search(payload) and any(_script_path_matches(w, expected_script) for w in argv0)
+                    )
+                    if nested is None or reaches:
                         undecidable = True
                     idx = end + 1
                     continue
@@ -2739,11 +3225,22 @@ def _cmd_executes_script(cmd: Any, expected_script: str, *, _depth: int = 0) -> 
                     # unresolved rather than settled as running nothing.
                     if _command_names_script(command, cmd_idx, scope, expected_script):
                         undecidable = True
-                elif status == _SCRIPT and script_arg is not None:
+                elif status == _SCRIPT and script_arg is not None and str(script_arg).strip("\"'") != "-":
                     if _script_path_matches(_path_with_shell_cwd(script_arg, current_directory), expected_script):
                         return True
-                    if _UNRESOLVED_ARG_RE.search(str(script_arg)):
+                    if _UNRESOLVED_ARG_RE.search(str(script_arg)) or _UNSETTLED_VALUE in str(script_arg):
                         undecidable = True
+                elif (
+                    status in (_NO_SCRIPT, _SCRIPT)
+                    and idx > 0
+                    and tokens[idx - 1] == "|"
+                    and _reads_program_from_stdin(interpreter, command, cmd_idx, scope)
+                    and _pipeline_upstream_names_script(tokens, idx, scope, expected_script)
+                ):
+                    # ``cat run.py | python3`` runs the script and ``cat run.py | wc -l``
+                    # does not, but an interpreter reading its program from standard
+                    # input is the same shape as ``python3 < run.py``: unresolved.
+                    undecidable = True
 
         idx = end + 1
 

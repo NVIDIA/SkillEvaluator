@@ -32,6 +32,14 @@ Run it with ``python scripts/script_invocation_differential.py``. Add
 pieces, and ``--seed`` to reproduce a particular generation. Commands that this
 machine cannot run (a tool that is not installed, a shell that refuses to parse)
 are reported separately and never counted as either kind of defect.
+
+Add ``--compose N`` to execute N commands that nest binding scopes (groups,
+brace groups, compound commands and pipeline stages, two or three deep, under
+bash, zsh and ksh). Add ``--baseline REF`` to also score every command with the checker as it
+stood at that git ref, and list each command whose score moved, against the
+marker. A fix that lowers the score of a command that ran, or raises it for
+one that did not, is a regression whatever else it repaired, so those are
+listed first for review before a revision is pushed.
 """
 
 from __future__ import annotations
@@ -39,10 +47,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import random
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,8 +73,13 @@ def _load_template():
 
 TEMPLATE = _load_template()
 
+# A command that returns before its script does: ``setsid -f`` and ``nohup``
+# fork and detach, and ``&`` backgrounds. Their marker may land after the
+# shell exits, so the harness waits for it before reading "did not run".
+_DETACHED_RE = re.compile(r"setsid\s+-f|\bnohup\b|&\s*(?:$|;|\)|\|\|)")
 PY = "python3"
 SCRIPT = "skills/demo/run.py"
+O = "skills/demo/other.py"
 SHELL_SCRIPT = "skills/demo/run.sh"
 
 
@@ -117,6 +132,9 @@ FIXTURES = {
     "other.py": _marker("other.py"),
     "another.py": _marker("another.py"),
     "skills/demo/another.py": _marker("another.py"),
+    # a name carrying the private-use character the checker uses as a mark,
+    # which must stay a different file from run.py
+    "skills/demo/\ue000run.py": _marker("\ue000run.py"),
     # ``python3 2 > out.txt run.py`` runs a script named 2: these exist so that
     # command succeeds, as the shell reads it, without touching run.py.
     "0": "print('zero')\n",
@@ -222,12 +240,17 @@ REDIRECT_FORMS = [
     "< /dev/null ",
     "</dev/null ",
     "0< /dev/null ",
+    "0</dev/null ",
+    "0<notes.txt ",
     "<&0 ",
     "2>/dev/null ",
     "2> /dev/null ",
     "2>&1 ",
+    "2>&- ",
+    "2>>err.txt ",
     "1>>out.txt ",
     "1> out.txt ",
+    "3<>notes.txt ",
 ]
 # A digit standing apart from its operator is an operand: ``python3 2 > out.txt
 # run.py`` runs the script named 2 and hands it run.py.
@@ -236,6 +259,9 @@ DETACHED_DESCRIPTOR_FORMS = ["2 > out.txt ", "2 >out.txt ", "1 >> out.txt ", "0 
 REBINDING_HEADERS = [
     "for f in {other} {another}; do {body}; done",
     "for f; do {body}; done",
+    "for f in; do {body}; done",
+    "for f in; do :; done; {body}",
+    'for f in ""; do :; done; {body}',
     "for f in {other}; do {body}; done",
     "for f in {script}; do {body}; done",
     "for g in x; do {body}; done",
@@ -414,7 +440,194 @@ def curated() -> list[tuple[str, str]]:
         add(f"{interpreter} -c {script}", name)
         add(f"{interpreter} --version {script}", name)
         add(f"env -i {interpreter} {script}", name)
+
+    # redirections written flush against a descriptor and spaced apart
+    # tokenize to the same words, so each pair must score the same
+    for attached, spaced in (
+        (f"0<{SCRIPT}", f"0< {SCRIPT}"),
+        (f"<{SCRIPT}", f"< {SCRIPT}"),
+        (f"2>err.txt {SCRIPT}", f"2> err.txt {SCRIPT}"),
+        (f"2>>err.txt {SCRIPT}", f"2>> err.txt {SCRIPT}"),
+        (f"1>out.txt {SCRIPT}", f"1> out.txt {SCRIPT}"),
+        (f"0</dev/null {SCRIPT}", f"0< /dev/null {SCRIPT}"),
+        (f"2>&1 {SCRIPT}", f"2>&1 {SCRIPT}"),
+        (f"2>&- {SCRIPT}", f"2>&- {SCRIPT}"),
+        (f"{SCRIPT} 2>err.txt", f"{SCRIPT} 2> err.txt"),
+    ):
+        add(f"{PY} {attached}")
+        add(f"{PY} {spaced}")
+    add(f"cat 0<{SCRIPT}")
+    add(f"cat 0< {SCRIPT}")
+
+    # a loop with an empty list never runs and never assigns its variable
+    add(f'f={SCRIPT}; for f in; do :; done; {PY} "$f"')
+    add(f'f={SCRIPT}; for f in; do {PY} "$f"; done')
+    add(f"for f in; do {PY} {SCRIPT}; done")
+    add(f'f={SCRIPT}; for f in; do :; done; cat "$f"')
+    add(f'for f in {SCRIPT}; do :; done; for f in; do :; done; {PY} "$f"')
+    add(f'for f in ""; do {PY} {SCRIPT}; done')
+    add(f'f={SCRIPT}; printf "" | for f in; do :; done; {PY} "$f"')
+
+    # a binding made in the last stage of a pipeline survives in zsh and not
+    # in bash, dash or sh; one made in an earlier stage, or inside ( ), in none
+    for shell in ("zsh", "bash", "sh", "dash"):
+        add(f'{shell} -c \'printf "" | for f in {SCRIPT}; do cat "$f"; done; {PY} "$f"\'')
+        add(f'{shell} -c \'for f in {SCRIPT}; do cat "$f"; done | cat; {PY} "$f"\'')
+        add(f'{shell} -c \'printf "" | f={SCRIPT}; {PY} "$f"\'')
+        add(f'{shell} -c \'printf "" | if true; then f={SCRIPT}; fi; {PY} "$f"\'')
+        add(f'{shell} -c \'printf "" | {{ f={SCRIPT}; }}; {PY} "$f"\'')
+        add(f'{shell} -c \'printf "" | (f={SCRIPT}); {PY} "$f"\'')
+        add(f'{shell} -c \'printf "" | for f in {SCRIPT}; do {PY} "$f"; done\'')
+    add(f'printf "" | for f in {SCRIPT}; do cat "$f"; done; {PY} "$f"')
+    add(f'(f={SCRIPT}); {PY} "$f"')
+    add(f'(f={SCRIPT}; {PY} "$f")')
+    add(f'{{ f={SCRIPT}; }}; {PY} "$f"')
+    add(f'bash -c "shopt -s lastpipe; printf \\"\\" | for f in {SCRIPT}; do :; done; {PY} \\"\\$f\\""')
+    add(f'bash -O lastpipe -c "printf \\"\\" | for f in {SCRIPT}; do :; done; {PY} \\"\\$f\\""')
+    add(f'ksh -c \'printf "" | for f in {SCRIPT}; do :; done; {PY} "$f"\'')
+
+    # a quoted or escaped word is not syntax: a quoted done does not end a
+    # loop, a quoted parenthesis opens no subshell, a quoted separator splits
+    # no command, and a redirection operand keeps its whole name
+    add(f"{PY} 2>1.log {SCRIPT}")
+    add(f"{PY} 2> 1.log {SCRIPT}")
+    add(f"{PY} 1>2.txt {SCRIPT}")
+    add(f"{PY} '0<{SCRIPT}'")
+    add(f"for f in; do :; 'done'; {PY} {SCRIPT}; done")
+    add(f"for f in; do d'on'e; {PY} {SCRIPT}; done")
+    add(f"for f in; do :; d\\\\one; {PY} {SCRIPT}; done")
+    add(f"for f in; do 'for'; done; {PY} {SCRIPT}")
+    add(f'f={SCRIPT}; for g in; do printf done; done; {PY} "$f"')
+    add(f'f={SCRIPT}; for g in; do for f in skills/demo/other.py; do :; done; done; {PY} "$f"')
+    add(f'f={SCRIPT}; printf "("; f=skills/demo/other.py; printf ")"; {PY} "$f"')
+    add(f'f={SCRIPT}; printf \\\\(; f=skills/demo/other.py; printf \\\\); {PY} "$f"')
+    add(f"{PY} '|' {SCRIPT}")
+    add(f"'{PY}' {SCRIPT}")
+    add(f"printf '(' ; {PY} {SCRIPT}")
+    add(f'zsh -c \'emulate sh; printf "" | for f in {SCRIPT}; do :; done; {PY} "$f"\'')
+
+    # positional parameters: none at the top level, given by set, shift or the
+    # operands after a -c payload; and an interpreter fed its program by a pipe
+    add(f'f={SCRIPT}; for f in; do :; done; for f; do :; done; {PY} "$f"')
+    add(f"for f; do {PY} {SCRIPT}; done")
+    add(f"set -- {SCRIPT}; for f; do {PY} $f; done")
+    add(f"bash -c 'for f; do {PY} $f; done' _ {SCRIPT}")
+    add(f"bash -c 'for f; do {PY} $f; done' {SCRIPT}")
+    add(f"bash -c '{PY} $1' _ {SCRIPT}")
+    add(f"bash -c '{PY} other.py' _ {SCRIPT}")
+    add(f"cat {SCRIPT} | {PY}")
+    add(f"cat '{SCRIPT}' | {PY}")
+    add(f"cat {SCRIPT} | {PY} -")
+    add(f"cat {SCRIPT} | {PY} -c 'print(1)'")
+    add(f"cat {SCRIPT} | wc -l")
+    add(f"cat {SHELL_SCRIPT} | bash", "run.sh")
+
+    # from the generated audit: quoted metacharacter runs, a brace group as a
+    # pipeline stage, a group inside a pipeline, an empty loop inside a group,
+    # and a file whose name carries the mark character
+    add(f"printf '%s' ';|' {PY} {SCRIPT}")
+    add(f"printf '%s' \\\\;\\\\| {PY} {SCRIPT}")
+    add(f"{PY} ';;' {SCRIPT}")
+    add(f"{PY} '|&' {SCRIPT}")
+    add(f"{PY} '2>' {SCRIPT}")
+    add(f"{PY} {SCRIPT} ';|'")
+    for shell in ("bash", "zsh"):
+        add(f"{shell} -c 'f={O}; {{ f={SCRIPT}; :; }} | cat; {PY} \"$f\"'")
+        add(f'{shell} -c \'f={O}; printf "" | {{ :; f={SCRIPT}; }} | cat; {PY} "$f"\'')
+        add(f'{shell} -c \'f={O}; printf "" | {{ :; f={SCRIPT}; }}; {PY} "$f"\'')
+        add(f'{shell} -c \'f={O}; printf "" | (f={SCRIPT}; {PY} "$f"); {PY} "$f"\'')
+        add(f'{shell} -c \'f={O}; printf "" | (f={SCRIPT}; {PY} "$f") | cat; {PY} "$f"\'')
+    add(f'f={SCRIPT}; (f={O}; for g in; do :; done); {PY} "$f"')
+    add(f'f={O}; (f={SCRIPT}; for g in; do :; done); {PY} "$f"')
+    add(f'f={O}; (f={SCRIPT}; for g in; do for h in; do :; done; done) | cat; {PY} "$f"')
+    add(f'f={SCRIPT}; (f={O}; for g in; do :; done) | cat; (:); {PY} "$f"')
+    add(f'printf "" | (for f in {SCRIPT}; do :; done; {PY} $f)')
+    add(f"{PY} 'skills/demo/\ue000run.py'")
+    add(f"{PY} skills/demo/\ue000run.py")
+
+    # a pipeline inside a group still isolates its own stages, in both
+    # assignment directions, at the last and a middle stage, and nested
+    for first, second in ((SCRIPT, O), (O, SCRIPT)):
+        add(f'(f={first}; f={second} | cat; {PY} "$f")')
+        add(f'(f={first}; printf "" | f={second}; {PY} "$f")')
+        add(f'(f={first}; {{ f={second}; }} | cat; {PY} "$f")')
+        add(f'((f={first}; f={second} | cat); {PY} "$f")')
+        add(f'f={first}; ((f={second}) | cat; {PY} "$f")')
+        add(f'{{ f={first}; f={second} | cat; {PY} "$f"; }}')
+        add(f'zsh -c \'(f={first}; printf "" | f={second}; {PY} "$f")\'')
+        add(f"zsh -c '(f={first}; f={second} | cat; {PY} \"$f\")'")
+        # a group inside a compound stage, a compound stage inside another, and
+        # a segment that opens a compound and starts a pipeline inside it
+        for shell in ("bash", "zsh"):
+            add(f'{shell} -c \'printf "" | {{ f={first}; (f={second}); {PY} "$f"; }}\'')
+            add(f'{shell} -c \'printf "" | for g in 1; do f={first}; (f={second}); {PY} "$f"; done\'')
+            add(f"{shell} -c 'if true; then f={first}; (f={second}); {PY} \"$f\"; fi | cat'")
+            add(f"{shell} -c 'f={first}; {{ {{ f={second}; }} | cat; }}; {PY} \"$f\"'")
+            add(f"{shell} -c 'f={first}; {{ if true; then f={second}; fi | cat; }}; {PY} \"$f\"'")
+            add(f'{shell} -c \'f={first}; {{ printf "" | f={second}; }}; {PY} "$f"\'')
+        # an arithmetic command, and the nested-subshell reading of ((
+        add(f'f={first}; ((f={second})); {PY} "$f"')
+        add(f"ksh -c 'f={first}; ((f={second})); {PY} \"$f\"'")
+        add(f'f={first}; ((f={second}; g=1); {PY} "$f")')
+        # (( closed by )) is arithmetic in bash, zsh, ksh and mksh, whatever is
+        # inside; closed apart, or under dash, it is nested subshells
+        for shell in ("", "zsh", "ksh", "mksh", "dash", "sh"):
+            body = f'f={first}; ((f={second}; {PY} "$f")); {PY} "$f"'
+            add(f"{shell} -c '{body}'" if shell else body)
+        add(f'f={first}; ((f={second}; {PY} "$f") ); {PY} "$f"')
+        add(f'zsh -c \'f={first}; ((printf "" | for g in 1; do f={second}; {PY} "$f"; done)); {PY} "$f"\'')
     return cases
+
+
+# Scopes a binding can be made in, each wrapping the text inside it: groups,
+# brace groups, compound commands, and each of those as the first, a middle
+# or the last stage of a pipeline.
+SCOPE_WRAPPERS = [
+    "({x})",
+    "{{ {x}; }}",
+    'printf "" | {{ {x}; }}',
+    "{{ {x}; }} | cat",
+    'printf "" | {{ {x}; }} | cat',
+    'printf "" | for g in 1; do {x}; done',
+    "for g in 1; do {x}; done | cat",
+    "if true; then {x}; fi | cat",
+    'printf "" | if true; then {x}; fi',
+    'printf "x\\n" | while read -r l; do {x}; done',
+    'printf "" | ({x})',
+    "({x}) | cat",
+    "for g in 1; do {x}; done",
+    "if true; then {x}; fi",
+    "for g in; do :; done; {x}",
+    "{{ for g in; do :; done; {x}; }}",
+]
+SCOPE_BINDINGS = [
+    "f={v}",
+    "f={v} | cat",
+    'printf "" | f={v}',
+    "(f={v})",
+    "for f in {v}; do :; done",
+    'printf "" | for f in {v}; do :; done',
+    "{{ f={v}; }}",
+]
+
+
+def _compose(rng: random.Random) -> tuple[str, str]:
+    """A binding nested two or three scopes deep, read at a random level.
+
+    Which value the interpreter reads depends on which scopes keep a binding,
+    in which shell: a group never does, a pipeline stage only as zsh's or
+    ksh's last stage, a brace group or a loop always. Both assignment
+    directions are drawn, so a scope that leaks and one that forgets are both
+    caught.
+    """
+    outer, inner = rng.choice([(SCRIPT, O), (O, SCRIPT)])
+    text = rng.choice(SCOPE_BINDINGS).format(v=inner)
+    for _ in range(rng.choice([2, 3])):
+        wrapper = rng.choice(SCOPE_WRAPPERS)
+        text = wrapper.format(x=f'{text}; {PY} "$f"' if rng.random() < 0.4 else text)
+    command = f'f={outer}; {text}; {PY} "$f"'
+    shell = rng.choice(["", "zsh", "ksh", "bash"])
+    return (f"{shell} -c '{command}'" if shell else command), "run.py"
 
 
 def _generate(rng: random.Random) -> tuple[str, str]:
@@ -450,6 +663,27 @@ def _generate(rng: random.Random) -> tuple[str, str]:
         body = f"for f in {names['script']}; do cat $f; done; " + header.format(
             body=rng.choice([f"{interpreter} $f", "cat $f"]), **names
         )
+    elif shape < 0.42:
+        # a binding made in a pipeline or a group, then read by the interpreter
+        inside = prefix.startswith(("cd ", "(cd "))
+        bound = "run.py" if inside else SCRIPT
+        binding = rng.choice(
+            [
+                f'printf "" | for f in {bound}; do cat "$f"; done',
+                f'for f in {bound}; do cat "$f"; done | cat',
+                f'printf "" | f={bound}',
+                f'printf "" | (f={bound})',
+                f'printf "" | {{ f={bound}; }}',
+                f'printf "" | if true; then f={bound}; fi',
+                'printf "" | for f in; do :; done',
+                f"(f={bound})",
+                f"{{ f={bound}; }}",
+                f"f={bound}",
+            ]
+        )
+        reader = rng.choice([f'{interpreter} "$f"', 'cat "$f"'])
+        shell = rng.choice(["", "zsh -c ", "bash -c ", "sh -c ", "dash -c ", "ksh -c "])
+        body = f"{shell}'{binding}; {reader}'" if shell else f"{binding}; {reader}"
     elif shape < 0.55:
         body = f"{rng.choice(NON_EXECUTING_VERBS)} {target}"
     else:
@@ -476,8 +710,72 @@ def _build(directory: Path) -> None:
             path.chmod(0o755)  # fixtures are invoked directly, so they need the bit
 
 
-def _run_one(command: str, script: str) -> tuple[str, str]:
-    """Execute one command and compare the marker against both checkers."""
+def _load_baseline(ref: str):
+    """The host checker and the template as they stood at a git ref."""
+    modules = []
+    for name, relative in (
+        ("baseline_host", "src/skillevaluator/tier3/eval_core/checks.py"),
+        ("baseline_template", "src/skillevaluator/tier3/harbor/templates/eval.py"),
+    ):
+        source = subprocess.run(
+            ["git", "show", f"{ref}:{relative}"], capture_output=True, text=True, check=True, cwd=REPO_ROOT
+        ).stdout
+        path = Path(tempfile.mkdtemp()) / Path(relative).name
+        path.write_text(source)
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        modules.append(module)
+    return modules
+
+
+# Tools a command may name that are not installed everywhere. When one is
+# missing, the command did not run for a reason its text does not carry, and
+# the harness reports it as not runnable rather than scoring it; reading the
+# captured output alone misses a `command not found` sent to /dev/null.
+_EXTERNAL_TOOLS = (
+    "timeout",
+    "nohup",
+    "nice",
+    "stdbuf",
+    "setsid",
+    "xargs",
+    "parallel",
+    "flock",
+    "taskset",
+    "ionice",
+    "chrt",
+    "strace",
+    "uv",
+    "ruby",
+    "perl",
+    "node",
+    "zsh",
+    "ksh",
+    "mksh",
+    "dash",
+    "ash",
+)
+_TOOL_WORD_RE = re.compile(r"(?<![\w./-])(" + "|".join(_EXTERNAL_TOOLS) + r")(?![\w.-])")
+
+
+def _missing_tool(command: str) -> str | None:
+    for name in dict.fromkeys(_TOOL_WORD_RE.findall(command)):
+        if shutil.which(name) is None:
+            return name
+    return None
+
+
+def _run_one(command: str, script: str) -> tuple[str, str, float | None, bool | None, list[dict[str, str]]]:
+    """Execute one command and compare the marker against both checkers.
+
+    Returns the outcome, its detail, the host score, whether the script
+    ran, and the tool call the checkers read, so a baseline can score it.
+    """
+    missing = _missing_tool(command)
+    if missing is not None:
+        return ("inconclusive", f"{missing}: not installed here", None, None, [])
     directory = Path(tempfile.mkdtemp())
     try:
         _build(directory)
@@ -493,11 +791,16 @@ def _run_one(command: str, script: str) -> tuple[str, str]:
                 executable="/bin/bash",
             )
         except subprocess.TimeoutExpired:
-            return ("inconclusive", "timed out")
+            return ("inconclusive", "timed out", None, None, [])
         output = completed.stdout + completed.stderr
         ran = any(directory.rglob(f"MARKER.{script}"))
+        if not ran and _DETACHED_RE.search(command):
+            deadline = time.monotonic() + 2.0
+            while not ran and time.monotonic() < deadline:
+                time.sleep(0.05)
+                ran = any(directory.rglob(f"MARKER.{script}"))
         if not ran and ("command not found" in output or "syntax error" in output):
-            return ("inconclusive", output.strip().splitlines()[0][:70] if output.strip() else "")
+            return ("inconclusive", output.strip().splitlines()[0][:70] if output.strip() else "", None, None, [])
 
         calls = [
             {
@@ -513,7 +816,7 @@ def _run_one(command: str, script: str) -> tuple[str, str]:
             template_result["reason"],
             template_result["passed"],
         ):
-            return ("divergence", f"host={host_result} template={template_result}")
+            return ("divergence", f"host={host_result} template={template_result}", None, ran, calls)
 
         score = host_result["score"]
         if score == 1.0 and not ran:
@@ -522,19 +825,25 @@ def _run_one(command: str, script: str) -> tuple[str, str]:
                 # walk is static and a tool call does not carry which link
                 # failed, so this is the limitation the PR declares, reported
                 # here rather than hidden.
-                return ("short-circuited chain (declared limitation)", f"exit {completed.returncode}")
-            return ("false positive", host_result["reason"])
+                return (
+                    "short-circuited chain (declared limitation)",
+                    f"exit {completed.returncode}",
+                    score,
+                    ran,
+                    calls,
+                )
+            return ("false positive", host_result["reason"], score, ran, calls)
         if ran and score == 0.0:
-            return ("false negative", host_result["reason"])
+            return ("false negative", host_result["reason"], score, ran, calls)
         if ran and score != 1.0:
-            return ("partial on a real run", f"{score}")
+            return ("partial on a real run", f"{score}", score, ran, calls)
         if (
             score == 0.75
             and script.rsplit("/", 1)[-1] not in command
             and "could not be classified" in host_result["reason"]
         ):
-            return ("partial without a reference", host_result["reason"])
-        return ("agreed", f"{score}")
+            return ("partial without a reference", host_result["reason"], score, ran, calls)
+        return ("agreed", f"{score}", score, ran, calls)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -542,8 +851,12 @@ def _run_one(command: str, script: str) -> tuple[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fuzz", type=int, default=0, help="also generate and execute N random commands")
+    parser.add_argument(
+        "--compose", type=int, default=0, help="also generate and execute N commands that nest binding scopes"
+    )
     parser.add_argument("--seed", type=int, default=20260923, help="seed for --fuzz")
     parser.add_argument("--verbose", action="store_true", help="print every command and its outcome")
+    parser.add_argument("--baseline", help="git ref of an earlier checker to compare every score against")
     arguments = parser.parse_args()
 
     commands = curated()
@@ -557,13 +870,39 @@ def main() -> int:
                 seen.add(command)
                 generated.append((command, script))
         commands += generated
+    if arguments.compose:
+        rng = random.Random(arguments.seed + 1)
+        seen = {command for command, _ in commands}
+        composed: list[tuple[str, str]] = []
+        while len(composed) < arguments.compose:
+            command, script = _compose(rng)
+            if command not in seen:
+                seen.add(command)
+                composed.append((command, script))
+        commands += composed
 
+    baseline = _load_baseline(arguments.baseline) if arguments.baseline else None
     buckets: dict[str, list[tuple[str, str]]] = {}
+    moves: dict[str, list[tuple[str, float, float]]] = {}
     for command, script in commands:
-        outcome, detail = _run_one(command, script)
+        outcome, detail, score, ran, calls = _run_one(command, script)
         buckets.setdefault(outcome, []).append((command, detail))
         if arguments.verbose:
             print(f"{outcome:22} {command!r} {detail}")
+        if baseline is not None and score is not None:
+            before = baseline[0].check_script_execution(calls, script)["score"]
+            if before != score:
+                if ran and score < before:
+                    kind = "score lowered on a command that ran (review each)"
+                elif not ran and score > before:
+                    kind = "score raised on a command that did not run (review each)"
+                elif not ran and before == 1.0:
+                    kind = "false positive repaired"
+                elif ran and before == 0.0:
+                    kind = "false negative repaired"
+                else:
+                    kind = "other move"
+                moves.setdefault(kind, []).append((command, before, score))
 
     executed = len(commands) - len(buckets.get("inconclusive", []))
     print(f"\ncommands executed: {executed} of {len(commands)}")
@@ -592,6 +931,20 @@ def main() -> int:
         print(f"  not runnable on this machine: {len(inconclusive)}")
         for command, detail in inconclusive[:15]:
             print(f"     {command!r} :: {detail}")
+    if baseline is not None:
+        total = sum(len(entries) for entries in moves.values())
+        print(f"\nscores that moved against {arguments.baseline}: {total}")
+        for kind in (
+            "score lowered on a command that ran (review each)",
+            "score raised on a command that did not run (review each)",
+            "false positive repaired",
+            "false negative repaired",
+            "other move",
+        ):
+            entries = moves.get(kind, [])
+            print(f"  {kind}: {len(entries)}")
+            for command, before, after in entries[:40]:
+                print(f"     {command!r}: {before} -> {after}")
     return 1 if defects else 0
 
 

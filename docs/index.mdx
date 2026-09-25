@@ -32,7 +32,7 @@ Every tier is an independent entry point — run any command directly; nothing r
 
 | Tier | Representative commands | Requires |
 | --- | --- | --- |
-| [Tier 1](tier1-validation.mdx) | `validate`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra plus external Semgrep, SkillSpector, and Gitleaks executables for full scanner coverage; a provider key for LLM checks |
+| [Tier 1](tier1-validation.mdx) | `tier1 PATH`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; the `security` extra plus external Semgrep, SkillSpector, and Gitleaks executables for full scanner coverage; a provider key for LLM checks |
 | [Tier 2](tier2-deduplication.mdx) | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
 | [Tier 3](tier3-live-evaluation.mdx) | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
 
@@ -53,7 +53,9 @@ You get a 0–100 quality score with an A–F grade. From there, the [Quickstart
   <img src="./assets/pipeline-overview.svg" alt="SkillEvaluator pipeline: skill directory through Tier 1 static validation, Tier 2 semantic deduplication, and Tier 3 live agent evaluation, producing reports and a verdict" />
 </Frame>
 
-Tier 1's deterministic gates run offline. Tier 2 and the optional Tier 1 LLM checks need a provider key, and Tier 3 adds the agent credential and a sandbox. Every run ends in [reports](reports.mdx) — CLI, JSON, HTML, or Markdown.
+`skillevaluator validate ./my-skill` runs all three tiers by default, with
+Tier 3 autopilot reusing an existing evaluation source or creating one starter
+case when none exists. Tier 1's deterministic gates run offline. Tier 2 and the optional Tier 1 LLM checks need a provider key, and Tier 3 adds the agent credential and a sandbox. Every run ends in [reports](reports.mdx) — CLI, JSON, HTML, or Markdown.
 
 ## What Tier 3 measures
 

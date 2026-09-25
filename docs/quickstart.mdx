@@ -1,109 +1,143 @@
 ---
 title: Quickstart
-description: Install SkillEvaluator and get your first skill evaluation result in about two minutes — no API key required.
+description: Install SkillEvaluator, configure one provider and key, and run all three tiers or one tier independently.
 ---
 
-Get your first evaluation result in about two minutes, with no API key. This page walks you from install to a scored skill, then adds a provider key to unlock the LLM-backed checks.
+Set a provider and its key, then run `validate ./my-skill` for all three tiers.
+Default models are already configured for NVIDIA Build and OpenAI.
 
-## Evaluate your first skill
+## Install and configure
 
 <Steps>
   ### Install
 
-  One command installs the CLI with every Python feature. [uv](https://docs.astral.sh/uv/) provisions Python 3.13 automatically:
+  [uv](https://docs.astral.sh/uv/) provisions Python 3.13 and installs every
+  Python evaluation extra:
 
   ```bash title="Install with uv"
   uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-  ```
-
-  Confirm the install:
-
-  ```bash title="Verify"
   skillevaluator --version
   ```
 
-  You should see `skillevaluator, version 0.3.0` (or newer).
-
   <Tip>
-  If the shell can't find `skillevaluator`, run `uv tool update-shell` and open a new terminal — uv installs tools to `~/.local/bin`, which may not be on your PATH yet.
+  If the shell cannot find `skillevaluator`, run `uv tool update-shell` and
+  open a new terminal.
   </Tip>
 
-  ### Run the keyless quality check
+  ### Set the provider and key
 
-  Point SkillEvaluator at any skill directory (a folder with a `SKILL.md`):
+  These two variables configure NVIDIA Build for all three tiers:
 
-  ```bash title="No API key required"
-  skillevaluator quality-check ./my-skill
-  ```
-
-  You get a deterministic quality score from 0–100 and an A–F grade; the check passes at 70 (a C) or above by default.
-
-  ### Run the complete offline Tier 1 validation
-
-  `validate` runs the full static and security check suite. The `[all]` install
-  above includes the Python scanners, but complete evidence also requires the
-  separate Semgrep, SkillSpector, and Gitleaks executables. Install all three,
-  and pass `--no-dedup` to skip the Tier 2 pass that needs an embeddings key:
-
-  ```bash title="Complete offline Tier 1"
-  brew install semgrep gitleaks   # macOS
-  uv tool install git+https://github.com/NVIDIA/SkillSpector.git
-  skillevaluator validate ./my-skill --no-dedup
-  ```
-
-  On other platforms, follow [Installation: System tools](installation.mdx#system-tools)
-  for the Semgrep, SkillSpector, and Gitleaks setup. The terminal shows a
-  compact pipeline view, and HTML and JSON reports land in `reports/` — pass
-  `-r cli` explicitly for terminal-only output, or `--verbose` for the full
-  per-check detail stream. The command exits `0` only when every check passes
-  and every required scanner returns complete evidence. A failed check or
-  missing scanner evidence leaves the result `INCOMPLETE` and exits `1`. See
-  [Gate Your CI](ci-integration.mdx) for the full recipe.
-
-  ### Add an LLM provider
-
-  LLM-backed features — rubric judging, deeper security analysis, and Tier 2 deduplication — use whichever provider you configure. A free [NVIDIA API Catalog](https://build.nvidia.com/) key covers both LLM judging and embeddings with one variable:
-
-  ```bash title="Configure a provider"
+  ```bash title="NVIDIA Build"
   export SKILL_EVAL_LLM_PROVIDER=nv_build
   export NVIDIA_API_KEY='nvapi-...'
   ```
 
-  <Note>
-  If `SKILL_EVAL_LLM_PROVIDER` is unset and exactly one of `NVIDIA_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` is present, that provider is auto-selected; with more than one key set, you must name the provider explicitly. OpenAI, Anthropic, Bedrock, OpenAI-compatible endpoints, and fully local servers all work; see [Providers & Credentials](configuration.mdx).
-  </Note>
+  Get a key from [build.nvidia.com](https://build.nvidia.com/). That same key
+  covers evaluator chat, Tier 2 embeddings, and supported Tier 3 agents in
+  Docker or local mode. No model or embedding settings are required.
 
-  ### Check for redundancy
+  For OpenAI, use `SKILL_EVAL_LLM_PROVIDER=openai` and `OPENAI_API_KEY` instead;
+  the default Codex agent uses the same OpenAI key. Other providers and optional
+  model overrides are covered in [Providers & Credentials](configuration.mdx).
 
-  With a provider configured, find repeated guidance inside your skill, or compare every skill in a collection for overlap:
+  ### Install the runtime tools
 
-  ```bash title="Tier 2 deduplication"
-  skillevaluator context-optimization-check ./my-skill   # inside one skill
-  skillevaluator similarity-check ./skills               # across a collection
+  Full Tier 1 scanner coverage needs Semgrep, SkillSpector, and Gitleaks in
+  addition to the Python extras:
+
+  ```bash title="Tier 1 scanner setup on macOS"
+  brew install semgrep gitleaks
+  uv tool install git+https://github.com/NVIDIA/SkillSpector.git
   ```
 
-  Cross-skill matches are classified by similarity, from `EXACT_DUPLICATE` down to `LOOSELY_RELATED`; intra-skill duplicate findings include a suggested fix. See [Tier 2: Deduplication](tier2-deduplication.mdx).
+  See [Installation](installation.mdx#system-tools) for other platforms.
+  Tier 1 exits `0` when its selected checks pass. A failed check exits `1`;
+  missing scanner evidence leaves the result `INCOMPLETE` and exits `1`.
+
+  Tier 3 needs a supported agent runtime and a running sandbox (Docker by
+  default). Check those prerequisites before the first live run:
+
+  ```bash title="Tier 3 readiness"
+  skillevaluator doctor --env-mode docker
+  ```
 </Steps>
+
+## Run all three tiers
+
+Point `validate` at a directory containing a `SKILL.md`:
+
+```bash title="Validate a skill"
+skillevaluator validate ./my-skill
+```
+
+This runs Tier 1 checks, Tier 2 deduplication, and Tier 3 live evaluation.
+Tier 3 uses autopilot: it reuses valid existing evaluation sources or generates
+one starter case when none exists, then evaluates with and without the skill.
+`--full` remains supported but is not required. Use `--tiers 1,2` to skip the
+live evaluation, or `--no-autopilot` to require an existing source.
+
+Tier 1 and Tier 2 gate the result by default. Tier 3 is advisory unless you
+add `--block-on-agent-eval`; that setting affects the exit code, not whether
+the live evaluation runs.
+
+## Run one tier
+
+Point each command at a directory containing a `SKILL.md`. Each tier is
+independent; it does not require running earlier tiers first.
+
+```bash title="Choose the evaluation you need"
+skillevaluator tier1 ./my-skill
+skillevaluator tier2 ./my-skill
+skillevaluator tier3 ./my-skill
+```
+
+| Command | What it runs |
+| --- | --- |
+| `tier1 PATH` | All static checks, including dependencies; with a provider, rubric judging, LLM security analysis, and finding verification also run |
+| `tier2 PATH` | Intra-skill deduplication; add `--catalog ./skill-catalog.json` for inter-skill comparison |
+| `tier3 PATH` | Creates one starter case when the evaluation source is missing, then runs the provider-native agent with and without the skill |
+
+Without a catalog, Tier 2 explicitly reports that inter-skill comparison did
+not run. Build a reusable catalog with
+`skillevaluator similarity-check ./skills --save-catalog ./skill-catalog.json`.
+
+Tier 3 reuses valid existing datasets or task sources without rewriting them;
+invalid sources produce an error. The generated starter case is enough to try
+the pipeline, not to establish broad coverage. Generate and review a larger
+dataset with `skillevaluator tier3 create-eval-dataset ./my-skill --full`.
+Without `--agents`, Tier 3 selects OpenCode for NVIDIA Build, Codex for OpenAI,
+and Claude Code for Anthropic. An explicit `--agents` value always wins.
+Live evaluations make paid model calls; see
+[Tier 3: Plan for cost](tier3-live-evaluation.mdx#plan-for-cost).
+
+A tier without a path shows help. Expert subcommands remain available, such as
+`skillevaluator tier1 security-scan ./my-skill` and
+`skillevaluator tier3 evaluate ./my-skill`. No `run` subcommand is needed.
+
+## Try a keyless check
+
+You can start before configuring a provider:
+
+```bash title="Deterministic quality score"
+skillevaluator quality-check ./my-skill
+```
+
+This prints a score from 0–100 and an A–F grade, passing at 70 by default.
+For the static Tier 1 suite, use `skillevaluator tier1 ./my-skill --no-llm`.
+Scanner tools still need to be installed. Without a provider, direct Tier 1
+also runs the static suite and reports the LLM stages as skipped; it does not
+claim those stages passed.
 
 ## Where to go next
 
-| Your goal | Command | Guide | What success looks like |
-| --- | --- | --- | --- |
-| Gate skill quality and security | `validate` | [Tier 1: Validation](tier1-validation.mdx) | Exit code `0`, no CRITICAL findings |
-| Find overlapping or duplicate skills | `similarity-check` | [Tier 2: Deduplication](tier2-deduplication.mdx) | No `EXACT_DUPLICATE` or `HIGH_SIMILARITY` findings |
-| Prove the skill helps a real agent | `tier3 evaluate` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) | Positive Skill Lift across the five dimensions |
-| Run all three tiers in one shot | `validate --full` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) | Exit code `0` plus an auto-generated dataset; Tier 3 is advisory unless you add `--block-on-agent-eval` |
-| Block bad skills at merge time | `validate` in CI | [Gate Your CI](ci-integration.mdx) | A red check on failing PRs |
-| Look up every flag and default | — | [CLI Reference](cli-reference.mdx) | — |
+| Your goal | Command | Guide |
+| --- | --- | --- |
+| Check quality and security | `tier1 ./my-skill` | [Tier 1: Validation](tier1-validation.mdx) |
+| Check repeated and overlapping guidance | `tier2 ./my-skill --catalog ./skill-catalog.json` | [Tier 2: Deduplication](tier2-deduplication.mdx) |
+| Measure a skill's effect on an agent | `tier3 ./my-skill` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) |
+| Run the combined pipeline | `validate ./my-skill` | [CLI Reference](cli-reference.mdx#validate) |
+| Gate changes in CI | `validate` with explicit gates | [Gate Your CI](ci-integration.mdx) |
 
-## What each tier needs
-
-Every tier is an independent entry point — nothing requires running the earlier tiers first.
-
-| Tier | CLI only | Provider key | External scanners | Docker + agent CLI |
-| --- | --- | --- | --- | --- |
-| **Tier 1** — validation | All deterministic checks | Only `rubric-eval` and the optional `--llm`/`--llm-verify` flags | Semgrep, SkillSpector, and Gitleaks for a complete security result | — |
-| **Tier 2** — deduplication | — | Embeddings; intra-skill analysis also needs a chat LLM | — | — |
-| **Tier 3** — live evaluation | Keyless dataset templates (`--no-llm`) and report viewing | LLM dataset generation and grading | — | Live runs need a sandbox plus the agent CLI and its credential |
-
-Ready for the deeper install options — extras, pip, source, Docker? Head to [Installation](installation.mdx).
+For rules, workflows, and plugins, `validate` runs their applicable validation
+stages without automatically enabling live skill evaluation.

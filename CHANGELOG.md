@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 now uses one versioned, equal-weight five-dimension overall-score
+  policy across Harbor rewards, pass@k, Skill Lift, reports, comparisons, and
+  best-agent selection. Previously, some paths averaged all six evaluators
+  directly while reports averaged five dimensions, which gave Effectiveness
+  two votes and could reverse the reported lift direction. Current artifacts
+  persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
+  retain their historical semantics
+  (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
 - Preserve full Codex gateway model IDs in cloud environments, including E2B
   and Daytona, while retaining local runtime setup and native provider routing.
 - Keep Tier 2 execution diagnostics visible alongside duplicate findings in

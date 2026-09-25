@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.tier3.eval_core import checks as shared_checks
+from skillevaluator.tier3.harbor.metrics import overall_score
 
 
 def _load_template():
@@ -498,11 +499,7 @@ def test_template_main_scores_standard_negative_fail_closed(tmp_path, monkeypatc
     result = json.loads(rich_reward_json.read_text(encoding="utf-8"))
     harbor_reward = json.loads(reward_json.read_text(encoding="utf-8"))
     expected_reward_keys = {*TEMPLATE.DISPLAY_METRICS, "overall"}
-    expected_overall = round(
-        sum(float(result.get(metric, 0.0) or 0.0) for metric in TEMPLATE.DISPLAY_METRICS)
-        / len(TEMPLATE.DISPLAY_METRICS),
-        4,
-    )
+    expected_overall = overall_score(result)
 
     assert result["skill_execution"] == 0.0
     if include_trusted_identity:

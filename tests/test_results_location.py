@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.constants import DEFAULT_SCORE_POLICY
 from skillevaluator.tier3 import results_location
 from skillevaluator.tier3.output_provenance import mark_generated_output_root
 from skillevaluator.tier3.results_location import external_results_root, resolve_latest_results
@@ -99,11 +100,13 @@ def _write_authenticated_current_run(
                 "result_path": recorded_result_path or str((run_dir / "result.json").resolve()),
                 "run_config": run_config,
                 "agents": {"opencode": agent_result},
+                "score_policy": DEFAULT_SCORE_POLICY,
                 "attempt_policy": {
                     "max_attempts": 1,
                     "pass_threshold": 0.5,
                     "stop_on_pass": False,
                     "score_definition": "test",
+                    "score_policy": DEFAULT_SCORE_POLICY,
                 },
                 "execution_status": "succeeded",
                 "execution_errors": [],
@@ -265,6 +268,68 @@ def test_latest_results_rejects_authenticated_current_run_with_malformed_result_
     result_path.write_text(json.dumps(result), encoding="utf-8")
 
     assert resolve_latest_results(skill_path, cli_results_dir, environ={}) == historical
+
+
+@pytest.mark.parametrize("invalid_score_policy", ["", 1, None])
+def test_latest_results_rejects_invalid_recorded_score_policy(tmp_path: Path, invalid_score_policy: object) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    cli_results_dir = tmp_path / "results"
+    root = external_results_root(cli_results_dir, skill_path)
+    historical = _write_completed_run(root, "20260705_120000")
+    current = _write_authenticated_current_run(root, "20260705_130000_222_bbbbbbbbbbbb")
+    result_path = current / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["attempt_policy"]["score_policy"] = invalid_score_policy
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    assert resolve_latest_results(skill_path, cli_results_dir, environ={}) == historical
+
+
+@pytest.mark.parametrize("invalid_score_policy", ["", 1, None])
+def test_latest_results_rejects_invalid_top_level_score_policy(tmp_path: Path, invalid_score_policy: object) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    cli_results_dir = tmp_path / "results"
+    root = external_results_root(cli_results_dir, skill_path)
+    historical = _write_completed_run(root, "20260705_120000")
+    current = _write_authenticated_current_run(root, "20260705_130000_222_bbbbbbbbbbbb")
+    result_path = current / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["score_policy"] = invalid_score_policy
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    assert resolve_latest_results(skill_path, cli_results_dir, environ={}) == historical
+
+
+def test_latest_results_rejects_mismatched_score_policies(tmp_path: Path) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    cli_results_dir = tmp_path / "results"
+    root = external_results_root(cli_results_dir, skill_path)
+    historical = _write_completed_run(root, "20260705_120000")
+    current = _write_authenticated_current_run(root, "20260705_130000_222_bbbbbbbbbbbb")
+    result_path = current / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["score_policy"] = "different-policy-v1"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    assert resolve_latest_results(skill_path, cli_results_dir, environ={}) == historical
+
+
+def test_latest_results_accepts_authenticated_current_run_without_historical_score_policy(tmp_path: Path) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    cli_results_dir = tmp_path / "results"
+    root = external_results_root(cli_results_dir, skill_path)
+    current = _write_authenticated_current_run(root, "20260705_130000_222_bbbbbbbbbbbb")
+    result_path = current / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["attempt_policy"].pop("score_policy")
+    result.pop("score_policy")
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    assert resolve_latest_results(skill_path, cli_results_dir, environ={}) == current
 
 
 def test_latest_results_accepts_authenticated_current_run_with_relative_recorded_path_after_cwd_change(

@@ -7,11 +7,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.commands import compare_results
+from skillevaluator.tier3.commands import _overall_score_for_display, _summary_overall, compare_results
+from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_SCORE_POLICY,
+    DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
+    LEGACY_SCORE_POLICY,
+)
 from skillevaluator.tier3.output_provenance import mark_generated_output_root
 
 
@@ -21,6 +28,282 @@ def _complete_current_run(run_dir: Path) -> None:
         json.dumps({"run_id": run_dir.name, "agents": {}}),
         encoding="utf-8",
     )
+
+
+def test_compare_overall_uses_the_canonical_dimension_mean() -> None:
+    scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    assert _overall_score_for_display(scores, DEFAULT_METRICS) == pytest.approx(0.49)
+
+
+def test_compare_rejects_cross_agent_overalls_with_different_score_policies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    for agent, policy in (("current", DEFAULT_SCORE_POLICY), ("historical", LEGACY_SCORE_POLICY)):
+        summary = run_dir / agent / "with-skill" / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "execution_status": "succeeded",
+                    "scores": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                    "overall_score": 0.5,
+                    "score_policy": policy,
+                    "num_trials": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 1
+    assert "different score policies" in capsys.readouterr().out.lower()
+
+
+def test_overall_display_preserves_pre_policy_default_v2_semantics() -> None:
+    scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    assert _overall_score_for_display(scores, DEFAULT_METRICS, score_policy=None) == pytest.approx(0.5583)
+    assert _overall_score_for_display(
+        scores,
+        DEFAULT_METRICS,
+        persisted_overall=0.5583,
+        score_policy=None,
+    ) == pytest.approx(0.5583)
+    assert _overall_score_for_display(
+        scores,
+        DEFAULT_METRICS,
+        persisted_overall=0.5583,
+        score_policy=DEFAULT_SCORE_POLICY,
+    ) == pytest.approx(0.49)
+
+
+@pytest.mark.parametrize("invalid_overall", [2.0, -0.1, float("inf"), 10**4000, True])
+def test_historical_overall_rejects_invalid_persisted_scores(invalid_overall: object) -> None:
+    scores = {
+        "security": 0.3875,
+        "skill_execution": 0.3875,
+        "skill_efficiency": 0.3875,
+        "accuracy": 0.3875,
+        "goal_accuracy": 0.9,
+        "behavior_check": 0.9,
+    }
+
+    assert _summary_overall({"overall_score": invalid_overall}) is None
+    assert _overall_score_for_display(
+        scores,
+        DEFAULT_METRICS,
+        persisted_overall=invalid_overall,
+        score_policy=None,
+    ) == pytest.approx(0.5583)
+
+
+def test_compare_carries_persisted_historical_overall(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    summary = run_dir / "opencode" / "with-skill" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps(
+            {
+                "execution_status": "succeeded",
+                "scores": {
+                    "security": 0.3875,
+                    "skill_execution": 0.3875,
+                    "skill_efficiency": 0.3875,
+                    "accuracy": 0.3875,
+                    "goal_accuracy": 0.9,
+                    "behavior_check": 0.9,
+                },
+                "overall_score": 0.5583,
+                "metric_set": "skill-evaluator-default-v2",
+                "metrics": list(DEFAULT_METRICS),
+                "num_trials": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_summary = run_dir / "opencode" / "without-skill" / "summary.json"
+    baseline_summary.parent.mkdir(parents=True)
+    baseline_summary.write_text(
+        json.dumps(
+            {
+                "execution_status": "succeeded",
+                "scores": dict.fromkeys(DEFAULT_METRICS, 0.5),
+                "overall_score": 0.5,
+                "metric_set": "skill-evaluator-default-v2",
+                "metrics": list(DEFAULT_METRICS),
+                "num_trials": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+    output = capsys.readouterr().out
+    assert "0.56" in output
+    assert "0.49" not in output
+    assert "+0.06" in output
+
+
+def test_compare_renders_scalar_only_custom_summaries(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    agent_dir = run_dir / "opencode"
+    for condition, overall in (("with-skill", 0.8), ("without-skill", 0.4)):
+        summary = agent_dir / condition / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "execution_status": "succeeded",
+                    "scores": {},
+                    "custom_scores": {},
+                    "overall_score": overall,
+                    "score_policy": CUSTOM_SCORE_POLICY,
+                    "metric_set": "custom-only",
+                    "metrics": [],
+                    "num_trials": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+    output = capsys.readouterr().out
+    assert "Overall" in output
+    assert "0.80" in output
+    assert "+0.40" in output
+    assert "No agent results" not in output
+
+
+def test_compare_does_not_fabricate_missing_standard_scores(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    summary = run_dir / "opencode" / "with-skill" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps({"execution_status": "succeeded", "scores": {"security": 0.8}, "num_trials": 1}),
+        encoding="utf-8",
+    )
+    _complete_current_run(run_dir)
+
+    assert _overall_score_for_display({"security": 0.8}, DEFAULT_METRICS) is None
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+    output = capsys.readouterr().out
+    assert re.search(r"Accuracy\s+-", output, flags=re.IGNORECASE)
+    assert re.search(r"Overall\s+-", output)
+    assert "0.13" not in output
+
+
+def test_compare_ignores_nonfinite_component_scores() -> None:
+    assert _overall_score_for_display({"security": float("nan")}, DEFAULT_METRICS) is None
+    assert _overall_score_for_display({}, (), score_policy=CUSTOM_SCORE_POLICY) is None
+
+
+def test_compare_ignores_out_of_range_standard_scores() -> None:
+    scores = dict.fromkeys(DEFAULT_METRICS, 0.5)
+    scores["security"] = 2.0
+
+    assert _overall_score_for_display(scores, DEFAULT_METRICS) is None
+
+
+def test_compare_does_not_pair_summaries_with_different_score_policies(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    for condition, score, policy in (
+        ("with-skill", 0.8, DEFAULT_SCORE_POLICY),
+        ("without-skill", 0.2, "skill-evaluator-metric-mean-v1"),
+    ):
+        summary = run_dir / "opencode" / condition / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "execution_status": "succeeded",
+                    "scores": dict.fromkeys(DEFAULT_METRICS, score),
+                    "overall_score": score,
+                    "score_policy": policy,
+                    "num_trials": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+    output = capsys.readouterr().out
+    assert "0.80" in output
+    assert "+0.60" not in output
+    assert "lift" not in output.lower()
+
+
+def test_compare_does_not_pair_unversioned_metric_and_scalar_policies(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    run_dir = tmp_path / "results" / "demo" / "20260709_010000"
+    for condition, scores, score in (
+        ("with-skill", dict.fromkeys(DEFAULT_METRICS, 0.8), 0.8),
+        ("without-skill", {}, 0.2),
+    ):
+        summary = run_dir / "opencode" / condition / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "execution_status": "succeeded",
+                    "scores": scores,
+                    "overall_score": score,
+                    "num_trials": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    _complete_current_run(run_dir)
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+    output = capsys.readouterr().out
+    assert "0.80" in output
+    assert "lift" not in output.lower()
+    assert "+0.60" not in output
 
 
 def _write_authentic_pre_status_run(root: Path, run_id: str, *, score: float = 0.8) -> Path:

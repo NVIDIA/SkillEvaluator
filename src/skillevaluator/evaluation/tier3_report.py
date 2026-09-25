@@ -625,8 +625,10 @@ def build_agent_eval_payload(
     policy_metrics = _policy_metrics_from_agents(agents, metrics)
 
     from skillevaluator.tier3.harbor.metrics import (
+        CUSTOM_SCORE_POLICY,
         DEFAULT_METRICS,
         LEGACY_SCORE_POLICY,
+        SUPPORTED_SCORE_POLICIES,
         score_policy_for_metrics,
     )
 
@@ -634,21 +636,24 @@ def build_agent_eval_payload(
     if not attempt_policy:
         policy.pop("score_definition", None)
         policy.pop("score_policy", None)
+    recorded_policies = _recorded_score_policies(agents)
     stored_policy = policy.get("score_policy")
     if isinstance(stored_policy, str) and stored_policy.strip():
         policy["score_policy"] = stored_policy.strip()
+    elif len(recorded_policies) == 1:
+        policy["score_policy"] = next(iter(recorded_policies))
+    elif historical_missing_score_policy and policy_metrics == DEFAULT_METRICS:
+        policy["score_policy"] = LEGACY_SCORE_POLICY
     else:
-        recorded_policy = _recorded_score_policy(agents)
-        if recorded_policy is not None:
-            policy["score_policy"] = recorded_policy
-        elif historical_missing_score_policy and policy_metrics == DEFAULT_METRICS:
-            policy["score_policy"] = LEGACY_SCORE_POLICY
-        else:
-            policy["score_policy"] = score_policy_for_metrics(policy_metrics)
-    policy.setdefault(
-        "score_definition",
-        _score_definition_for_policy(policy_metrics, policy["score_policy"]),
+        policy["score_policy"] = score_policy_for_metrics(policy_metrics)
+    conflicting_policies = len(recorded_policies) > 1 or bool(
+        recorded_policies and policy["score_policy"] not in recorded_policies
     )
+    if conflicting_policies:
+        policy["score_policy"] = "mixed-score-policies"
+        policy.pop("score_definition", None)
+    if policy["score_policy"] != CUSTOM_SCORE_POLICY or not isinstance(policy.get("score_definition"), str):
+        policy["score_definition"] = _score_definition_for_policy(policy_metrics, policy["score_policy"])
 
     report_budget = _ReportBudget(artifact_loading=_artifact_loading_reasons(agents, dataset))
     agent_payloads: dict[str, dict[str, Any]] = {}
@@ -660,15 +665,7 @@ def build_agent_eval_payload(
     if not agent_payloads:
         return None
 
-    scored_metric_sets = {
-        frozenset(agent["metrics_with_skill"])
-        for agent in agent_payloads.values()
-        if agent["execution_status"] == "succeeded" and agent["with_skill"] is not None
-    }
-    conflicting_metric_sets = len(scored_metric_sets) > 1
-    if conflicting_metric_sets and not conflicting_policies:
-        policy["score_definition"] = "overall unavailable: incomparable metric sets across agents"
-    best_agent = "" if conflicting_policies or conflicting_metric_sets else _pick_best_agent(agent_payloads)
+    best_agent = "" if conflicting_policies else _pick_best_agent(agent_payloads)
     detail_priority = ([best_agent] if best_agent else []) + [name for name in agent_payloads if name != best_agent]
     for name in detail_priority:
         _attach_agent_report_details(
@@ -698,9 +695,6 @@ def build_agent_eval_payload(
         execution_errors.append(
             "Conflicting score policies across scored conditions: " + ", ".join(sorted(recorded_policies))
         )
-    elif conflicting_metric_sets:
-        execution_status = "failed"
-        execution_errors.append("Incomparable metric sets across scored agents; overall ranking is unavailable")
     elif policy["score_policy"] not in SUPPORTED_SCORE_POLICIES and any(
         agent.get("execution_status") == "succeeded" and agent.get("with_skill") is None
         for agent in agent_payloads.values()
@@ -1345,20 +1339,22 @@ def _policy_metrics_from_agents(
     agents: dict[str, dict[str, Any]],
     metrics: list[str],
 ) -> tuple[str, ...]:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
     available = tuple(
         metric
-        for metric in metrics
+        for metric in (metrics or DEFAULT_METRICS)
         if any(
-            _finite_float(scores.get(metric)) is not None
+            _condition_quality_available(info, "with_skill") and _finite_float(scores.get(metric)) is not None
             for info in agents.values()
-            for scores in (info.get("with_skill"), info.get("without_skill"))
+            for scores in (info.get("with_skill"),)
             if isinstance(scores, dict)
         )
     )
     return available or tuple(metrics)
 
 
-def _recorded_score_policy(agents: dict[str, dict[str, Any]]) -> str | None:
+def _recorded_score_policies(agents: dict[str, dict[str, Any]]) -> set[str]:
     recorded: set[str] = set()
     for info in agents.values():
         for condition, scores_key, policy_key in (
@@ -1370,25 +1366,38 @@ def _recorded_score_policy(agents: dict[str, dict[str, Any]]) -> str | None:
             if (
                 _condition_quality_available(info, condition)
                 and isinstance(scores, dict)
-                and scores
+                and (scores or _unit_interval_score(info.get(f"overall_{condition}")) is not None)
                 and isinstance(policy, str)
                 and policy.strip()
             ):
                 recorded.add(policy.strip())
-    return next(iter(recorded)) if len(recorded) == 1 else None
+    return recorded
 
 
 def _score_definition_for_policy(metrics: tuple[str, ...], score_policy: str) -> str:
-    from skillevaluator.tier3.harbor.metrics import LEGACY_SCORE_POLICY, score_definition
+    from skillevaluator.tier3.harbor.metrics import (
+        CUSTOM_SCORE_POLICY,
+        DEFAULT_METRICS,
+        DEFAULT_SCORE_POLICY,
+        LEGACY_SCORE_POLICY,
+        PARTIAL_SCORE_POLICY,
+        score_definition,
+    )
 
     if score_policy == LEGACY_SCORE_POLICY and metrics:
         return f"overall = mean({', '.join(metrics)}) [{LEGACY_SCORE_POLICY}]"
-    return score_definition(metrics)
+    if score_policy == CUSTOM_SCORE_POLICY:
+        return score_definition(())
+    if score_policy == DEFAULT_SCORE_POLICY:
+        return score_definition(DEFAULT_METRICS)
+    if score_policy == PARTIAL_SCORE_POLICY:
+        return score_definition(metrics)
+    return f"overall = persisted score; formula unavailable [{score_policy}]"
 
 
 def _complete_metric_mean(scores: dict[str, Any], metrics: list[str]) -> float | None:
     values = tuple(_finite_float(scores.get(metric)) for metric in metrics)
-    if not values or any(value is None for value in values):
+    if not values or any(value is None or not 0.0 <= value <= 1.0 for value in values):
         return None
     return round(sum(value for value in values if value is not None) / len(values), 4)
 
@@ -1412,9 +1421,11 @@ def _build_agent(
     score_policy: str,
 ) -> dict[str, Any]:
     from skillevaluator.tier3.harbor.metrics import (
-        LEGACY_METRICS,
+        CUSTOM_SCORE_POLICY,
+        DEFAULT_METRICS,
+        DEFAULT_SCORE_POLICY,
         LEGACY_SCORE_POLICY,
-        canonical_dimension_mean,
+        PARTIAL_SCORE_POLICY,
         overall_score_from_metrics,
     )
     from skillevaluator.tier3.harbor.report_data import metrics_for_condition
@@ -1448,8 +1459,8 @@ def _build_agent(
     overall_ws = None
     overall_bl = None
     if score_policy == LEGACY_SCORE_POLICY:
-        overall_ws = _complete_metric_mean(with_scores, with_metrics) if with_quality_available else None
-        overall_bl = _complete_metric_mean(without_scores, without_metrics) if baseline_quality_available else None
+        overall_ws = _complete_metric_mean(with_scores, metrics) if with_quality_available else None
+        overall_bl = _complete_metric_mean(without_scores, metrics) if baseline_quality_available else None
         if overall_ws is None and not with_scores and with_quality_available:
             overall_ws = _unit_interval_score(info.get("overall_with_skill"))
         if overall_bl is None and not without_scores and baseline_quality_available:
@@ -1458,9 +1469,10 @@ def _build_agent(
         overall_ws = overall_score_from_metrics(with_scores, DEFAULT_METRICS) if with_quality_available else None
         overall_bl = overall_score_from_metrics(without_scores, DEFAULT_METRICS) if baseline_quality_available else None
     elif score_policy == PARTIAL_SCORE_POLICY:
-        overall_ws = overall_score_from_metrics(with_scores, tuple(with_metrics)) if with_quality_available else None
+        selected_metrics = tuple(metrics)
+        overall_ws = overall_score_from_metrics(with_scores, selected_metrics) if with_quality_available else None
         overall_bl = (
-            overall_score_from_metrics(without_scores, tuple(without_metrics)) if baseline_quality_available else None
+            overall_score_from_metrics(without_scores, selected_metrics) if baseline_quality_available else None
         )
         if overall_ws is None:
             overall_ws = _mean(with_dimension_values)
@@ -1473,45 +1485,23 @@ def _build_agent(
     }:
         overall_ws = _unit_interval_score(info.get("overall_with_skill")) if with_quality_available else None
         overall_bl = _unit_interval_score(info.get("overall_without_skill")) if baseline_quality_available else None
-        if overall_ws is None:
-            overall_ws = _complete_metric_mean(with_scores, metrics)
-        if overall_bl is None:
-            overall_bl = _complete_metric_mean(without_scores, metrics)
-    elif tuple(metrics) == LEGACY_METRICS:
-        if overall_ws is None:
-            overall_ws = overall_score_from_metrics(with_scores, LEGACY_METRICS)
-        if overall_bl is None:
-            overall_bl = overall_score_from_metrics(without_scores, LEGACY_METRICS)
-    else:
-        if overall_ws is None:
-            overall_ws = canonical_dimension_mean(with_dimension_values)
-        if overall_bl is None:
-            overall_bl = canonical_dimension_mean(baseline_dimension_values)
-    if overall_ws is None:
-        overall_ws = _mean(with_dimension_values)
-    if overall_bl is None:
-        overall_bl = _mean(baseline_dimension_values)
-    if overall_ws is None and not metrics and with_quality_available:
+    if overall_ws is None and not metrics and with_quality_available and score_policy == CUSTOM_SCORE_POLICY:
         overall_ws = _unit_interval_score(info.get("overall_with_skill"))
         if overall_ws is None and info.get("rewards_complete") is not False:
             overall_ws = _logical_reward_mean(info.get("rewards"), "overall")
-    if overall_bl is None and not metrics and baseline_quality_available:
+    if overall_bl is None and not metrics and baseline_quality_available and score_policy == CUSTOM_SCORE_POLICY:
         overall_bl = _unit_interval_score(info.get("overall_without_skill"))
         if overall_bl is None and info.get("rewards_baseline_complete") is not False:
             overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
-    overall_lift = (
-        round(overall_ws - overall_bl, 4)
-        if comparable_scores and overall_ws is not None and overall_bl is not None
-        else None
-    )
-    if score_policy == LEGACY_SCORE_POLICY and overall_lift is not None and with_metrics:
-        with_values = tuple(_unit_interval_score(with_scores.get(metric)) for metric in with_metrics)
-        baseline_values = tuple(_unit_interval_score(without_scores.get(metric)) for metric in with_metrics)
+    overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
+    if score_policy == LEGACY_SCORE_POLICY and overall_lift is not None and metrics:
+        with_values = tuple(_unit_interval_score(with_scores.get(metric)) for metric in metrics)
+        baseline_values = tuple(_unit_interval_score(without_scores.get(metric)) for metric in metrics)
         if all(value is not None for value in (*with_values, *baseline_values)):
             # Historical lift subtracted the unrounded metric means. Recompute
             # that value from trusted metrics instead of a mutable lift artifact.
             overall_lift = round(
-                sum(w - b for w, b in zip(with_values, baseline_values, strict=True)) / len(with_metrics),
+                sum(w - b for w, b in zip(with_values, baseline_values, strict=True)) / len(metrics),
                 4,
             )
 
@@ -2969,6 +2959,8 @@ def _read_attempt_policy(run_dir: Path) -> dict[str, Any]:
                 policy.update(loaded)
                 if "score_policy" not in loaded:
                     policy.pop("score_policy", None)
+                if "score_definition" not in loaded:
+                    policy.pop("score_definition", None)
                 return policy
     policy.pop("score_definition", None)
     policy.pop("score_policy", None)

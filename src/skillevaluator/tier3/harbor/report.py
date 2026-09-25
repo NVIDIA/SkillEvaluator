@@ -20,12 +20,15 @@ from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
+    DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
-    MAX_CUSTOM_METRICS,
+    LEGACY_METRIC_SET,
+    LEGACY_SCORE_POLICY,
     METRIC_DESCRIPTIONS,
     METRIC_DISPLAY,
     METRIC_QUESTIONS,
     extract_custom_metrics,
+    overall_score,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
@@ -140,11 +143,11 @@ def _pick_best_agent(
             or any(metric_value(with_scores, metric) is None for metric in standard_metrics)
         ):
             continue
-        metrics = tuple(report_data.metrics_for_condition(data, "with_skill"))
+        metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores) or DISPLAY_METRICS
         if data.get("score_policy_with_skill") == LEGACY_SCORE_POLICY:
             overall = overall_score(
                 {
-                    "metric_set": DEFAULT_METRIC_SET if "security" in metrics else LEGACY_METRIC_SET,
+                    "metric_set": DEFAULT_METRIC_SET if "security" in with_scores else LEGACY_METRIC_SET,
                     "score_policy": LEGACY_SCORE_POLICY,
                     **with_scores,
                 }

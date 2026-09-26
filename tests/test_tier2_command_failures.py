@@ -217,6 +217,9 @@ def test_chat_http_diagnostics_after_successful_embedding(tmp_path: Path, monkey
         monkeypatch.setenv(f"SKILL_EVAL_{purpose}_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
         monkeypatch.setenv(f"SKILL_EVAL_{purpose}_API_KEY", "local-test-key")
         monkeypatch.setenv(f"SKILL_EVAL_{purpose}_MODEL", f"local-{purpose.lower()}-model")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_BASE_DELAY", "0")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_MAX_DELAY", "0")
     try:
         invocation = CliRunner().invoke(cli, ["tier2", str(skill), "-o", str(reports)])
     finally:
@@ -226,7 +229,7 @@ def test_chat_http_diagnostics_after_successful_embedding(tmp_path: Path, monkey
 
     assert requests[0][0] == "/v1/embeddings"
     chat_requests = [body for path, body in requests if path == "/v1/chat/completions"]
-    assert len(chat_requests) == 6
+    assert len(chat_requests) == 6 * (3 if chat_status == 429 else 1)
     assert all(body["model"] == "local-llm-model" and body["stream"] is False for body in chat_requests)
     payload = json.loads((reports / "skillevaluator-tier2.json").read_text())
     html = (reports / "skillevaluator-tier2.html").read_text()

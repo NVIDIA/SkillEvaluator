@@ -18,13 +18,17 @@ provider-native credential. Importing this module never requires a key.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import re
+import urllib.error
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_MODEL, LLM_VERIFY_TEMPERATURE
+from skillevaluator.inference.retry import resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientError
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import (
@@ -104,6 +108,163 @@ def _temperature_kwargs(model: str, temperature: float | None) -> dict[str, floa
     return {"temperature": temperature}
 
 
+_SCHEMA_UNSUPPORTED_TARGETS: set[tuple[str, str, str]] = set()
+
+
+def _build_openai_response_format(schema: dict[str, Any], schema_name: str = "judge_response") -> dict[str, Any]:
+    """Build OpenAI-compatible JSON schema response_format payload."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _build_anthropic_output_config(schema: dict[str, Any]) -> dict[str, Any]:
+    """Build Anthropic Messages API output_config payload."""
+    return {
+        "format": {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    }
+
+
+_UNSUPPORTED_REASON_INDICATORS: tuple[str, ...] = (
+    "unsupported",
+    "not supported",
+    "extra input",
+    "extra inputs",
+    "unknown parameter",
+    "unknown field",
+    "unknown argument",
+    "unrecognized request argument",
+    "unrecognized parameter",
+    "unexpected keyword argument",
+    "unexpected argument",
+    "invalid parameter",
+    "invalid argument",
+    "not permitted",
+    "not allowed",
+    "disallowed",
+)
+
+_SCHEMA_OPTION_PATTERN = r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?)"
+_SCHEMA_REJECTION_REASON = (
+    r"(?:unsupported|not supported|not permitted|not allowed|disallowed|"
+    r"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
+    r"unexpected (?:keyword )?argument|extra inputs?(?: are not permitted)?)"
+)
+_SCHEMA_REJECTION_AFTER_OPTION = re.compile(
+    rf"\b{_SCHEMA_OPTION_PATTERN}\b(?:\.[a-z0-9_]+)*"
+    rf"(?:\s+of\s+type\s+['\"]?[a-z0-9_]+['\"]?)?"
+    rf"\s*(?:(?:is|are|was|were)\s+(?:an?\s+)?|:\s*)?"
+    rf"{_SCHEMA_REJECTION_REASON}\b",
+    re.IGNORECASE,
+)
+_SCHEMA_REJECTION_BEFORE_OPTION = re.compile(
+    rf"\b(?:unsupported|not supported|extra inputs?(?: are not permitted)?|unknown (?:parameter|field|argument)|"
+    rf"unrecognized (?:request argument|parameter)|unexpected (?:keyword argument|argument)|"
+    rf"invalid (?:parameter|argument)|not permitted|not allowed|disallowed)\b"
+    rf"(?:\s+supplied)?[\s:'\"\[\]{{}}(),-]{{0,32}}\b{_SCHEMA_OPTION_PATTERN}\b",
+    re.IGNORECASE,
+)
+
+
+def _message_rejects_schema_option(text: str, param: str | None = None) -> bool:
+    """Match a rejection of the schema option itself, not unrelated error text."""
+    if param:
+        if not re.search(rf"\b{_SCHEMA_OPTION_PATTERN}\b", param, re.IGNORECASE):
+            return False
+        return any(indicator in text.lower() for indicator in _UNSUPPORTED_REASON_INDICATORS)
+    return bool(_SCHEMA_REJECTION_AFTER_OPTION.search(text) or _SCHEMA_REJECTION_BEFORE_OPTION.search(text))
+
+
+def _is_schema_unsupported_error(exc: Exception) -> bool:
+    """Determine whether an exception indicates structured output schema is unsupported."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+    if status_code is None and isinstance(exc, urllib.error.HTTPError):
+        status_code = exc.code
+
+    is_type_error = isinstance(exc, TypeError)
+    if status_code not in {400, 422} and not is_type_error:
+        return False
+
+    parts: list[str] = [str(exc), getattr(exc, "message", "")]
+    error_param: str | None = None
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        parts.append(str(body))
+        error_dict = body.get("error")
+        if isinstance(error_dict, dict):
+            parts.append(str(error_dict.get("message", "")))
+            param = error_dict.get("param")
+            if isinstance(param, str):
+                error_param = param
+    elif isinstance(body, str):
+        parts.append(body)
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        text = getattr(response, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body_bytes = exc.read()
+            exc.fp = io.BytesIO(body_bytes)
+            parts.append(body_bytes.decode("utf-8", "replace"))
+        except Exception:
+            pass
+
+    full_text = " ".join(part for part in parts if part)
+    return _message_rejects_schema_option(full_text, error_param)
+
+
+def _call_with_schema_fallback(
+    call_fn: Any,
+    call_kwargs: dict[str, Any],
+    *,
+    schema_key: str,
+    target_key: tuple[str, str, str],
+    use_schema: bool,
+) -> Any:
+    """Invoke call_fn and downgrade to prompt-only on confirmed HTTP 400/422 schema errors."""
+    try:
+        return call_fn(**call_kwargs)
+    except Exception as exc:
+        if use_schema and _is_schema_unsupported_error(exc):
+            logger.warning(
+                "Structured output schema unsupported by provider=%s model=%s; "
+                "downgrading to prompt-only JSON and memoizing target.",
+                target_key[0],
+                target_key[2],
+            )
+            fallback_kwargs = dict(call_kwargs)
+            fallback_kwargs.pop(schema_key, None)
+            result = call_fn(**fallback_kwargs)
+            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            return result
+        raise
+
+
+def _extract_choice_content(response: Any) -> str:
+    choices = getattr(response, "choices", None) or []
+    first_choice = choices[0] if choices else None
+    message = getattr(first_choice, "message", None) if first_choice is not None else None
+    content = getattr(message, "content", None) if message is not None else ""
+    if not content:
+        return ""
+    return content.strip()
+
+
 class LLMClient:
     """Public-provider client for chat completions.
 
@@ -132,12 +293,21 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        max_retries: int | None = None,
+        retry_base_delay: float | None = None,
+        retry_max_delay: float | None = None,
+        http_client: Any = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
         self._api_key = api_key
         self._max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         self._temperature = temperature if temperature is not None else self.default_temperature
+        retry_cfg = resolve_retry_config()
+        self._max_retries = max_retries if max_retries is not None else retry_cfg.max_retries
+        self._retry_base_delay = retry_base_delay if retry_base_delay is not None else retry_cfg.base_delay
+        self._retry_max_delay = retry_max_delay if retry_max_delay is not None else retry_cfg.max_delay
+        self._http_client = http_client
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
 
@@ -158,6 +328,21 @@ class LLMClient:
     @property
     def temperature(self) -> float | None:
         return self._temperature
+
+    @property
+    def max_retries(self) -> int:
+        """Return the maximum number of retry attempts for transient errors."""
+        return self._max_retries
+
+    @property
+    def retry_base_delay(self) -> float:
+        """Return the initial base backoff delay in seconds."""
+        return self._retry_base_delay
+
+    @property
+    def retry_max_delay(self) -> float:
+        """Return the maximum delay ceiling in seconds for a retry backoff."""
+        return self._retry_max_delay
 
     # -- client management ------------------------------------------------
 
@@ -208,9 +393,11 @@ class LLMClient:
                 raise LLMClientError(
                     "The 'anthropic' package is required for Anthropic LLM operations. Install with: pip install 'skillevaluator[llm]'"
                 ) from exc
-            client_kwargs: dict[str, Any] = {"api_key": config.api_key}
+            client_kwargs: dict[str, Any] = {"api_key": config.api_key, "max_retries": 0}
             if config.base_url:
                 client_kwargs["base_url"] = config.base_url
+            if self._http_client is not None:
+                client_kwargs["http_client"] = self._http_client
             self._client = Anthropic(**client_kwargs)
             return self._client
 
@@ -221,7 +408,14 @@ class LLMClient:
                 "The 'openai' package is required for LLM operations. Install it with: pip install openai"
             ) from exc
 
-        client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+        client_kwargs: dict[str, Any] = {
+            "api_key": config.api_key,
+            "base_url": config.base_url,
+            "max_retries": 0,
+        }
+        if self._http_client is not None:
+            client_kwargs["http_client"] = self._http_client
+        client = OpenAI(**client_kwargs)
         if (
             config.base_url is not None
             and not _is_canonical_openai_base_url(config.base_url)
@@ -236,63 +430,99 @@ class LLMClient:
 
     # -- direct-use methods -----------------------------------------------
 
-    def completions(self, system_prompt: str, user_prompt: str) -> str:
+    def completions(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: dict[str, Any] | None = None,
+        schema_name: str = "judge_response",
+    ) -> str:
         """Send a chat completion request and return the response text.
 
         Raises :class:`LLMClientError` when the response is empty.
         """
         config = self._resolved_config()
         client = self._get_client()
-        if config.provider == "anthropic":
+        target_key = (config.provider, config.base_url or "", config.model)
+
+        def _invoke_provider() -> str:
+            use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+            if config.provider == "anthropic":
+                call_kwargs: dict[str, Any] = {
+                    "model": config.model,
+                    "max_tokens": self._max_tokens or 4096,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                    **_temperature_kwargs(config.model, self._temperature),
+                }
+                if use_schema and response_schema is not None:
+                    call_kwargs["output_config"] = _build_anthropic_output_config(response_schema)
+                response = _call_with_schema_fallback(
+                    client.messages.create,
+                    call_kwargs,
+                    schema_key="output_config",
+                    target_key=target_key,
+                    use_schema=use_schema,
+                )
+                content = "".join(
+                    str(block.text) for block in response.content if getattr(block, "type", None) == "text"
+                )
+                if not content:
+                    raise EmptyLLMResponseError("LLM returned empty response content")
+                return content.strip()
+            if config.provider == "bedrock":
+                try:
+                    from litellm import completion
+                except ImportError as exc:
+                    raise LLMClientError(
+                        "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
+                    ) from exc
+                response = completion(
+                    model=config.litellm_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    aws_region_name=config.region,
+                    **_temperature_kwargs(config.model, self._temperature),
+                    **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
+                )
+                content = _extract_choice_content(response)
+                if not content:
+                    raise EmptyLLMResponseError("LLM returned empty response content")
+                return content
             call_kwargs: dict[str, Any] = {
                 "model": config.model,
-                "max_tokens": self._max_tokens or 4096,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
-                **_temperature_kwargs(config.model, self._temperature),
-            }
-            response = client.messages.create(**call_kwargs)
-            content = "".join(str(block.text) for block in response.content if getattr(block, "type", None) == "text")
-            if not content:
-                raise EmptyLLMResponseError("LLM returned empty response content")
-            return content.strip()
-        if config.provider == "bedrock":
-            try:
-                from litellm import completion
-            except ImportError as exc:
-                raise LLMClientError(
-                    "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
-                ) from exc
-            response = completion(
-                model=config.litellm_model,
-                messages=[
+                "stream": False,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                aws_region_name=config.region,
                 **_temperature_kwargs(config.model, self._temperature),
-                **({"max_tokens": self._max_tokens} if self._max_tokens is not None else {}),
+                **_token_limit_kwargs(config, self._max_tokens),
+            }
+            if use_schema and response_schema is not None:
+                call_kwargs["response_format"] = _build_openai_response_format(response_schema, schema_name)
+
+            response = _call_with_schema_fallback(
+                client.chat.completions.create,
+                call_kwargs,
+                schema_key="response_format",
+                target_key=target_key,
+                use_schema=use_schema,
             )
-            content = response.choices[0].message.content
+            content = _extract_choice_content(response)
             if not content:
                 raise EmptyLLMResponseError("LLM returned empty response content")
-            return str(content).strip()
-        call_kwargs: dict[str, Any] = {
-            "model": config.model,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            **_temperature_kwargs(config.model, self._temperature),
-            **_token_limit_kwargs(config, self._max_tokens),
-        }
+            return content
 
-        response = client.chat.completions.create(**call_kwargs)
-        content = response.choices[0].message.content
-        if not content:
-            raise EmptyLLMResponseError("LLM returned empty response content")
-        return content.strip()
+        return retry_call_with_backoff(
+            _invoke_provider,
+            max_retries=self._max_retries,
+            base_delay=self._retry_base_delay,
+            max_delay=self._retry_max_delay,
+        )
 
     def extract_json_from_response(self, system_prompt: str, user_prompt: str) -> dict:
         """Send a completion and parse JSON from the response."""

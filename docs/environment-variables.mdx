@@ -29,6 +29,9 @@ These variables select and configure the provider used for LLM-backed checks and
 | `SKILL_EVAL_LLM_MODEL` | OpenAI: `gpt-5.6-sol`; Anthropic: `claude-opus-5`; NVIDIA Build: `nvidia/nemotron-3-super-120b-a12b`; OpenAI-compatible: `nvidia/nvidia/nemotron-3-super-120b-long-ctx`; Bedrock: `us.anthropic.claude-opus-5` | Chat model override. For gateways, use the exact catalog ID when it differs from the default. Setting it to an empty string is a configuration error. For a lower-cost OpenAI option, use `gpt-5.4-mini`. |
 | `SKILL_EVAL_LLM_BASE_URL` | provider default endpoint | Endpoint override; takes precedence over `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`. Required for `openai-compatible`. Ignored by `nv_build`, whose endpoint is fixed to `https://integrate.api.nvidia.com/v1` — point a custom endpoint at the `openai-compatible` provider instead. |
 | `SKILL_EVAL_LLM_API_KEY` | — | API key for the `openai-compatible` provider (local servers still require it to be set). |
+| `SKILL_EVAL_LLM_MAX_RETRIES` | `3` | Extra attempts for transient LLM judge failures after the initial request. `0` disables retries; invalid or negative values use the default. |
+| `SKILL_EVAL_LLM_RETRY_BASE_DELAY` | `1` second | Base for exponential jitter between direct LLM judge attempts. Values must be finite and nonnegative. |
+| `SKILL_EVAL_LLM_RETRY_MAX_DELAY` | `30` seconds | Maximum sleep between direct LLM judge attempts. A `Retry-After` value above this limit fails fast; values must be finite and nonnegative. |
 | `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` | unset | Comma-separated hosts whose model catalog may be read over plain HTTP. Catalog reads otherwise require HTTPS unless the host is loopback, because the request carries a bearer token. Use this only when the transport is already encrypted and authenticated below HTTP — a WireGuard or comparable tunnel peer, for example — where the tool cannot see that the link is protected. Each entry matches one whole host as written, with no resolution, no suffix matching, and no wildcards. A plain-HTTP request to an accepted host also bypasses any inherited HTTP proxy, so the bearer token is never offered to an intermediary. The transport rechecks authorization before dispatch and rejects hosts that are no longer allowed. HTTPS routing is unchanged. |
 | `NVIDIA_API_KEY` | — | Credential for the `nv_build` provider (NVIDIA Build). |
 | `OPENAI_API_KEY` | — | Credential for the `openai` provider. |
@@ -37,6 +40,11 @@ These variables select and configure the provider used for LLM-backed checks and
 | `ANTHROPIC_BASE_URL` | Anthropic SDK default | Absolute HTTP(S) Anthropic API root. Accepts an unversioned root or a legacy terminal `/v1`; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
 | `AWS_REGION` | `us-west-2` | Region for the `bedrock` provider. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, ... | — | Standard AWS credential chain, used as-is by the `bedrock` provider. |
+
+The retry settings apply to the shared host LLM client and direct public-provider
+calls in the Harbor verifier. The canonical OpenAI RAGAS goal scorer uses its
+own adapter and scoring path. Harbor's managed verifier limits each required
+judge to 180 seconds so retries leave time to write a failed-run report.
 
 ### Anthropic endpoint roots
 

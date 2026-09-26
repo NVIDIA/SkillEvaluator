@@ -22,17 +22,23 @@ RAGAS is used for goal_accuracy and accuracy when available.
 
 from __future__ import annotations
 
+import io
 import ipaddress
 import json
 import logging
 import math
 import os
+import random
 import re
 import shlex
+import signal
 import sys
+import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
@@ -1290,7 +1296,36 @@ def _is_native_openai_chat_url(provider, request_url):
     )
 
 
-def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=None, request_url=None):
+def _build_openai_response_format(schema, schema_name="judge_response"):
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _build_anthropic_output_config(schema):
+    return {
+        "format": {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    }
+
+
+def _chat_completion_payload(
+    model,
+    prompt,
+    max_tokens,
+    temperature,
+    provider=None,
+    request_url=None,
+    response_schema=None,
+    schema_name="judge_response",
+):
     resolved_provider = _public_provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
@@ -1307,6 +1342,8 @@ def _chat_completion_payload(model, prompt, max_tokens, temperature, provider=No
     }
     if temperature is not None and _supports_custom_temperature(model):
         payload["temperature"] = temperature
+    if response_schema is not None:
+        payload["response_format"] = _build_openai_response_format(response_schema, schema_name)
     return payload
 
 
@@ -1493,30 +1530,268 @@ def _anthropic_url():
     return _validate_http_url(url)
 
 
-def _call_anthropic(prompt, model, max_tokens, temperature):
+_RETRIABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_BASE_DELAY = 1.0
+_DEFAULT_MAX_DELAY = 30.0
+# Three required judges run sequentially under the managed 600-second Harbor
+# verifier timeout. Reserve one minute for deterministic checks and artifacts.
+_JUDGE_WALL_TIME_BUDGET_SEC = 180.0
+_ACTIVE_JUDGE_DEADLINE = ContextVar("active_judge_deadline", default=None)
+
+
+def _remaining_judge_timeout(timeout):
+    """Bound one provider request by the remaining time for its judge."""
+    deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("LLM judge time budget exhausted")
+    return min(timeout, remaining)
+
+
+def _parse_retry_after(header_value, fallback_delay):
+    """Parse a Retry-After header as seconds or HTTP date, falling back to default."""
+    if not header_value:
+        return fallback_delay
+    clean_val = str(header_value).strip()
+    try:
+        return max(0.0, float(clean_val))
+    except ValueError:
+        pass
+    try:
+        from datetime import UTC, datetime
+        from email.utils import parsedate_to_datetime
+
+        target = parsedate_to_datetime(clean_val)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
+        return max(0.0, (target - now).total_seconds())
+    except Exception:
+        return fallback_delay
+
+
+def _calculate_jitter_delay(attempt, base_delay=1.0, max_delay=30.0):
+    """Calculate exponential backoff with full jitter."""
+    calculated = min(max_delay, base_delay * (2.0**attempt))
+    return random.uniform(0.0, calculated)
+
+
+def _resolve_eval_retry_config():
+    """Resolve retry and backoff limits from environment variables with safe defaults."""
+
+    def _read_int(name, default):
+        """Read a non-negative integer from the environment variable or return default."""
+        raw = str(os.environ.get(name, "")).strip()
+        if raw:
+            try:
+                val = int(raw)
+                return val if val >= 0 else default
+            except ValueError:
+                return default
+        return default
+
+    def _read_float(name, default):
+        """Read a non-negative float from the environment variable or return default."""
+        raw = str(os.environ.get(name, "")).strip()
+        if raw:
+            try:
+                val = float(raw)
+                return val if math.isfinite(val) and val >= 0.0 else default
+            except ValueError:
+                return default
+        return default
+
+    max_retries = _read_int("SKILL_EVAL_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+    base_delay = _read_float("SKILL_EVAL_LLM_RETRY_BASE_DELAY", _DEFAULT_BASE_DELAY)
+    raw_max_delay = _read_float("SKILL_EVAL_LLM_RETRY_MAX_DELAY", _DEFAULT_MAX_DELAY)
+    return max_retries, base_delay, max(base_delay, raw_max_delay)
+
+
+def _urlopen_with_retry(request, timeout=90):
+    """Open a URL request with exponential backoff and full jitter on transient failures."""
+    max_retries, base_delay, max_delay = _resolve_eval_retry_config()
+    attempt = 0
+    while True:
+        request_timeout = _remaining_judge_timeout(timeout)
+        try:
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:  # nosec B310
+                return response.read()
+        except Exception as error:
+            is_http = isinstance(error, urllib.error.HTTPError)
+            is_network = isinstance(error, (urllib.error.URLError, ConnectionError, OSError))
+            if (
+                attempt >= max_retries
+                or (not is_http and not is_network)
+                or (is_http and error.code not in _RETRIABLE_HTTP_CODES)
+            ):
+                raise
+
+            retry_after_str = None
+            if is_http and error.headers:
+                retry_after_str = error.headers.get("retry-after") or error.headers.get("Retry-After")
+
+            if retry_after_str is not None:
+                parsed = _parse_retry_after(retry_after_str, fallback_delay=base_delay)
+                if parsed > max_delay:
+                    raise
+                delay = parsed + random.uniform(0.1, 0.5)
+            else:
+                delay = _calculate_jitter_delay(attempt, base_delay=base_delay, max_delay=max_delay)
+
+            sleep_duration = min(delay, max_delay)
+            deadline = _ACTIVE_JUDGE_DEADLINE.get()
+            if deadline is not None and time.monotonic() + sleep_duration >= deadline:
+                raise TimeoutError("LLM judge time budget exhausted before retry") from error
+            status_label = f"HTTP {error.code}" if is_http else type(error).__name__
+            logger.warning(
+                "LLM judge transient error (%s). Retrying in %.2fs (attempt %d/%d)...",
+                status_label,
+                sleep_duration,
+                attempt + 1,
+                max_retries,
+            )
+            if is_http:
+                error.close()
+            time.sleep(sleep_duration)
+            attempt += 1
+
+
+_UNSUPPORTED_REASON_INDICATORS = (
+    "unsupported",
+    "not supported",
+    "extra input",
+    "extra inputs",
+    "unknown parameter",
+    "unknown field",
+    "unknown argument",
+    "unrecognized request argument",
+    "unrecognized parameter",
+    "unexpected keyword argument",
+    "unexpected argument",
+    "invalid parameter",
+    "invalid argument",
+    "not permitted",
+    "not allowed",
+    "disallowed",
+)
+
+_SCHEMA_OPTION_PATTERN = r"(?:response_format|response format|output_config|json_schema|structured[_ ]outputs?)"
+_SCHEMA_REJECTION_REASON = (
+    r"(?:unsupported|not supported|not permitted|not allowed|disallowed|"
+    r"unknown (?:parameter|field|argument)|unrecognized (?:request argument|parameter)|"
+    r"unexpected (?:keyword )?argument|extra inputs?(?: are not permitted)?)"
+)
+_SCHEMA_REJECTION_AFTER_OPTION = re.compile(
+    rf"\b{_SCHEMA_OPTION_PATTERN}\b(?:\.[a-z0-9_]+)*"
+    rf"(?:\s+of\s+type\s+['\"]?[a-z0-9_]+['\"]?)?"
+    rf"\s*(?:(?:is|are|was|were)\s+(?:an?\s+)?|:\s*)?"
+    rf"{_SCHEMA_REJECTION_REASON}\b",
+    re.IGNORECASE,
+)
+_SCHEMA_REJECTION_BEFORE_OPTION = re.compile(
+    rf"\b(?:unsupported|not supported|extra inputs?(?: are not permitted)?|unknown (?:parameter|field|argument)|"
+    rf"unrecognized (?:request argument|parameter)|unexpected (?:keyword argument|argument)|"
+    rf"invalid (?:parameter|argument)|not permitted|not allowed|disallowed)\b"
+    rf"(?:\s+supplied)?[\s:'\"\[\]{{}}(),-]{{0,32}}\b{_SCHEMA_OPTION_PATTERN}\b",
+    re.IGNORECASE,
+)
+
+
+def _message_rejects_schema_option(text, param=None):
+    """Match a rejection of the schema option itself, not unrelated error text."""
+    if param:
+        if not re.search(rf"\b{_SCHEMA_OPTION_PATTERN}\b", param, re.IGNORECASE):
+            return False
+        return any(indicator in text.lower() for indicator in _UNSUPPORTED_REASON_INDICATORS)
+    return bool(_SCHEMA_REJECTION_AFTER_OPTION.search(text) or _SCHEMA_REJECTION_BEFORE_OPTION.search(text))
+
+
+def _is_schema_unsupported_http_error(error):
+    """Determine whether an HTTP error indicates structured output schema is unsupported."""
+    if getattr(error, "code", None) not in {400, 422}:
+        return False
+    body_text = ""
+    try:
+        body_bytes = error.read()
+        error.fp = io.BytesIO(body_bytes)
+        body_text = body_bytes.decode("utf-8", "replace")
+    except Exception:
+        pass
+    error_param = None
+    try:
+        body = json.loads(body_text)
+        if isinstance(body, dict) and isinstance(body.get("error"), dict):
+            param = body["error"].get("param")
+            if isinstance(param, str):
+                error_param = param
+    except (TypeError, ValueError):
+        pass
+    text = f"{error} {getattr(error, 'reason', '')} {body_text}"
+    return _message_rejects_schema_option(text, error_param)
+
+
+_SCHEMA_UNSUPPORTED_TARGETS = set()
+
+
+def _urlopen_with_schema_fallback(build_request, *, target_key, use_schema, timeout=90):
+    """Open URL with retry, falling back to prompt-only on confirmed schema capability errors."""
+    try:
+        return _urlopen_with_retry(build_request(use_schema), timeout=timeout)
+    except urllib.error.HTTPError as error:
+        if use_schema and _is_schema_unsupported_http_error(error):
+            error.close()
+            logger.warning(
+                "Structured output schema unsupported by provider=%s model=%s; "
+                "downgrading to prompt-only JSON and memoizing target.",
+                target_key[0],
+                target_key[2],
+            )
+            response = _urlopen_with_retry(build_request(False), timeout=timeout)
+            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            return response
+        raise
+
+
+def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None):
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None, "ANTHROPIC_API_KEY is required for the anthropic provider"
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-    }
-    if temperature is not None and _supports_custom_temperature(model):
-        payload["temperature"] = temperature
-    request = urllib.request.Request(
-        _anthropic_url(),
-        data=json.dumps(payload).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-    )
+    target_url = _anthropic_url()
+    target_key = ("anthropic", target_url, model)
+    use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+
+    def _build_request(include_schema):
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
+        if temperature is not None and _supports_custom_temperature(model):
+            payload["temperature"] = temperature
+        if include_schema:
+            payload["output_config"] = _build_anthropic_output_config(response_schema)
+        return urllib.request.Request(
+            target_url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+
     # _anthropic_url() validates the configured base URL before this request.
-    with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-        body = json.loads(response.read())
+    raw_response = _urlopen_with_schema_fallback(
+        _build_request,
+        target_key=target_key,
+        use_schema=use_schema,
+        timeout=90,
+    )
+    body = json.loads(raw_response)
     content = "".join(
         str(block.get("text", ""))
         for block in body.get("content", [])
@@ -1560,7 +1835,15 @@ def _selected_judge_model(model=None):
     )
 
 
-def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+def _call_public_llm_with_provenance(
+    prompt,
+    model=None,
+    max_tokens=1024,
+    temperature=0.0,
+    allow_model_fallback=True,
+    response_schema=None,
+    schema_name="judge_response",
+):
     provider = _public_provider()
     if not provider:
         return None, _public_provider_error(), {}
@@ -1573,7 +1856,13 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
         last_provenance = provenance
         try:
             if provider == "anthropic":
-                content, error = _call_anthropic(prompt, candidate_model, max_tokens, temperature)
+                content, error = _call_anthropic(
+                    prompt,
+                    candidate_model,
+                    max_tokens,
+                    temperature,
+                    response_schema=response_schema,
+                )
                 if error:
                     return None, _redact_configured_credentials(error), provenance
                 return content, None, provenance
@@ -1591,24 +1880,45 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
             if not api_key:
                 return None, f"No API key configured for {provider}", provenance
             request_url = _resolve_url(provider)
-            request = urllib.request.Request(
-                request_url,
-                data=json.dumps(
-                    _chat_completion_payload(
-                        candidate_model,
-                        prompt,
-                        max_tokens,
-                        temperature,
-                        provider=provider,
-                        request_url=request_url,
-                    )
-                ).encode(),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            )
+            target_key = (provider, request_url, candidate_model)
+            use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
+
+            def _build_oai_request(
+                include_schema,
+                *,
+                _url=request_url,
+                _model=candidate_model,
+                _key=api_key,
+            ):
+                return urllib.request.Request(
+                    _url,
+                    data=json.dumps(
+                        _chat_completion_payload(
+                            _model,
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            provider=provider,
+                            request_url=_url,
+                            response_schema=response_schema if include_schema else None,
+                            schema_name=schema_name,
+                        )
+                    ).encode(),
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {_key}"},
+                )
+
             # request_url was validated by _resolve_url() before this request.
-            with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
-                body = json.loads(response.read())
-            content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+            raw_response = _urlopen_with_schema_fallback(
+                _build_oai_request,
+                target_key=target_key,
+                use_schema=use_schema,
+                timeout=90,
+            )
+            body = json.loads(raw_response)
+            choices = body.get("choices") or [{}]
+            first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+            message = first_choice.get("message")
+            content = message.get("content", "") if isinstance(message, dict) else ""
             if content is None:
                 content = ""
             if candidate_model != requested_model:
@@ -1626,13 +1936,23 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
     return None, _redact_configured_credentials(detail), last_provenance
 
 
-def call_public_llm(prompt, model=None, max_tokens=1024, temperature=0.0, allow_model_fallback=True):
+def call_public_llm(
+    prompt,
+    model=None,
+    max_tokens=1024,
+    temperature=0.0,
+    allow_model_fallback=True,
+    response_schema=None,
+    schema_name="judge_response",
+):
     content, error, _provenance = _call_public_llm_with_provenance(
         prompt,
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
         allow_model_fallback=allow_model_fallback,
+        response_schema=response_schema,
+        schema_name=schema_name,
     )
     return content, error
 
@@ -4032,11 +4352,76 @@ def _goal_payload_error(parsed):
     return None
 
 
+ACCURACY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "criteria": {
+            "type": "object",
+            "properties": {
+                "SKILL_IDENTIFIED": {"type": "boolean"},
+                "ACTION_CORRECT": {"type": "boolean"},
+                "FACTUALLY_ACCURATE": {"type": "boolean"},
+                "TASK_ADDRESSED": {"type": "boolean"},
+                "ACTIONABLE": {"type": "boolean"},
+            },
+            "required": [
+                "SKILL_IDENTIFIED",
+                "ACTION_CORRECT",
+                "FACTUALLY_ACCURATE",
+                "TASK_ADDRESSED",
+                "ACTIONABLE",
+            ],
+            "additionalProperties": False,
+        },
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["criteria", "score", "reason"],
+    "additionalProperties": False,
+}
+
+GOAL_ACCURACY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "user_goal": {"type": "string"},
+        "end_state": {"type": "string"},
+        "achieved": {"type": "boolean"},
+        "score": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["user_goal", "end_state", "achieved", "score", "reason"],
+    "additionalProperties": False,
+}
+
+BEHAVIOR_CHECK_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "integer"},
+                    "passed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["step", "passed", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "score": {"type": "number"},
+        "summary": {"type": "string"},
+    },
+    "required": ["results", "score", "summary"],
+    "additionalProperties": False,
+}
+
+
 def judge_accuracy(question, ground_truth, agent_text):
     if not ground_truth:
         return {"score": 1.0, "reason": "No ground_truth -- skipped"}
     prompt = f"""You are an expert evaluator for AI agent responses. Evaluate by checking \
-each criterion below against the expected answer. For each, answer YES or NO.
+each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
 
 1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?
 2. ACTION_CORRECT: Does the response describe or execute the correct actions/scripts?
@@ -4044,8 +4429,7 @@ each criterion below against the expected answer. For each, answer YES or NO.
 4. TASK_ADDRESSED: Does the response directly address the user's request?
 5. ACTIONABLE: Does the response provide actionable information (not just acknowledgment)?
 
-For each criterion write: YES or NO with a brief reason.
-Then compute score = count(YES) / 5.
+Compute score = count(true) / 5.
 Be lenient on exact wording but strict on factual correctness.
 
 Respond with ONLY a JSON object:
@@ -4065,6 +4449,8 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
         _accuracy_payload_error,
         call_public_llm,
         extract_json,
+        response_schema=ACCURACY_JSON_SCHEMA,
+        schema_name="accuracy_judgment",
     )
     if error:
         return _judge_error(error)
@@ -4147,7 +4533,9 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
 
     loop = asyncio.new_event_loop()
     try:
-        result = loop.run_until_complete(metric.ascore(sample))
+        result = loop.run_until_complete(
+            asyncio.wait_for(metric.ascore(sample), timeout=_remaining_judge_timeout(_JUDGE_WALL_TIME_BUDGET_SEC))
+        )
     finally:
         loop.close()
 
@@ -4192,6 +4580,8 @@ Respond with ONLY a JSON object:
         _goal_payload_error,
         _call_public_llm_with_provenance,
         extract_json,
+        response_schema=GOAL_ACCURACY_JSON_SCHEMA,
+        schema_name="goal_accuracy_judgment",
     )
     if error:
         return _judge_error(error, **provenance)
@@ -4244,12 +4634,17 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors_text}
 
-For each behavior, respond YES (observed) or NO (not observed) with a brief reason.
+For each behavior, set "passed" to true (observed) or false (not observed) with a brief reason.
 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true, "reason": "..."}}, ...], "score": 0.67, "summary": "brief summary"}}"""
 
-    content, error = call_public_llm(prompt, max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS)
+    content, error = call_public_llm(
+        prompt,
+        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+        schema_name="behavior_check_judgment",
+    )
     if error:
         return _judge_error(f"LLM judge error: {error}", results=[])
 
@@ -4263,7 +4658,10 @@ Respond with ONLY a JSON object:
     if score is None:
         # One retry max, with an explicit machine-readable-output reminder.
         retry_content, retry_error = call_public_llm(
-            prompt + _BEHAVIOR_RETRY_REMINDER, max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS
+            prompt + _BEHAVIOR_RETRY_REMINDER,
+            max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+            response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+            schema_name="behavior_check_judgment",
         )
         if not retry_error:
             parsed = _parse_judge_object(retry_content)
@@ -4363,10 +4761,43 @@ def _normalize_required_judge_result(metric, result):
 
 
 def _call_required_judge(metric, judge, *args, **kwargs):
+    previous_deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    own_deadline = time.monotonic() + _JUDGE_WALL_TIME_BUDGET_SEC
+    deadline = min(previous_deadline, own_deadline) if previous_deadline is not None else own_deadline
+    token = _ACTIVE_JUDGE_DEADLINE.set(deadline)
+    alarm_armed = False
+    previous_alarm_handler = None
+
+    # The standalone Harbor verifier runs judges on its main thread. Its
+    # interval timer also interrupts a response body that keeps trickling data
+    # inside one socket read, where urllib's idle timeout cannot help.
     try:
-        result = judge(*args, **kwargs)
+        try:
+            if hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread():
+                active_alarm, repeat_interval = signal.getitimer(signal.ITIMER_REAL)
+                if active_alarm == 0 and repeat_interval == 0:
+                    previous_alarm_handler = signal.getsignal(signal.SIGALRM)
+
+                    def _raise_judge_timeout(_signum, _frame):
+                        raise TimeoutError("LLM judge time budget exhausted")
+
+                    signal.signal(signal.SIGALRM, _raise_judge_timeout)
+                    try:
+                        signal.setitimer(signal.ITIMER_REAL, max(deadline - time.monotonic(), 1e-6))
+                        alarm_armed = True
+                    except OSError:
+                        signal.signal(signal.SIGALRM, previous_alarm_handler)
+            result = judge(*args, **kwargs)
+        finally:
+            if alarm_armed:
+                try:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                finally:
+                    signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
         result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+    finally:
+        _ACTIVE_JUDGE_DEADLINE.reset(token)
     return _normalize_required_judge_result(metric, result)
 
 

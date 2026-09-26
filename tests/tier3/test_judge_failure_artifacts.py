@@ -5,15 +5,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
+import urllib.error
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -155,6 +159,165 @@ def test_verifier_main_fails_closed_after_collecting_every_required_judge(
     verifier.SKILL_EVALUATOR_REWARD_JSON.unlink()
     assert metric_set_for_reward(numeric)[0] == DEFAULT_METRIC_SET
     assert overall_score(numeric) is None
+
+
+def test_verifier_retries_leave_time_to_write_failure_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slow transient calls must finish before Harbor's verifier timeout kills artifact writes."""
+    verifier = _load_verifier(tmp_path)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MAX_RETRIES", "3")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_BASE_DELAY", "0")
+    monkeypatch.setenv("SKILL_EVAL_LLM_RETRY_MAX_DELAY", "0")
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "")
+    monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: False)
+
+    elapsed = [0.0]
+
+    class FakeTime:
+        def monotonic(self) -> float:
+            return elapsed[0]
+
+        def sleep(self, seconds: float) -> None:
+            elapsed[0] += seconds
+
+        def __getattr__(self, name: str):
+            return getattr(time, name)
+
+    def slow_timeout(_request, timeout=90):
+        elapsed[0] += timeout
+        raise urllib.error.URLError("timed out")
+
+    monkeypatch.setattr(verifier, "time", FakeTime())
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", slow_timeout)
+
+    with pytest.raises(SystemExit) as exc_info:
+        verifier.main()
+
+    assert exc_info.value.code == 1
+    assert elapsed[0] <= 540.0
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
+    assert rich["evaluation_status"] == "failed"
+    assert "accuracy" in rich["evaluation_errors"]
+    assert numeric["overall"] == 0.0
+    assert overall_score(numeric) is None
+
+
+def test_required_judge_deadline_interrupts_a_stalled_response_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider that trickles a response must not keep the verifier alive indefinitely."""
+    if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+        pytest.skip("free POSIX interval timer required")
+    verifier = _load_verifier(tmp_path)
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.05)
+
+    class SlowResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            time.sleep(0.5)
+            return b"late success"
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", lambda *_args, **_kwargs: SlowResponse())
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    started = time.monotonic()
+    result = verifier._call_required_judge("accuracy", lambda: verifier._urlopen_with_retry("test"))
+
+    assert time.monotonic() - started < 0.4
+    assert result["status"] == "error"
+    assert result["score"] is None
+    assert signal.getsignal(signal.SIGALRM) == previous_handler
+    assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
+
+
+def test_required_judge_restores_alarm_handler_after_teardown_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+        pytest.skip("free POSIX interval timer required")
+    verifier = _load_verifier(tmp_path)
+    original_setitimer = signal.setitimer
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def interrupted_setitimer(timer, seconds, interval=0):
+        previous = original_setitimer(timer, seconds, interval)
+        if seconds == 0:
+            raise TimeoutError("interrupted during deadline teardown")
+        return previous
+
+    monkeypatch.setattr(verifier.signal, "setitimer", interrupted_setitimer)
+    result = verifier._call_required_judge("accuracy", lambda: {"score": 1.0, "reason": "ok"})
+
+    assert result["status"] == "error"
+    assert signal.getsignal(signal.SIGALRM) == previous_handler
+    assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
+
+
+def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default OpenAI goal scorer must return before its Harbor budget expires."""
+    verifier = _load_verifier(tmp_path)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+    monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: True)
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+
+    class FakeMessage:
+        def __init__(self, content: str):
+            self.content = content
+
+    class FakeMetric:
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, _sample):
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(value=1.0)
+
+    fake_ragas = ModuleType("ragas")
+    fake_ragas.SingleTurnSample = lambda **_kwargs: object()
+    fake_ragas_llms = ModuleType("ragas.llms")
+    fake_ragas_llms_base = ModuleType("ragas.llms.base")
+    fake_ragas_llms_base.llm_factory = lambda *_args, **_kwargs: object()
+    fake_ragas_messages = ModuleType("ragas.messages")
+    fake_ragas_messages.AIMessage = FakeMessage
+    fake_ragas_messages.HumanMessage = FakeMessage
+    fake_ragas_metrics = ModuleType("ragas.metrics")
+    fake_ragas_collections = ModuleType("ragas.metrics.collections")
+    fake_ragas_collections.AgentGoalAccuracyWithReference = FakeMetric
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda **_kwargs: object()
+    for name, module in {
+        "ragas": fake_ragas,
+        "ragas.llms": fake_ragas_llms,
+        "ragas.llms.base": fake_ragas_llms_base,
+        "ragas.messages": fake_ragas_messages,
+        "ragas.metrics": fake_ragas_metrics,
+        "ragas.metrics.collections": fake_ragas_collections,
+        "openai": fake_openai,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(
+        verifier.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("custom fallback must stop before another HTTP request"),
+    )
+
+    result = verifier._call_required_judge(
+        "goal_accuracy", verifier.judge_goal_accuracy, "question", "ground truth", "agent response"
+    )
+
+    assert result["status"] == "error"
+    assert result["score"] is None
 
 
 def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(

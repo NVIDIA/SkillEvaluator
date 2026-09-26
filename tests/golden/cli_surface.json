@@ -1081,6 +1081,24 @@
           "type": "text"
         },
         {
+          "default": "1024",
+          "name": "max_entries",
+          "opts": [
+            "--max-entries"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "default": "128000000",
+          "name": "max_scalar_comparisons",
+          "opts": [
+            "--max-scalar-comparisons"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
           "name": "catalog",
           "opts": [
             "--catalog"
@@ -1750,6 +1768,24 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "default": "1024",
+              "name": "max_entries",
+              "opts": [
+                "--max-entries"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "128000000",
+              "name": "max_scalar_comparisons",
+              "opts": [
+                "--max-scalar-comparisons"
+              ],
+              "param_type": "option",
+              "type": "integer range"
             },
             {
               "name": "catalog",

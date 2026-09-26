@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
+  similarity scans now allow 1,024 selected manifests and 128 million scalar
+  comparisons by default, covering 343 skills with 2,048-dimensional embeddings.
+  Add `--max-entries` and `--max-scalar-comparisons` for explicit scan budgets;
+  exceeded limits fail with actionable errors and never truncate the collection.
 - Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
 
 - Preserve full Codex gateway model IDs in cloud environments, including E2B

@@ -31,17 +31,20 @@ from skillevaluator.constants import (
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_WORKFLOWS,
     SIMILARITY_CRITICAL_THRESHOLD,
+    SIMILARITY_DEFAULT_MAX_ENTRIES,
+    SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_HIGH_THRESHOLD,
     SIMILARITY_LOW_THRESHOLD,
+    SIMILARITY_MAX_ENTRIES,
     SIMILARITY_MEDIUM_THRESHOLD,
 )
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
 from skillevaluator.embedding.extractor import (
-    MAX_COLLECTION_ENTRIES,
     MAX_MANIFEST_BYTES,
     ContentEntry,
     discover_and_extract,
 )
+from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
@@ -51,14 +54,12 @@ logger = get_logger(__name__)
 
 CATALOG_SCHEMA_VERSION = 1
 MAX_CATALOG_BYTES = 32 * 1024 * 1024
-MAX_CATALOG_ENTRIES = 5_000
+MAX_CATALOG_ENTRIES = SIMILARITY_MAX_ENTRIES
 MAX_VECTOR_DIMENSION = 65_536
 MAX_CATALOG_TEXT_LENGTH = 16_384
 EMBEDDING_BATCH_SIZE = 64
 MAX_DESCRIPTION_EMBEDDING_TEXT_CHARS = 16_384
 MAX_FULL_BODY_EMBEDDING_TEXT_BYTES = MAX_MANIFEST_BYTES
-MAX_PAIRWISE_COMPARISONS = MAX_COLLECTION_ENTRIES * (MAX_COLLECTION_ENTRIES - 1) // 2
-MAX_SCALAR_COMPARISONS = 25_000_000
 MAX_SIMILARITY_MATCHES = 1_000
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ENDPOINT_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -169,9 +170,21 @@ class EmbeddingRegistry:
     2. Cached: load_cache() / save_cache() for pre-computed indexes.
     """
 
-    def __init__(self, client: EmbeddingClient, *, full_body: bool = False) -> None:
+    def __init__(
+        self,
+        client: EmbeddingClient,
+        *,
+        full_body: bool = False,
+        max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES,
+        max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    ) -> None:
+        validate_max_entries(max_entries)
+        validate_max_scalar_comparisons(max_scalar_comparisons)
         self._client = client
         self._full_body = full_body
+        self._max_entries = max_entries
+        self._max_pairwise_comparisons = max_entries * (max_entries - 1) // 2
+        self._max_scalar_comparisons = max_scalar_comparisons
         self._entries: dict[str, RegistryEntry] = {}
         self._vector_dimension: int | None = None
 
@@ -191,7 +204,7 @@ class EmbeddingRegistry:
         Returns:
             Number of entries successfully indexed.
         """
-        content_entries = discover_and_extract(root, content_type)
+        content_entries = discover_and_extract(root, content_type, max_entries=self._max_entries)
         if not content_entries:
             logger.debug("No content entries found in %s", safe_path_label(root))
             return 0
@@ -247,10 +260,13 @@ class EmbeddingRegistry:
         _validate_threshold(threshold)
         entries = list(self._entries.values())
         comparison_count = len(entries) * (len(entries) - 1) // 2
-        if comparison_count > MAX_PAIRWISE_COMPARISONS:
-            raise ValueError(f"Pairwise comparison limit exceeded ({MAX_PAIRWISE_COMPARISONS})")
+        if comparison_count > self._max_pairwise_comparisons:
+            raise ValueError(
+                f"Pairwise comparison limit exceeded ({self._max_pairwise_comparisons}); "
+                "increase --max-entries within its supported range to compare the complete collection"
+            )
         vector_dimension = _validate_registry_vectors(entries, self._vector_dimension)
-        _validate_scalar_work(comparison_count, vector_dimension)
+        _validate_scalar_work(comparison_count, vector_dimension, self._max_scalar_comparisons)
         matches: list[SimilarityMatch] = []
 
         for a, b in combinations(entries, 2):
@@ -279,7 +295,7 @@ class EmbeddingRegistry:
         _validate_threshold(threshold)
         entries = list(self._entries.values())
         vector_dimension = _validate_registry_vectors(entries, self._vector_dimension)
-        _validate_scalar_work(len(entries), vector_dimension)
+        _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
         _validate_vector(vector, vector_dimension or self._vector_dimension)
@@ -308,7 +324,7 @@ class EmbeddingRegistry:
         _validate_threshold(threshold)
         catalog_entries = list(self._entries.values())
         vector_dimension = _validate_registry_vectors(catalog_entries, self._vector_dimension)
-        _validate_scalar_work(len(catalog_entries), vector_dimension)
+        _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
         text = entry.full_text if self._full_body else entry.embedding_text
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
@@ -572,10 +588,13 @@ def _validate_registry_vectors(entries: list[RegistryEntry], expected_dimension:
     return dimension or 0
 
 
-def _validate_scalar_work(comparison_count: int, vector_dimension: int) -> None:
+def _validate_scalar_work(comparison_count: int, vector_dimension: int, max_scalar_comparisons: int) -> None:
     scalar_work = comparison_count * vector_dimension
-    if scalar_work > MAX_SCALAR_COMPARISONS:
-        raise ValueError(f"Scalar comparison work limit exceeded ({MAX_SCALAR_COMPARISONS}); requested {scalar_work}")
+    if scalar_work > max_scalar_comparisons:
+        raise ValueError(
+            f"Scalar comparison work limit exceeded ({max_scalar_comparisons}); requested {scalar_work}. "
+            "Increase --max-scalar-comparisons to allow this comparison workload"
+        )
 
 
 def _validate_catalog_identity(entry_id: object, path: object, content_type: object) -> None:

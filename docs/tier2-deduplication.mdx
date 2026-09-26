@@ -173,6 +173,30 @@ matches.
 | `--full-body` | off | Embed each discovered `SKILL.md` in full, including frontmatter, chunked at 512 tokens with 64-token overlap and average pooling — instead of only the name and description. Supporting files are not included |
 | `--model` | configured embedding model | Embedding model override for this run |
 | `--type skill` | `auto` | Explicit skill discovery when automatic detection is not suitable |
+| `--max-entries` | `1024` | Maximum selected manifests in a fresh collection; accepts `1` through `5000` |
+| `--max-scalar-comparisons` | `128000000` | Maximum comparisons multiplied by embedding dimensions; accepts a positive integer |
+
+The entry budget is independent of the 256-file limit inside one skill. A
+343-skill collection fits the defaults, including with 2,048-dimensional
+embeddings. Entry and comparison budgets are separate: a pairwise scan needs
+`n * (n - 1) / 2 * dimensions` scalar comparisons, so increasing the entry
+budget may also require increasing the comparison budget. For example, 500
+skills with 2,048-dimensional embeddings need 255,488,000 scalar comparisons:
+
+```bash title="Allow a larger comparison workload"
+skillevaluator similarity-check ./skills --max-entries 500 --max-scalar-comparisons 256000000
+```
+
+The entry budget counts selected manifests even when their frontmatter is
+invalid. It applies before any embedding request and never truncates a scan.
+The comparison budget is checked after embeddings establish their dimensions
+and before cosine comparisons. A failure names the option to adjust. Increasing
+either budget can increase provider usage or processing time. Neither option
+changes the separate path, input-byte, catalog-file, vector, or result limits.
+
+For a saved catalog query, `--max-entries` does not reduce the catalog's existing
+5,000-entry capacity. Its comparison work is `catalog entries * dimensions`,
+bounded by `--max-scalar-comparisons`.
 
 ## Use a local catalog
 
@@ -263,8 +287,10 @@ discovered paths, file counts, per-file and total input bytes, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
 matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
 keys, unexpected fields, invalid identities, non-finite vectors, and
-incompatible provider metadata. If a collection exceeds a limit, split it into
-intentional batches rather than scanning an unbounded directory tree.
+incompatible provider metadata. Increase the documented collection budgets only
+for a workload you intend to process. Splitting a collection into independent
+batches omits comparisons between batches and is not a complete deduplication
+scan.
 
 ### What leaves your machine
 

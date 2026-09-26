@@ -362,6 +362,8 @@ skillevaluator similarity-check ./skills
 | `--model TEXT` | provider default | Embedding model override. |
 | `--catalog FILE` | none | Compare exactly one skill against a local catalog. |
 | `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. |
+| `--max-entries INTEGER` | `1024` | Maximum selected manifests for a fresh collection; range `1`–`5000`. Does not restrict loaded catalog queries. |
+| `--max-scalar-comparisons INTEGER` | `128000000` | Maximum comparisons multiplied by embedding dimensions; must be positive. Applies to pairwise scans and catalog queries. |
 
 Plus the standard report options. Classification tiers and catalog rules are in [Tier 2: Deduplication](tier2-deduplication.mdx).
 

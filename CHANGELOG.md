@@ -25,6 +25,49 @@ All notable changes to SkillEvaluator are documented in this file.
 - Report Tier 2 embedding and LLM service failures as incomplete checks, retaining
   a nonzero exit without inventing duplicate-content findings. Provider error
   messages include recovery guidance without echoing raw response bodies.
+- Tier 3 script execution credit now requires evidence that the expected script
+  was invoked. `check_script_execution` previously treated the script name as a
+  substring of an execution command, so reading, printing or searching the
+  script, or running a similarly named file, scored a full `Executed <script>`.
+  Credit is now given only for a recognised invocation: the script run directly,
+  an interpreter given it as its script argument, a `source`, or a `sh -c`
+  payload that does one of those, with `cd` tracked and script identity compared
+  exactly. Interpreter and wrapper options come from grammars derived by running
+  each option against a script that records whether it executed, so `--help`,
+  `perl -c` and `bash -n` run no script while `python -Wignore` and
+  `env FOO=1` still resolve to theirs. A command the walk cannot resolve keeps
+  the existing 0.75 partial credit rather than being scored either way: a path
+  built at run time, an option outside a grammar, a name only in heredoc data,
+  inline code or a module that names the script, and anything reaching a command
+  through standard input, including `xargs` and `parallel`, whose behaviour the
+  command text never determines. Partial credit is only ever given for a
+  command that names the script: an unresolved command that never mentions it
+  scores zero, as before. Redirections standing before the script
+  (`python3 < /dev/null run.py`), a script's own arguments that look like shell
+  options (`bash run.sh -c '...'`), invocations inside `if`, `while`, `until`
+  and `for` bodies, and versioned interpreter names (`perl5.38.2`, `python3.13`)
+  resolve as the shell runs them. A loop over an empty list keeps the earlier
+  binding and its body is not read; a binding made inside `( ... )` stays
+  there; the last command of a pipeline keeps its bindings where the shell
+  does (zsh, ksh) and not where it forks it (bash, dash, mksh), with an
+  option change that could move it (`shopt -s lastpipe`, `emulate sh`)
+  read as unresolved; a quoted or escaped word that would read as syntax
+  (`'done'`, `printf "("`, `';|'`) is the ordinary word it is; groups and
+  compound pipeline stages nest in either order, each compound tested for its
+  own pipe; `((` closed by `))` is an arithmetic command where the shell has
+  one; the positional
+  parameters are empty unless the text gives some, so `for f; do` at the top
+  level runs nothing and keeps the variable's value; an interpreter fed its
+  program by a pipe (`cat run.py | python3`) is unresolved like
+  `python3 < run.py`; and `ksh`, `mksh` and `ash` are recognised shells.
+  Applied to both the host checker and the bundled Harbor verifier.
+
+- Added `scripts/script_invocation_differential.py`, a differential harness that
+  executes each command for real against fixtures that record whether they ran,
+  and compares the result against both implementations. `--baseline REF` also
+  scores every command with the checker at an earlier ref and lists each score
+  that moved, so a change that lowers a command that ran, or raises one that
+  did not, is seen before it is pushed.
 
 ### Added
 

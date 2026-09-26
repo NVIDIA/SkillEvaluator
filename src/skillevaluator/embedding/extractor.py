@@ -20,24 +20,24 @@ import yaml
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     CONTENT_DEDUP_MAX_FILE_BYTES,
-    CONTENT_DEDUP_MAX_FILES,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_TYPE_RULES,
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_WORKFLOWS,
     RULES_FILE_EXTENSION,
     SCAN_EXCLUDED_DIRS,
+    SIMILARITY_DEFAULT_MAX_ENTRIES,
     SKILL_MANIFEST_VARIANTS,
     WORKFLOWS_MANIFEST_FILE,
 )
 from skillevaluator.deduplication.utils.skill_collector import _SecureReadError, _SecureRoot
+from skillevaluator.embedding.limits import validate_max_entries
 from skillevaluator.logging_config import get_logger
 from skillevaluator.utils.tier2_paths import is_contained_compatibility_alias, safe_path_label
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 logger = get_logger(__name__)
 
-MAX_COLLECTION_ENTRIES = CONTENT_DEDUP_MAX_FILES
 MAX_MANIFEST_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
 MAX_COLLECTION_BYTES = CONTENT_DEDUP_MAX_TOTAL_BYTES
 MAX_DISCOVERED_PATHS = CONTENT_DEDUP_MAX_DISCOVERED_PATHS
@@ -72,13 +72,17 @@ class ContentEntry:
 class _ExtractionBudget:
     """Tracks collection bounds before any embedding request is made."""
 
+    max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES
     entry_count: int = 0
     total_bytes: int = 0
 
     def reserve(self, file_path: Path, declared_bytes: int) -> None:
         self.entry_count += 1
-        if self.entry_count > MAX_COLLECTION_ENTRIES:
-            raise ValueError(f"Collection entry limit exceeded ({MAX_COLLECTION_ENTRIES}) before embedding")
+        if self.entry_count > self.max_entries:
+            raise ValueError(
+                f"Collection entry limit exceeded ({self.max_entries}) before embedding; "
+                "increase --max-entries within its supported range to scan the complete collection"
+            )
         if declared_bytes > MAX_MANIFEST_BYTES:
             raise ValueError(
                 f"Manifest exceeds the Tier 2 per-file byte limit ({MAX_MANIFEST_BYTES}): {file_path.name}"
@@ -176,22 +180,26 @@ def extract_from_workflow(workflow_dir: Path, *, budget: _ExtractionBudget | Non
 # ---------------------------------------------------------------------------
 
 
-def discover_and_extract(root: Path, content_type: str) -> list[ContentEntry]:
+def discover_and_extract(
+    root: Path, content_type: str, *, max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES
+) -> list[ContentEntry]:
     """Auto-discover content items under a directory and extract entries.
 
     Args:
         root: Root directory to scan.
         content_type: One of "skill", "rules", "workflows".
+        max_entries: Maximum selected manifests, including those with invalid frontmatter.
 
     Returns:
         List of successfully extracted ContentEntry objects.
     """
+    validate_max_entries(max_entries)
     strategy = _DISCOVERY_STRATEGIES.get(content_type)
     if strategy is None:
         logger.warning("Unknown content type '%s' for discovery", content_type)
         return []
 
-    entries = strategy(root, _ExtractionBudget())
+    entries = strategy(root, _ExtractionBudget(max_entries=max_entries))
     logger.debug("Discovered %d %s entries in %s", len(entries), content_type, safe_path_label(root))
     return entries
 

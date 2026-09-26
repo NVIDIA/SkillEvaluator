@@ -199,45 +199,76 @@ def test_codex_file_change_emits_write_calls():
     assert tcs[0]["action_input"]["path"] == "/workspace/output/real.py"
 
 
-def test_codex_web_search_search_action_emits_synthetic_tool_call():
+def test_codex_web_search_multi_query_preserves_action_payload():
+    # Schema-valid WebSearchItem: required top-level query, action.search with queries.
     log = (
         '{"type":"item.completed","item":{"type":"web_search","id":"ws-1",'
-        '"action":{"type":"search","query":"skill evaluator harbor"},'
-        '"status":"completed"}}\n'
+        '"query":"parallel query batch",'
+        '"action":{"type":"search","queries":["alpha","beta"]}}}\n'
     )
     traj = synthetic_trajectory_from_codex_txt(log)
     assert traj is not None
     tcs = extract_tool_calls_as_dicts(traj)
     assert len(tcs) == 1
     assert tcs[0]["action"] == "web_search"
-    assert tcs[0]["action_input"] == {"action": "search", "query": "skill evaluator harbor"}
-    assert "status=completed" in tcs[0]["observation"]
+    assert tcs[0]["action_input"] == {
+        "query": "parallel query batch",
+        "action": {"type": "search", "queries": ["alpha", "beta"]},
+    }
 
 
 def test_codex_web_search_open_page_action_preserves_url():
     log = (
         '{"type":"item.completed","item":{"type":"web_search","id":"ws-2",'
-        '"action":{"type":"open_page","url":"https://example.com/docs"},'
-        '"status":"completed"}}\n'
+        '"query":"https://example.com/docs",'
+        '"action":{"type":"open_page","url":"https://example.com/docs"}}}\n'
     )
     traj = synthetic_trajectory_from_codex_txt(log)
     assert traj is not None
     tcs = extract_tool_calls_as_dicts(traj)
-    assert tcs[0]["action_input"]["url"] == "https://example.com/docs"
-    assert tcs[0]["action_input"]["action"] == "open_page"
+    assert tcs[0]["action_input"] == {
+        "query": "https://example.com/docs",
+        "action": {"type": "open_page", "url": "https://example.com/docs"},
+    }
 
 
-def test_codex_collab_tool_call_spawn_agent_emits_synthetic_tool_call():
+def test_codex_web_search_find_in_page_preserves_pattern():
+    log = (
+        '{"type":"item.completed","item":{"type":"web_search","id":"ws-3",'
+        '"query":"\'install\' in https://example.com/docs",'
+        '"action":{"type":"find_in_page","url":"https://example.com/docs","pattern":"install"}}}\n'
+    )
+    traj = synthetic_trajectory_from_codex_txt(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert tcs[0]["action_input"]["action"] == {
+        "type": "find_in_page",
+        "url": "https://example.com/docs",
+        "pattern": "install",
+    }
+
+
+def test_codex_collab_tool_call_spawn_agent_preserves_wire_fields():
     log = (
         '{"type":"item.completed","item":{"type":"collab_tool_call","id":"col-1",'
-        '"tool":"spawn_agent","prompt":"review the logs","status":"completed"}}\n'
+        '"tool":"spawn_agent","sender_thread_id":"thread-parent",'
+        '"receiver_thread_ids":["thread-child"],"prompt":"review logs",'
+        '"agents_states":{"thread-child":{"status":"completed","message":null}},'
+        '"status":"completed"}}\n'
     )
     traj = synthetic_trajectory_from_codex_txt(log)
     assert traj is not None
     tcs = extract_tool_calls_as_dicts(traj)
     assert len(tcs) == 1
     assert tcs[0]["action"] == "spawn_agent"
-    assert tcs[0]["action_input"]["prompt"] == "review the logs"
+    assert tcs[0]["action_input"] == {
+        "sender_thread_id": "thread-parent",
+        "receiver_thread_ids": ["thread-child"],
+        "prompt": "review logs",
+        "agents_states": {"thread-child": {"status": "completed", "message": None}},
+        "status": "completed",
+    }
+    assert "status=completed" in tcs[0]["observation"]
 
 
 def test_codex_mcp_tool_call_preserves_result():

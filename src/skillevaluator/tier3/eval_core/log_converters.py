@@ -680,38 +680,42 @@ def _codex_mcp_observation(item: dict[str, Any]) -> str:
 
 
 def _codex_web_search_arguments(item: dict[str, Any]) -> dict[str, Any]:
+    """Map Codex ``WebSearchItem`` wire fields into ATIF tool arguments.
+
+    Schema shape (``codex exec --json``): required top-level ``query`` plus an
+    ``action`` object (``search`` with optional ``query``/``queries``,
+    ``open_page``, or ``find_in_page``). Preserve the full action payload so
+    multi-query and navigation evidence is not collapsed to a summary string.
+    """
+    arguments: dict[str, Any] = {}
+    if "query" in item and item.get("query") is not None:
+        arguments["query"] = str(item["query"])
     action = item.get("action")
     if isinstance(action, dict):
-        action_type = str(action.get("type") or "").strip()
-        if action_type == "search":
-            query = action.get("query")
-            if query is not None:
-                return {"action": "search", "query": str(query)}
-        if action_type == "open_page":
-            payload: dict[str, Any] = {"action": "open_page"}
-            url = action.get("url")
-            if url is not None:
-                payload["url"] = str(url)
-            return payload
-        if action_type == "find_in_page":
-            payload = {"action": "find_in_page"}
-            for key in ("query", "url", "pattern"):
-                if action.get(key) is not None:
-                    payload[key] = str(action[key])
-            return payload
-    query = str(item.get("query") or item.get("input") or "").strip()
-    return {"query": query} if query else {}
+        arguments["action"] = dict(action)
+        return arguments
+    legacy = str(item.get("input") or "").strip()
+    if legacy and "query" not in arguments:
+        arguments["query"] = legacy
+    return arguments
 
 
 def _codex_collab_tool_arguments(item: dict[str, Any]) -> dict[str, Any]:
+    """Map Codex ``CollabToolCallItem`` wire fields into ATIF tool arguments.
+
+    Schema fields: ``sender_thread_id``, ``receiver_thread_ids``, ``prompt``,
+    ``agents_states``, and ``status`` (``tool`` becomes the function name).
+    """
     arguments: dict[str, Any] = {}
-    raw_args = item.get("arguments")
-    if isinstance(raw_args, dict):
-        arguments.update(raw_args)
-    for key in ("prompt", "receiver", "agent_id", "session_id", "message"):
-        value = item.get(key)
-        if value is not None:
-            arguments[key] = value
+    for key in (
+        "sender_thread_id",
+        "receiver_thread_ids",
+        "prompt",
+        "agents_states",
+        "status",
+    ):
+        if key in item and item[key] is not None:
+            arguments[key] = item[key]
     return arguments
 
 

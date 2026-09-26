@@ -2565,7 +2565,11 @@ def evaluate(
 
 @cli.command("create-eval-dataset")
 @_skill_argument
-@click.option("--full", is_flag=True, help="Generate the full 4-bucket dataset.")
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Generate the full bucket set (up to four cases; template mode omits negative without eval guidance).",
+)
 @click.option("--no-llm", is_flag=True, help="Use local templates only.")
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")

@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Run the public Docker image as an unprivileged user, with writable default report and home directories.
+  Document UID/GID overrides for host-owned output mounts.
 - Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
 
 - Preserve full Codex gateway model IDs in cloud environments, including E2B

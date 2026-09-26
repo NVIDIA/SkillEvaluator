@@ -56,6 +56,10 @@ def _all_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     return [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
 
 
+def _workflow_names() -> list[str]:
+    return sorted(path.name for path in WORKFLOWS.glob("*.y*ml"))
+
+
 def test_ci_preserves_required_contexts_as_explicit_jobs() -> None:
     ci = _load("ci.yml")
 
@@ -224,14 +228,23 @@ def test_non_pr_workflow_triggers_are_preserved() -> None:
     assert "workflow_dispatch" in security["on"]
 
 
-def test_changed_workflows_pin_every_action_to_a_commit() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
+def test_all_workflows_pin_every_action_to_a_commit() -> None:
+    for workflow_name in _workflow_names():
         for uses in _all_uses(_load(workflow_name)):
             assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), uses
 
 
-def test_changed_workflows_do_not_persist_checkout_credentials() -> None:
-    for workflow_name in ("ci.yml", "security.yml"):
+def test_all_workflows_do_not_persist_checkout_credentials() -> None:
+    for workflow_name in _workflow_names():
         checkout_steps = [step for step in _all_steps(_load(workflow_name)) if step.get("uses", "").startswith("actions/checkout@")]
         assert checkout_steps
         assert all(step.get("with", {}).get("persist-credentials") == "false" for step in checkout_steps)
+
+
+def test_all_workflows_declare_restricted_permissions() -> None:
+    for workflow_name in _workflow_names():
+        workflow = _load(workflow_name)
+        assert "permissions" in workflow
+        assert workflow["permissions"] != "write-all"
+        for job in workflow["jobs"].values():
+            assert job.get("permissions", {}) != "write-all"

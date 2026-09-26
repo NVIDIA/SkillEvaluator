@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
+
 - Preserve full Codex gateway model IDs in cloud environments, including E2B
   and Daytona, while retaining local runtime setup and native provider routing.
 - Keep Tier 2 execution diagnostics visible alongside duplicate findings in

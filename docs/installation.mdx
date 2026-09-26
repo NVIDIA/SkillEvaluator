@@ -95,8 +95,30 @@ docker build -t skillevaluator:local .
 docker run --rm skillevaluator:local --version
 docker run --rm \
   -v "$PWD/tests/fixtures/skills/simple:/workspace/skills/simple:ro" \
-  skillevaluator:local validate /workspace/skills/simple --no-llm --no-dedup
+  skillevaluator:local validate /workspace/skills/simple --no-llm --tiers 1
 ```
+
+The image runs as the unprivileged `skillevaluator` user (UID 10001). Its home
+and `/app/reports` directory are writable, so default reports can be created
+without root. Input bind mounts can remain read-only.
+
+To save reports to a host directory on Linux, create that directory first and
+run with its owner's UID and GID. Docker's `--user` override preserves access to
+host-owned output paths without changing their permissions:
+
+```bash
+mkdir -p reports
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp \
+  -v "$PWD/tests/fixtures/skills/simple:/workspace/skills/simple:ro" \
+  -v "$PWD/reports:/output" \
+  skillevaluator:local validate /workspace/skills/simple --no-llm --tiers 1 -o /output
+```
+
+The UID override also uses `/tmp` as a writable home for per-user caches. Provider
+credentials and access to external sandbox services still need to be configured
+for the selected runtime user.
 
 The image does not bundle the external Semgrep, SkillSpector, or Gitleaks executables, so their required scanner evidence is incomplete and `validate` exits non-zero — the other checks still run and the report is still produced (see [Troubleshooting](#troubleshooting)). Tier 3 still requires credentials for the selected provider and agent at runtime — pass them into the container as environment variables when you get there.
 
@@ -149,7 +171,7 @@ skillevaluator --version
 skillevaluator health-check
 ```
 
-`--version` confirms the CLI is on PATH — that is the whole smoke test for a Tier 1-only install. `health-check` goes one step further: a quick readiness check of the CLI and the selected live-eval backend (defaults: the `codex` agent, `docker` environment), useful once you plan to run Tier 3. On an install without the `tier3` extra or a configured provider it lists the missing pieces and exits non-zero — expected for a Tier 1-only setup, not a broken install. For a deeper diagnosis, `doctor` covers the same ground; add `doctor --verify-models` to make a live credential-bearing catalog request for each resolved agent model. A public or otherwise non-authoritative result is reported as a warning because catalog access alone does not prove inference access. See the [CLI Reference](cli-reference.mdx) for both commands.
+`--version` confirms the CLI is on PATH — that is the whole smoke test for a Tier 1-only install. `health-check` goes one step further: a quick readiness check of the CLI and the selected live-eval backend (the agent follows the configured provider; the environment defaults to `docker`), useful once you plan to run Tier 3. On an install without the `tier3` extra or a configured provider it lists the missing pieces and exits non-zero — expected for a Tier 1-only setup, not a broken install. For a deeper diagnosis, `doctor` covers the same ground; add `doctor --verify-models` to make a live credential-bearing catalog request for each resolved agent model. A public or otherwise non-authoritative result is reported as a warning because catalog access alone does not prove inference access. See the [CLI Reference](cli-reference.mdx) for both commands.
 
 ## Troubleshooting
 

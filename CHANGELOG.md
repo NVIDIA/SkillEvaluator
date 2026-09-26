@@ -4,6 +4,71 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Keep headings and comments inside fenced code examples in their enclosing Markdown
+  section during Tier 2 content chunking, preserving original source line numbers.
+- Run the public Docker image as an unprivileged user, with writable default report and home directories.
+  Document UID/GID overrides for host-owned output mounts.
+- Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
+
+- Preserve full Codex gateway model IDs in cloud environments, including E2B
+  and Daytona, while retaining local runtime setup and native provider routing.
+- Keep Tier 2 execution diagnostics visible alongside duplicate findings in
+  CLI, HTML, and Markdown reports, without repeating the findings as errors.
+- Use `nvidia/nemotron-3-super-120b-a12b` as the shared NVIDIA Build default for
+  evaluator chat, agent execution, and judging, preserving explicit model overrides.
+  Request nonstreaming chat responses explicitly to match the response parser.
+- Tier 2 LLM failures now identify the selected provider and model, HTTP status,
+  safe error metadata, and failed-cluster count without exposing response bodies.
+- Replace the retired NVIDIA embedding default with `nvidia/nemotron-3-embed-1b`
+  and send the required passage input type for NVIDIA document comparisons.
+  Existing catalogs and caches must be rebuilt when switching embedding models.
+- Report Tier 2 embedding and LLM service failures as incomplete checks, retaining
+  a nonzero exit without inventing duplicate-content findings. Provider error
+  messages include recovery guidance without echoing raw response bodies.
+
+### Added
+
+- Interactive top-level help now opens with a green SkillEvaluator wordmark,
+  installed version, and tier overview. Narrow terminals use a compact header;
+  redirected output and subcommands keep their existing output format.
+
+- OpenAI-compatible gateways now have chat, embedding, and separate Codex,
+  Claude Code, and OpenCode model defaults. Set the provider, URL, and key;
+  override model IDs when the gateway uses different catalog names. Claude
+  Code inherits the gateway route unless an explicit Anthropic route is set.
+  Run reports identify harness defaults separately from CLI/config overrides.
+
+- Run individual tiers directly with `skillevaluator tier1 PATH`, `tier2 PATH`,
+  and `tier3 PATH`, while retaining the expert subcommands. Tier 1 includes
+  dependency checks and enables LLM checks when configured; Tier 2 reports
+  whether a catalog comparison ran; Tier 3 creates a missing starter dataset
+  and preserves existing evaluation sources.
+
+### Changed
+
+- `validate PATH` now runs all three tiers for skills by default. Tier 3
+  autopilot reuses an existing evaluation source or creates one starter case
+  when none exists. `--full` remains compatible but is unnecessary;
+  `--tiers`, `--no-tier3`, and `--no-autopilot` provide explicit scope controls.
+  Keyless static CI gates should select `--tiers 1`.
+- Tier 3 now selects a provider-native agent when `--agents` is omitted:
+  OpenCode for NVIDIA Build, Codex for OpenAI, and Claude Code for Anthropic.
+  NVIDIA Build agent runs default to Nemotron Super; explicit agent and model
+  overrides remain unchanged.
+- Tier 3's extra agent runtime preflight is now disabled by default because it
+  executes the first real task prompt and incurs agent runtime and model cost.
+  Enable it explicitly with `--agent-runtime-preflight` on either `tier3` or
+  `validate`, or with `harbor.agent_runtime_preflight: true` in `evals/config.yml`.
+- Missing-provider and API-key errors now show concise, copyable setup steps
+  and a link to advanced configuration. Tier 1 also explains `--no-llm`.
+- `tier1 validate` now runs only Tier 1, matching `tier1 PATH`. The top-level
+  `validate` command retains its combined pipeline behavior.
+- README and getting-started guides lead with provider-plus-key setup for
+  NVIDIA Build and OpenAI, explain inherited model defaults, and separate
+  credentials from scanner and agent runtime requirements.
+
 ## 0.3.0 - 2026-09-17
 
 ### Added

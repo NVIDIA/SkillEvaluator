@@ -11,6 +11,10 @@ All notable changes to SkillEvaluator are documented in this file.
   normalizes external repository and namespace prefixes, and commutatively
   resolves canonical case IDs across attempt and arm suffix combinations
   while preserving expected case IDs.
+- Run the public Docker image as an unprivileged user, with writable default report and home directories.
+  Document UID/GID overrides for host-owned output mounts.
+- Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
+
 - Preserve full Codex gateway model IDs in cloud environments, including E2B
   and Daytona, while retaining local runtime setup and native provider routing.
 - Keep Tier 2 execution diagnostics visible alongside duplicate findings in

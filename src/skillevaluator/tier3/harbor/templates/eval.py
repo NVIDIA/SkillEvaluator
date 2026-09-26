@@ -3791,6 +3791,7 @@ def check_error_recovery(tool_calls, expected_script=None):
         return b1 == b2 or b1 in c2 or b2 in c1
 
     corrections = []
+    failures = []
     seen = set()
 
     for i, (orig_idx, call) in enumerate(exec_calls):
@@ -3798,11 +3799,21 @@ def check_error_recovery(tool_calls, expected_script=None):
             continue
         cmd = _cmd_text(call)
         obs = str(call.get("observation", ""))
+        fault = "skill" if any(k in obs.lower() for k in skill_fault_kw) else "agent"
+        # Record every observed failure, whether or not it is later recovered.
+        # Previously only recovered failures (corrections) were tracked, so an
+        # unrecovered failure was silently scored as first-attempt clean.
+        failure = {
+            "failed_cmd": cmd[:200],
+            "error": obs[:300],
+            "fault": fault,
+            "recovered": False,
+        }
+        failures.append(failure)
         for j in range(i + 1, min(i + 6, len(exec_calls))):
             retry_idx, retry_call = exec_calls[j]
             retry_cmd = _cmd_text(retry_call)
             if _cmds_similar(cmd, retry_cmd) and not _is_failure(retry_call):
-                fault = "skill" if any(k in obs.lower() for k in skill_fault_kw) else "agent"
                 corrections.append(
                     {
                         "failed_cmd": cmd[:200],
@@ -3812,15 +3823,21 @@ def check_error_recovery(tool_calls, expected_script=None):
                         "steps_to_fix": retry_idx - orig_idx,
                     }
                 )
+                failure["recovered"] = True
                 seen.add(orig_idx)
                 break
 
-    first_attempt_clean = len(corrections) == 0
+    first_attempt_clean = len(failures) == 0
     skill_faults = sum(1 for c in corrections if c["fault"] == "skill")
     agent_faults = sum(1 for c in corrections if c["fault"] == "agent")
+    unrecovered_failures = [f for f in failures if not f["recovered"]]
 
     if first_attempt_clean:
         score, reason = 1.0, "All commands succeeded on first attempt"
+    elif unrecovered_failures:
+        score = 0.0
+        unrecovered_cmds = ", ".join(f["failed_cmd"][:60] for f in unrecovered_failures[:3])
+        reason = f"{len(unrecovered_failures)} unrecovered failure(s): {unrecovered_cmds}"
     elif skill_faults > 0:
         score = max(0.0, 1.0 - (skill_faults * 0.25))
         reason = f"{skill_faults} skill defect(s), {agent_faults} agent error(s)"
@@ -3834,6 +3851,8 @@ def check_error_recovery(tool_calls, expected_script=None):
         "reason": reason,
         "first_attempt_clean": first_attempt_clean,
         "corrections": corrections,
+        "failures": failures,
+        "unrecovered_failures": unrecovered_failures,
         "skill_faults": skill_faults,
         "agent_faults": agent_faults,
     }

@@ -2338,6 +2338,9 @@ def _run_harbor_eval_impl(
     )
     staging_failure_stage = "with-skill-tasks"
     try:
+        is_dual_arm = not skip_baseline
+        with_arm_suffix = "-with-skill" if is_dual_arm else ""
+        without_arm_suffix = "-without-skill" if is_dual_arm else ""
         for agent in agents:
             with_dir = tasks_dir / agent / "with"
             without_dir = None if skip_baseline else tasks_dir / agent / "without"
@@ -2359,6 +2362,7 @@ def _run_harbor_eval_impl(
                 task_resources=resource_config,
                 agent_workdir=harbor_config.get("agent_workdir"),
                 evaluator_skill_path=evaluator_skill_path,
+                arm_suffix=with_arm_suffix,
             )
             task_names = [task.name for task in task_paths]
             if expected_task_names is None:
@@ -2400,6 +2404,7 @@ def _run_harbor_eval_impl(
                     agent_workdir=harbor_config.get("agent_workdir"),
                     evaluator_skill_path=evaluator_skill_path,
                     _baseline_alias_validation=baseline_alias_validation,
+                    arm_suffix=without_arm_suffix,
                 )
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))

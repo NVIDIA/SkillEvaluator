@@ -1794,6 +1794,7 @@ def _write_task_toml(
     pre_agent_setup: list[str] | None = None,
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
+    arm_suffix: str = "",
 ) -> None:
     entry_id = entry.get("id", "unknown")
     expected_skill = entry.get("expected_skill") or "none"
@@ -1803,16 +1804,19 @@ def _write_task_toml(
         raise TypeError("expected_skill must be a string before Harbor TOML serialization")
     if not isinstance(docker_image, str):
         raise TypeError("docker_image must be a string before Harbor TOML serialization")
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before Harbor TOML serialization")
     docker_image_line = f"docker_image = {_toml_quote(docker_image)}\n" if docker_image else ""
     cpus = _task_resource_value(task_resources, "cpus", 2)
     memory_mb = _task_resource_value(task_resources, "memory_mb", 4096)
     storage_mb = _task_resource_value(task_resources, "storage_mb", 2048)
     workdir_line = f"workdir = {_toml_quote(agent_workdir)}\n" if agent_workdir else ""
 
+    task_name = f"nvidia/skillevaluator-{entry_id}{arm_suffix}"
     content = f"""schema_version = "1.3"
 
 [task]
-name = {_toml_quote(f"nvidia/skillevaluator-{entry_id}")}
+name = {_toml_quote(task_name)}
 description = {_toml_quote(f"Skill evaluation task for {expected_skill}")}
 
 [metadata]
@@ -4225,6 +4229,32 @@ def _native_entry_id(task_dir: Path) -> str:
     return task_dir.name
 
 
+def _append_native_task_name_suffix(task_dir: Path, arm_suffix: str) -> None:
+    """Append dual-arm suffix to [task] name in a native task's task.toml."""
+    if not arm_suffix:
+        return
+    task_toml = task_dir / "task.toml"
+    if not task_toml.exists():
+        return
+    content = task_toml.read_text(encoding="utf-8")
+
+    pattern = r'(?ms)(\[task\]\s*?\n(?:(?!\[)[^\n]*\n)*?\s*name\s*=\s*)(["\'])(.*?)\2'
+
+    def _repl(m: re.Match[str]) -> str:
+        prefix, quote, old_name = m.groups()
+        if old_name.endswith(arm_suffix):
+            return m.group(0)
+        return f"{prefix}{quote}{old_name}{arm_suffix}{quote}"
+
+    new_content, count = re.subn(pattern, _repl, content, count=1)
+    if count == 0:
+        fallback_pattern = r'(?m)^(\s*name\s*=\s*)(["\'])(.*?)\2'
+        new_content = re.sub(fallback_pattern, _repl, content, count=1)
+
+    if new_content != content:
+        task_toml.write_text(new_content, encoding="utf-8")
+
+
 def _environment_reference_names(value: object) -> set[str]:
     """Return portable shell-style environment references from a TOML value."""
     if not isinstance(value, str):
@@ -4579,12 +4609,15 @@ def _stage_native_harbor_tasks_into(
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Build native Harbor tasks inside a private, caller-owned directory.
 
     The source tree is copied first and all SkillEvaluator injections happen only in the
     staged result directory.
     """
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before staging native Harbor tasks")
     _validate_runtime_discovery_env(runtime_env)
     _validate_runtime_loader_env(runtime_env)
     evals_dir = evaluator_skill_path / "evals"
@@ -4636,6 +4669,7 @@ def _stage_native_harbor_tasks_into(
         baseline_aliases_prevalidated = True
     for task_dir in task_dirs:
         entry_id = _native_entry_id(task_dir)
+        _append_native_task_name_suffix(task_dir, arm_suffix)
         native_agent_workdir = _native_task_workdir(task_dir)
         _ensure_native_skills_dir(task_dir)
         entry = entries_by_id.get(entry_id)
@@ -4767,8 +4801,12 @@ def stage_native_harbor_tasks(
     agent_workdir: str | None = None,
     evaluator_skill_path: Path | None = None,
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Stage native tasks privately, then publish one exact output snapshot."""
+
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before staging native Harbor tasks")
 
     if evaluator_skill_path is None:
         with private_evaluator_skill_snapshot(skill_path, task_source="native_harbor") as private_skill_path:
@@ -4791,6 +4829,7 @@ def stage_native_harbor_tasks(
                 agent_workdir=agent_workdir,
                 evaluator_skill_path=private_skill_path,
                 _baseline_alias_validation=_baseline_alias_validation,
+                arm_suffix=arm_suffix,
             )
 
     baseline_aliases_prevalidated = False
@@ -4857,6 +4896,7 @@ def stage_native_harbor_tasks(
             task_resources=task_resources,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            arm_suffix=arm_suffix,
         )
         relative_tasks = [task.relative_to(private_output) for task in private_tasks]
         if output_requires_provenance:
@@ -4915,6 +4955,7 @@ def _generate_harbor_tasks_into(
     task_resources: dict[str, int] | None = None,
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Generate Harbor task directories inside a private output directory.
 
@@ -4947,6 +4988,8 @@ def _generate_harbor_tasks_into(
     Returns:
         List of generated task directory paths.
     """
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before generating Harbor tasks")
     _validate_runtime_discovery_env(runtime_env)
     _validate_runtime_loader_env(runtime_env)
     agent_workdir = _validated_agent_workdir(agent_workdir)
@@ -5011,6 +5054,7 @@ def _generate_harbor_tasks_into(
             pre_agent_setup=pre_agent_setup,
             task_resources=task_resources,
             agent_workdir=agent_workdir,
+            arm_suffix=arm_suffix,
         )
         _copy_verifier(task_dir)
         custom_grader = _copy_custom_grader(task_dir, skill_path, grading_mode, evals_dir=evals_dir)
@@ -5446,8 +5490,12 @@ def generate_harbor_tasks(
     agent_workdir: str | None = None,
     evaluator_skill_path: Path | None = None,
     _baseline_alias_validation: _BaselineAliasValidation | None = None,
+    arm_suffix: str = "",
 ) -> list[Path]:
     """Generate tasks from one private evals snapshot, then publish exactly."""
+
+    if not isinstance(arm_suffix, str):
+        raise TypeError("arm_suffix must be a string before generating Harbor tasks")
 
     if evaluator_skill_path is None:
         if find_evals_file(skill_path) is None:
@@ -5472,6 +5520,7 @@ def generate_harbor_tasks(
                 agent_workdir=agent_workdir,
                 evaluator_skill_path=private_skill_path,
                 _baseline_alias_validation=_baseline_alias_validation,
+                arm_suffix=arm_suffix,
             )
     if find_evals_file(evaluator_skill_path) is None:
         raise FileNotFoundError(f"No evals dataset found in {evaluator_skill_path / 'evals'}")
@@ -5540,6 +5589,7 @@ def generate_harbor_tasks(
             task_resources=task_resources,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            arm_suffix=arm_suffix,
         )
         relative_tasks = [task.relative_to(private_output) for task in private_tasks]
         if output_requires_provenance:

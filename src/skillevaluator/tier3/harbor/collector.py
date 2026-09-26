@@ -1848,19 +1848,43 @@ def _strip_attempt_suffix(value: str) -> str:
     return re.sub(r"(?:[-_])attempt\d+$", "", value)
 
 
+def _strip_arm_suffix(value: str) -> str:
+    """Remove SkillEvaluator dual-arm suffixes (-with-skill, -without-skill) from an identifier."""
+    return re.sub(r"-(?:with|without)-skill$", "", value)
+
+
+def _strip_arm_and_attempt_suffixes(value: str) -> str:
+    """Remove dual-arm and attempt suffixes regardless of ordering."""
+    pass1 = _strip_arm_suffix(_strip_attempt_suffix(value))
+    return _strip_attempt_suffix(_strip_arm_suffix(pass1))
+
+
 def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) -> str:
+    """Normalize a task, trial, or entry identifier to its canonical case ID."""
     value = str(value or "").strip()
     if not value:
         return ""
-    if expected_case_ids and value in expected_case_ids:
-        return value
-    stripped = _strip_attempt_suffix(value)
-    if expected_case_ids and stripped in expected_case_ids:
-        return stripped
-    generated_prefix_stripped = stripped.removeprefix("skillevaluator-")
-    if expected_case_ids and generated_prefix_stripped in expected_case_ids:
-        return generated_prefix_stripped
-    return stripped
+    name_part = value.rpartition("/")[2] or value
+
+    raw_candidates = [
+        name_part,
+        _strip_attempt_suffix(name_part),
+        _strip_arm_suffix(name_part),
+        _strip_arm_and_attempt_suffixes(name_part),
+    ]
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in raw_candidates + [c.removeprefix("skillevaluator-") for c in raw_candidates]:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    if expected_case_ids:
+        for candidate in candidates:
+            if candidate in expected_case_ids:
+                return candidate
+
+    return _strip_arm_and_attempt_suffixes(name_part.removeprefix("skillevaluator-"))
 
 
 def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None) -> str:

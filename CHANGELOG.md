@@ -28,6 +28,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
 - Interactive top-level help now opens with a green SkillEvaluator wordmark,
   installed version, and tier overview. Narrow terminals use a compact header;
   redirected output and subcommands keep their existing output format.

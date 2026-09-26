@@ -704,3 +704,123 @@ def test_behavior_evidence_ignores_non_write_shell_gt() -> None:
     assert "print(3 > 2)" not in file_changes
     assert "/workspace/output/result.txt" in file_changes
     assert "/workspace/output/from_python.txt" in file_changes
+
+
+def _trajectory_with_long_final_response() -> dict:
+    """Build a synthetic trajectory with a long agent response."""
+    body = "START_MARKER_" + ("A" * 1700) + "_LATE_MARKER_" + ("B" * 500) + "_TAIL"
+    return {
+        "steps": [
+            {
+                "source": "user",
+                "message": "Verify onboarding setup",
+            },
+            {
+                "source": "agent",
+                "message": body,
+            },
+        ]
+    }
+
+
+def test_behavior_evidence_final_response_default_and_env_override(monkeypatch) -> None:
+    traj = _trajectory_with_long_final_response()
+
+    # By default, final response is capped at 800 chars and truncated
+    default_evidence = build_behavior_evidence(traj, "question")
+    assert "START_MARKER_" in default_evidence
+    assert "_LATE_MARKER_" not in default_evidence
+    assert "...[truncated]..." in default_evidence
+
+    # Overriding via environment variable expands the capture limit
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
+    expanded_evidence = build_behavior_evidence(traj, "question", max_chars=8000)
+    assert "START_MARKER_" in expanded_evidence
+    assert "_LATE_MARKER_" in expanded_evidence
+    assert "...[truncated]..." not in expanded_evidence
+
+
+def test_behavior_evidence_final_response_explicit_arg() -> None:
+    traj = _trajectory_with_long_final_response()
+
+    evidence = build_behavior_evidence(traj, "question", max_chars=8000, final_response_limit=3000)
+    assert "START_MARKER_" in evidence
+    assert "_LATE_MARKER_" in evidence
+    assert "...[truncated]..." not in evidence
+
+
+def test_behavior_evidence_standalone_reconciles_max_chars(monkeypatch) -> None:
+    traj = _trajectory_with_long_final_response()
+
+    # When final_response_limit is explicitly passed without max_chars, max_chars expands
+    evidence = build_behavior_evidence(traj, "question", final_response_limit=3000)
+    assert "START_MARKER_" in evidence
+    assert "_LATE_MARKER_" in evidence
+    assert "...[truncated]..." not in evidence
+
+    # When SKILL_EVAL_BEHAVIOR_CHECK_BUDGET is set in env, standalone call uses it
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "12000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
+    env_evidence = build_behavior_evidence(traj, "question")
+    assert "START_MARKER_" in env_evidence
+    assert "_LATE_MARKER_" in env_evidence
+
+
+def test_behavior_check_budget_and_compactor_env_override(monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core.llm_judge import _compact_behavior_conversation
+
+    sample_conversation = "A" * 9000
+
+    # Default compactor threshold is 8000
+    compacted = _compact_behavior_conversation(sample_conversation)
+    assert "...[middle truncated for behavior check]..." in compacted
+    assert len(compacted) <= 8000
+
+    # Overriding SKILL_EVAL_BEHAVIOR_CHECK_BUDGET raises compactor threshold
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "12000")
+    uncompacted = _compact_behavior_conversation(sample_conversation)
+    assert "...[middle truncated for behavior check]..." not in uncompacted
+    assert len(uncompacted) == 9000
+
+
+def test_behavior_check_budget_auto_reconciles_tool_history_headroom(monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core import atif_helpers
+    from skillevaluator.tier3.eval_core.llm_judge import _behavior_check_budget as judge_budget
+
+    # If only final response limit is set to a large value, budget expands with headroom (4000)
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+    assert atif_helpers._behavior_check_budget() == 12000
+    assert judge_budget() == 12000
+
+    # If explicit budget is smaller than final response limit, it reconciles up to final limit
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "6000")
+    assert atif_helpers._behavior_check_budget() == 8000
+    assert judge_budget() == 8000
+
+
+def test_harbor_template_behavior_evidence_respects_custom_limits(monkeypatch) -> None:
+    template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
+    spec = importlib.util.spec_from_file_location("harbor_eval_template_custom_limits", template_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    traj = _trajectory_with_long_final_response()
+
+    # Template default caps at 800
+    evidence_default = module.build_behavior_evidence(traj, "question")
+    assert "START_MARKER_" in evidence_default
+    assert "_LATE_MARKER_" not in evidence_default
+    assert "...[truncated]..." in evidence_default
+
+    # Template override respects SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
+    evidence_custom = module.build_behavior_evidence(traj, "question", max_chars=8000)
+    assert "START_MARKER_" in evidence_custom
+    assert "_LATE_MARKER_" in evidence_custom
+    assert "...[truncated]..." not in evidence_custom
+
+    # Template helpers match shared atif_helpers logic
+    assert module._behavior_final_response_limit() == atif_helpers._behavior_final_response_limit()
+    assert module._behavior_check_budget() == atif_helpers._behavior_check_budget()
+

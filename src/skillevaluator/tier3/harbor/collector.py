@@ -1766,10 +1766,6 @@ def _harbor_result_rewards(result: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _entry_id_from_harbor_result(result: dict[str, Any]) -> str:
-    task_name = result.get("task_name")
-    if isinstance(task_name, str) and task_name.strip():
-        return task_name.strip().rsplit("/", 1)[-1]
-
     task_id = result.get("task_id")
     if isinstance(task_id, dict):
         task_path = task_id.get("path")
@@ -1783,6 +1779,10 @@ def _entry_id_from_harbor_result(result: dict[str, Any]) -> str:
             task_path = task.get("path")
             if isinstance(task_path, str) and task_path.strip():
                 return Path(task_path).name
+
+    task_name = result.get("task_name")
+    if isinstance(task_name, str) and task_name.strip():
+        return task_name.strip().rsplit("/", 1)[-1]
 
     return ""
 

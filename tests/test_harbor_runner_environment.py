@@ -1649,11 +1649,11 @@ def test_run_harbor_reissues_adc_token_for_bounded_jobs(monkeypatch: pytest.Monk
     assert captured_timeout is not None and 0 < captured_timeout < 3600
 
 
-def test_run_harbor_preserves_explicit_vertex_credential_and_enforces_adc_timeout(
+def test_run_harbor_preserves_explicit_vertex_credential(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Preserve explicit operator credentials on Vertex URLs, reject raw verifier_env secrets, and fail on ADC timeout."""
+    """Preserve explicit operator credentials on Vertex URLs without overwriting from host ADC."""
     base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
     captured_env: dict[str, str] = {}
     captured_timeout: float | None = None
@@ -1666,9 +1666,8 @@ def test_run_harbor_preserves_explicit_vertex_credential_and_enforces_adc_timeou
 
     monkeypatch.setattr(runner.subprocess, "run", mock_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
-    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "ambient-host-adc-token")
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kw: "ambient-host-adc")
 
-    # 1. Explicit operator credential (no SKILL_EVAL_LLM_CREDENTIAL_SOURCE=ADC) must NOT be overwritten by host ADC
     explicit_env = {
         "OPENAI_API_KEY": "explicit-operator-key",
         "OPENAI_BASE_URL": base_url,
@@ -1693,17 +1692,52 @@ def test_run_harbor_preserves_explicit_vertex_credential_and_enforces_adc_timeou
     assert captured_env.get("OPENAI_API_KEY") == "explicit-operator-key"
     assert captured_timeout is None
 
-    # 2. build_harbor_run_command rejects raw secrets in verifier_env without ${VAR} placeholder indirection
+
+@pytest.mark.parametrize(
+    "verifier_env",
+    [
+        {"OPENAI_API_KEY": "raw-secret-token"},
+        {"ANTHROPIC_API_KEY": "sk-ant-raw-secret"},
+        {"SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC"},
+    ],
+)
+def test_build_harbor_run_command_rejects_raw_verifier_env_secrets(
+    tmp_path: Path,
+    verifier_env: dict[str, str],
+) -> None:
+    """Reject raw secrets or operator-owned values in verifier_env without ${VAR} placeholder indirection."""
     with pytest.raises(ValueError, match="Sensitive key detected in verifier_env"):
         runner.build_harbor_run_command(
             dataset_path=tmp_path / "dataset",
             agent="opencode",
             job_name="bad-verifier-env",
             env_mode="docker",
-            verifier_env={"OPENAI_API_KEY": "raw-secret-token"},
+            verifier_env=verifier_env,
         )
 
-    # 3. ADC-backed job exceeding token lifetime surfaces clear timeout failure
+
+def test_run_harbor_enforces_adc_job_timeout_and_stages_credential_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Enforce bounded ADC timeout on non-GKE jobs and stage SKILL_EVAL_LLM_CREDENTIAL_SOURCE for the verifier."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    adc_provider = ProviderConfig(
+        provider="openai-compatible",
+        model="google/gemini-3.8-flash",
+        api_key="initial-adc-token",
+        base_url=base_url,
+        litellm_model="openai/google/gemini-3.8-flash",
+        credential_env="ADC",
+        base_url_env="SKILL_EVAL_LLM_BASE_URL",
+    )
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kw: "fresh-adc-token")
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-adc-token")
+
+    provider_env = runner._provider_environment(adc_provider)
+    assert provider_env.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE") == "ADC"
+    assert "SKILL_EVAL_LLM_CREDENTIAL_SOURCE" in _verifier_env_vars(provider_env)
+
     def timeout_run(command, *args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout", 3300))
 
@@ -1730,4 +1764,4 @@ def test_run_harbor_preserves_explicit_vertex_credential_and_enforces_adc_timeou
         override_storage_mb=None,
     )
     assert ok_timeout is False
-    assert "ADC token lifetime" in detail_timeout or "timed out" in detail_timeout.lower()
+    assert "ADC token lifetime" in detail_timeout

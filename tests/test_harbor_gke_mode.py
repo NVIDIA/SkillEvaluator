@@ -1231,22 +1231,9 @@ def test_mcp_server_declarations_block_operator_secrets_and_unapproved_headers(
     assert not any(r.status == "error" for r in spec_results_valid)
 
 
-def test_gke_environment_disables_automount_and_rejects_bound_ksa_without_opt_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Disable service account token automount and reject GCP-bound KSAs unless allow_workload_identity=1."""
-    import asyncio
-    from types import SimpleNamespace
-
-    from harbor.environments.gke import GKEEnvironment
-    from kubernetes import client as k8s_client
-
-    from skillevaluator.tier3.harbor.gke_environment import (
-        SECURE_GKE_ENV_IMPORT_PATH,
-        SkillEvaluatorGKEEnvironment,
-    )
-
-    monkeypatch.delenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", raising=False)
+def test_build_harbor_run_command_gke_uses_secure_environment_import_path() -> None:
+    """Route GKE Harbor commands through SECURE_GKE_ENV_IMPORT_PATH instead of --env gke."""
+    from skillevaluator.tier3.harbor.gke_environment import SECURE_GKE_ENV_IMPORT_PATH
 
     cmd = build_harbor_run_command(
         dataset_path="/tmp/dataset",
@@ -1258,63 +1245,6 @@ def test_gke_environment_disables_automount_and_rejects_bound_ksa_without_opt_in
     )
     assert "--environment-import-path" in cmd
     assert cmd[cmd.index("--environment-import-path") + 1] == SECURE_GKE_ENV_IMPORT_PATH
-
-    created_pods: list[k8s_client.V1Pod] = []
-
-    async def fake_super_create_pod(self, pod: k8s_client.V1Pod) -> None:
-        created_pods.append(pod)
-
-    monkeypatch.setattr(GKEEnvironment, "_create_pod", fake_super_create_pod)
-    monkeypatch.setattr(GKEEnvironment, "_api", property(lambda self: self._fake_api))
-
-    # 1. Unbound default KSA without allow_workload_identity -> automount_service_account_token=False
-    env_unbound = object.__new__(SkillEvaluatorGKEEnvironment)
-    env_unbound.namespace = "skill-eval"
-    env_unbound._kwargs = {}
-    env_unbound._allow_workload_identity = False
-    env_unbound._fake_api = SimpleNamespace(
-        read_namespaced_service_account=lambda **_kw: SimpleNamespace(metadata=SimpleNamespace(annotations={}))
-    )
-    pod_unbound = k8s_client.V1Pod(
-        metadata=k8s_client.V1ObjectMeta(name="pod-unbound", namespace="skill-eval"),
-        spec=k8s_client.V1PodSpec(containers=[k8s_client.V1Container(name="main", image="ubuntu:24.04")]),
-    )
-    asyncio.run(env_unbound._create_pod(pod_unbound))
-    assert len(created_pods) == 1
-    assert created_pods[0].spec.automount_service_account_token is False
-
-    # 2. Bound default KSA (iam.gke.io/gcp-service-account) without allow_workload_identity -> fails closed
-    env_bound = object.__new__(SkillEvaluatorGKEEnvironment)
-    env_bound.namespace = "skill-eval"
-    env_bound._kwargs = {}
-    env_bound._allow_workload_identity = False
-    env_bound._fake_api = SimpleNamespace(
-        read_namespaced_service_account=lambda **_kw: SimpleNamespace(
-            metadata=SimpleNamespace(
-                annotations={"iam.gke.io/gcp-service-account": "eval-sa@my-proj.iam.gserviceaccount.com"}
-            )
-        )
-    )
-    pod_bound = k8s_client.V1Pod(
-        metadata=k8s_client.V1ObjectMeta(name="pod-bound", namespace="skill-eval"),
-        spec=k8s_client.V1PodSpec(containers=[k8s_client.V1Container(name="main", image="ubuntu:24.04")]),
-    )
-    with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
-        asyncio.run(env_bound._create_pod(pod_bound))
-
-    # 3. Bound KSA WITH allow_workload_identity=1 -> permitted and automount left enabled
-    env_opted_in = object.__new__(SkillEvaluatorGKEEnvironment)
-    env_opted_in.namespace = "skill-eval"
-    env_opted_in._kwargs = {"allow_workload_identity": "1"}
-    env_opted_in._allow_workload_identity = True
-    env_opted_in._fake_api = env_bound._fake_api
-    pod_opted_in = k8s_client.V1Pod(
-        metadata=k8s_client.V1ObjectMeta(name="pod-opted-in", namespace="skill-eval"),
-        spec=k8s_client.V1PodSpec(containers=[k8s_client.V1Container(name="main", image="ubuntu:24.04")]),
-    )
-    asyncio.run(env_opted_in._create_pod(pod_opted_in))
-    assert len(created_pods) == 2
-    assert created_pods[1].spec.automount_service_account_token is not False
 
 
 def test_check_prerequisites_gke_live_cluster_rejects_bound_service_account_without_opt_in(

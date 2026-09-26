@@ -11,14 +11,17 @@ import re
 import shutil
 import subprocess
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from urllib.parse import quote, unquote_to_bytes, urlsplit, urlunsplit
 
 import idna
 
-PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
+CREDENTIAL_SOURCE_ADC = "ADC"
+CREDENTIAL_SOURCE_ENV = "SKILL_EVAL_LLM_CREDENTIAL_SOURCE"
+GOOGLE_ADC_TOKEN_LIFETIME_SEC = 3600.0
 OPENAI_BASE_URL = "https://api.openai.com/v1"
+PUBLIC_NVIDIA_BUILD_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _PROVIDER_SETUP_URL = "https://docs.nvidia.com/skills/skillevaluator/configuration"
 
 # Pinned frontier chat defaults (not floating aliases like ``gpt-5`` / ``claude-opus-latest``).
@@ -208,6 +211,33 @@ def _get_google_access_token(timeout_seconds: float = 10.0) -> str | None:
     return None
 
 
+def refresh_host_vertex_adc_environment(
+    env: MutableMapping[str, str],
+    *,
+    fallback_env: Mapping[str, str] | None = None,
+    base_url_override: str | None = None,
+    require_existing_api_key: bool = False,
+    update_os_environ: bool = False,
+    token_getter: Callable[[], str | None] | None = None,
+) -> str | None:
+    """Refresh OPENAI_API_KEY in-place when provenance is ADC and endpoint is Vertex OpenAPI."""
+    source = env.get(CREDENTIAL_SOURCE_ENV) or (fallback_env or {}).get(CREDENTIAL_SOURCE_ENV)
+    if source != CREDENTIAL_SOURCE_ADC:
+        return None
+    if require_existing_api_key and not env.get("OPENAI_API_KEY", "").strip():
+        return None
+    base_url = base_url_override or env.get("OPENAI_BASE_URL") or (fallback_env or {}).get("OPENAI_BASE_URL")
+    if not _is_vertex_openapi_endpoint(base_url):
+        return None
+    getter = token_getter or _get_google_access_token
+    fresh_token = getter()
+    if fresh_token:
+        env["OPENAI_API_KEY"] = fresh_token
+        if update_os_environ:
+            os.environ["OPENAI_API_KEY"] = fresh_token
+    return fresh_token
+
+
 def _build_vertex_openapi_adc_config(
     provider: str,
     model: str,
@@ -228,7 +258,7 @@ def _build_vertex_openapi_adc_config(
         api_key=token,
         base_url=base_url,
         litellm_model=f"openai/{model}",
-        credential_env="ADC",
+        credential_env=CREDENTIAL_SOURCE_ADC,
         base_url_env=base_url_env,
     )
 

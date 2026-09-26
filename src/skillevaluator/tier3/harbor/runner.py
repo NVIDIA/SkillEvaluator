@@ -33,12 +33,16 @@ from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
     CHAT_DEFAULT_ANTHROPIC,
     CHAT_DEFAULT_NVIDIA,
+    CREDENTIAL_SOURCE_ADC,
+    CREDENTIAL_SOURCE_ENV,
     GATEWAY_AGENT_DEFAULT_MODELS,
+    GOOGLE_ADC_TOKEN_LIFETIME_SEC,
     ProviderConfig,
     ProviderConfigurationError,
     _get_google_access_token,
     _is_vertex_openapi_endpoint,
     _normalize_anthropic_base_url,
+    refresh_host_vertex_adc_environment,
     resolve_llm_provider,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
@@ -74,9 +78,12 @@ from skillevaluator.tier3.harbor.collector import (
     validate_harbor_job_result,
 )
 from skillevaluator.tier3.harbor.gke_environment import (
+    GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
     GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE,
+    GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL,
     SECURE_GKE_ENV_IMPORT_PATH,
     inspect_bound_gcp_service_account,
+    is_gke_workload_identity_allowed,
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
@@ -354,13 +361,12 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
         "NVIDIA_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
-        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE",
-        "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
+        CREDENTIAL_SOURCE_ENV,
+        GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
     }
 )
 _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC = 3300.0
 VERTEX_ADC_JOB_TIMEOUT_ENV = "SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC"
-GKE_ALLOW_WORKLOAD_IDENTITY_ENV = "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY"
 GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE = (
     "CLAUDE_CODE_USE_VERTEX=1 in GKE mode uses single-pod Kubernetes Workload Identity, "
     "which shares the pod service account and GKE metadata server with evaluated skill "
@@ -413,23 +419,6 @@ def is_gke_vertex_workload_identity_active(
         str(lookup_env.get("CLAUDE_CODE_USE_VERTEX", "")).strip() == "1"
         or os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
     )
-
-
-def is_gke_workload_identity_allowed(
-    environment_kwargs: Mapping[str, str] | None = None,
-    env: Mapping[str, str] | None = None,
-) -> bool:
-    """Return True only when the operator explicitly opts into GKE Workload Identity."""
-    for candidate_env in (env, os.environ):
-        if candidate_env is not None:
-            raw_env = str(candidate_env.get(GKE_ALLOW_WORKLOAD_IDENTITY_ENV, "")).strip().lower()
-            if raw_env in {"1", "true", "yes"}:
-                return True
-    if environment_kwargs:
-        raw_ek = str(environment_kwargs.get("allow_workload_identity", "")).strip().lower()
-        if raw_ek in {"1", "true", "yes"}:
-            return True
-    return False
 
 
 _SENSITIVE_EK_KEY_RE = re.compile(
@@ -762,10 +751,10 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
     environment.update(
         {name: value for name in _VERIFIER_JUDGE_MODEL_ENV_VARS if (value := os.environ.get(name, "").strip())}
     )
-    if getattr(config, "credential_env", None) == "ADC":
+    if getattr(config, "credential_env", None) == CREDENTIAL_SOURCE_ADC:
         fresh_token = _get_google_access_token()
         api_key = fresh_token or getattr(config, "api_key", None) or ""
-        environment["SKILL_EVAL_LLM_CREDENTIAL_SOURCE"] = "ADC"
+        environment[CREDENTIAL_SOURCE_ENV] = CREDENTIAL_SOURCE_ADC
     else:
         api_key = getattr(config, "api_key", None) or ""
 
@@ -1888,24 +1877,27 @@ def _run_harbor(
     environment_kwargs: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
     base_url = (verifier_env or {}).get("OPENAI_BASE_URL") or run_env.get("OPENAI_BASE_URL")
-    is_adc = run_env.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE") == "ADC"
-    if is_adc and _is_vertex_openapi_endpoint(base_url):
-        fresh_token = _get_google_access_token()
-        if fresh_token:
-            run_env = dict(run_env)
-            run_env["OPENAI_API_KEY"] = fresh_token
-            if verifier_env is not None and "OPENAI_API_KEY" in verifier_env:
-                verifier_env = dict(verifier_env)
-                verifier_env["OPENAI_API_KEY"] = "${OPENAI_API_KEY}"
+    run_env_copy = dict(run_env)
+    fresh_token = refresh_host_vertex_adc_environment(
+        run_env_copy,
+        base_url_override=base_url,
+        token_getter=_get_google_access_token,
+    )
+    if fresh_token:
+        run_env = run_env_copy
+        if verifier_env is not None and "OPENAI_API_KEY" in verifier_env:
+            verifier_env = dict(verifier_env)
+            verifier_env["OPENAI_API_KEY"] = "${OPENAI_API_KEY}"
 
     adc_timeout: float | None = None
+    is_adc = run_env.get(CREDENTIAL_SOURCE_ENV) == CREDENTIAL_SOURCE_ADC
     if is_adc and _is_vertex_openapi_endpoint(base_url) and env_mode != "gke":
         raw_timeout = os.environ.get(VERTEX_ADC_JOB_TIMEOUT_ENV, "").strip()
         try:
             adc_timeout = float(raw_timeout) if raw_timeout else _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
         except ValueError:
             adc_timeout = _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
-        if adc_timeout <= 0 or adc_timeout >= 3600.0:
+        if adc_timeout <= 0 or adc_timeout >= GOOGLE_ADC_TOKEN_LIFETIME_SEC:
             adc_timeout = _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
 
     command = build_harbor_run_command(
@@ -2791,10 +2783,7 @@ def _run_harbor_eval_impl(
             and is_auth_failure
             and disposition == CredentialProbeDisposition.DEGRADED
         ):
-            safe_detail = (
-                "host does not possess Vertex AI credentials; runtime authentication is unverified on host "
-                "(pending in-pod GKE Workload Identity probe)"
-            )
+            safe_detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
         credential_validation_targets.append(
             {
                 "labels": list(selected_labels),

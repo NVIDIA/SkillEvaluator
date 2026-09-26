@@ -865,6 +865,9 @@ def doctor(
         if provider is None or not runtime_plans:
             rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
+            from skillevaluator.tier3.harbor.gke_environment import (
+                GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL,
+            )
             from skillevaluator.tier3.harbor.runtime_preflight import (
                 CredentialProbeDisposition,
                 ModelCatalogFailureKind,
@@ -891,7 +894,7 @@ def doctor(
                         ModelCatalogFailureKind.AUTHORIZATION,
                     }
                     if not probe.ok and env_mode == "gke" and is_vertex and is_auth_failure:
-                        detail = "host does not possess Vertex AI credentials; runtime authentication is unverified on host (pending in-pod GKE Workload Identity probe)"
+                        detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
                     elif probe.ok:
                         detail = f"{probe.detail}; catalog access does not verify runtime credentials for this endpoint"
                     else:

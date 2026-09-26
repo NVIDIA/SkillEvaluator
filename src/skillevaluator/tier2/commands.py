@@ -18,7 +18,14 @@ def _guarded_result(title: str, target_path: Path, callback) -> list[ValidationR
         result = callback()
     except Exception as exc:  # validators convert expected failures; this protects CLI UX
         result = ValidationResult(validator_name=title, validator_description="Tier 2 check")
-        result.add_error(f"{title} failed: {exc}")
+        result.mark_scan_incomplete(title)
+        # SDK exceptions may contain response bodies, request data, or credentials.
+        # Expected provider failures are explained by the validators themselves.
+        result.add_error(
+            f"{title} could not complete because of an unexpected error ({type(exc).__name__}). "
+            "Check the provider configuration and connectivity, then rerun Tier 2. "
+            "If the problem persists, report this error type to the maintainers."
+        )
     if not result.validator_name:
         result.validator_name = title
     if not result.validator_description:
@@ -61,16 +68,15 @@ def run_context_optimization_check(
     model: str | None = None,
     llm_model: str | None = None,
 ) -> list[ValidationResult]:
-    validator = IntraSkillValidator(
-        threshold=threshold,
-        embedding_model=model,
-        llm_model=llm_model,
-    )
-    return _guarded_result(
-        "Context Deduplication",
-        skill_path,
-        lambda: validator.validate(skill_path),
-    )
+    def _run() -> ValidationResult:
+        validator = IntraSkillValidator(
+            threshold=threshold,
+            embedding_model=model,
+            llm_model=llm_model,
+        )
+        return validator.validate(skill_path)
+
+    return _guarded_result("Context Deduplication", skill_path, _run)
 
 
 def run_dedup_scan(

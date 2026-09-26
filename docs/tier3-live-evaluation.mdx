@@ -6,8 +6,9 @@ description: "Run a real agent with and without your skill in a sandboxed enviro
 
 Tier 3 answers the question the other tiers can't: **does your skill actually
 make an agent better at the task?** It is the one tier that needs real
-infrastructure — an evaluator LLM key, the selected agent's own credential, and
-Docker or another sandbox. This guide takes you from a skill directory to a
+infrastructure — model access for the evaluator and selected agent, and
+Docker or another sandbox. NVIDIA Build in Docker or local mode uses one key
+for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
 ## What a live eval measures
@@ -46,18 +47,45 @@ depth.
 | Requirement | How to check | Covered in |
 | --- | --- | --- |
 | The `tier3` extra installed (`[all]` includes it) | `skillevaluator health-check` | [Installation](installation.mdx) |
-| An evaluator LLM provider key | `skillevaluator doctor --agents codex --env-mode docker` names any missing key | [Providers & Credentials](configuration.mdx) |
+| An evaluator LLM provider key | `skillevaluator doctor --env-mode docker` names any missing key | [Providers & Credentials](configuration.mdx) |
 | The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 | Docker running (the default environment) | `docker info` | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
 
-## Run your first evaluation
+## Start with one command
+
+After the [provider setup](configuration.mdx) and runtime prerequisites above:
+
+```bash title="Run Tier 3"
+skillevaluator tier3 ./my-skill
+```
+
+The direct workflow uses Docker and selects an agent from the provider: OpenCode
+for NVIDIA Build, Codex for OpenAI, or Claude Code for Anthropic. If no accepted
+dataset or task source exists, it generates one starter case and proceeds to the
+live with-skill and without-skill comparison. It reuses valid existing sources
+unchanged; invalid sources produce an error rather than being replaced.
+A generated starter case lets you try the pipeline, but does not establish
+broad positive and negative coverage.
+
+The same agent, model, environment, grading, and reporting options described for
+`tier3 evaluate` apply to this direct workflow. For example:
+
+```bash title="Choose the agent"
+skillevaluator tier3 ./my-skill --agents opencode --env-mode docker
+```
+
+`tier3 evaluate` remains available for explicit execution; its missing-source
+generation requires `--autopilot`. To prepare and review a fuller dataset before
+running, follow the steps below.
+
+## Prepare and review a fuller evaluation
 
 <Steps toc={true}>
 
 ### Check readiness
 
 ```bash title="Verify the runtime before spending compute"
-skillevaluator doctor --agents codex --env-mode docker
+skillevaluator doctor --env-mode docker
 ```
 
 `doctor` takes seconds and names anything missing: the evaluator provider,
@@ -65,8 +93,9 @@ the selected backend's prerequisites, and unsupported agent names. Add
 `--verify-models` to live-probe each agent's model against the provider's
 catalog — one pass, warn, or fail row per agent — and `--agent-model AGENT=MODEL`
 to check an override before committing to a run. Warnings identify catalog
-results that do not authoritatively prove inference access. Tier 3's runtime
-preflight is the stronger check for agent routes; it does not invoke a separate
+results that do not authoritatively prove inference access. If you need proof
+before the measured matrix, `--agent-runtime-preflight` adds an agent-only
+execution of the first staged task. It does not invoke a separate
 standard-grader-only route before the evaluation reaches grading.
 `skillevaluator health-check` is the quicker
 CLI-and-backend variant; [Agents & Sandboxes](agents-and-sandboxes.mdx) covers
@@ -159,8 +188,7 @@ skill source.
 ### Run the comparison
 
 ```bash title="With-skill vs. without-skill in Docker"
-skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=gpt-5.6-sol
+skillevaluator tier3 ./my-skill --env-mode docker
 ```
 
 Every supported agent harness works the same way:
@@ -213,18 +241,19 @@ immediately. Non-authoritative OpenAI catalog permission or membership results,
 compatible-gateway catalog authentication, unsupported catalogs, and transient
 failures are reported as degraded rather than blocking the run. A successful
 NVIDIA Build or compatible-gateway listing is also inconclusive when that
-catalog does not authenticate inference; the real per-agent runtime preflight
-is the stronger check for agent routes. A degraded route used only by the
+catalog does not authenticate inference. The optional real per-agent runtime
+preflight is the stronger check for agent routes. A degraded route used only by the
 standard grader remains unproven until grading begins. Native Harbor judge selection is likewise inconclusive
 until runtime when no host judge override is set. `result.json` retains the
 redacted target-by-target outcome under `run_config.credential_validation`,
-including when the subsequent agent runtime preflight fails.
+including when an enabled agent runtime preflight fails.
 
 SkillEvaluator then builds the Harbor task bundle. Before spending the full
-A/B matrix, a runtime preflight runs one real, bounded smoke task per agent to
-confirm each agent runtime actually works (on by default; disable with
-`--no-agent-runtime-preflight`). Harbor then starts the selected environment
-and runs the agent in both arms; with standard grading, each transcript is
+A/B matrix, you can pass `--agent-runtime-preflight` to run one extra agent-only
+execution per agent. It uses the first staged evaluation task and its real prompt,
+so it can consume substantial tokens and exercise task actions; grading is the
+only part disabled. It is off by default. Harbor then starts the selected
+environment and runs the agent in both arms; with standard grading, each transcript is
 judged against the case's expected output and assertions using the configured
 evaluator provider. Finally, SkillEvaluator collects the artifacts and
 computes the dimension scores, pass rates, and Skill Lift. Harbor task and job
@@ -263,12 +292,11 @@ One deliberate exception collapses the two roles: with the `nv_build` provider
 in `--env-mode docker` or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
 Codex and experimental Claude Code use a Docker or local compatibility bridge.
-SkillEvaluator never changes models silently: explicit overrides are preserved.
-Without an override, bridged agents default to Nemotron Super
-(`nvidia/nemotron-3-super-120b-a12b`); direct OpenCode defaults to
-`nvidia/nemotron-3-nano-30b-a3b` (rendered
-`nvidia/nvidia/nemotron-3-nano-30b-a3b`). Override models explicitly when you
-want to compare harnesses or models:
+Explicit model overrides are preserved exactly. Without an override, all three
+agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
+OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
+adapter namespace precedes the NVIDIA catalog ID. Override models explicitly
+when you want to compare harnesses or models:
 
 ```bash title="NVIDIA Build model overrides"
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
@@ -306,27 +334,29 @@ cloud backend for untrusted code.
 
 | Use case | Command | When to use |
 | --- | --- | --- |
-| Full validation | `skillevaluator validate ./my-skill --tier3` | Add Tier 3 after the standard stages; advisory by default, optionally blocking |
+| Full validation | `skillevaluator validate ./my-skill` | Run all three tiers; Tier 3 uses autopilot and is advisory by default, optionally blocking |
 | Focused evaluation | `skillevaluator tier3 evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
 
 Attached to `validate`, Tier 3 is advisory by default: its results appear in the
 combined reports without changing the exit code. Add `--block-on-agent-eval`
 to make its findings gate, including evidence that the selected YAML/JSON
-dataset or native Harbor source is missing or invalid. `--full` is the one-shot
-variant — Tier 1+2+3 with `--autopilot` dataset generation — and `--autopilot`
-on its own enables Tier 3 while generating an eval case when none exists.
+dataset or native Harbor source is missing or invalid. Autopilot is enabled
+by default for skills: it generates one starter case when no source exists and
+reuses valid existing sources unchanged. `--full` remains supported but is
+unnecessary. Use `--tiers 1,2` or `--no-tier3` to skip live evaluation;
+`--no-autopilot` requires an existing evaluation source.
 
 ```bash title="Make attached Tier 3 blocking"
-skillevaluator validate ./my-skill --tier3 --agents codex \
+skillevaluator validate ./my-skill --agents codex \
   --block-on-agent-eval
 ```
 
 <Note>
 `validate` forwards a dedicated Tier 3 flag group (`--agents`, `--env-mode`,
 `--grading-mode`, and the rest) to the live-eval engine whenever Tier 3 is
-enabled — via `--tier3`, `--autopilot`, `--full`, or the `--agent-eval` alias.
-`--agent-eval` is a supported compatibility alias and is not currently
-deprecated. See the [CLI Reference](cli-reference.mdx) for the full group.
+enabled, which is the default for skills. `--agent-eval` remains a supported
+alias for `--tier3`; explicit tier selection and disable flags control the
+scope. See the [CLI Reference](cli-reference.mdx) for the full group.
 </Note>
 
 ## Plan for cost
@@ -341,8 +371,8 @@ eval cases × agents × attempts × arms
 
 A standard comparison has two arms (with-skill and without-skill). Each trial
 can make multiple agent-model requests, standard grading adds evaluator-model
-calls, dataset generation can add more, and the default runtime preflight adds
-one small smoke task per agent. Actual charges therefore depend on the selected
+calls, dataset generation can add more, and the optional runtime preflight adds
+one extra agent execution per agent. Actual charges therefore depend on the selected
 models, token usage, agent behavior, and environment pricing; SkillEvaluator
 does not estimate a fixed dollar amount. Check the current pricing for your
 [NVIDIA API Catalog](https://build.nvidia.com/),
@@ -390,7 +420,7 @@ The high-signal flags, with defaults:
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
-| `--agent-runtime-preflight` | on | One real, bounded smoke task per agent before the full A/B matrix; `--no-agent-runtime-preflight` skips it |
+| `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |

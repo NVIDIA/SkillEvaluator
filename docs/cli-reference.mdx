@@ -1,6 +1,6 @@
 ---
 title: "CLI Reference"
-description: "Every SkillEvaluator command, flag, and default — validate, quality-check, similarity-check, tier3 evaluate, and the tier1/tier2/tier3 expert groups."
+description: "Run tiers directly, explore expert subcommands, and look up SkillEvaluator flags and defaults."
 layout: reference
 ---
 
@@ -17,7 +17,10 @@ commands referenced below.
 
 | Command | Purpose | Needs |
 | --- | --- | --- |
-| [validate](#validate) | Run Tier 1 checks plus Tier 2 dedup by default, with explicit Tier 2 and Tier 3 gating controls | Nothing by default |
+| [tier1 PATH](#direct-tier-workflows) | Run Tier 1 static and configured LLM checks | External scanners; provider for LLM stages |
+| [tier2 PATH](#direct-tier-workflows) | Run intra-skill dedup; include inter-skill comparison with `--catalog` | Chat and embeddings provider |
+| [tier3 PATH](#direct-tier-workflows) | Prepare a missing starter dataset and run live evaluation | Provider, supported agent, and sandbox |
+| [validate](#validate) | Run all three tiers for skills, including Tier 3 autopilot, with explicit scope and gating controls | Provider access, scanners, supported agent, and sandbox; `--tiers 1` selects static checks |
 | [quality-check](#quality-check) | Score skill quality across four weighted categories | Nothing |
 | [rubric-eval](#rubric-eval) | LLM-as-judge rubric evaluation | LLM provider key |
 | [security-scan](#security-scan) | Scan for security vulnerabilities | Nothing (key only with `--llm`/`--llm-verify`) |
@@ -40,14 +43,16 @@ commands referenced below.
 
 ## Global conventions
 
-**Reports.** Every Tier 1 and Tier 2 command accepts the same two report options:
+**Reports.** Every Tier 1 and Tier 2 command accepts the same two report options.
+Direct `tier1 PATH`, `tier1 validate PATH`, and `tier2 PATH` default to
+`cli,json,html`; focused expert commands default to `cli`:
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-r, --report [cli\|json\|html\|markdown\|sarif]` | `cli` | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
+| `-r, --report [cli\|json\|html\|markdown\|sarif]` | `cli,json,html` for direct workflows; `cli` for focused commands | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
 | `-o, --output-dir DIRECTORY` | `reports` | Directory for generated reports. |
 
-In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The standalone commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown` or `.sarif.json` with `-r sarif`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Filename conventions and report anatomy live in [Reports & Results](reports.mdx).
+In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The focused expert commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown` or `.sarif.json` with `-r sarif`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Direct workflows write `skillevaluator-tier1` or `skillevaluator-tier2` reports in the selected formats and also overwrite previous files with that basename. Filename conventions and report anatomy live in [Reports & Results](reports.mdx).
 
 **Exit codes.** Commands communicate through a small exit-code contract — this is what your CI gates on (see [Gate Your CI](ci-integration.mdx)):
 
@@ -60,9 +65,66 @@ In practice: a default `validate` run (no `-r`) shows the compact pipeline view 
 
 **Version.** `skillevaluator --version` prints the installed version.
 
-## Expert tier groups
+## Direct tier workflows
 
-Most commands are also reachable under a tier-prefixed group — `skillevaluator tier1 validate` behaves exactly like `skillevaluator validate`. The groups exist so you can discover a tier's commands in one place:
+```bash title="Run each tier independently"
+skillevaluator tier1 ./my-skill
+skillevaluator tier2 ./my-skill --catalog ./skill-catalog.json
+skillevaluator tier3 ./my-skill
+```
+
+There is no required `run` subcommand. A bare `tier1`, `tier2`, or `tier3` shows
+help and does not evaluate the current directory. Prefix a path with `./` when
+its name matches an expert command: `tier1 ./validate` evaluates a directory
+named `validate`; `tier1 validate ./my-skill` invokes the Tier 1 workflow.
+
+| Workflow | Default scope | Scope controls |
+| --- | --- | --- |
+| `tier1 PATH` | All static checks including dependencies; rubric, LLM security, and finding verification when a provider is configured | `--no-llm` skips LLM stages; `--llm` requires provider access; `--checks` selects static checks |
+| `tier2 PATH` | Intra-skill analysis | `--catalog FILE` adds inter-skill comparison against a saved JSON catalog; without it, inter-skill is explicitly not run |
+| `tier3 PATH` | One missing starter case is generated, then the provider-native agent runs in Docker with and without the skill | Accepts the [tier3 evaluate](#tier3-evaluate) options; missing-source generation is implicit |
+
+Direct Tier 1 can run keyless, but marks its LLM stages as skipped. Missing
+required scanner evidence remains incomplete. Direct Tier 2 needs both chat and
+embedding access and takes one skill, not a collection. Create its catalog with
+`similarity-check ./skills --save-catalog ./skill-catalog.json`. Direct Tier 3
+preserves valid existing sources and rejects invalid ones; it does not overwrite
+a dataset to repair it.
+
+`validate PATH` runs all three tiers for skills by default, including Tier 3
+autopilot. It is separate from these tier-only workflows.
+
+### Direct Tier 1 options
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--checks TEXT` | All applicable static checks, including dependency auditing | Comma-separated subset of static checks |
+| `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
+| `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100 |
+| `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
+| `--previous-version TEXT` | unset | Previous version for version checks |
+
+Also accepts `-r/--report` and `-o/--output-dir` described above.
+
+### Direct Tier 2 options
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--catalog FILE` | unset | Saved JSON catalog for inter-skill comparison |
+| `--threshold FLOAT` | `0.80` | Intra-skill candidate similarity threshold |
+| `--similarity-threshold FLOAT` | `0.75` | Inter-skill reporting threshold |
+| `--full-body` | off | Compare the full `SKILL.md` against a catalog created in full-body mode |
+
+Both thresholds accept values from 0 to 1. Also accepts `-r/--report` and
+`-o/--output-dir`. Direct Tier 3 accepts the options in
+[tier3 evaluate](#tier3-evaluate), with missing-source generation already enabled.
+
+## Expert tier subcommands
+
+The commands below remain available for focused operations.
+`skillevaluator tier1 validate PATH` now runs the same isolated Tier 1 workflow
+as `tier1 PATH`. Use top-level `skillevaluator validate PATH` for the combined
+pipeline.
 
 | Group | Members |
 | --- | --- |
@@ -70,7 +132,7 @@ Most commands are also reachable under a tier-prefixed group — `skillevaluator
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
 | `tier3` | `evaluate`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
 
-The exceptions run in both directions. `health-check` and [models](#models) are top-level only, with no tier-prefixed twin. And two commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
+`health-check` and [models](#models) are top-level only. Two expert commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
 
 ### tier3 validate
 
@@ -88,23 +150,25 @@ skillevaluator tier3 validate ./my-skill --strict
 
 ## validate
 
-Validate a skill, rule, workflow, or plugin. Tier 1 static, security, and quality checks always gate the exit code. Tier 2 deduplication runs and gates by default, but `--no-block-on-dedup` keeps the scan while making its findings advisory. Tier 3 live evaluation attaches as an advisory pass when enabled with `--tier3`, `--autopilot`, `--full`, or the supported `--agent-eval` compatibility alias; add `--block-on-agent-eval` to make its findings gate.
+Validate a skill, rule, workflow, or plugin. For skills, all three tiers run by default. Tier 3 uses autopilot to reuse an existing evaluation source or generate one starter case when none exists; invalid sources are reported rather than replaced. Tier 1 static, security, and quality checks always gate the exit code. Tier 2 deduplication runs and gates by default, but `--no-block-on-dedup` keeps the scan while making its findings advisory. Tier 3 is advisory unless `--block-on-agent-eval` is set. Rules, workflows, and plugins retain their applicable validation stages without automatically enabling live skill evaluation.
 
 ```bash title="Common invocations"
-skillevaluator validate ./my-skill                        # Tier 1 + Tier 2
+skillevaluator validate ./my-skill                        # Tier 1 + Tier 2 + Tier 3 autopilot
 skillevaluator validate ./my-skill --llm                  # add LLM security analysis
 skillevaluator validate ./my-skill -r cli,json,html       # multiple report formats
 skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
 skillevaluator validate ./my-skill --no-block-on-dedup    # run Tier 2 as advisory
 skillevaluator validate ./my-skill --external             # strict publication profile
-skillevaluator validate ./my-skill --tier3 -a codex       # add advisory Tier 3 eval
-skillevaluator validate ./my-skill --tier3 -a codex \
+skillevaluator validate ./my-skill -a codex               # choose the Tier 3 agent
+skillevaluator validate ./my-skill -a codex \
     --block-on-agent-eval                                  # gate on Tier 3 too
-skillevaluator validate ./my-skill --autopilot            # Tier 3, generating evals if missing
-skillevaluator validate ./my-skill --full -a codex        # everything, one shot
+skillevaluator validate ./my-skill --no-autopilot         # require an existing eval source
+skillevaluator validate ./my-skill --full -a codex        # compatibility: same default scope
+skillevaluator validate ./my-skill --tiers 1,2            # skip live evaluation
+skillevaluator validate ./my-skill --tiers 1              # static checks only
 skillevaluator validate ./my-skill --tiers 1,3            # explicit tier selection
-skillevaluator validate ./skills-folder --full            # whole catalog, serially
-skillevaluator validate ./my-skill --tier3 -a codex,claude-code \
+skillevaluator validate ./skills-folder                   # whole catalog, serially
+skillevaluator validate ./my-skill -a codex,claude-code \
     --env-mode docker --harbor-keep-jobs                  # Tier 3, retain Harbor jobs
 ```
 
@@ -119,8 +183,8 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--type [skill\|rules\|workflows\|plugin\|auto]` | `auto` | Force the content type instead of auto-detecting it from the target path. |
-| `--tiers TEXT` | unset | Explicit tier selection, e.g. `--tiers 1,3`. Tier 1 always runs. |
-| `--full` | off | One-shot validation: Tier 1+2+3 with `--autopilot` dataset generation. |
+| `--tiers TEXT` | all three for skills | Explicit tier selection, e.g. `--tiers 1,2` skips live evaluation and `--tiers 1,3` skips dedup. Tier 1 always runs. |
+| `--full` | unnecessary for skills | Compatibility flag for all three tiers with autopilot. Explicit tier selection and disable flags still apply. |
 | `--verbose` | off | Print the full per-check detail stream instead of the compact pipeline view. |
 | `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `external` | Validation profile: `external` or a custom name. |
 | `--external` | — | Shortcut for `--profile external` (validate for public publication). |
@@ -155,15 +219,15 @@ Embedding + LLM dedup; on by default, skips gracefully without a provider key.
 ### Tier 3 · Live Agent Evaluation
 
 <Note>
-The following flags are forwarded to the live-eval engine **only when Tier 3 is enabled** — with `--tier3`, `--autopilot`, `--full`, or the supported `--agent-eval` compatibility alias. On their own they have no effect. The Dockerfile-, workspace-, resource-, preflight-, and progress-tuning flags (`--custom-dockerfile-mode`, `--skill-workspace-mode`, the `--override-*` flags, `--agent-runtime-preflight`, and `--progress`) are not forwardable — use the standalone [tier3 evaluate](#tier3-evaluate) command for those.
+The following flags are forwarded to the live-eval engine when Tier 3 is enabled, which is the default for skills. They do not re-enable a stage excluded by `--tiers` or `--no-tier3`. The Dockerfile-, workspace-, resource-, and progress-tuning flags (`--custom-dockerfile-mode`, `--skill-workspace-mode`, the `--override-*` flags, and `--progress`) are not forwardable — use the standalone [tier3 evaluate](#tier3-evaluate) command for those.
 </Note>
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--tier3, --agent-eval` | off | Also run Tier 3 live agent evaluation. Accepts a supported YAML/JSON dataset or native Harbor source and validates it before execution. Tier 3 is advisory by default. `--tier3` is the primary name; `--agent-eval` is a supported compatibility alias and is not currently deprecated. |
+| `--tier3 / --no-tier3` | enabled for skills | Run or skip Tier 3 live agent evaluation. Accepts a supported YAML/JSON dataset or native Harbor source and validates it before execution. `--agent-eval` / `--no-agent-eval` are compatibility aliases. Explicit `--tiers` selection controls scope; `--no-tier3` also disables autopilot. |
 | `--block-on-agent-eval / --no-block-on-agent-eval` | advisory | Choose whether Tier 3 findings, including missing or invalid selected task-source evidence, participate in the `validate` exit gate. This flag does not enable Tier 3 by itself. |
-| `--autopilot` | off | Generate an evaluation source automatically when missing, then run Tier 3 (implies `--tier3`). |
-| `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents to evaluate. |
+| `--autopilot / --no-autopilot` | enabled for skills | Generate one starter case when no evaluation source exists, then run Tier 3. Existing sources are reused unchanged; invalid sources are reported. `--no-autopilot` requires an existing source. Explicit tier selection or `--no-tier3` can exclude Tier 3. |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents to evaluate. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Harbor environment backend (full list under [tier3 evaluate](#tier3-evaluate)). |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
@@ -179,6 +243,7 @@ The following flags are forwarded to the live-eval engine **only when Tier 3 is 
 | `--copy-repo` | off | Copy the surrounding repo into the eval environment. |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
+| `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the measured A/B matrix. The CLI value overrides `harbor.agent_runtime_preflight`; without either, no extra agent runs. |
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults ([Eval Datasets](eval-datasets.mdx) documents the config keys and precedence). The exception is `--results-dir`, which resolves independently of `evals/config.yml` (see [Reports & Results](reports.mdx)).
 
@@ -309,12 +374,12 @@ skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
 ```
 
 <Note>
-The old top-level spelling `skillevaluator evaluate` still works for existing scripts, but no longer appears in `--help`; `tier3 evaluate` is the advertised name.
+Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing-source generation. `tier3 evaluate` retains explicit execution and opt-in `--autopilot`. The old top-level spelling `skillevaluator evaluate` still works for existing scripts but does not appear in `--help`.
 </Note>
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | `codex` | Comma-separated Harbor agents. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--env-mode` | `docker` | Where trials run. All 16 values: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `gke`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `local`. Cloud modes are provider-managed Harbor backends enabled by the matching Harbor extra; `local` runs on your host. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
@@ -332,7 +397,7 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 | `--grading-mode [default\|default_plus_custom\|custom_only]` | unset | Reward/grading mode — see [Custom Graders & Tasks](custom-graders.mdx). The legacy aliases `aces_default` (→ `default`) and `aces_plus_custom` (→ `default_plus_custom`) are still accepted. |
 | `--results-dir DIRECTORY` | unset | Directory for live-eval results (precedence rules in [Reports & Results](reports.mdx)). |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts for inspection with [harbor-view](#harbor-view). |
-| `--agent-runtime-preflight / --no-agent-runtime-preflight` | enabled | Run one real, bounded agent smoke task before the full A/B evaluation matrix. |
+| `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the full A/B evaluation matrix. |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
 | `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation (passed through to Harbor). |
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB (passed through to Harbor). |
@@ -342,7 +407,11 @@ The old top-level spelling `skillevaluator evaluate` still works for existing sc
 | `--evaluator-container-revision TEXT` | unset | Digest-pinned evaluator image reference recorded beside the evaluated source. |
 | `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
 
-Without a `--model`/`--agent-model` override, each agent uses the selected provider's default model: `gpt-5.6-sol` on OpenAI, and Nemotron on the NVIDIA provider — `nvidia/nemotron-3-super-120b-a12b` for bridged agents, `nvidia/nemotron-3-nano-30b-a3b` for direct OpenCode.
+Without a `--model`/`--agent-model` override, agent execution uses
+`gpt-5.6-sol` for OpenAI, `claude-opus-5` for Anthropic, and
+`nvidia/nemotron-3-super-120b-a12b` for NVIDIA Build. OpenCode displays the
+last value as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its adapter
+namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
 
@@ -437,12 +506,12 @@ skillevaluator harbor-view ./path/to/jobs-dir
 Check live-evaluation runtime readiness: the CLI install, the configured provider, the requested agents and their credentials, and the selected backend. Run it before your first `tier3 evaluate` — see [Agents & Sandboxes](agents-and-sandboxes.mdx) for what each check means.
 
 ```bash title="Deep readiness check"
-skillevaluator doctor --agents codex --env-mode docker
+skillevaluator doctor --env-mode docker
 ```
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
+| `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
 | `--verify-models` | off | Live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. |
@@ -459,7 +528,7 @@ skillevaluator health-check
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | `codex` | Comma-separated agents to check. |
+| `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Backend to check (same 16 values as [tier3 evaluate](#tier3-evaluate)). |
 
 ## models

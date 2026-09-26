@@ -388,6 +388,7 @@ async def _generate_with_llm(
     full: bool = False,
     *,
     fallback_to_template: bool = True,
+    announce_provider: bool = True,
 ) -> list[dict[str, Any]]:
     """Generate test cases using LLM for more natural questions."""
     try:
@@ -480,7 +481,8 @@ No other fields."""
     try:
         from skillevaluator.inference.client import LLMClient
 
-        print(f"  Using public provider: {provider.provider} / {provider.model}")
+        if announce_provider:
+            print(f"  Using public provider: {provider.provider} / {provider.model}")
         text = await asyncio.to_thread(
             LLMClient(max_tokens=2000, temperature=0.3).completions,
             "You generate high-quality JSON evaluation datasets for AI agent skills.",
@@ -538,9 +540,12 @@ No other fields."""
         return cases
 
     except Exception as exc:
+        from skillevaluator.inference.diagnostics import llm_failure_diagnostic
+
+        diagnostic = llm_failure_diagnostic(exc)
         if not fallback_to_template:
-            raise RuntimeError("LLM dataset generation failed") from exc
-        print("Warning: LLM generation failed; using deterministic template mode.")
+            raise DatasetGenerationError(f"LLM dataset generation failed: {diagnostic}") from exc
+        print(f"Warning: LLM generation failed: {diagnostic} Using deterministic template mode.")
         return _generate_full(skill) if full else _generate_simple(skill)
 
 
@@ -554,7 +559,11 @@ def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
     if output_path.exists():
         raise FileExistsError(f"Dataset already exists: {output_path}")
     skill = _parse_skill(skill_path)
-    cases = asyncio.run(_generate_with_llm(skill, fallback_to_template=False)) if use_llm else _generate_simple(skill)
+    cases = (
+        asyncio.run(_generate_with_llm(skill, fallback_to_template=False, announce_provider=False))
+        if use_llm
+        else _generate_simple(skill)
+    )
     if len(cases) != 1:
         raise RuntimeError("one-case generation did not return exactly one case")
     evals_dir.mkdir(parents=True, exist_ok=True)

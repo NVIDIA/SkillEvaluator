@@ -1927,6 +1927,15 @@
                 Checks for redundant content within one skill and semantic overlap across skills or local catalog entries.
             </p>
             {% for result in tier2_results %}
+                {% set execution_errors = result | additional_errors %}
+                {% if execution_errors %}
+                <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
+                    <strong>{{ 'Execution errors' if result.is_incomplete else 'Errors' }}</strong>
+                    <ul style="margin:0.5rem 0 0;padding-left:1.25rem;">
+                        {% for error in execution_errors %}<li style="white-space:pre-line;">{{ error }}</li>{% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
                 {% if result.passed and not result.findings %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">No semantic overlaps detected.</strong>
@@ -1962,11 +1971,6 @@
                     </div>
                 </details>
                 {% endfor %}
-                {% if result.errors and not result.findings %}
-                    {% for error in result.errors %}
-                    <div class="finding high"><div class="finding-header"><span class="finding-message">{{ error }}</span></div></div>
-                    {% endfor %}
-                {% endif %}
             {% endfor %}
         {% else %}
             <p style="color: var(--text-secondary); padding: 1rem;">No Tier 2 checks were run. Configure a public embedding provider, then run <code>similarity-check</code> or <code>dedup-scan</code>.</p>
@@ -3465,7 +3469,9 @@
         </section>
 
         {# Sub-tab switcher and Chart.js charts #}
-        <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
+                integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+                crossorigin="anonymous"></script>
         <script>
         function showTier3SubTab(id, btn) {
             document.querySelectorAll('.t3-page').forEach(function(p){ p.classList.remove('active'); });

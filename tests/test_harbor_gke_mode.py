@@ -1229,3 +1229,181 @@ def test_mcp_server_declarations_block_operator_secrets_and_unapproved_headers(
 
     spec_results_valid = validate_skillevaluators(valid_skill)
     assert not any(r.status == "error" for r in spec_results_valid)
+
+
+def test_gke_environment_disables_automount_and_rejects_bound_ksa_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disable service account token automount and reject GCP-bound KSAs unless allow_workload_identity=1."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from harbor.environments.gke import GKEEnvironment
+    from kubernetes import client as k8s_client
+
+    from skillevaluator.tier3.harbor.gke_environment import (
+        SECURE_GKE_ENV_IMPORT_PATH,
+        SkillEvaluatorGKEEnvironment,
+    )
+
+    monkeypatch.delenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", raising=False)
+
+    cmd = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="codex",
+        job_name="gke-codex-job",
+        env_mode="gke",
+        model="gpt-5.5",
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+    )
+    assert "--environment-import-path" in cmd
+    assert cmd[cmd.index("--environment-import-path") + 1] == SECURE_GKE_ENV_IMPORT_PATH
+
+    created_pods: list[k8s_client.V1Pod] = []
+
+    async def fake_super_create_pod(self, pod: k8s_client.V1Pod) -> None:
+        created_pods.append(pod)
+
+    monkeypatch.setattr(GKEEnvironment, "_create_pod", fake_super_create_pod)
+    monkeypatch.setattr(GKEEnvironment, "_api", property(lambda self: self._fake_api))
+
+    # 1. Unbound default KSA without allow_workload_identity -> automount_service_account_token=False
+    env_unbound = object.__new__(SkillEvaluatorGKEEnvironment)
+    env_unbound.namespace = "skill-eval"
+    env_unbound._kwargs = {}
+    env_unbound._allow_workload_identity = False
+    env_unbound._fake_api = SimpleNamespace(
+        read_namespaced_service_account=lambda **_kw: SimpleNamespace(metadata=SimpleNamespace(annotations={}))
+    )
+    pod_unbound = k8s_client.V1Pod(
+        metadata=k8s_client.V1ObjectMeta(name="pod-unbound", namespace="skill-eval"),
+        spec=k8s_client.V1PodSpec(containers=[k8s_client.V1Container(name="main", image="ubuntu:24.04")]),
+    )
+    asyncio.run(env_unbound._create_pod(pod_unbound))
+    assert len(created_pods) == 1
+    assert created_pods[0].spec.automount_service_account_token is False
+
+    # 2. Bound default KSA (iam.gke.io/gcp-service-account) without allow_workload_identity -> fails closed
+    env_bound = object.__new__(SkillEvaluatorGKEEnvironment)
+    env_bound.namespace = "skill-eval"
+    env_bound._kwargs = {}
+    env_bound._allow_workload_identity = False
+    env_bound._fake_api = SimpleNamespace(
+        read_namespaced_service_account=lambda **_kw: SimpleNamespace(
+            metadata=SimpleNamespace(
+                annotations={"iam.gke.io/gcp-service-account": "eval-sa@my-proj.iam.gserviceaccount.com"}
+            )
+        )
+    )
+    pod_bound = k8s_client.V1Pod(
+        metadata=k8s_client.V1ObjectMeta(name="pod-bound", namespace="skill-eval"),
+        spec=k8s_client.V1PodSpec(containers=[k8s_client.V1Container(name="main", image="ubuntu:24.04")]),
+    )
+    with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
+        asyncio.run(env_bound._create_pod(pod_bound))
+
+    # 3. Bound KSA WITH allow_workload_identity=1 -> permitted and automount left enabled
+    env_opted_in = object.__new__(SkillEvaluatorGKEEnvironment)
+    env_opted_in.namespace = "skill-eval"
+    env_opted_in._kwargs = {"allow_workload_identity": "1"}
+    env_opted_in._allow_workload_identity = True
+    env_opted_in._fake_api = env_bound._fake_api
+    pod_opted_in = k8s_client.V1Pod(
+        metadata=k8s_client.V1ObjectMeta(name="pod-opted-in", namespace="skill-eval"),
+        spec=k8s_client.V1PodSpec(containers=[k8s_client.V1Container(name="main", image="ubuntu:24.04")]),
+    )
+    asyncio.run(env_opted_in._create_pod(pod_opted_in))
+    assert len(created_pods) == 2
+    assert created_pods[1].spec.automount_service_account_token is not False
+
+
+def test_check_prerequisites_gke_live_cluster_rejects_bound_service_account_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reject GKE live cluster preflight for non-Vertex agents when namespace default SA is bound to GCP IAM."""
+    from types import SimpleNamespace
+
+    from kubernetes import client as k8s_client
+    from kubernetes import config as k8s_config
+
+    monkeypatch.delenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+    monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+    monkeypatch.setattr(runner.shutil, "which", lambda cmd: "/usr/bin/" + cmd)
+    monkeypatch.setattr(k8s_config, "load_kube_config", lambda **_kw: None)
+
+    class FakeCoreV1Api:
+        def get_api_resources(self, **_kw):
+            return SimpleNamespace()
+
+        def read_namespaced_service_account(self, name: str, namespace: str, **_kw):
+            assert name == "default"
+            assert namespace == "skill-eval"
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={"iam.gke.io/gcp-service-account": "bound@proj.iam.gserviceaccount.com"}
+                )
+            )
+
+    monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreV1Api)
+
+    errors_blocked = _check_prerequisites(
+        env_mode="gke",
+        agents=["codex"],
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+        verify_live_cluster=True,
+    )
+    assert any("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1" in err for err in errors_blocked)
+
+    errors_allowed = _check_prerequisites(
+        env_mode="gke",
+        agents=["codex"],
+        environment_kwargs={**COMPLETE_GKE_KWARGS, "allow_workload_identity": "1"},
+        verify_live_cluster=True,
+    )
+    assert errors_allowed == []
+
+
+def test_doctor_verify_models_marks_gke_runtime_auth_unverified_pending_in_pod_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report runtime authentication as unverified/pending in-pod probe when host lacks Vertex credentials in GKE mode."""
+    from skillevaluator.tier3 import commands
+    from skillevaluator.tier3.harbor.runtime_preflight import (
+        ModelCatalogFailureKind,
+        ModelProbeResult,
+    )
+
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "my-gcp-proj")
+    monkeypatch.setenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", "1")
+    monkeypatch.setattr(commands, "resolve_llm_provider", lambda: _provider("openai", "gpt-5.5"))
+    monkeypatch.setattr(commands, "_check_prerequisites", lambda *_args, **_kw: [])
+    monkeypatch.setattr(
+        "skillevaluator.tier3.harbor.runtime_preflight.probe_model",
+        lambda _prov: ModelProbeResult(
+            ok=False,
+            provider="anthropic",
+            model="claude-sonnet-4-5",
+            detail="Vertex AI probe failed without credentials",
+            failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
+        ),
+    )
+
+    rc = commands.doctor(
+        env_mode="gke",
+        agents="claude-code",
+        agent_model=("claude-code=claude-sonnet-4-5",),
+        verify_models=True,
+        environment_kwargs=COMPLETE_GKE_KWARGS,
+    )
+    out = capsys.readouterr().out
+    normalized_out = " ".join(out.split())
+    assert rc == 0
+    assert "unverified" in normalized_out
+    assert "pending in-pod" in normalized_out
+    assert "is verified via GKE Workload Identity" not in normalized_out

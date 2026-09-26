@@ -1695,7 +1695,11 @@ def _call_public_llm_with_provenance(prompt, model=None, max_tokens=1024, temper
                 with urllib.request.urlopen(request, timeout=90) as response:  # nosec B310
                     body = json.loads(response.read())
             except urllib.error.HTTPError as http_err:
-                if http_err.code == 401 and _is_vertex_openapi_url(request_url):
+                if (
+                    http_err.code == 401
+                    and _is_vertex_openapi_url(request_url)
+                    and os.environ.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", "").strip() == "ADC"
+                ):
                     logger.info("Vertex AI OpenAPI 401 received; attempting in-process ADC token refresh")
                     refreshed_token = _get_vertex_access_token()
                     if refreshed_token and refreshed_token != api_key:

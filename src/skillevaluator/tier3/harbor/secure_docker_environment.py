@@ -27,6 +27,7 @@ from typing import Any
 from harbor.environments.base import ExecResult
 from harbor.environments.docker.docker import DockerEnvironment, _sanitize_docker_compose_project_name
 
+from skillevaluator.provider_config import _get_google_access_token, _is_vertex_openapi_endpoint
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
@@ -154,8 +155,19 @@ async def _terminate_process_tree(
 
 
 def _host_handoff_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Resolve a private NVIDIA Build sentinel without putting its value in argv."""
+    """Resolve private credential sentinels or refresh host ADC tokens without putting values in argv."""
     resolved = _validate_environment(environment)
+    is_adc = (
+        resolved.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE") == "ADC"
+        or os.environ.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE") == "ADC"
+    )
+    if is_adc and "OPENAI_API_KEY" in resolved:
+        base_url = resolved.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+        if _is_vertex_openapi_endpoint(base_url):
+            fresh_token = _get_google_access_token()
+            if fresh_token:
+                resolved["OPENAI_API_KEY"] = fresh_token
+                os.environ["OPENAI_API_KEY"] = fresh_token
     if resolved.get("NVIDIA_API_KEY") == NVIDIA_BUILD_STDIN_SENTINEL:
         resolved["NVIDIA_API_KEY"] = read_nvidia_build_key_from_stdin()
         return resolved

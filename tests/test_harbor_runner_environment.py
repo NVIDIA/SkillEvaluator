@@ -1598,27 +1598,30 @@ def test_resolve_agent_runtime_plan_preserves_refreshed_adc_token(monkeypatch: p
 
 
 def test_run_harbor_reissues_adc_token_for_bounded_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Verify _run_harbor refreshes ADC token before launching each bounded job."""
+    """Verify _run_harbor refreshes ADC token in child env without leaking secrets to argv and sets a bounded timeout."""
     base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
     captured_command: list[str] = []
     captured_env: dict[str, str] = {}
-
-    def mock_build_cmd(*args, **kwargs):
-        verifier_env = kwargs.get("verifier_env") or {}
-        captured_command.extend(["--verifier-env", f"OPENAI_API_KEY={verifier_env.get('OPENAI_API_KEY')}"])
-        return ["mock-harbor", "run"]
+    captured_timeout: float | None = None
 
     def mock_run(command, *args, **kwargs):
+        nonlocal captured_timeout
+        captured_command.extend(command)
         captured_env.update(kwargs.get("env") or {})
+        captured_timeout = kwargs.get("timeout")
         return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(runner, "build_harbor_run_command", mock_build_cmd)
     monkeypatch.setattr(runner.subprocess, "run", mock_run)
     monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
     monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "fresh-reissued-token")
 
-    run_env = {"OPENAI_API_KEY": "stale-initial-token", "PATH": "/usr/bin"}
-    verifier_env = {"OPENAI_BASE_URL": base_url, "OPENAI_API_KEY": "stale-initial-token"}
+    run_env = {
+        "OPENAI_API_KEY": "stale-initial-token",
+        "OPENAI_BASE_URL": base_url,
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+        "PATH": "/usr/bin",
+    }
+    verifier_env = {"LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}"}
 
     ok, _detail = runner._run_harbor(
         dataset=tmp_path / "dataset",
@@ -1638,6 +1641,93 @@ def test_run_harbor_reissues_adc_token_for_bounded_jobs(monkeypatch: pytest.Monk
     )
 
     assert ok is True
-    assert "--verifier-env" in captured_command
-    assert "OPENAI_API_KEY=fresh-reissued-token" in captured_command
+    rendered_argv = " ".join(captured_command)
+    assert "fresh-reissued-token" not in rendered_argv
+    assert "stale-initial-token" not in rendered_argv
+    assert "OPENAI_API_KEY=" not in rendered_argv
     assert captured_env.get("OPENAI_API_KEY") == "fresh-reissued-token"
+    assert captured_timeout is not None and 0 < captured_timeout < 3600
+
+
+def test_run_harbor_preserves_explicit_vertex_credential_and_enforces_adc_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Preserve explicit operator credentials on Vertex URLs, reject raw verifier_env secrets, and fail on ADC timeout."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    captured_env: dict[str, str] = {}
+    captured_timeout: float | None = None
+
+    def mock_run(command, *args, **kwargs):
+        nonlocal captured_timeout
+        captured_env.update(kwargs.get("env") or {})
+        captured_timeout = kwargs.get("timeout")
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", mock_run)
+    monkeypatch.setattr(runner, "_validate_harbor_job_result", lambda *_args, **_kwargs: (True, "success"))
+    monkeypatch.setattr(runner, "_get_google_access_token", lambda **_kw: "ambient-host-adc-token")
+
+    # 1. Explicit operator credential (no SKILL_EVAL_LLM_CREDENTIAL_SOURCE=ADC) must NOT be overwritten by host ADC
+    explicit_env = {
+        "OPENAI_API_KEY": "explicit-operator-key",
+        "OPENAI_BASE_URL": base_url,
+        "PATH": "/usr/bin",
+    }
+    ok, _detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="explicit-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=explicit_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok is True
+    assert captured_env.get("OPENAI_API_KEY") == "explicit-operator-key"
+    assert captured_timeout is None
+
+    # 2. build_harbor_run_command rejects raw secrets in verifier_env without ${VAR} placeholder indirection
+    with pytest.raises(ValueError, match="Sensitive key detected in verifier_env"):
+        runner.build_harbor_run_command(
+            dataset_path=tmp_path / "dataset",
+            agent="opencode",
+            job_name="bad-verifier-env",
+            env_mode="docker",
+            verifier_env={"OPENAI_API_KEY": "raw-secret-token"},
+        )
+
+    # 3. ADC-backed job exceeding token lifetime surfaces clear timeout failure
+    def timeout_run(command, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout", 3300))
+
+    monkeypatch.setattr(runner.subprocess, "run", timeout_run)
+    adc_env = {
+        "OPENAI_API_KEY": "initial-adc-token",
+        "OPENAI_BASE_URL": base_url,
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+        "PATH": "/usr/bin",
+    }
+    ok_timeout, detail_timeout = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="opencode",
+        job_name="timeout-job",
+        env_mode="docker",
+        model="google/gemini-3.8-flash",
+        jobs_dir=tmp_path / "jobs",
+        run_env=adc_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+    )
+    assert ok_timeout is False
+    assert "ADC token lifetime" in detail_timeout or "timed out" in detail_timeout.lower()

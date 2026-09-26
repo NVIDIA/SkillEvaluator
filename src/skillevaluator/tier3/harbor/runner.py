@@ -73,6 +73,11 @@ from skillevaluator.tier3.harbor.collector import (
     harbor_job_passed,
     validate_harbor_job_result,
 )
+from skillevaluator.tier3.harbor.gke_environment import (
+    GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE,
+    SECURE_GKE_ENV_IMPORT_PATH,
+    inspect_bound_gcp_service_account,
+)
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
 from skillevaluator.tier3.harbor.progress import (
     NullProgressReporter,
@@ -349,9 +354,12 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
         "NVIDIA_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        "SKILL_EVAL_LLM_CREDENTIAL_SOURCE",
         "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
     }
 )
+_VERTEX_ADC_MAX_JOB_TIMEOUT_SEC = 3300.0
+VERTEX_ADC_JOB_TIMEOUT_ENV = "SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC"
 GKE_ALLOW_WORKLOAD_IDENTITY_ENV = "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY"
 GKE_WORKLOAD_IDENTITY_ERROR_MESSAGE = (
     "CLAUDE_CODE_USE_VERTEX=1 in GKE mode uses single-pod Kubernetes Workload Identity, "
@@ -688,7 +696,7 @@ def build_harbor_run_command(
         if env_mode == "docker":
             command.extend(["--environment-import-path", SECURE_DOCKER_ENV_IMPORT_PATH])
         else:
-            command.extend(["--env", env_mode])
+            command.extend(["--env", env_mode, "--environment-import-path", SECURE_GKE_ENV_IMPORT_PATH])
     else:
         if agent_import_path:
             command.extend(["--agent-import-path", agent_import_path])
@@ -731,6 +739,14 @@ def build_harbor_run_command(
     if override_storage_mb is not None:
         command.extend(["--override-storage-mb", str(override_storage_mb)])
     for name, value in sorted((verifier_env or {}).items()):
+        str_val = str(value)
+        if (is_operator_owned_or_provider_secret(name) or _is_sensitive_ek_key(name)) and not re.fullmatch(
+            r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val
+        ):
+            raise ValueError(
+                f"Sensitive key detected in verifier_env: {name}. "
+                "Credentials and operator-owned settings must use ${VAR} placeholder indirection."
+            )
         command.extend(["--verifier-env", f"{name}={value}"])
     if _harbor_supports_yes():
         command.append("--yes")
@@ -749,6 +765,7 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
     if getattr(config, "credential_env", None) == "ADC":
         fresh_token = _get_google_access_token()
         api_key = fresh_token or getattr(config, "api_key", None) or ""
+        environment["SKILL_EVAL_LLM_CREDENTIAL_SOURCE"] = "ADC"
     else:
         api_key = getattr(config, "api_key", None) or ""
 
@@ -1179,6 +1196,23 @@ def _check_prerequisites(
                 k8s_config.load_kube_config(config_file=str(resolved_kc) if resolved_kc else None)
                 api = k8s_client.CoreV1Api()
                 api.get_api_resources(_request_timeout=5.0)
+                if not is_gke_workload_identity_allowed(environment_kwargs):
+                    target_namespace = (
+                        str((environment_kwargs or {}).get("namespace") or "default").strip() or "default"
+                    )
+                    bound_gcp_sa = inspect_bound_gcp_service_account(
+                        api,
+                        namespace=target_namespace,
+                        service_account="default",
+                    )
+                    if bound_gcp_sa:
+                        gke_errors.append(
+                            GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE.format(
+                                namespace=target_namespace,
+                                service_account="default",
+                                gcp_sa=bound_gcp_sa,
+                            )
+                        )
             except Exception as exc:
                 gke_errors.append(f"GKE cluster probe failed: {exc}")
         return gke_errors
@@ -1293,6 +1327,7 @@ def _harbor_subprocess_environment(
     provider_env: Mapping[str, str],
     agent: str | None = None,
     agent_model: str | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build Harbor's minimal host environment without ambient secrets."""
     host_env = os.environ
@@ -1306,6 +1341,8 @@ def _harbor_subprocess_environment(
         resolved_kubeconfig = _resolve_single_kubeconfig(environment.get("KUBECONFIG"))
         if resolved_kubeconfig is not None:
             environment["KUBECONFIG"] = str(resolved_kubeconfig)
+        if is_gke_workload_identity_allowed(environment_kwargs, environment):
+            environment[GKE_ALLOW_WORKLOAD_IDENTITY_ENV] = "1"
     if env_mode == ENV_MODE_LOCAL:
         from skillevaluator.tier3.harbor.local_runtime import local_subprocess_env
 
@@ -1496,9 +1533,7 @@ def _agent_credentials(
         return {}
 
     if provider.provider == "openai-compatible" and agent == "claude-code":
-        return _gateway_anthropic_agent_credentials(
-            provider, env_mode=env_mode, environment_kwargs=environment_kwargs
-        )
+        return _gateway_anthropic_agent_credentials(provider, env_mode=env_mode, environment_kwargs=environment_kwargs)
     if provider.provider == "openai" and agent == "claude-code":
         return _independent_anthropic_agent_credentials(env_mode=env_mode, environment_kwargs=environment_kwargs)
     if provider.provider == "anthropic" and agent == "codex":
@@ -1699,6 +1734,7 @@ def _resolve_agent_runtime_plan(
             provider_env=provider_env,
             agent=agent,
             agent_model=models[agent],
+            environment_kwargs=environment_kwargs,
         )
         subprocess_env.update(credentials)
         staged = {name: f"${{{name}}}" for name in (*configured_runtime_env, *credentials)}
@@ -1852,14 +1888,25 @@ def _run_harbor(
     environment_kwargs: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
     base_url = (verifier_env or {}).get("OPENAI_BASE_URL") or run_env.get("OPENAI_BASE_URL")
-    if _is_vertex_openapi_endpoint(base_url):
+    is_adc = run_env.get("SKILL_EVAL_LLM_CREDENTIAL_SOURCE") == "ADC"
+    if is_adc and _is_vertex_openapi_endpoint(base_url):
         fresh_token = _get_google_access_token()
         if fresh_token:
             run_env = dict(run_env)
             run_env["OPENAI_API_KEY"] = fresh_token
-            if verifier_env is not None:
+            if verifier_env is not None and "OPENAI_API_KEY" in verifier_env:
                 verifier_env = dict(verifier_env)
-                verifier_env["OPENAI_API_KEY"] = fresh_token
+                verifier_env["OPENAI_API_KEY"] = "${OPENAI_API_KEY}"
+
+    adc_timeout: float | None = None
+    if is_adc and _is_vertex_openapi_endpoint(base_url) and env_mode != "gke":
+        raw_timeout = os.environ.get(VERTEX_ADC_JOB_TIMEOUT_ENV, "").strip()
+        try:
+            adc_timeout = float(raw_timeout) if raw_timeout else _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
+        except ValueError:
+            adc_timeout = _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
+        if adc_timeout <= 0 or adc_timeout >= 3600.0:
+            adc_timeout = _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
 
     command = build_harbor_run_command(
         dataset_path=dataset,
@@ -1882,7 +1929,11 @@ def _run_harbor(
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
         # Harbor owns its phase deadlines, and native tasks may intentionally
-        # leave the agent unbounded. An outer deadline can preempt valid jobs.
+        # leave the agent unbounded. An outer deadline can preempt valid jobs,
+        # except when non-GKE jobs rely on short-lived Google ADC bearer tokens.
+        run_kwargs: dict[str, Any] = {}
+        if adc_timeout is not None:
+            run_kwargs["timeout"] = adc_timeout
         result = subprocess.run(
             command,
             capture_output=True,
@@ -1890,7 +1941,10 @@ def _run_harbor(
             input=handoff.stdin_text,
             env=handoff.subprocess_env,
             check=False,
+            **run_kwargs,
         )
+    except subprocess.TimeoutExpired:
+        return False, f"Harbor job exceeded Google ADC token lifetime ({adc_timeout:g}s) in {env_mode} mode"
     except OSError as exc:
         return False, str(exc)
     if result.returncode == 0:
@@ -2737,7 +2791,10 @@ def _run_harbor_eval_impl(
             and is_auth_failure
             and disposition == CredentialProbeDisposition.DEGRADED
         ):
-            safe_detail = "host does not possess Vertex AI credentials; runtime authentication is verified via GKE Workload Identity in-pod"
+            safe_detail = (
+                "host does not possess Vertex AI credentials; runtime authentication is unverified on host "
+                "(pending in-pod GKE Workload Identity probe)"
+            )
         credential_validation_targets.append(
             {
                 "labels": list(selected_labels),

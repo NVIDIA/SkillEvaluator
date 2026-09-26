@@ -526,3 +526,85 @@ def test_empty_stdin_handoff_fails_before_docker_preflight(monkeypatch) -> None:
         secure_docker_environment.SkillEvaluatorSecureDockerEnvironment.preflight()
 
     assert docker_preflight_called is False
+
+
+def test_secure_docker_exec_refreshes_adc_token_per_trial_and_verifier_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh host ADC token on every container exec() boundary so multi-trial Docker verifiers never use expired tokens."""
+    from skillevaluator.tier3.harbor import secure_docker_environment
+
+    environment = object.__new__(secure_docker_environment.SkillEvaluatorSecureDockerEnvironment)
+    environment._persistent_env = {}
+    environment.default_user = "1000"
+    environment.task_env_config = SimpleNamespace(workdir="/workspace")
+    environment._platform = SimpleNamespace(exec_shell_args=lambda command: ["bash", "-c", command])
+
+    handoff_payloads: list[str] = []
+    docker_commands: list[list[str]] = []
+
+    async def fake_run(
+        command: list[str],
+        check: bool = True,
+        timeout_sec: int | None = None,
+        *,
+        stdin_bytes: bytes | None = None,
+        redact_values: set[str] | None = None,
+        stop_main_on_interrupt: bool = False,
+    ):
+        del check, timeout_sec, redact_values, stop_main_on_interrupt
+        if stdin_bytes is not None:
+            handoff_payloads.append(stdin_bytes.decode("utf-8"))
+        docker_commands.append(command)
+        return SimpleNamespace(stdout="ok", stderr=None, return_code=0)
+
+    monkeypatch.setattr(environment, "_run_docker_compose_command", fake_run)
+
+    tokens = iter(["rotated-adc-token-trial-1", "rotated-adc-token-trial-2"])
+    monkeypatch.setattr(secure_docker_environment, "_get_google_access_token", lambda **_kw: next(tokens))
+
+    vertex_url = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+
+    # Trial 1 verifier exec (after initial launch token expired)
+    asyncio.run(
+        environment.exec(
+            "bash /tests/test.sh",
+            env={
+                "OPENAI_API_KEY": "expired-launch-token",
+                "OPENAI_BASE_URL": vertex_url,
+                "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+            },
+        )
+    )
+    # Trial 2 verifier exec (later in the same Harbor job after Trial 1 token also expired)
+    asyncio.run(
+        environment.exec(
+            "bash /tests/test.sh",
+            env={
+                "OPENAI_API_KEY": "expired-launch-token",
+                "OPENAI_BASE_URL": vertex_url,
+                "SKILL_EVAL_LLM_CREDENTIAL_SOURCE": "ADC",
+            },
+        )
+    )
+    # Explicit operator credential exec (must NOT be replaced by host ADC)
+    asyncio.run(
+        environment.exec(
+            "bash /tests/test.sh",
+            env={
+                "OPENAI_API_KEY": "explicit-operator-vertex-key",
+                "OPENAI_BASE_URL": vertex_url,
+            },
+        )
+    )
+
+    assert len(handoff_payloads) == 3
+    assert "rotated-adc-token-trial-1" in handoff_payloads[0]
+    assert "expired-launch-token" not in handoff_payloads[0]
+    assert "rotated-adc-token-trial-2" in handoff_payloads[1]
+    assert "expired-launch-token" not in handoff_payloads[1]
+    assert "explicit-operator-vertex-key" in handoff_payloads[2]
+
+    rendered_argv = "\n".join("\0".join(cmd) for cmd in docker_commands)
+    assert "rotated-adc-token-trial-1" not in rendered_argv
+    assert "rotated-adc-token-trial-2" not in rendered_argv

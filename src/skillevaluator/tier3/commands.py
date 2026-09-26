@@ -891,7 +891,7 @@ def doctor(
                         ModelCatalogFailureKind.AUTHORIZATION,
                     }
                     if not probe.ok and env_mode == "gke" and is_vertex and is_auth_failure:
-                        detail = "host does not possess Vertex AI credentials; runtime authentication is verified via GKE Workload Identity in-pod"
+                        detail = "host does not possess Vertex AI credentials; runtime authentication is unverified on host (pending in-pod GKE Workload Identity probe)"
                     elif probe.ok:
                         detail = f"{probe.detail}; catalog access does not verify runtime credentials for this endpoint"
                     else:

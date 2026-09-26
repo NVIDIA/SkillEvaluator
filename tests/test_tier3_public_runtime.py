@@ -1293,7 +1293,7 @@ def test_anthropic_idna_matches_httpx_sdk_and_bundled_verifier(
 
 
 def test_verifier_refreshes_adc_token_on_401_for_vertex_openapi(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify verifier template refreshes ADC token in-process upon HTTP 401 when calling Vertex OpenAPI."""
+    """Verify verifier template refreshes ADC token in-process upon HTTP 401 when calling Vertex OpenAPI with ADC provenance."""
     import io
     import urllib.error
 
@@ -1302,6 +1302,7 @@ def test_verifier_refreshes_adc_token_on_401_for_vertex_openapi(monkeypatch: pyt
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_BASE_URL", base_url)
     monkeypatch.setenv("OPENAI_API_KEY", "expired-initial-token")
+    monkeypatch.setenv("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", "ADC")
     monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
 
     attempts: list[str] = []
@@ -1359,6 +1360,7 @@ def test_verifier_refreshes_adc_token_on_401_via_gcloud_cli(monkeypatch: pytest.
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_BASE_URL", base_url)
     monkeypatch.setenv("OPENAI_API_KEY", "expired-initial-token")
+    monkeypatch.setenv("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", "ADC")
     monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
 
     # Simulate gcloud available and returning refreshed token
@@ -1410,6 +1412,53 @@ def test_verifier_refreshes_adc_token_on_401_via_gcloud_cli(monkeypatch: pytest.
     assert content == "grading verdict from gcloud token"
     assert attempts == ["Bearer expired-initial-token", "Bearer refreshed-gcloud-token"]
     assert verifier.os.environ.get("OPENAI_API_KEY") == "refreshed-gcloud-token"
+
+
+def test_verifier_401_does_not_switch_principals_for_explicit_vertex_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not replace an explicitly supplied Vertex OpenAPI token with ambient ADC on HTTP 401."""
+    import io
+    import urllib.error
+
+    verifier = _load_verifier_template()
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/test-p/locations/global/endpoints/openapi"
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", "explicit-operator-token")
+    monkeypatch.delenv("SKILL_EVAL_LLM_CREDENTIAL_SOURCE", raising=False)
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
+
+    refresh_called = False
+
+    def mock_get_token(**_kw):
+        nonlocal refresh_called
+        refresh_called = True
+        return "ambient-adc-token"
+
+    monkeypatch.setattr(verifier, "_get_vertex_access_token", mock_get_token)
+
+    def mock_urlopen(request, timeout=90):
+        raise urllib.error.HTTPError(
+            url=request.full_url,
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=io.BytesIO(b'{"error": "Explicit token rejected"}'),
+        )
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", mock_urlopen)
+
+    content, error, _provenance = verifier._call_public_llm_with_provenance(
+        "Evaluate this trajectory",
+        allow_model_fallback=False,
+    )
+
+    assert content is None
+    assert error is not None
+    assert "401" in error or "Unauthorized" in error
+    assert refresh_called is False
+    assert verifier.os.environ.get("OPENAI_API_KEY") == "explicit-operator-token"
 
 
 def test_verifier_401_does_not_retry_non_vertex_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:

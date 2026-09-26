@@ -189,8 +189,11 @@ skillevaluator similarity-check ./skills --max-entries 500 --max-scalar-comparis
 
 The entry budget counts selected manifests even when their frontmatter is
 invalid. It applies before any embedding request and never truncates a scan.
-The comparison budget is checked after embeddings establish their dimensions
-and before cosine comparisons. A failure names the option to adjust. Increasing
+Fresh pairwise scans check the comparison budget after the first validated
+embedding batch (or first full-body vector), before requesting the remaining
+embeddings or saving a catalog. Python index-only builds remain available for
+single-target queries that fit the smaller query budget. A failure names the
+option to adjust. Increasing
 either budget can increase provider usage or processing time. Neither option
 changes the separate path, input-byte, catalog-file, vector, or result limits.
 

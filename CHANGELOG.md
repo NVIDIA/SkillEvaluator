@@ -11,6 +11,8 @@ All notable changes to SkillEvaluator are documented in this file.
   comparisons by default, covering 343 skills with 2,048-dimensional embeddings.
   Add `--max-entries` and `--max-scalar-comparisons` for explicit scan budgets;
   exceeded limits fail with actionable errors and never truncate the collection.
+  Fresh pairwise scans reject excessive scalar work after the first validated
+  embedding response, before requesting more embeddings or saving a catalog.
 - Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
 
 - Preserve full Codex gateway model IDs in cloud environments, including E2B

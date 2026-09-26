@@ -198,8 +198,14 @@ class EmbeddingRegistry:
         content_type: str,
         *,
         minimum_entries: int = 1,
+        for_pairwise_scan: bool = False,
     ) -> int:
         """Discover content items, embed them, and populate the index.
+
+        Set ``for_pairwise_scan`` when the caller will compare all entries.
+        The first validated response then checks the pairwise work budget
+        before requesting the remaining embeddings. Index-only builds retain
+        their independent capacity for single-target queries.
 
         Returns:
             Number of entries successfully indexed.
@@ -218,35 +224,46 @@ class EmbeddingRegistry:
         texts = [entry.full_text if self._full_body else entry.embedding_text for entry in content_entries]
         for text in texts:
             _validate_embedding_text(text, full_body=self._full_body)
-        if self._full_body:
-            vectors = [self._client.embed_chunked(text) for text in texts]
-        else:
-            vectors = []
-            for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-                vectors.extend(self._client.embed(texts[start : start + EMBEDDING_BATCH_SIZE]))
-        if len(vectors) != len(content_entries):
-            raise ValueError(f"Embedding provider returned {len(vectors)} vectors for {len(content_entries)} entries")
-
         resolved_root = root.resolve(strict=True)
-        for entry, vector in zip(content_entries, vectors, strict=True):
-            vector_dimension = _validate_vector(vector, self._vector_dimension)
-            if self._vector_dimension is None:
-                self._vector_dimension = vector_dimension
+        pending_entries: list[RegistryEntry] = []
+        for entry in content_entries:
             resolved_entry = Path(entry.path).resolve(strict=True)
             try:
                 relative_path = resolved_entry.relative_to(resolved_root).as_posix() or "."
             except ValueError as exc:
                 raise ValueError(f"Discovered content path escapes scan root: {entry.path}") from exc
             entry_id = f"{entry.content_type}:{relative_path}"
-            self._entries[entry_id] = RegistryEntry(
-                name=entry.name,
-                description=entry.description,
-                path=relative_path,
-                content_type=entry.content_type,
-                embedding=vector,
-                entry_id=entry_id,
-                content_fingerprint=_fingerprint(entry.full_text if self._full_body else entry.embedding_text),
+            pending_entries.append(
+                RegistryEntry(
+                    name=entry.name,
+                    description=entry.description,
+                    path=relative_path,
+                    content_type=entry.content_type,
+                    entry_id=entry_id,
+                    content_fingerprint=_fingerprint(entry.full_text if self._full_body else entry.embedding_text),
+                )
             )
+
+        entry_count = len(self._entries.keys() | {entry.entry_id for entry in pending_entries})
+        comparison_count = entry_count * (entry_count - 1) // 2
+        vector_dimension = self._vector_dimension
+        validated_vectors: list[list[float]] = []
+        batch_size = 1 if self._full_body else EMBEDDING_BATCH_SIZE
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            vectors = [self._client.embed_chunked(batch[0])] if self._full_body else self._client.embed(batch)
+            if len(vectors) != len(batch):
+                raise ValueError(f"Embedding provider returned {len(vectors)} vectors for {len(batch)} entries in batch")
+            for vector in vectors:
+                vector_dimension = _validate_vector(vector, vector_dimension)
+                validated_vectors.append(vector)
+            if start == 0 and for_pairwise_scan:
+                _validate_scalar_work(comparison_count, vector_dimension or 0, self._max_scalar_comparisons)
+
+        for entry, vector in zip(pending_entries, validated_vectors, strict=True):
+            entry.embedding = vector
+        self._entries.update((entry.entry_id, entry) for entry in pending_entries)
+        self._vector_dimension = vector_dimension
 
         logger.debug("Indexed %d entries from %s", len(self._entries), safe_path_label(root))
         return len(self._entries)

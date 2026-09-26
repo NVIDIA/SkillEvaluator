@@ -144,6 +144,7 @@ class SimilarityValidator(ValidatorBase):
                     skill_path,
                     content_type,
                     minimum_entries=minimum_entries,
+                    for_pairwise_scan=True,
                 )
                 if count == 0:
                     if self._save_catalog_path:

@@ -707,9 +707,7 @@ class TestStrictGateRevisionSyntax:
         assert (self._STRICT not in reasons) is accepted
 
     @pytest.mark.parametrize(("length", "accepted"), [(255, True), (256, False)])
-    def test_a_registry_host_does_not_spend_the_path_budget(
-        self, tmp_path: Path, length: int, accepted: bool
-    ) -> None:
+    def test_a_registry_host_does_not_spend_the_path_budget(self, tmp_path: Path, length: int, accepted: bool) -> None:
         """The bound measures the path once the host is split off, as the reference grammar does."""
         reference = "ghcr.io/" + "n" * length + "@sha256:" + "0117bc2e" * 8
         reasons = self._container_reasons(tmp_path, reference)
@@ -843,7 +841,7 @@ class TestCliSurfacesTheConflict:
 
         result = CliRunner().invoke(
             cli,
-            ["validate", str(skill), "--no-dedup", "-r", "cli", "-o", str(tmp_path / "out")],
+            ["validate", "--no-tier3", str(skill), "--no-dedup", "-r", "cli", "-o", str(tmp_path / "out")],
         )
 
         assert result.exit_code != 0
@@ -881,7 +879,17 @@ class TestCliSuppliesTheIdentity:
         output_dir = tmp_path / "out"
         invocation = CliRunner().invoke(
             cli,
-            ["validate", str(self._skill(tmp_path)), "--no-dedup", "-r", "cli", "-o", str(output_dir), *args],
+            [
+                "validate",
+                "--no-tier3",
+                str(self._skill(tmp_path)),
+                "--no-dedup",
+                "-r",
+                "cli",
+                "-o",
+                str(output_dir),
+                *args,
+            ],
         )
         return invocation, output_dir / "BENCHMARK.md"
 
@@ -1179,7 +1187,7 @@ class TestTier1OnlyReportsCarryTheIdentity:
         output_dir = tmp_path / "out"
         invocation = CliRunner().invoke(
             cli,
-            ["validate", str(skill), "--no-dedup", "-r", "json", "-o", str(output_dir), *args],
+            ["validate", "--no-tier3", str(skill), "--no-dedup", "-r", "json", "-o", str(output_dir), *args],
         )
         assert "evaluated source" not in invocation.output
         return output_dir
@@ -1235,6 +1243,7 @@ class TestConflictAbortsBeforeAnyReportIsWritten:
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(skill),
                 "--no-dedup",
                 "-r",
@@ -1281,6 +1290,7 @@ class TestPartialRecordedIdentityMergesWithTheInput:
             cli,
             [
                 "validate",
+                "--no-tier3",
                 str(skill),
                 "--no-dedup",
                 "-r",

@@ -241,7 +241,6 @@
     "doctor": {
       "params": [
         {
-          "default": "codex",
           "name": "agents",
           "opts": [
             "--agents",
@@ -309,7 +308,6 @@
           "type": "path"
         },
         {
-          "default": "codex",
           "name": "agents",
           "opts": [
             "--agents",
@@ -596,7 +594,6 @@
     "health-check": {
       "params": [
         {
-          "default": "codex",
           "name": "agents",
           "opts": [
             "--agents",
@@ -1400,62 +1397,47 @@
         "validate": {
           "params": [
             {
-              "name": "target_path",
+              "name": "skill_path",
               "opts": [
-                "target_path"
+                "skill_path"
               ],
               "param_type": "argument",
               "required": true,
-              "type": "path"
+              "type": "directory"
             },
             {
-              "choices": [
-                "skill",
-                "rules",
-                "workflows",
-                "plugin",
-                "auto"
-              ],
-              "default": "auto",
-              "name": "content_type",
+              "name": "checks",
               "opts": [
-                "--type"
-              ],
-              "param_type": "option"
-            },
-            {
-              "name": "tiers",
-              "opts": [
-                "--tiers"
+                "--checks"
               ],
               "param_type": "option",
               "type": "text"
             },
             {
-              "default": "False",
               "is_flag": true,
-              "name": "full",
+              "name": "llm",
               "opts": [
-                "--full"
+                "--llm"
               ],
               "param_type": "option",
+              "secondary_opts": [
+                "--no-llm"
+              ],
               "type": "boolean"
             },
             {
-              "default": "False",
-              "is_flag": true,
-              "name": "verbose",
+              "default": "70",
+              "name": "min_score",
               "opts": [
-                "--verbose"
+                "--min-score"
               ],
               "param_type": "option",
-              "type": "boolean"
+              "type": "integer range"
             },
             {
-              "name": "checks",
+              "name": "profile",
               "opts": [
-                "--checks",
-                "--tier1-checks"
+                "--profile"
               ],
               "param_type": "option",
               "type": "text"
@@ -1469,344 +1451,6 @@
               "type": "text"
             },
             {
-              "default": "False",
-              "is_flag": true,
-              "name": "fail_fast",
-              "opts": [
-                "--fail-fast"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "continue_on_failure",
-              "opts": [
-                "--continue-on-failure",
-                "-c"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "llm",
-              "opts": [
-                "--llm",
-                "--tier1-llm"
-              ],
-              "param_type": "option",
-              "secondary_opts": [
-                "--no-llm",
-                "--no-tier1-llm"
-              ],
-              "type": "boolean"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "llm_verify",
-              "opts": [
-                "--llm-verify"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "default": "70",
-              "name": "min_score",
-              "opts": [
-                "--min-score"
-              ],
-              "param_type": "option",
-              "type": "integer"
-            },
-            {
-              "name": "profile",
-              "opts": [
-                "--profile"
-              ],
-              "param_type": "option",
-              "type": "text"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "external",
-              "opts": [
-                "--external"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "name": "policy_path",
-              "opts": [
-                "--policy"
-              ],
-              "param_type": "option",
-              "type": "file"
-            },
-            {
-              "default": "1",
-              "name": "workers",
-              "opts": [
-                "--workers"
-              ],
-              "param_type": "option",
-              "type": "integer range"
-            },
-            {
-              "default": "True",
-              "is_flag": true,
-              "name": "dedup",
-              "opts": [
-                "--dedup",
-                "--tier2"
-              ],
-              "param_type": "option",
-              "secondary_opts": [
-                "--no-dedup",
-                "--no-tier2"
-              ],
-              "type": "boolean"
-            },
-            {
-              "is_flag": true,
-              "name": "block_on_dedup",
-              "opts": [
-                "--block-on-dedup"
-              ],
-              "param_type": "option",
-              "secondary_opts": [
-                "--no-block-on-dedup"
-              ],
-              "type": "boolean"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "agent_eval",
-              "opts": [
-                "--agent-eval",
-                "--tier3"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "is_flag": true,
-              "name": "block_on_agent_eval",
-              "opts": [
-                "--block-on-agent-eval"
-              ],
-              "param_type": "option",
-              "secondary_opts": [
-                "--no-block-on-agent-eval"
-              ],
-              "type": "boolean"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "autopilot",
-              "opts": [
-                "--autopilot"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "default": "codex",
-              "name": "agents",
-              "opts": [
-                "--agents",
-                "-a"
-              ],
-              "param_type": "option",
-              "type": "text"
-            },
-            {
-              "choices": [
-                "docker",
-                "daytona",
-                "e2b",
-                "modal",
-                "runloop",
-                "langsmith",
-                "gke",
-                "novita",
-                "apple-container",
-                "singularity",
-                "islo",
-                "tensorlake",
-                "cwsandbox",
-                "wandb",
-                "use-computer",
-                "local"
-              ],
-              "default": "docker",
-              "name": "env_mode",
-              "opts": [
-                "--env-mode"
-              ],
-              "param_type": "option"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "skip_baseline",
-              "opts": [
-                "--skip-baseline"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "name": "n_concurrent",
-              "opts": [
-                "--n-concurrent"
-              ],
-              "param_type": "option",
-              "type": "integer"
-            },
-            {
-              "name": "max_agents",
-              "opts": [
-                "--max-agents"
-              ],
-              "param_type": "option",
-              "type": "integer"
-            },
-            {
-              "name": "n_attempts",
-              "opts": [
-                "--n-attempts"
-              ],
-              "param_type": "option",
-              "type": "integer"
-            },
-            {
-              "name": "pass_threshold",
-              "opts": [
-                "--pass-threshold"
-              ],
-              "param_type": "option",
-              "type": "float"
-            },
-            {
-              "is_flag": true,
-              "name": "stop_on_pass",
-              "opts": [
-                "--stop-on-pass"
-              ],
-              "param_type": "option",
-              "secondary_opts": [
-                "--no-stop-on-pass"
-              ],
-              "type": "boolean"
-            },
-            {
-              "name": "model",
-              "opts": [
-                "--model"
-              ],
-              "param_type": "option",
-              "type": "text"
-            },
-            {
-              "multiple": true,
-              "name": "agent_model",
-              "opts": [
-                "--agent-model"
-              ],
-              "param_type": "option",
-              "type": "text"
-            },
-            {
-              "choices": [
-                "default",
-                "default_plus_custom",
-                "custom_only"
-              ],
-              "name": "grading_mode",
-              "opts": [
-                "--grading-mode"
-              ],
-              "param_type": "option"
-            },
-            {
-              "name": "results_dir",
-              "opts": [
-                "--results-dir"
-              ],
-              "param_type": "option",
-              "type": "directory"
-            },
-            {
-              "multiple": true,
-              "name": "include_skills",
-              "opts": [
-                "--include-skills"
-              ],
-              "param_type": "option",
-              "type": "path"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "copy_repo",
-              "opts": [
-                "--copy-repo"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "name": "timeout_multiplier",
-              "opts": [
-                "--timeout-multiplier"
-              ],
-              "param_type": "option",
-              "type": "float"
-            },
-            {
-              "default": "False",
-              "is_flag": true,
-              "name": "harbor_keep_jobs",
-              "opts": [
-                "--harbor-keep-jobs"
-              ],
-              "param_type": "option",
-              "type": "boolean"
-            },
-            {
-              "name": "evaluated_source_repository",
-              "opts": [
-                "--evaluated-source-repository"
-              ],
-              "param_type": "option",
-              "type": "text"
-            },
-            {
-              "name": "evaluated_source_revision",
-              "opts": [
-                "--evaluated-source-revision"
-              ],
-              "param_type": "option",
-              "type": "text"
-            },
-            {
-              "name": "evaluator_container_revision",
-              "opts": [
-                "--evaluator-container-revision"
-              ],
-              "param_type": "option",
-              "type": "text"
-            },
-            {
               "choices": [
                 "cli",
                 "json",
@@ -1814,7 +1458,7 @@
                 "markdown",
                 "sarif"
               ],
-              "default": "('cli',)",
+              "default": "('cli', 'json', 'html')",
               "multiple": true,
               "name": "report_formats",
               "opts": [
@@ -1836,7 +1480,92 @@
           ]
         }
       },
-      "params": []
+      "params": [],
+      "workflow": {
+        "params": [
+          {
+            "name": "skill_path",
+            "opts": [
+              "skill_path"
+            ],
+            "param_type": "argument",
+            "required": true,
+            "type": "directory"
+          },
+          {
+            "name": "checks",
+            "opts": [
+              "--checks"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "is_flag": true,
+            "name": "llm",
+            "opts": [
+              "--llm"
+            ],
+            "param_type": "option",
+            "secondary_opts": [
+              "--no-llm"
+            ],
+            "type": "boolean"
+          },
+          {
+            "default": "70",
+            "name": "min_score",
+            "opts": [
+              "--min-score"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
+            "name": "profile",
+            "opts": [
+              "--profile"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "name": "previous_version",
+            "opts": [
+              "--previous-version"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "choices": [
+              "cli",
+              "json",
+              "html",
+              "markdown",
+              "sarif"
+            ],
+            "default": "('cli', 'json', 'html')",
+            "multiple": true,
+            "name": "report_formats",
+            "opts": [
+              "--report",
+              "-r"
+            ],
+            "param_type": "option"
+          },
+          {
+            "default": "reports",
+            "name": "output_dir",
+            "opts": [
+              "--output-dir",
+              "-o"
+            ],
+            "param_type": "option",
+            "type": "directory"
+          }
+        ]
+      }
     },
     "tier2": {
       "commands": {
@@ -2084,7 +1813,83 @@
           ]
         }
       },
-      "params": []
+      "params": [],
+      "workflow": {
+        "params": [
+          {
+            "name": "skill_path",
+            "opts": [
+              "skill_path"
+            ],
+            "param_type": "argument",
+            "required": true,
+            "type": "directory"
+          },
+          {
+            "name": "catalog",
+            "opts": [
+              "--catalog"
+            ],
+            "param_type": "option",
+            "type": "file"
+          },
+          {
+            "default": "0.8",
+            "name": "threshold",
+            "opts": [
+              "--threshold"
+            ],
+            "param_type": "option",
+            "type": "float"
+          },
+          {
+            "default": "0.75",
+            "name": "similarity_threshold",
+            "opts": [
+              "--similarity-threshold"
+            ],
+            "param_type": "option",
+            "type": "float"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "full_body",
+            "opts": [
+              "--full-body"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "choices": [
+              "cli",
+              "json",
+              "html",
+              "markdown",
+              "sarif"
+            ],
+            "default": "('cli', 'json', 'html')",
+            "multiple": true,
+            "name": "report_formats",
+            "opts": [
+              "--report",
+              "-r"
+            ],
+            "param_type": "option"
+          },
+          {
+            "default": "reports",
+            "name": "output_dir",
+            "opts": [
+              "--output-dir",
+              "-o"
+            ],
+            "param_type": "option",
+            "type": "directory"
+          }
+        ]
+      }
     },
     "tier3": {
       "commands": {
@@ -2199,7 +2004,6 @@
         "doctor": {
           "params": [
             {
-              "default": "codex",
               "name": "agents",
               "opts": [
                 "--agents",
@@ -2267,7 +2071,6 @@
               "type": "path"
             },
             {
-              "default": "codex",
               "name": "agents",
               "opts": [
                 "--agents",
@@ -2740,7 +2543,289 @@
           ]
         }
       },
-      "params": []
+      "params": [],
+      "workflow": {
+        "params": [
+          {
+            "name": "skill_path",
+            "opts": [
+              "skill_path"
+            ],
+            "param_type": "argument",
+            "required": true,
+            "type": "path"
+          },
+          {
+            "name": "agents",
+            "opts": [
+              "--agents",
+              "-a"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "choices": [
+              "docker",
+              "daytona",
+              "e2b",
+              "modal",
+              "runloop",
+              "langsmith",
+              "gke",
+              "novita",
+              "apple-container",
+              "singularity",
+              "islo",
+              "tensorlake",
+              "cwsandbox",
+              "wandb",
+              "use-computer",
+              "local"
+            ],
+            "default": "docker",
+            "name": "env_mode",
+            "opts": [
+              "--env-mode"
+            ],
+            "param_type": "option"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "autopilot",
+            "opts": [
+              "--autopilot"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "skip_baseline",
+            "opts": [
+              "--skip-baseline"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "name": "n_attempts",
+            "opts": [
+              "--n-attempts"
+            ],
+            "param_type": "option",
+            "type": "integer"
+          },
+          {
+            "name": "pass_threshold",
+            "opts": [
+              "--pass-threshold"
+            ],
+            "param_type": "option",
+            "type": "float"
+          },
+          {
+            "is_flag": true,
+            "name": "stop_on_pass",
+            "opts": [
+              "--stop-on-pass"
+            ],
+            "param_type": "option",
+            "secondary_opts": [
+              "--no-stop-on-pass"
+            ],
+            "type": "boolean"
+          },
+          {
+            "name": "n_concurrent",
+            "opts": [
+              "--n-concurrent"
+            ],
+            "param_type": "option",
+            "type": "integer"
+          },
+          {
+            "name": "max_agents",
+            "opts": [
+              "--max-agents"
+            ],
+            "param_type": "option",
+            "type": "integer"
+          },
+          {
+            "name": "model",
+            "opts": [
+              "--model"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "multiple": true,
+            "name": "agent_model",
+            "opts": [
+              "--agent-model"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "choices": [
+              "preserve",
+              "rebase"
+            ],
+            "name": "custom_dockerfile_mode",
+            "opts": [
+              "--custom-dockerfile-mode"
+            ],
+            "param_type": "option"
+          },
+          {
+            "choices": [
+              "isolated",
+              "group"
+            ],
+            "name": "skill_workspace_mode",
+            "opts": [
+              "--skill-workspace-mode"
+            ],
+            "param_type": "option"
+          },
+          {
+            "multiple": true,
+            "name": "include_skills",
+            "opts": [
+              "--include-skills"
+            ],
+            "param_type": "option",
+            "type": "path"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "copy_repo",
+            "opts": [
+              "--copy-repo"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "choices": [
+              "default",
+              "default_plus_custom",
+              "custom_only"
+            ],
+            "name": "grading_mode",
+            "opts": [
+              "--grading-mode"
+            ],
+            "param_type": "option"
+          },
+          {
+            "name": "results_dir",
+            "opts": [
+              "--results-dir"
+            ],
+            "param_type": "option",
+            "type": "directory"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "harbor_keep_jobs",
+            "opts": [
+              "--harbor-keep-jobs"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "is_flag": true,
+            "name": "agent_runtime_preflight",
+            "opts": [
+              "--agent-runtime-preflight"
+            ],
+            "param_type": "option",
+            "secondary_opts": [
+              "--no-agent-runtime-preflight"
+            ],
+            "type": "boolean"
+          },
+          {
+            "name": "timeout_multiplier",
+            "opts": [
+              "--timeout-multiplier"
+            ],
+            "param_type": "option",
+            "type": "float"
+          },
+          {
+            "name": "override_cpus",
+            "opts": [
+              "--override-cpus"
+            ],
+            "param_type": "option",
+            "type": "integer"
+          },
+          {
+            "name": "override_memory_mb",
+            "opts": [
+              "--override-memory-mb"
+            ],
+            "param_type": "option",
+            "type": "integer"
+          },
+          {
+            "name": "override_storage_mb",
+            "opts": [
+              "--override-storage-mb"
+            ],
+            "param_type": "option",
+            "type": "integer"
+          },
+          {
+            "name": "evaluated_source_repository",
+            "opts": [
+              "--evaluated-source-repository"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "name": "evaluated_source_revision",
+            "opts": [
+              "--evaluated-source-revision"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "name": "evaluator_container_revision",
+            "opts": [
+              "--evaluator-container-revision"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "choices": [
+              "auto",
+              "rich",
+              "plain",
+              "off"
+            ],
+            "default": "auto",
+            "name": "progress",
+            "opts": [
+              "--progress"
+            ],
+            "param_type": "option"
+          }
+        ]
+      }
     },
     "validate": {
       "params": [
@@ -2931,7 +3016,6 @@
           "type": "boolean"
         },
         {
-          "default": "False",
           "is_flag": true,
           "name": "agent_eval",
           "opts": [
@@ -2939,6 +3023,10 @@
             "--tier3"
           ],
           "param_type": "option",
+          "secondary_opts": [
+            "--no-agent-eval",
+            "--no-tier3"
+          ],
           "type": "boolean"
         },
         {
@@ -2954,17 +3042,18 @@
           "type": "boolean"
         },
         {
-          "default": "False",
           "is_flag": true,
           "name": "autopilot",
           "opts": [
             "--autopilot"
           ],
           "param_type": "option",
+          "secondary_opts": [
+            "--no-autopilot"
+          ],
           "type": "boolean"
         },
         {
-          "default": "codex",
           "name": "agents",
           "opts": [
             "--agents",
@@ -3125,6 +3214,18 @@
             "--harbor-keep-jobs"
           ],
           "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "agent_runtime_preflight",
+          "opts": [
+            "--agent-runtime-preflight"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-agent-runtime-preflight"
+          ],
           "type": "boolean"
         },
         {

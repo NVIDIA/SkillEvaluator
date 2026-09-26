@@ -3859,7 +3859,7 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert child_env["OPENAI_API_KEY"] == public_key
         assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
         assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
-        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-nano-30b-a3b"
+        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-super-120b-a12b"
         assert "NVIDIA_API_KEY" not in child_env
         assert "ANTHROPIC_API_KEY" not in child_env
         assert retired_name not in child_env

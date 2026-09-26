@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from skillevaluator import model_commands
@@ -63,20 +64,25 @@ def test_models_missing_provider_uses_canonical_configuration_error(monkeypatch)
     result = CliRunner().invoke(cli, ["models"])
 
     assert result.exit_code == 1
+    assert result.stdout == ""
     assert "No provider is configured" in result.output
     assert "NVIDIA_API_KEY" in result.output
 
 
-def test_models_requires_explicit_provider_when_credentials_are_ambiguous(monkeypatch) -> None:
+@pytest.mark.parametrize("options", [[], ["--json"]])
+def test_models_requires_explicit_provider_when_credentials_are_ambiguous(monkeypatch, options) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("NVIDIA_API_KEY", "nvidia-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
 
-    result = CliRunner().invoke(cli, ["models"])
+    result = CliRunner().invoke(cli, ["models", *options])
 
     assert result.exit_code == 1
+    assert result.stdout == ""
     assert "SKILL_EVAL_LLM_PROVIDER is required" in result.output
-    assert "multiple public provider credentials" in result.output
+    assert "multiple public provider credentials" in result.stderr.lower()
+    assert "Accepted values:\n  anthropic, bedrock, nv_build, openai, openai-compatible" in result.stderr
+    assert "export SKILL_EVAL_LLM_PROVIDER=nv_build" in result.stderr
     assert "nvidia-secret" not in result.output
     assert "openai-secret" not in result.output
 

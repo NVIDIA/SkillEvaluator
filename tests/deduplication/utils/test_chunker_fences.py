@@ -72,17 +72,18 @@ def test_code_comment_does_not_drop_a_short_parent_section() -> None:
     assert chunks[0].text == content
 
 
-def test_file_collection_preserves_original_lines_and_fence_content(tmp_path: Path) -> None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_file_collection_preserves_original_lines_and_fence_content(tmp_path: Path, newline: str) -> None:
     frontmatter = "---\nname: example\ndescription: A simple example\n---\n"
     section = "## Usage\n```python\n# Literal comment\nprint(1)\n```\n"
-    content = frontmatter + section + "## Next\nDone\n"
-    (tmp_path / "SKILL.md").write_text(content, encoding="utf-8")
+    content = (frontmatter + section + "## Next\nDone\n").replace("\n", newline)
+    (tmp_path / "SKILL.md").write_bytes(content.encode("utf-8"))
     files = collect_files(tmp_path)
     assert len(files) == 1
     chunks = chunk_file(files[0], min_chars=1)
     assert [chunk.heading for chunk in chunks] == ["## Usage", "## Next"]
-    original_lines = content.splitlines()
+    original_lines = content.splitlines(keepends=True)
     for chunk in chunks:
-        assert "\n".join(original_lines[chunk.start_line - 1 : chunk.end_line]) == chunk.text
+        assert "".join(original_lines[chunk.start_line - 1 : chunk.end_line]).strip() == chunk.text
     assert chunks[0].start_line == 5
-    assert chunks[0].text == section.strip()
+    assert chunks[0].text == section.replace("\n", newline).strip()

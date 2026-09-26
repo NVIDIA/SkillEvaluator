@@ -497,3 +497,99 @@ def test_no_credential_embedding_error_omits_non_embedding_providers() -> None:
 def test_embedding_rejection_of_llm_only_providers_names_the_fix() -> None:
     with pytest.raises(ProviderConfigurationError, match=r"nv_build\|openai\|openai-compatible"):
         resolve_embedding_provider({"ANTHROPIC_API_KEY": "test-anthropic-key"})
+
+
+def test_resolve_llm_provider_vertex_openapi_adc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve Vertex AI OpenAPI endpoint using Google Application Default Credentials without API key."""
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-adc-token")
+    base_url = (
+        "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/us-central1/endpoints/openapi"
+    )
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_LLM_BASE_URL": base_url,
+            "SKILL_EVAL_LLM_MODEL": "google/gemini-3.8-flash",
+        }
+    )
+
+    assert config.provider == "openai-compatible"
+    assert config.model == "google/gemini-3.8-flash"
+    assert config.base_url == base_url
+    assert config.api_key == "mock-adc-token"
+    assert config.credential_env == "ADC"
+
+    # Verify child_environment does NOT export credential when credential_env is ADC
+    child_env = config.child_environment()
+    assert child_env.get("SKILL_EVAL_LLM_BASE_URL") == base_url
+    assert "SKILL_EVAL_LLM_API_KEY" not in child_env
+    assert "mock-adc-token" not in child_env.values()
+
+
+def test_resolve_llm_provider_vertex_openapi_adc_openai_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve openai provider pointing to Vertex OpenAPI endpoint using ADC."""
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-adc-token")
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/global/endpoints/openapi"
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai",
+            "OPENAI_BASE_URL": base_url,
+            "SKILL_EVAL_LLM_MODEL": "google/gemini-3.8-flash",
+        }
+    )
+
+    assert config.provider == "openai"
+    assert config.api_key == "mock-adc-token"
+    assert config.credential_env == "ADC"
+    child_env = config.child_environment()
+    assert child_env["OPENAI_API_KEY"] == "mock-adc-token"
+    assert child_env["OPENAI_BASE_URL"] == base_url
+
+
+def test_resolve_llm_provider_vertex_openapi_adc_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise ProviderConfigurationError when ADC token acquisition returns None."""
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: None)
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/global/endpoints/openapi"
+    with pytest.raises(ProviderConfigurationError, match="Google Application Default Credentials"):
+        resolve_llm_provider(
+            {
+                "SKILL_EVAL_LLM_PROVIDER": "openai",
+                "OPENAI_BASE_URL": base_url,
+                "SKILL_EVAL_LLM_MODEL": "google/gemini-3.8-flash",
+            }
+        )
+
+
+def test_openai_provider_supports_skill_eval_llm_api_key() -> None:
+    """Resolve openai provider using SKILL_EVAL_LLM_API_KEY when OPENAI_API_KEY is not set."""
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai",
+            "SKILL_EVAL_LLM_API_KEY": "skill-eval-key-123",
+        }
+    )
+    assert config.provider == "openai"
+    assert config.api_key == "skill-eval-key-123"
+    assert config.credential_env == "SKILL_EVAL_LLM_API_KEY"
+
+
+def test_openai_provider_vertex_openapi_with_explicit_key() -> None:
+    """Resolve openai provider on Vertex OpenAPI with explicit SKILL_EVAL_LLM_API_KEY without calling ADC."""
+    base_url = "https://aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/global/endpoints/openapi"
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai",
+            "OPENAI_BASE_URL": base_url,
+            "SKILL_EVAL_LLM_API_KEY": "test-openai-key",
+            "SKILL_EVAL_LLM_MODEL": "google/gemini-3.8-flash",
+        }
+    )
+    assert config.provider == "openai"
+    assert config.api_key == "test-openai-key"
+    assert config.credential_env == "SKILL_EVAL_LLM_API_KEY"
+
+
+def test_openai_provider_missing_both_keys_raises() -> None:
+    """Raise ProviderConfigurationError when neither OPENAI_API_KEY nor SKILL_EVAL_LLM_API_KEY is set."""
+    with pytest.raises(ProviderConfigurationError, match="OPENAI_API_KEY or SKILL_EVAL_LLM_API_KEY is required"):
+        resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "openai"})

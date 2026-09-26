@@ -288,7 +288,30 @@ class LLMClient:
             **_token_limit_kwargs(config, self._max_tokens),
         }
 
-        response = client.chat.completions.create(**call_kwargs)
+        try:
+            response = client.chat.completions.create(**call_kwargs)
+        except Exception as exc:
+            from skillevaluator.provider_config import _get_google_access_token
+
+            if config.credential_env == "ADC":
+                from openai import AuthenticationError
+
+                if isinstance(exc, AuthenticationError) or getattr(exc, "status_code", None) == 401:
+                    new_token = _get_google_access_token()
+                    if new_token:
+                        import dataclasses
+
+                        client.api_key = new_token
+                        self._provider_config = dataclasses.replace(config, api_key=new_token)
+                        if self._api_key is not None:
+                            self._api_key = new_token
+                        response = client.chat.completions.create(**call_kwargs)
+                    else:
+                        raise
+                else:
+                    raise
+            else:
+                raise
         content = response.choices[0].message.content
         if not content:
             raise EmptyLLMResponseError("LLM returned empty response content")

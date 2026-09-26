@@ -2264,6 +2264,16 @@ def dedup_scan(
         raise click.ClickException("dedup scan failed")
 
 
+def _parse_environment_kwargs_cli(raw_kwargs: tuple[str, ...]) -> dict[str, str]:
+    """Parse and validate environment kwargs for CLI commands, raising Click BadParameter on errors."""
+    from skillevaluator.tier3.commands import parse_environment_kwargs
+
+    try:
+        return parse_environment_kwargs(raw_kwargs)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint=["--ek"]) from exc
+
+
 def _workflow_report_options(func):
     func = _report_options(func)
     for param in func.__click_params__:
@@ -2450,6 +2460,13 @@ def _tier2_workflow(
     show_default=True,
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
+@click.option(
+    "--ek",
+    "--environment-kwarg",
+    "environment_kwargs",
+    multiple=True,
+    help="Environment kwarg override in KEY=VALUE form (repeatable).",
+)
 def evaluate(
     skill_path: Path,
     agents: str | None,
@@ -2479,6 +2496,7 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    environment_kwargs: tuple[str, ...] = (),
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
@@ -2494,6 +2512,8 @@ def evaluate(
     )
     if autopilot:
         _ensure_autopilot_dataset(skill_path, progress=progress)
+
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwargs)
 
     options = EvaluationOptions(
         skill_path=skill_path,
@@ -2520,6 +2540,7 @@ def evaluate(
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
         evaluated_source=evaluated_source,
+        environment_kwargs=parsed_environment_kwargs,
     )
     try:
         if env_mode == "local":
@@ -2538,6 +2559,31 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
+        elif env_mode == "gke":
+            from skillevaluator.tier3.commands import parse_agents
+            from skillevaluator.tier3.harbor.runner import (
+                is_gke_vertex_workload_identity_active,
+                is_gke_workload_identity_allowed,
+            )
+
+            if is_gke_vertex_workload_identity_active(
+                env_mode, parse_agents(agents)
+            ) and is_gke_workload_identity_allowed(options.environment_kwargs):
+                from rich.panel import Panel
+                from rich.text import Text
+
+                console.print(
+                    Panel(
+                        Text(
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.13.2 single-pod "
+                            "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
+                            style="yellow",
+                        ),
+                        title=Text("GKE Workload Identity · Trusted Skills Only", style="bold cyan"),
+                        border_style="yellow",
+                        padding=(0, 1),
+                    )
+                )
         progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
@@ -2713,16 +2759,31 @@ def models_command(limit: int, as_json: bool) -> None:
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
-def doctor(agents: str | None, env_mode: str, agent_model: tuple[str, ...], verify_models: bool) -> None:
+@click.option(
+    "--ek",
+    "--environment-kwarg",
+    "environment_kwargs",
+    multiple=True,
+    help="Environment kwarg override in KEY=VALUE form (repeatable).",
+)
+def doctor(
+    agents: str | None,
+    env_mode: str,
+    agent_model: tuple[str, ...],
+    verify_models: bool,
+    environment_kwargs: tuple[str, ...] = (),
+) -> None:
     """Check live-evaluation runtime readiness."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
+    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwargs)
     raise SystemExit(
         tier3_doctor(
             agents=agents,
             env_mode=env_mode,
             verify_models=verify_models,
             agent_model=agent_model,
+            environment_kwargs=parsed_environment_kwargs,
         )
     )
 
@@ -2739,7 +2800,15 @@ def health_check(agents: str | None, env_mode: str) -> None:
     """Quick readiness check for the CLI and selected live-eval backend."""
     from skillevaluator.tier3.commands import doctor as tier3_doctor
 
-    raise SystemExit(tier3_doctor(agents=agents, env_mode=env_mode, verify_models=False, agent_model=()))
+    raise SystemExit(
+        tier3_doctor(
+            agents=agents,
+            env_mode=env_mode,
+            verify_models=False,
+            agent_model=(),
+            environment_kwargs={},
+        )
+    )
 
 
 @tier3.command("validate")

@@ -64,6 +64,7 @@ _SECRET_PATTERNS = [
     re.compile(r"nvapi-" + _GLUED_KEY_BODY),
     re.compile(r"AKIA" + _GLUED_AKIA_BODY),
     re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----"),
+    re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}"),
 ]
 
 _DESTRUCTIVE_PATTERNS = [
@@ -80,6 +81,9 @@ _UNAUTHORIZED_PATHS = [
     "/etc/shadow",
     "/root/.ssh",
     "/var/run/docker.sock",
+    "/var/run/secrets/kubernetes.io",
+    "169.254.169.254",
+    "metadata.google.internal",
     "~/.ssh",
     ".aws/credentials",
     ".config/gcloud",

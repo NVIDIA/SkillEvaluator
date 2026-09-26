@@ -106,7 +106,123 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
     return f"{rewrite(launcher)}{separator}{prompt}"
 
 
-class SkillEvaluatorLocalClaudeCode(ClaudeCode):
+class SkillEvaluatorClaudeCode(ClaudeCode):
+    """Wrap Claude Code to preserve rich MCP server declarations (transport, headers)."""
+
+    def _resolve_task_path(self) -> Path | None:
+        """Resolve the task directory path from trial config.json."""
+        trial_config_path = self.logs_dir.parent / "config.json"
+        if not trial_config_path.is_file():
+            trial_config_path = self.logs_dir.parent.parent / "config.json"
+            if not trial_config_path.is_file():
+                return None
+        try:
+            config_data = json.loads(trial_config_path.read_text(encoding="utf-8"))
+            task_path_str = config_data.get("task", {}).get("path")
+            if not task_path_str:
+                return None
+            task_path = Path(task_path_str)
+            if not task_path.is_absolute():
+                task_path = (trial_config_path.parent / task_path).resolve()
+            return task_path
+        except Exception:
+            return None
+
+    def _resolve_task_runtime_env(self) -> dict[str, str]:
+        """Extract allowed runtime environment from task.toml if available."""
+        task_path = self._resolve_task_path()
+        if not task_path:
+            return {}
+        task_toml_path = task_path / "task.toml"
+        if not task_toml_path.is_file():
+            return {}
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        try:
+            task_data = tomllib.loads(task_toml_path.read_text(encoding="utf-8"))
+            env_table = task_data.get("environment", {}).get("env", {})
+            if isinstance(env_table, dict):
+                return {str(k): str(v) for k, v in env_table.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _build_register_mcp_servers_command(self) -> str | None:
+        """Build MCP registration command supporting streamable-http and headers from mcp_servers.json."""
+        mcp_servers = self._resolve_task_mcp_servers()
+        if not mcp_servers:
+            return super()._build_register_mcp_servers_command()
+
+        from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+        runtime_env = self._resolve_task_runtime_env()
+        validate_mcp_server_declarations(mcp_servers, allowed_runtime_env=runtime_env)
+
+        servers: dict[str, dict[str, Any]] = {}
+        for server in mcp_servers:
+            name = server.get("name")
+            if not name:
+                continue
+            transport = server.get("transport", "stdio")
+            if transport == "stdio":
+                stdio_entry: dict[str, Any] = {
+                    "type": "stdio",
+                    "command": server.get("command"),
+                    "args": server.get("args", []),
+                }
+                if "env" in server and isinstance(server["env"], dict):
+                    stdio_entry["env"] = server["env"]
+                servers[name] = stdio_entry
+            else:
+                http_type = "http" if transport in ("streamable-http", "http") else transport
+                entry: dict[str, Any] = {
+                    "type": http_type,
+                    "url": server.get("url"),
+                }
+                if "headers" in server and isinstance(server["headers"], dict):
+                    entry["headers"] = server["headers"]
+                servers[name] = entry
+
+        if not servers:
+            return super()._build_register_mcp_servers_command()
+
+        claude_json = json.dumps({"mcpServers": servers}, indent=2)
+        escaped = shlex.quote(claude_json)
+        return (
+            'CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME}" && '
+            'mkdir -p "$CLAUDE_DIR" && '
+            f"printf '%s\\n' {escaped} > \"$CLAUDE_DIR/.claude.json\""
+        )
+
+    def _resolve_task_mcp_servers(self) -> list[dict[str, Any]]:
+        """Resolve rich MCP declarations from task mcp_servers.json if available."""
+        task_path = self._resolve_task_path()
+        if not task_path:
+            return []
+        try:
+            mcp_json_path = task_path / "mcp_servers.json"
+            if not mcp_json_path.is_file():
+                return []
+            raw_servers = json.loads(mcp_json_path.read_text(encoding="utf-8"))
+            if isinstance(raw_servers, list):
+                from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+                runtime_env = self._resolve_task_runtime_env()
+                return validate_mcp_server_declarations(
+                    raw_servers,
+                    allowed_runtime_env=runtime_env,
+                    source_label=str(mcp_json_path),
+                )
+            return []
+        except ValueError:
+            raise
+        except Exception:
+            return []
+
+
+class SkillEvaluatorLocalClaudeCode(SkillEvaluatorClaudeCode):
     """Claude Code wrapper that skips bootstrap install in local mode."""
 
     _REMOTE_CLAUDE_TMP = PurePosixPath(EnvironmentPaths.agent_dir / "claude-tmp")
@@ -722,7 +838,7 @@ class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, Codex):
         return _rewrite_launcher_segment(command, lambda text: _CODEX_MODEL_ARG_RE.sub(replace, text))
 
 
-class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, ClaudeCode):
+class SkillEvaluatorNvidiaBuildClaudeCode(_NvidiaBuildBridgeAgent, SkillEvaluatorClaudeCode):
     """Stock Claude Code CLI routed through the in-trial NVIDIA Build bridge."""
 
     def _bridge_client_environment(self) -> dict[str, str]:
@@ -858,4 +974,8 @@ NVIDIA_BUILD_AGENT_IMPORT_PATHS = {
 NVIDIA_BUILD_LOCAL_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildClaudeCode",
     "codex": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalNvidiaBuildCodex",
+}
+
+CONTAINER_AGENT_IMPORT_PATHS = {
+    "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode",
 }

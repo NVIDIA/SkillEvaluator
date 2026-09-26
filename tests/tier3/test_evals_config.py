@@ -4,7 +4,11 @@
 import pytest
 
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
-from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+from skillevaluator.tier3.evals_config import (
+    _GKE_INFRASTRUCTURE_KWARGS,
+    EvalsConfigError,
+    load_evals_config,
+)
 from skillevaluator.tier3.evals_spec import validate_skillevaluators as validate_skill_evals
 
 
@@ -118,6 +122,132 @@ harbor:
     )
 
     with pytest.raises(EvalsConfigError, match="pass_threshold"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_valid_environment_kwargs(tmp_path):
+    skill = tmp_path / "gke-skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        """\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    custom_setting: custom_val
+    workload_profile: memory-optimized
+""",
+        encoding="utf-8",
+    )
+
+    config, path = load_evals_config(skill)
+
+    assert path == skill / "evals" / "config.yml"
+    assert config["harbor"]["environment_kwargs"] == {
+        "custom_setting": "custom_val",
+        "workload_profile": "memory-optimized",
+    }
+
+
+def test_load_evals_config_invalid_environment_kwargs(tmp_path):
+    skill = tmp_path / "invalid-skill"
+    (skill / "evals").mkdir(parents=True)
+
+    # Not a mapping
+    (skill / "evals" / "config.yml").write_text(
+        """\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    - custom_setting
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvalsConfigError, match=r"harbor\.environment_kwargs must be a mapping"):
+        load_evals_config(skill)
+
+    # Non-string value
+    (skill / "evals" / "config.yml").write_text(
+        """\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    custom_setting: 12345
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        EvalsConfigError,
+        match=r"harbor\.environment_kwargs\.custom_setting must be a non-empty string",
+    ):
+        load_evals_config(skill)
+
+
+def test_gke_infrastructure_kwargs_contains_expected_keys():
+    """Verify all 10 GKE infrastructure and security control kwargs are protected."""
+    expected = {
+        "allow_workload_identity",
+        "cluster_name",
+        "region",
+        "namespace",
+        "registry_location",
+        "registry_name",
+        "project_id",
+        "cloud_build_machine_type",
+        "cloud_build_disk_size_gb",
+        "memory_limit_multiplier",
+    }
+    assert expected == _GKE_INFRASTRUCTURE_KWARGS
+
+
+@pytest.mark.parametrize("blocked_key", sorted(_GKE_INFRASTRUCTURE_KWARGS))
+def test_load_evals_config_blocked_infrastructure_kwargs(tmp_path, blocked_key):
+    """Untrusted skills must not configure infrastructure keys in evals/config.yml."""
+    skill = tmp_path / "blocked-skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"""\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    {blocked_key}: forbidden-val
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        EvalsConfigError,
+        match=rf"harbor\.environment_kwargs\.{blocked_key} cannot be configured in skill evals/config\.yml",
+    ):
+        load_evals_config(skill)
+
+
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "network_block_all",
+        "langsmith_endpoint",
+        "extra_docker_compose",
+        "arbitrary_backend_knob",
+        "cookie",
+        "oauth",
+    ],
+)
+def test_load_evals_config_blocked_backend_security_controls(tmp_path, forbidden_key):
+    """Verify skills can only configure keys from the safe allowlist."""
+    skill = tmp_path / "forbidden-skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        f"""\
+schema_version: 1
+harbor:
+  environment_kwargs:
+    {forbidden_key}: some-value
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        EvalsConfigError,
+        match=rf"harbor\.environment_kwargs\.{forbidden_key} cannot be configured in skill evals/config\.yml",
+    ):
         load_evals_config(skill)
 
 

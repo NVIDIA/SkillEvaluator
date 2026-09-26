@@ -20,6 +20,18 @@ def _isolate_output_provenance_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_operator_vertex_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests isolated from host operator Vertex AI routing environment variables."""
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", raising=False)
+
+
 # =============================================================================
 # SKILLS FIXTURES
 # =============================================================================

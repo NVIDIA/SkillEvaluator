@@ -5,17 +5,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import math
 import os
+import re
 import shlex
 import ssl
 import stat
 import subprocess
+import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from http import HTTPStatus
 from pathlib import Path
 from queue import Empty, Queue
 from threading import BoundedSemaphore, Thread
@@ -69,6 +74,7 @@ from botocore.exceptions import (
 from skillevaluator.model_catalog import (
     ModelCatalogError,
     ModelCatalogFailureKind,
+    _urlopen_without_redirects,
     fetch_anthropic_model_record,
     fetch_model_records,
 )
@@ -733,15 +739,44 @@ def _catalog_listing_is_authoritative(provider: ProviderConfig) -> bool:
     return provider.provider.casefold() == "nv_build" and _is_native_catalog_endpoint(provider)
 
 
+from skillevaluator.provider_config import (
+    _get_google_access_token,
+    _is_vertex_openapi_endpoint,
+    _parse_vertex_openapi_metadata,
+)
+
+
 def credential_probe_disposition(
     provider: ProviderConfig,
     probe: ModelProbeResult,
+    *,
+    env_mode: str = "",
 ) -> CredentialProbeDisposition:
     """Classify a live catalog probe without rejecting compatible custom gateways."""
+    is_vertex_openapi = _is_vertex_openapi_endpoint(getattr(provider, "base_url", None))
+    is_claude_vertex = getattr(provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX" or (
+        provider.provider.casefold() == "anthropic"
+        and not provider.api_key
+        and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1"
+    )
+    is_vertex = is_vertex_openapi or is_claude_vertex
+
     if probe.ok:
         provider_name = provider.provider.casefold()
         if provider_name == "bedrock":
             # Only native catalog + runtime endpoints prove AWS credentials.
+            return (
+                CredentialProbeDisposition.VERIFIED
+                if getattr(probe, "catalog_authoritative", True)
+                else CredentialProbeDisposition.DEGRADED
+            )
+        if provider_name == "anthropic" and is_claude_vertex:
+            return (
+                CredentialProbeDisposition.VERIFIED
+                if getattr(probe, "catalog_authoritative", True)
+                else CredentialProbeDisposition.DEGRADED
+            )
+        if is_vertex_openapi:
             return (
                 CredentialProbeDisposition.VERIFIED
                 if getattr(probe, "catalog_authoritative", True)
@@ -759,15 +794,29 @@ def credential_probe_disposition(
     except (TypeError, ValueError):
         failure_kind = ModelCatalogFailureKind.UNKNOWN
 
+    if (
+        env_mode == "gke"
+        and is_claude_vertex
+        and not is_vertex_openapi
+        and failure_kind
+        in {
+            ModelCatalogFailureKind.AUTHENTICATION,
+            ModelCatalogFailureKind.AUTHORIZATION,
+        }
+    ):
+        return CredentialProbeDisposition.DEGRADED
+
     if failure_kind == ModelCatalogFailureKind.AUTHENTICATION:
         return (
             CredentialProbeDisposition.FATAL
-            if provider.provider.casefold() == "bedrock" or _is_native_catalog_endpoint(provider)
+            if provider.provider.casefold() == "bedrock" or is_vertex or _is_native_catalog_endpoint(provider)
             else CredentialProbeDisposition.DEGRADED
         )
     if failure_kind == ModelCatalogFailureKind.INVALID_CONFIGURATION:
         return CredentialProbeDisposition.FATAL
     if failure_kind == ModelCatalogFailureKind.MODEL_NOT_FOUND:
+        if is_vertex:
+            return CredentialProbeDisposition.FATAL
         return (
             CredentialProbeDisposition.FATAL
             if provider.provider.casefold() not in {"openai", "openai-compatible"}
@@ -775,6 +824,8 @@ def credential_probe_disposition(
             else CredentialProbeDisposition.DEGRADED
         )
     if failure_kind == ModelCatalogFailureKind.AUTHORIZATION:
+        if is_vertex:
+            return CredentialProbeDisposition.FATAL
         if provider.provider == "bedrock" or provider.provider.casefold() in {"openai", "openai-compatible"}:
             # ListFoundationModels permission is distinct from InvokeModel. OpenAI
             # restricted keys can likewise allow Responses while denying Models.
@@ -1379,10 +1430,559 @@ def _probe_bedrock_model_with_deadline(
         )
 
 
+_VERTEX_PROBE_SLOT = BoundedSemaphore(1)
+_VERTEX_OPENAPI_PROBE_SLOT = BoundedSemaphore(1)
+
+
+DEFAULT_VERTEX_REGION = "us-east5"
+VERTEX_PROJECT_ENV_VARS = (
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "GOOGLE_CLOUD_PROJECT",
+    "GCP_PROJECT",
+    "CLOUDSDK_CORE_PROJECT",
+)
+
+
+def _resolve_vertex_project_id(environ: Mapping[str, str] | None = None) -> str | None:
+    """Resolve the Google Cloud project ID for Vertex AI from environment variables."""
+    env = environ if environ is not None else os.environ
+    for var in VERTEX_PROJECT_ENV_VARS:
+        if val := env.get(var, "").strip():
+            return val
+    return None
+
+
+def _resolve_vertex_region(provider_region: str | None = None) -> str:
+    """Resolve the Google Cloud region for Vertex AI from provider config or environment variables."""
+    if provider_region and provider_region.strip():
+        return provider_region.strip()
+    return (
+        os.environ.get("CLOUD_ML_REGION", "").strip()
+        or os.environ.get("GOOGLE_CLOUD_REGION", "").strip()
+        or os.environ.get("GCP_REGION", "").strip()
+        or DEFAULT_VERTEX_REGION
+    )
+
+
+def _resolve_vertex_model_id(model: str) -> str:
+    """Normalize user-supplied Claude model string to Vertex Anthropic model ID."""
+    clean = model.strip()
+    if clean.lower().startswith("anthropic/"):
+        clean = clean[len("anthropic/") :].strip()
+    if "@" in clean:
+        prefix, sep, suffix = clean.partition("@")
+        return f"{prefix.lower()}{sep}{suffix}"
+    mapping = {
+        "claude-3-7-sonnet": "claude-3-7-sonnet@20250219",
+        "claude-3-5-sonnet": "claude-3-5-sonnet-v2@20241022",
+        "claude-3-5-sonnet-v2": "claude-3-5-sonnet-v2@20241022",
+        "claude-3-5-haiku": "claude-3-5-haiku@20241022",
+        "claude-3-opus": "claude-3-opus@20240229",
+        "claude-3-haiku": "claude-3-haiku@20240307",
+    }
+    return mapping.get(clean.lower(), clean.lower())
+
+
+def _probe_vertex_anthropic_model(
+    provider: ProviderConfig,
+    *,
+    timeout_seconds: float,
+    deadline: float | None = None,
+) -> ModelProbeResult:
+    """Execute rawPredict probe against Vertex AI Claude Model Garden endpoint."""
+    effective_deadline = deadline if deadline is not None else (monotonic() + timeout_seconds)
+    project_id = _resolve_vertex_project_id()
+    if not project_id:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI Anthropic probe requires a Google Cloud project ID. Set ANTHROPIC_VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT.",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    region = _resolve_vertex_region(getattr(provider, "region", None))
+
+    if not re.fullmatch(r"[a-z0-9-]+", region):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Invalid GCP region: {region!r}",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+    if not re.fullmatch(r"[a-z0-9-]+", project_id):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Invalid GCP project ID: {project_id!r}",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    token_budget = max(0.1, min(timeout_seconds, effective_deadline - monotonic()))
+    token = _get_google_access_token(timeout_seconds=token_budget)
+    if not token:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Could not acquire Google Cloud access token via google-auth or gcloud",
+            failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
+        )
+
+    model_id = _resolve_vertex_model_id(provider.model)
+    if not re.fullmatch(r"[a-zA-Z0-9_.@-]+", model_id):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Invalid model ID: {model_id!r}",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    host = "aiplatform.googleapis.com" if region == "global" else f"{region}-aiplatform.googleapis.com"
+    url = (
+        f"https://{host}/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model_id}:rawPredict"
+    )
+
+    payload = json.dumps(
+        {
+            "anthropic_version": "vertex-2023-10-16",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+
+    http_timeout = max(0.1, effective_deadline - monotonic())
+    try:
+        with _urlopen_without_redirects(req, timeout=http_timeout) as response:
+            if HTTPStatus.OK <= response.status < HTTPStatus.MULTIPLE_CHOICES:
+                return ModelProbeResult(
+                    True,
+                    provider.provider,
+                    provider.model,
+                    f"model {provider.model} is available on Vertex AI ({region})",
+                    catalog_authoritative=True,
+                )
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI probe returned unexpected HTTP status {response.status}",
+                failure_kind=ModelCatalogFailureKind.OTHER_HTTP,
+                http_status=response.status,
+            )
+    except urllib.error.HTTPError as exc:
+        body = ""
+        with contextlib.suppress(Exception):
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+        if HTTPStatus.MULTIPLE_CHOICES <= exc.code < HTTPStatus.BAD_REQUEST:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI probe rejected unexpected redirect ({exc.code}): {body}",
+                failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+                http_status=exc.code,
+            )
+        if exc.code == HTTPStatus.UNAUTHORIZED:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI authentication failed (401): {body}",
+                failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
+                http_status=HTTPStatus.UNAUTHORIZED,
+            )
+        if exc.code == HTTPStatus.FORBIDDEN:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI permission denied (403): {body}",
+                failure_kind=ModelCatalogFailureKind.AUTHORIZATION,
+                http_status=HTTPStatus.FORBIDDEN,
+            )
+        if exc.code == HTTPStatus.NOT_FOUND:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI model {provider.model} ({model_id}) not found (404): {body}",
+                failure_kind=ModelCatalogFailureKind.MODEL_NOT_FOUND,
+                http_status=HTTPStatus.NOT_FOUND,
+            )
+        if exc.code == HTTPStatus.TOO_MANY_REQUESTS:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI rate limit / quota exceeded (429): {body}",
+                failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+                http_status=HTTPStatus.TOO_MANY_REQUESTS,
+            )
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Vertex AI request failed with HTTP {exc.code}: {body}",
+            failure_kind=ModelCatalogFailureKind.OTHER_HTTP,
+            http_status=exc.code,
+        )
+    except TimeoutError:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI model probe timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+    except Exception as exc:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Vertex AI model probe failed: {type(exc).__name__}",
+            failure_kind=ModelCatalogFailureKind.UNKNOWN,
+        )
+
+
+def _probe_vertex_anthropic_model_with_deadline(
+    provider: ProviderConfig,
+    *,
+    timeout_seconds: float,
+) -> ModelProbeResult:
+    """Bound Vertex AI credential acquisition and rawPredict I/O within a single deadline."""
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "model catalog timeout must be a positive number",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    result_queue: Queue[ModelProbeResult] = Queue(maxsize=1)
+    deadline = monotonic() + timeout_seconds
+    if not _VERTEX_PROBE_SLOT.acquire(timeout=timeout_seconds):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI model probe timed out waiting for worker slot",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+    def run_probe() -> None:
+        try:
+            result = _probe_vertex_anthropic_model(provider, timeout_seconds=timeout_seconds, deadline=deadline)
+        except Exception as exc:
+            result = ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI model probe failed: {type(exc).__name__}",
+                failure_kind=ModelCatalogFailureKind.UNKNOWN,
+            )
+        finally:
+            _VERTEX_PROBE_SLOT.release()
+        result_queue.put_nowait(result)
+
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        _VERTEX_PROBE_SLOT.release()
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI model probe timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+    try:
+        worker = Thread(target=run_probe, name="vertex-anthropic-model-probe", daemon=True)
+        worker.start()
+    except BaseException as exc:
+        _VERTEX_PROBE_SLOT.release()
+        if not isinstance(exc, Exception):
+            raise
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Vertex AI model probe failed: {type(exc).__name__}",
+            failure_kind=ModelCatalogFailureKind.UNKNOWN,
+        )
+    try:
+        return result_queue.get(timeout=remaining)
+    except Empty:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI model probe timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+
+def _probe_vertex_openapi_model(
+    provider: ProviderConfig,
+    *,
+    timeout_seconds: float,
+    deadline: float | None = None,
+) -> ModelProbeResult:
+    """Execute a 1-token chat/completions probe against Vertex AI OpenAPI endpoint."""
+    effective_deadline = deadline if deadline is not None else (monotonic() + timeout_seconds)
+    base_url = (provider.base_url or "").strip().rstrip("/")
+    if not _is_vertex_openapi_endpoint(base_url):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Invalid Vertex AI OpenAPI base URL: {base_url!r}",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    _, location = _parse_vertex_openapi_metadata(base_url)
+
+    token_budget = max(0.1, min(timeout_seconds, effective_deadline - monotonic()))
+    token = provider.api_key.strip() if provider.api_key and provider.api_key.strip() else None
+    if not token:
+        token = _get_google_access_token(timeout_seconds=token_budget)
+
+    if not token:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Could not acquire Google Cloud access token via API key or google-auth/gcloud",
+            failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
+        )
+
+    url = f"{base_url}/chat/completions"
+    payload = json.dumps(
+        {
+            "model": provider.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+
+    http_timeout = max(0.1, effective_deadline - monotonic())
+    try:
+        with _urlopen_without_redirects(req, timeout=http_timeout) as response:
+            if HTTPStatus.OK <= response.status < HTTPStatus.MULTIPLE_CHOICES:
+                location_str = f" ({location})" if location else ""
+                return ModelProbeResult(
+                    True,
+                    provider.provider,
+                    provider.model,
+                    f"model {provider.model} is available on Vertex AI OpenAPI{location_str}",
+                    catalog_authoritative=True,
+                )
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI OpenAPI probe returned unexpected HTTP status {response.status}",
+                failure_kind=ModelCatalogFailureKind.OTHER_HTTP,
+                http_status=response.status,
+            )
+    except urllib.error.HTTPError as exc:
+        body = ""
+        with contextlib.suppress(Exception):
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+        if HTTPStatus.MULTIPLE_CHOICES <= exc.code < HTTPStatus.BAD_REQUEST:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI OpenAPI probe rejected unexpected redirect ({exc.code}): {body}",
+                failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+                http_status=exc.code,
+            )
+        if exc.code == HTTPStatus.UNAUTHORIZED:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI OpenAPI authentication failed (401): {body}",
+                failure_kind=ModelCatalogFailureKind.AUTHENTICATION,
+                http_status=HTTPStatus.UNAUTHORIZED,
+            )
+        if exc.code == HTTPStatus.FORBIDDEN:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI OpenAPI permission denied (403): {body}",
+                failure_kind=ModelCatalogFailureKind.AUTHORIZATION,
+                http_status=HTTPStatus.FORBIDDEN,
+            )
+        if exc.code == HTTPStatus.NOT_FOUND:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI OpenAPI model {provider.model} not found (404): {body}",
+                failure_kind=ModelCatalogFailureKind.MODEL_NOT_FOUND,
+                http_status=HTTPStatus.NOT_FOUND,
+            )
+        if exc.code == HTTPStatus.TOO_MANY_REQUESTS:
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI OpenAPI rate limit / quota exceeded (429): {body}",
+                failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+                http_status=HTTPStatus.TOO_MANY_REQUESTS,
+            )
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Vertex AI OpenAPI request failed with HTTP {exc.code}: {body}",
+            failure_kind=ModelCatalogFailureKind.OTHER_HTTP,
+            http_status=exc.code,
+        )
+    except TimeoutError:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI OpenAPI model probe timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+    except Exception as exc:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Vertex AI OpenAPI model probe failed: {type(exc).__name__}",
+            failure_kind=ModelCatalogFailureKind.UNKNOWN,
+        )
+
+
+def _probe_vertex_openapi_model_with_deadline(
+    provider: ProviderConfig,
+    *,
+    timeout_seconds: float,
+) -> ModelProbeResult:
+    """Bound Vertex AI OpenAPI credential acquisition and chat/completions I/O within a single deadline."""
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "model catalog timeout must be a positive number",
+            failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+        )
+
+    result_queue: Queue[ModelProbeResult] = Queue(maxsize=1)
+    deadline = monotonic() + timeout_seconds
+    if not _VERTEX_OPENAPI_PROBE_SLOT.acquire(timeout=timeout_seconds):
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI OpenAPI model probe timed out waiting for worker slot",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+    def run_probe() -> None:
+        try:
+            result = _probe_vertex_openapi_model(provider, timeout_seconds=timeout_seconds, deadline=deadline)
+        except Exception as exc:
+            result = ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                f"Vertex AI OpenAPI model probe failed: {type(exc).__name__}",
+                failure_kind=ModelCatalogFailureKind.UNKNOWN,
+            )
+        finally:
+            _VERTEX_OPENAPI_PROBE_SLOT.release()
+        result_queue.put_nowait(result)
+
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        _VERTEX_OPENAPI_PROBE_SLOT.release()
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI OpenAPI model probe timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+    try:
+        worker = Thread(target=run_probe, name="vertex-openapi-model-probe", daemon=True)
+        worker.start()
+    except BaseException as exc:
+        _VERTEX_OPENAPI_PROBE_SLOT.release()
+        if not isinstance(exc, Exception):
+            raise
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            f"Vertex AI OpenAPI model probe failed: {type(exc).__name__}",
+            failure_kind=ModelCatalogFailureKind.UNKNOWN,
+        )
+    try:
+        return result_queue.get(timeout=remaining)
+    except Empty:
+        return ModelProbeResult(
+            False,
+            provider.provider,
+            provider.model,
+            "Vertex AI OpenAPI model probe timed out",
+            failure_kind=ModelCatalogFailureKind.UNAVAILABLE,
+        )
+
+
 def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> ModelProbeResult:
     """Check the selected model against the provider catalog within one deadline."""
     if provider.provider == "bedrock":
         return _probe_bedrock_model_with_deadline(provider, timeout_seconds=timeout_seconds)
+    if provider.provider == "anthropic" and (
+        getattr(provider, "credential_env", None) == "CLAUDE_CODE_USE_VERTEX"
+        or (not provider.api_key and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").strip() == "1")
+    ):
+        return _probe_vertex_anthropic_model_with_deadline(provider, timeout_seconds=timeout_seconds)
+    if _is_vertex_openapi_endpoint(getattr(provider, "base_url", None)):
+        return _probe_vertex_openapi_model_with_deadline(provider, timeout_seconds=timeout_seconds)
     if (
         not isinstance(timeout_seconds, (int, float))
         or isinstance(timeout_seconds, bool)
@@ -1428,14 +2028,14 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
                     timeout_seconds=remaining,
                 )
             except ModelCatalogError as exc:
-                if exc.http_status == 404:
+                if exc.http_status == HTTPStatus.NOT_FOUND:
                     return ModelProbeResult(
                         False,
                         provider.provider,
                         provider.model,
                         f"model {provider.model} is not available",
                         failure_kind=ModelCatalogFailureKind.MODEL_NOT_FOUND,
-                        http_status=404,
+                        http_status=HTTPStatus.NOT_FOUND,
                     )
                 return ModelProbeResult(
                     False,
@@ -1469,6 +2069,7 @@ def run_agent_runtime_preflight(
     override_memory_mb: int | None = None,
     override_storage_mb: int | None = None,
     agent_import_path: str | None = None,
+    environment_kwargs: Mapping[str, str] | None = None,
 ) -> PreflightResult:
     """Start one real agent task and stop before the full A/B matrix."""
     task_name = _first_task_name(dataset)
@@ -1492,6 +2093,7 @@ def run_agent_runtime_preflight(
         override_memory_mb=override_memory_mb,
         override_storage_mb=override_storage_mb,
         agent_import_path=agent_import_path,
+        environment_kwargs=environment_kwargs,
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)

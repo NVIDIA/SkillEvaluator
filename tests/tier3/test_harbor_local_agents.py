@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import shlex
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +14,7 @@ from harbor.agents.installed.codex import Codex
 from harbor.models.trial.paths import EnvironmentPaths
 
 from skillevaluator.tier3.harbor.local_agents import (
+    SkillEvaluatorClaudeCode,
     SkillEvaluatorLocalClaudeCode,
     SkillEvaluatorLocalCodex,
     SkillEvaluatorLocalOpenCode,
@@ -271,3 +275,182 @@ def test_local_opencode_removes_docker_only_stdbuf(monkeypatch, tmp_path) -> Non
     assert "--dangerously-skip-permissions" not in captured["command"]
     assert captured["command"].endswith("| tee /logs/agent/opencode.txt")
     assert captured["env"]["OPENAI_API_KEY"] == "test"
+
+
+def test_claude_mcp_servers_command_with_mcp_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Build MCP configuration command with streamable-http and headers from task mcp_servers.json."""
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "developerknowledge.googleapis.com")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEVELOPERKNOWLEDGE_API_KEY")
+    agent_logs = tmp_path / "agent"
+    agent_logs.mkdir(parents=True)
+    task_dir = tmp_path / "task-001"
+    task_dir.mkdir(parents=True)
+
+    mcp_servers = [
+        {
+            "name": "developer-knowledge",
+            "transport": "streamable-http",
+            "url": "https://developerknowledge.googleapis.com/mcp",
+            "headers": {"X-Goog-Api-Key": "${DEVELOPERKNOWLEDGE_API_KEY}"},
+        }
+    ]
+    (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
+    (tmp_path / "config.json").write_text(json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8")
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    command = agent._build_register_mcp_servers_command()
+    assert command is not None
+    assert command.startswith('CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME}" && mkdir -p "$CLAUDE_DIR"')
+    assert ' > "$CLAUDE_DIR/.claude.json"' in command
+
+    # Extract and parse JSON payload
+    _, _, suffix = command.partition("printf '%s\\n' ")
+    payload_part, _, _ = suffix.partition(" > ")
+    json_str = shlex.split(payload_part)[0]
+    parsed = json.loads(json_str)
+
+    assert "developer-knowledge" in parsed["mcpServers"]
+    dk = parsed["mcpServers"]["developer-knowledge"]
+    assert dk["type"] == "http"
+    assert dk["url"] == "https://developerknowledge.googleapis.com/mcp"
+    assert dk["headers"] == {"X-Goog-Api-Key": "${DEVELOPERKNOWLEDGE_API_KEY}"}
+
+
+def test_claude_mcp_servers_command_stdio(tmp_path: Path) -> None:
+    """Build MCP configuration command with stdio transport, env, and command arguments."""
+    agent_logs = tmp_path / "agent"
+    agent_logs.mkdir(parents=True)
+    task_dir = tmp_path / "task-001"
+    task_dir.mkdir(parents=True)
+
+    mcp_servers = [
+        {
+            "name": "local-tool",
+            "transport": "stdio",
+            "command": "python3",
+            "args": ["-m", "my_mcp_server"],
+            "env": {"DATABASE_URL": "sqlite:///local.db"},
+        }
+    ]
+    (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
+    (tmp_path / "config.json").write_text(json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8")
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    command = agent._build_register_mcp_servers_command()
+    assert command is not None
+    assert command.startswith('CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME}" && mkdir -p "$CLAUDE_DIR"')
+    assert ' > "$CLAUDE_DIR/.claude.json"' in command
+
+    _, _, suffix = command.partition("printf '%s\\n' ")
+    payload_part, _, _ = suffix.partition(" > ")
+    json_str = shlex.split(payload_part)[0]
+    parsed = json.loads(json_str)
+
+    assert "local-tool" in parsed["mcpServers"]
+    lt = parsed["mcpServers"]["local-tool"]
+    assert lt["type"] == "stdio"
+    assert lt["command"] == "python3"
+    assert lt["args"] == ["-m", "my_mcp_server"]
+    assert lt["env"] == {"DATABASE_URL": "sqlite:///local.db"}
+
+
+def test_claude_mcp_servers_relative_task_path(tmp_path: Path) -> None:
+    """Anchor relative task path to trial directory instead of host process CWD."""
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir(parents=True)
+    agent_logs = trial_dir / "agent"
+    agent_logs.mkdir(parents=True)
+    task_dir = trial_dir / "relative-task"
+    task_dir.mkdir(parents=True)
+
+    mcp_servers = [
+        {
+            "name": "relative-mcp",
+            "transport": "stdio",
+            "command": "node",
+            "args": ["server.js"],
+        }
+    ]
+    (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
+    (trial_dir / "config.json").write_text(json.dumps({"task": {"path": "relative-task"}}), encoding="utf-8")
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    command = agent._build_register_mcp_servers_command()
+    assert command is not None
+    assert "relative-mcp" in command
+
+
+def test_claude_mcp_servers_command_fallback_when_no_mcp_json(tmp_path: Path) -> None:
+    """Fall back to base MCP registration command when no task mcp_servers.json exists."""
+    agent_logs = tmp_path / "agent"
+    agent_logs.mkdir(parents=True)
+    task_dir = tmp_path / "task-001"
+    task_dir.mkdir(parents=True)
+    (tmp_path / "config.json").write_text(json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8")
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    assert agent._build_register_mcp_servers_command() is None
+
+
+def test_claude_mcp_servers_command_resilient_to_missing_config_json(tmp_path: Path) -> None:
+    """Handle missing or malformed config.json without raising errors."""
+    agent_logs = tmp_path / "agent"
+    agent_logs.mkdir(parents=True)
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    assert agent._build_register_mcp_servers_command() is None
+
+
+def test_claude_mcp_servers_command_nested_logs_dir_layout(tmp_path: Path) -> None:
+    """Resolve task config.json from trial root when logs_dir is nested as <trial>/logs/agent."""
+    trial_dir = tmp_path / "trial_001"
+    agent_logs = trial_dir / "logs" / "agent"
+    agent_logs.mkdir(parents=True)
+    task_dir = trial_dir / "task"
+    task_dir.mkdir(parents=True)
+
+    mcp_servers = [{"name": "nested-mcp", "transport": "stdio", "command": "echo", "args": ["hi"]}]
+    (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
+    (trial_dir / "config.json").write_text(json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8")
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    command = agent._build_register_mcp_servers_command()
+    assert command is not None
+    assert "nested-mcp" in command
+
+
+def test_claude_mcp_servers_preserves_task_runtime_env_args(tmp_path: Path) -> None:
+    """Verify SkillEvaluatorClaudeCode extracts runtime_env from task.toml and validates MCP args."""
+    trial_dir = tmp_path / "trial_runtime_env"
+    agent_logs = trial_dir / "logs" / "agent"
+    agent_logs.mkdir(parents=True)
+    task_dir = trial_dir / "task"
+    task_dir.mkdir(parents=True)
+
+    mcp_servers = [
+        {
+            "name": "db-server",
+            "transport": "stdio",
+            "command": "python3",
+            "args": ["--db", "${LOCAL_DB_PATH}"],
+        }
+    ]
+    (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers), encoding="utf-8")
+    (task_dir / "task.toml").write_text(
+        '[environment.env]\nLOCAL_DB_PATH = "/workspace/db.sqlite"\n',
+        encoding="utf-8",
+    )
+    (trial_dir / "config.json").write_text(json.dumps({"task": {"path": str(task_dir)}}), encoding="utf-8")
+
+    agent = SkillEvaluatorClaudeCode(logs_dir=agent_logs, model_name="claude-sonnet-5")
+    resolved = agent._resolve_task_mcp_servers()
+    assert len(resolved) == 1
+    assert resolved[0]["name"] == "db-server"
+
+    command = agent._build_register_mcp_servers_command()
+    assert command is not None
+    assert "db-server" in command
+    assert "${LOCAL_DB_PATH}" in command

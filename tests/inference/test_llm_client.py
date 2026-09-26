@@ -672,6 +672,64 @@ class TestCompletions:
         assert call_kwargs["max_tokens"] == 512
         assert "max_completion_tokens" not in call_kwargs
 
+    def test_vertex_openapi_refreshes_token_on_auth_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Refresh Google access token and retry on 401 AuthenticationError for Vertex OpenAPI endpoints."""
+        from openai import AuthenticationError
+
+        vertex_base_url = (
+            "https://us-central1-aiplatform.googleapis.com/v1beta1/"
+            "projects/my-proj/locations/us-central1/endpoints/openapi"
+        )
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", vertex_base_url)
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
+        monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-refreshed-token")
+
+        mock_openai = MagicMock()
+        mock_auth_err = AuthenticationError("Unauthorized", response=MagicMock(status_code=401), body=None)
+        mock_success_response = MagicMock()
+        mock_success_response.choices = [MagicMock(message=MagicMock(content="Refreshed response"))]
+        mock_openai.chat.completions.create.side_effect = [mock_auth_err, mock_success_response]
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            client = LLMClient()
+            result = client.completions("system", "user")
+
+        assert result == "Refreshed response"
+        assert mock_openai.chat.completions.create.call_count == 2
+        assert mock_openai.api_key == "mock-refreshed-token"
+        assert client.api_key == "mock-refreshed-token"
+        assert client._resolved_config().api_key == "mock-refreshed-token"
+
+    def test_vertex_openapi_does_not_refresh_token_when_explicit_api_key_provided(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Do not overwrite user-provided API key with ADC token when 401 occurs."""
+        from openai import AuthenticationError
+
+        vertex_base_url = (
+            "https://us-central1-aiplatform.googleapis.com/v1beta1/"
+            "projects/my-proj/locations/us-central1/endpoints/openapi"
+        )
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", vertex_base_url)
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "explicit-user-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
+        monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "host-adc-token")
+
+        mock_openai = MagicMock()
+        mock_auth_err = AuthenticationError("Unauthorized", response=MagicMock(status_code=401), body=None)
+        mock_openai.chat.completions.create.side_effect = mock_auth_err
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            client = LLMClient()
+            with pytest.raises(AuthenticationError):
+                client.completions("system", "user")
+
+        assert mock_openai.chat.completions.create.call_count == 1
+        assert client.api_key == "explicit-user-key"
+        assert client._resolved_config().api_key == "explicit-user-key"
+
 
 class TestExtractJsonFromResponse:
     def test_parses_plain_json(self, monkeypatch: pytest.MonkeyPatch) -> None:

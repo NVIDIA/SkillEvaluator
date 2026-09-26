@@ -160,6 +160,13 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         )
         for agent in agents
     }
+    from skillevaluator.tier3.commands import parse_environment_kwargs
+
+    parsed_environment_kwargs = parse_environment_kwargs(params.get("environment_kwargs", ()))
+    resolved_environment_kwargs = {
+        **(harbor.get("environment_kwargs") or {}),
+        **parsed_environment_kwargs,
+    }
     runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"))
     if errors:
         raise ValueError("; ".join(errors))
@@ -170,6 +177,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
         configured_runtime_env=runtime_env,
         env_mode=params["env_mode"],
         model_sources={agent: value[1] for agent, value in resolution.items()},
+        environment_kwargs=resolved_environment_kwargs,
     )
     _evaluated_source_from_options(
         params["evaluated_source_repository"],
@@ -180,14 +188,19 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> None:
 
 def _preflight_environment(params: dict[str, Any]) -> None:
     """Check installed runtimes and backend configuration without an agent run."""
-    from skillevaluator.tier3.commands import parse_agents
+    from skillevaluator.tier3.commands import parse_agents, parse_environment_kwargs
     from skillevaluator.tier3.harbor.runner import _check_prerequisites
 
     # These Harbor preflights perform remote authentication RPCs. Leave those
     # probes in the execution engine instead of running them before generation.
     if params["env_mode"] in {"cwsandbox", "wandb", "langsmith"}:
         return
-    errors = _check_prerequisites(env_mode=params["env_mode"], agents=parse_agents(params["agents"]))
+    parsed_environment_kwargs = parse_environment_kwargs(params.get("environment_kwargs", ()))
+    errors = _check_prerequisites(
+        env_mode=params["env_mode"],
+        agents=parse_agents(params["agents"]),
+        environment_kwargs=parsed_environment_kwargs,
+    )
     if errors:
         raise ValueError("; ".join(errors))
 

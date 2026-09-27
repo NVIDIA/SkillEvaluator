@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Keep headings and comments inside fenced code examples in their enclosing Markdown
+  section during Tier 2 content chunking, preserving original source line numbers.
 - Run the public Docker image as an unprivileged user, with writable default report and home directories.
   Document UID/GID overrides for host-owned output mounts.
 - Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
@@ -139,6 +141,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).

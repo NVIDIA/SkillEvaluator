@@ -792,19 +792,206 @@ def test_behavior_check_budget_auto_reconciles_tool_history_headroom(monkeypatch
     assert atif_helpers._behavior_check_budget() == 12000
     assert judge_budget() == 12000
 
-    # If explicit budget is smaller than final response limit, it reconciles up to final limit
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "6000")
-    assert atif_helpers._behavior_check_budget() == 8000
-    assert judge_budget() == 8000
+    # Equal explicit budget (8000) and exceeded explicit budget (6000) both reserve tool-history headroom (4000)
+    for explicit_budget in ("8000", "6000"):
+        monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", explicit_budget)
+        assert atif_helpers._behavior_check_budget() == 12000
+        assert judge_budget() == 12000
 
 
-def test_harbor_template_behavior_evidence_respects_custom_limits(monkeypatch) -> None:
+def _load_harbor_template_module():
     template_path = Path(__file__).parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_custom_limits", template_path)
+    spec = importlib.util.spec_from_file_location("harbor_eval_template_headroom", template_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
 
+
+def _trajectory_with_failed_verification_and_long_claim(*, include_file_changes: bool = False) -> dict:
+    """Build a trajectory with a failed command (and optional large file writes) before a 9,000-char success claim."""
+    steps: list[dict] = [
+        {
+            "source": "user",
+            "message": "Run the verification suite and confirm all checks pass.",
+        }
+    ]
+    if include_file_changes:
+        for idx in range(2):
+            steps.append(
+                {
+                    "source": "agent",
+                    "tool_calls": [
+                        {
+                            "tool_call_id": f"write-{idx}",
+                            "function_name": "Write",
+                            "arguments": {
+                                "file_path": f"/workspace/output/module_{idx}.py",
+                                "content": f"# generated module {idx}\n" + ("x = 1\n" * 400),
+                            },
+                        }
+                    ],
+                    "observation": {
+                        "results": [
+                            {
+                                "source_call_id": f"write-{idx}",
+                                "content": f"Wrote /workspace/output/module_{idx}.py",
+                            }
+                        ]
+                    },
+                }
+            )
+    steps.append(
+        {
+            "source": "agent",
+            "tool_calls": [
+                {
+                    "tool_call_id": "verify-1",
+                    "function_name": "Bash",
+                    "arguments": {"command": "pytest -q tests/verify_suite.py"},
+                }
+            ],
+            "observation": {
+                "results": [
+                    {
+                        "source_call_id": "verify-1",
+                        "content": "FAILED tests/verify_suite.py::test_core - AssertionError: verification failed (exit 1)",
+                    }
+                ]
+            },
+        }
+    )
+    steps.append(
+        {
+            "source": "agent",
+            "message": "CLAIM_START: All verification checks succeeded!\n" + ("S" * 9000) + "\nCLAIM_END",
+        }
+    )
+    return {"steps": steps}
+
+
+@pytest.mark.parametrize("budget_env", ["8000", "6000"])
+@pytest.mark.parametrize("include_file_changes", [False, True], ids=["no_file_changes", "with_file_changes"])
+def test_explicit_budget_preserves_tool_history_with_long_final_response(
+    monkeypatch,
+    budget_env: str,
+    include_file_changes: bool,
+) -> None:
+    template_module = _load_harbor_template_module()
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", budget_env)
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+
+    traj = _trajectory_with_failed_verification_and_long_claim(include_file_changes=include_file_changes)
+    question = "Run the verification suite and confirm all checks pass."
+
+    shared_bundles = atif_helpers.build_metric_evidence_bundles(
+        traj,
+        question,
+        expected_behavior=["Run pytest verification and report failures accurately"],
+    )
+    template_bundles = template_module.build_metric_evidence_bundles(
+        traj,
+        question,
+        expected_behavior=["Run pytest verification and report failures accurately"],
+    )
+
+    for impl_name, bundle in (
+        ("shared", shared_bundles["behavior_check"]["prompt_evidence"]),
+        ("template", template_bundles["behavior_check"]["prompt_evidence"]),
+    ):
+        assert "FINAL RESPONSE" in bundle, impl_name
+        assert "CLAIM_START:" in bundle, impl_name
+        assert "USER REQUEST" in bundle, impl_name
+        assert "COMPACT TOOL HISTORY" in bundle, impl_name
+        assert "pytest -q tests/verify_suite.py" in bundle, impl_name
+        assert "AssertionError: verification failed" in bundle, impl_name
+
+    assert shared_bundles["behavior_check"]["prompt_evidence"] == template_bundles["behavior_check"]["prompt_evidence"]
+
+
+@pytest.mark.parametrize("max_chars", [8000, 6000])
+def test_direct_max_chars_argument_reserves_tool_history_headroom(max_chars: int) -> None:
+    template_module = _load_harbor_template_module()
+    traj = _trajectory_with_failed_verification_and_long_claim(include_file_changes=False)
+    question = "Run the verification suite and confirm all checks pass."
+
+    shared_ev = build_behavior_evidence(traj, question, max_chars=max_chars, final_response_limit=8000)
+    template_ev = template_module.build_behavior_evidence(
+        traj, question, max_chars=max_chars, final_response_limit=8000
+    )
+
+    assert shared_ev == template_ev
+    assert len(shared_ev) <= max_chars
+    assert "FINAL RESPONSE" in shared_ev
+    assert "COMPACT TOOL HISTORY" in shared_ev
+    assert "AssertionError: verification failed" in shared_ev
+
+
+@pytest.mark.parametrize("tiny_limit", [10, 19, 20, 43, 44, 60])
+def test_behavior_evidence_and_compactor_handle_tiny_limits(monkeypatch, tiny_limit: int) -> None:
+    from skillevaluator.tier3.eval_core.llm_judge import _compact_behavior_conversation
+
+    template_module = _load_harbor_template_module()
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+    traj = _trajectory_with_failed_verification_and_long_claim(include_file_changes=False)
+
+    shared_ev = build_behavior_evidence(traj, "question", max_chars=tiny_limit, final_response_limit=8000)
+    template_ev = template_module.build_behavior_evidence(
+        traj, "question", max_chars=tiny_limit, final_response_limit=8000
+    )
+    assert len(shared_ev) <= tiny_limit
+    assert shared_ev == template_ev
+
+    long_text = "HEAD_CONTEXT_" + ("M" * 5000) + "_TAIL_OUTCOME"
+    shared_compacted = _compact_behavior_conversation(long_text, limit=tiny_limit)
+    template_compacted = template_module._compact_behavior_conversation(long_text, limit=tiny_limit)
+    assert len(shared_compacted) <= tiny_limit
+    assert shared_compacted == template_compacted
+
+
+def test_seam_bundle_to_judge_behavior_check_retains_failed_command_and_claim(monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    template_module = _load_harbor_template_module()
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "8000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+
+    traj = _trajectory_with_failed_verification_and_long_claim(include_file_changes=False)
+    question = "Run the verification suite and confirm all checks pass."
+    behaviors = ["Run pytest verification and only claim success if tests pass"]
+
+    shared_prompts: list[str] = []
+    template_prompts: list[str] = []
+
+    def fake_shared_llm(prompt: str, **kwargs):
+        shared_prompts.append(prompt)
+        return json.dumps({"results": [{"step": 1, "passed": False, "reason": "test failed"}], "summary": "fail"}), None
+
+    def fake_template_llm(prompt: str, **kwargs):
+        template_prompts.append(prompt)
+        return json.dumps({"results": [{"step": 1, "passed": False, "reason": "test failed"}], "summary": "fail"}), None
+
+    monkeypatch.setattr(llm_judge, "call_public_llm", fake_shared_llm)
+    monkeypatch.setattr(template_module, "call_public_llm", fake_template_llm)
+
+    shared_bundle = atif_helpers.build_metric_evidence_bundles(
+        traj, question, expected_behavior=behaviors
+    )["behavior_check"]["prompt_evidence"]
+    template_bundle = template_module.build_metric_evidence_bundles(
+        traj, question, expected_behavior=behaviors
+    )["behavior_check"]["prompt_evidence"]
+
+    shared_res = llm_judge.judge_behavior_check(shared_bundle, behaviors)
+    template_res = template_module.judge_behavior_check(template_bundle, behaviors)
+
+    assert shared_res["score"] == template_res["score"] == 0.0
+    for prompt in (shared_prompts[0], template_prompts[0]):
+        assert "CLAIM_START:" in prompt
+        assert "AssertionError: verification failed" in prompt
+
+
+def test_harbor_template_behavior_evidence_respects_custom_limits(monkeypatch) -> None:
+    module = _load_harbor_template_module()
     traj = _trajectory_with_long_final_response()
 
     # Template default caps at 800
@@ -823,4 +1010,5 @@ def test_harbor_template_behavior_evidence_respects_custom_limits(monkeypatch) -
     # Template helpers match shared atif_helpers logic
     assert module._behavior_final_response_limit() == atif_helpers._behavior_final_response_limit()
     assert module._behavior_check_budget() == atif_helpers._behavior_check_budget()
+
 

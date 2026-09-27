@@ -423,30 +423,30 @@ _BEHAVIOR_EVIDENCE_MAX_CHARS = 4000
 _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 800
 _DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
 _DEFAULT_TOOL_HISTORY_HEADROOM = 4000
+_MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
 
 
-def _behavior_final_response_limit():
-    """Return the configured behavior final response section limit or default."""
-    raw = os.environ.get("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "").strip()
+def _env_positive_int(name, default):
+    """Parse a positive integer from environment variable *name* or return *default*."""
+    raw = os.environ.get(name, "").strip()
     if raw:
         try:
             return max(1, int(raw))
         except ValueError:
             pass
-    return _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT
+    return default
+
+
+def _behavior_final_response_limit():
+    """Return the configured behavior final response section limit or default."""
+    return _env_positive_int("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT)
 
 
 def _behavior_check_budget():
     """Return the configured behavior check evidence budget or reconciled default."""
     final_limit = _behavior_final_response_limit()
-    raw = os.environ.get("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "").strip()
-    if raw:
-        try:
-            explicit_budget = max(1, int(raw))
-            return max(explicit_budget, final_limit)
-        except ValueError:
-            pass
-    return max(_DEFAULT_BEHAVIOR_CHECK_BUDGET, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
+    base_budget = _env_positive_int("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", _DEFAULT_BEHAVIOR_CHECK_BUDGET)
+    return max(base_budget, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
 
 
 _BEHAVIOR_WRITE_TOOLS = {
@@ -483,7 +483,7 @@ def _truncate_for_behavior(text, limit):
     if len(text) <= limit:
         return text
     marker = "\n...[truncated]...\n"
-    if limit <= len(marker):
+    if limit <= len(marker) + 1:
         return text[:limit]
     head = max(1, (limit - len(marker)) * 2 // 3)
     tail = max(1, limit - len(marker) - head)
@@ -597,7 +597,10 @@ def build_behavior_evidence(
         if raw_budget:
             max_chars = _behavior_check_budget()
         else:
-            max_chars = max(_BEHAVIOR_EVIDENCE_MAX_CHARS, effective_final_limit + 1600)
+            max_chars = max(
+                _BEHAVIOR_EVIDENCE_MAX_CHARS,
+                effective_final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM,
+            )
 
     parts = []
     remaining = max_chars
@@ -608,12 +611,14 @@ def build_behavior_evidence(
 
     final = _get_final_response(traj)
     if final:
+        reserved_headroom = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, remaining // 2)
+        bounded_final_limit = min(effective_final_limit, max(1, remaining - reserved_headroom))
         remaining = _append_section_with_budget(
             parts,
             "FINAL RESPONSE",
             final,
             remaining,
-            section_limit=effective_final_limit,
+            section_limit=bounded_final_limit,
         )
 
     remaining = _append_section_with_budget(
@@ -923,24 +928,12 @@ _BUNDLE_GOAL_MAX_OBS = 12
 
 def _accuracy_budget():
     """Return the configured accuracy evidence budget or default."""
-    raw = os.environ.get("SKILL_EVAL_ACCURACY_BUDGET", "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            pass
-    return _DEFAULT_ACCURACY_BUDGET
+    return _env_positive_int("SKILL_EVAL_ACCURACY_BUDGET", _DEFAULT_ACCURACY_BUDGET)
 
 
 def _goal_accuracy_budget():
     """Return the configured goal accuracy evidence budget or default."""
-    raw = os.environ.get("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            pass
-    return _DEFAULT_GOAL_ACCURACY_BUDGET
+    return _env_positive_int("SKILL_EVAL_GOAL_ACCURACY_BUDGET", _DEFAULT_GOAL_ACCURACY_BUDGET)
 
 
 def _bundle_budgets():
@@ -1182,11 +1175,13 @@ def _compact_behavior_conversation(conversation_text, limit=None):
     if len(conversation_text) <= limit:
         return conversation_text
     marker = "\n...[middle truncated for behavior check]...\n"
-    if limit <= len(marker):
+    if limit <= len(marker) + 1:
         return conversation_text[:limit]
+    available = limit - len(marker)
+    reserved_head = min(1600, available // 2)
     final_limit = _behavior_final_response_limit()
-    tail = max(1, (limit - len(marker)) // 3, min(final_limit, limit - len(marker) - 1))
-    head = max(1, limit - len(marker) - tail)
+    tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
+    head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"
 
 

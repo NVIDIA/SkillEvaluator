@@ -848,12 +848,14 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
         return conversation_text
 
     marker = "\n...[middle truncated for behavior check]...\n"
-    if limit <= len(marker):
+    if limit <= len(marker) + 1:
         return conversation_text[:limit]
 
+    available = limit - len(marker)
+    reserved_head = min(1600, available // 2)
     final_limit = _behavior_final_response_limit()
-    tail = max(1, (limit - len(marker)) // 3, min(final_limit, limit - len(marker) - 1))
-    head = max(1, limit - len(marker) - tail)
+    tail = max(1, available // 3, min(final_limit, max(1, available - max(1, reserved_head))))
+    head = max(1, available - tail)
     return f"{conversation_text[:head]}{marker}{conversation_text[-tail:]}"
 
 

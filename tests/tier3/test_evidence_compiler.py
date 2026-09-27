@@ -3,10 +3,7 @@
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
-from test_behavior_evidence import _trajectory_with_late_write
+from test_behavior_evidence import _load_harbor_template_module, _trajectory_with_late_write
 
 from skillevaluator.tier3.eval_core import atif_helpers
 from skillevaluator.tier3.eval_core.atif_helpers import build_conversation_summary
@@ -67,20 +64,7 @@ def test_over_budget_sets_truncated_and_reason_not_silent() -> None:
 
 
 def test_template_bundles_match_shared_helper() -> None:
-    template_path = (
-        Path(__file__).resolve().parents[2]
-        / "src"
-        / "skillevaluator"
-        / "tier3"
-        / "harbor"
-        / "templates"
-        / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_eval_template", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
+    module = _load_harbor_template_module()
     traj = _trajectory_with_late_write()
     args = {"ground_truth": "GPU test written", "expected_behavior": ["writes GPU test"]}
     shared = atif_helpers.build_metric_evidence_bundles(traj, "question", **args)
@@ -100,15 +84,32 @@ def test_bundle_budgets_defaults_and_env_overrides(monkeypatch) -> None:
     assert budgets["goal_accuracy"] == 12000
     assert budgets["behavior_check"] == 8000
 
-    # Non-integer / invalid fallback
-    monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "invalid")
-    monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "-10")
-    assert atif_helpers._accuracy_budget() == 8000
-    assert atif_helpers._goal_accuracy_budget() == 1  # max(1, -10) is 1
+    # Non-integer / invalid fallback across all 4 budget/limit env vars
+    for invalid_val in ("invalid", "   ", "3.14", ""):
+        monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", invalid_val)
+        monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", invalid_val)
+        monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", invalid_val)
+        monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", invalid_val)
+        assert atif_helpers._accuracy_budget() == 8000
+        assert atif_helpers._goal_accuracy_budget() == 12000
+        assert atif_helpers._behavior_final_response_limit() == 800
+        assert atif_helpers._behavior_check_budget() == 8000
+
+    # Non-positive integer clamping and headroom reconciliation
+    for non_positive in ("0", "-10", "-500"):
+        monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", non_positive)
+        monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", non_positive)
+        monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", non_positive)
+        monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", non_positive)
+        assert atif_helpers._accuracy_budget() == 1
+        assert atif_helpers._goal_accuracy_budget() == 1
+        assert atif_helpers._behavior_final_response_limit() == 1
+        assert atif_helpers._behavior_check_budget() == 4001  # final_limit (1) + headroom (4000)
 
     # Valid environment overrides
     monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "15000")
     monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "25000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "800")
     monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "10000")
     assert atif_helpers._accuracy_budget() == 15000
     assert atif_helpers._goal_accuracy_budget() == 25000
@@ -119,19 +120,7 @@ def test_bundle_budgets_defaults_and_env_overrides(monkeypatch) -> None:
 
 
 def test_harbor_template_bundle_budgets_match_shared(monkeypatch) -> None:
-    template_path = (
-        Path(__file__).resolve().parents[2]
-        / "src"
-        / "skillevaluator"
-        / "tier3"
-        / "harbor"
-        / "templates"
-        / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_eval_template_budgets", template_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_harbor_template_module()
 
     monkeypatch.setenv("SKILL_EVAL_ACCURACY_BUDGET", "9000")
     monkeypatch.setenv("SKILL_EVAL_GOAL_ACCURACY_BUDGET", "18000")

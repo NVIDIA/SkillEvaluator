@@ -203,15 +203,20 @@ _COMPOSE_ALLOWED_BUILD_KEYS = frozenset(
 _COMPOSE_ALLOWED_NETWORK_KEYS = frozenset({"attachable", "enable_ipv4", "enable_ipv6", "internal", "labels"})
 _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
 _VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
+_VERIFIER_RETRY_ENV_VARS = frozenset(
+    {
+        "SKILL_EVAL_LLM_MAX_RETRIES",
+        "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
+        "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
+    }
+)
 _VERIFIER_PROVIDER_ENV_VARS = frozenset(
     {
         "SKILL_EVAL_LLM_PROVIDER",
         "SKILL_EVAL_LLM_MODEL",
         "SKILL_EVAL_LLM_API_KEY",
         "SKILL_EVAL_LLM_BASE_URL",
-        "SKILL_EVAL_LLM_MAX_RETRIES",
-        "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
-        "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
+        *_VERIFIER_RETRY_ENV_VARS,
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "ANTHROPIC_API_KEY",

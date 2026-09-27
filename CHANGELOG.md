@@ -59,7 +59,34 @@ All notable changes to SkillEvaluator are documented in this file.
   parameters are empty unless the text gives some, so `for f; do` at the top
   level runs nothing and keeps the variable's value; an interpreter fed its
   program by a pipe (`cat run.py | python3`) is unresolved like
-  `python3 < run.py`; and `ksh`, `mksh` and `ash` are recognised shells.
+  `python3 < run.py`; a variable bound by `export` or `readonly`, or by
+  `declare` and `typeset` where the shell has them, holds the value it had
+  when the builtin ran, `unset` empties it, `+x` and `export -n` unexport it
+  however the builtin is reached, and one bound from data the text does not
+  carry (`read`, `printf -v`, `local` outside a function, `declare -u`, a name
+  `eval` may bind, including from a program held in a variable) is
+  unresolved, as is a later assignment to a name given `-i`, `-u` or `-n`,
+  while `-l` lowercases it and an array is never exported; what is done to a
+  `-n` name (`nameref` in ksh and mksh) leaves the name it refers to
+  unresolved; `let`, `$((...))` and `$[...]` assign as `((...))` does; an
+  assignment the shell rejects (a value that is not a number for an `-i`
+  name) and a special builtin given an option the shell rejects end the
+  credit where the shell stops there; an assignment written before a command,
+  `env NAME=value` included, is that command's environment only, reaching
+  neither its own words nor the commands after it, except before a special
+  builtin in the POSIX shells; a `-c` payload's shell sees the exported names,
+  its command's own prefix and what `env` adds and removes, and a `$` quoted
+  or escaped from the outer shell is expanded there (one left unquoted is
+  expanded here, a name never bound to nothing), with the payload's own
+  heredoc bodies kept as data; text that `eval`, inline
+  code or a shell reading a heredoc may expand again is unresolved when a
+  variable in it holds the script; every heredoc declared on a line takes its
+  body after the line, in order, and past the number a shell accepts on one
+  line (16 in bash) the line and the rest are data; a here-string, which dash
+  and busybox ash reject before running anything, leaves nothing credited
+  under those shells; `(((` is a subshell
+  around `((` in bash, zsh and mksh; and `ksh`, `mksh` and `ash` are
+  recognised shells.
   Applied to both the host checker and the bundled Harbor verifier.
 
 - Added `scripts/script_invocation_differential.py`, a differential harness that

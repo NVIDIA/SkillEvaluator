@@ -2727,7 +2727,7 @@ def _shell_c_payload(command, cmd_idx, assignments):
                 raw = operands[payload_index]
                 if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
                     raw = raw[1:-1]
-                return raw
+                return raw.replace(_QUOTED_NEWLINE, "\n")
     return None
 
 
@@ -3913,6 +3913,797 @@ _READS_POSITIONAL_RE = re.compile(r"\$[@*1-9]|\$\{[@*1-9]|\bshift\b|\bfor\s+[A-Z
 _READS_ARGV0_RE = re.compile(r"\$0\b|\$\{0[}:]")
 # Control syntax this walk does not model, so a script inside it is unresolved.
 _UNMODELLED_CONTROL_WORDS = frozenset({"case"})
+# A ``$`` the shell reads literally: inside single quotes, or escaped. The
+# walk marks it before tokenizing so that no binding is substituted there:
+# ``bash -c 'python3 "$f"'`` hands the child the text ``$f``, which the child
+# expands from its own environment, not from this shell's unexported ``f``.
+_LITERAL_DOLLAR = "\ue003"
+
+
+# The shared tokenizer turns every newline into a separator, quoted ones
+# included, so a ``-c`` payload lost the lines its heredocs need. Within this
+# walk a newline inside quotes is kept as this mark, spaced as the separator
+# was so that words split as before, and restored where the quoted text is
+# read again as commands.
+_QUOTED_NEWLINE = " \ue009 "
+
+
+def _mark_quoted_newlines(text: str) -> str:
+    """Replace each newline inside quotes with ``_QUOTED_NEWLINE``."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'" and index + 1 < len(text):
+            out.append(char + text[index + 1])
+            index += 2
+            continue
+        if char in {"'", '"'} and quote in {None, char}:
+            quote = None if quote == char else char
+        out.append(_QUOTED_NEWLINE if char == "\n" and quote else char)
+        index += 1
+    return "".join(out)
+
+
+def _mark_literal_dollars(text: str) -> str:
+    """Replace each ``$`` the shell would not expand with ``_LITERAL_DOLLAR``."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if quote == "'":
+            out.append(_LITERAL_DOLLAR if char == "$" else char)
+            if char == "'":
+                quote = None
+        elif char == "\\" and following == "$":
+            out.append(_LITERAL_DOLLAR)
+            index += 1
+        elif char == "\\" and following:
+            out.append(char + following)
+            index += 1
+        else:
+            if char == '"':
+                quote = None if quote == '"' else '"'
+            elif char == "'" and quote is None:
+                quote = "'"
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+# A name exported to the commands this shell starts, kept in the same
+# bindings as the values so that a scope copy carries it: a ``-c`` payload's
+# shell sees the exported names and the command's own ``NAME=value`` prefix,
+# and nothing else this shell bound.
+_EXPORTED_MARK = "\ue004"
+# Whether ``set -a`` (allexport) is on, kept with the bindings so a subshell's
+# copy carries it and drops it on exit. A name bound while it is on is
+# exported, and stays exported after ``set +a``; one bound before is not.
+_ALLEXPORT_MARK = "\ue005"
+# A name made read-only, kept in the same bindings as the values so that a
+# scope copy carries it. A later assignment to it fails, and whether the shell
+# goes on after that is not the same in every shell, so its value is unsettled.
+_READONLY_MARK = "\ue002"
+# Set in the bindings once an assignment to a read-only name has failed where
+# the shell stops. Where it stops, nothing after the failure in that shell is
+# credited as run: a script named there is unresolved. A subshell stops
+# alone, so the mark is dropped with its copy of the bindings.
+_ASSIGNMENT_REFUSED = "\ue006"
+# The attributes a declaration gives a name that change what a later
+# assignment stores or what a child inherits, kept as their letters until
+# ``unset`` or a ``+`` option removes them: ``-i`` (integer), ``-u`` and
+# ``-c`` (case, which also decides whether a path matches on a case-blind
+# file system) and ``-n`` (a reference to another name, below) leave a
+# later value unsettled; ``-l`` lowercases it; ``-a`` and ``-A`` keep ``$f``
+# as the value assigned but are never exported to a child.
+_ATTRIBUTE_MARK = "\ue007"
+_ATTRIBUTE_LETTERS = frozenset("iuncalA")
+_READONLY_ATTRIBUTES = {"readonly": frozenset("aA")}
+# The name a ``-n`` name refers to: the value ``declare -n f=g`` gives, or
+# the name f held where none is given; empty where that names nothing yet,
+# when bash and ksh take the next value assigned as the name, and unsettled
+# where the text does not settle it. Assigning, exporting, making read-only
+# or unsetting f acts on that name instead, in bash, ksh and mksh
+# (measured), and it may be a name the text has not bound.
+_REFERENCE_MARK = "\ue008"
+# ``nameref`` is ``typeset -n`` in ksh, also after ``command``, and an alias
+# for it in mksh, where only the first word of a command is an alias.
+# ``unset -n f`` unsets the reference itself in bash and ksh; mksh, dash and
+# zsh reject the option.
+_NAMEREF_SHELLS = frozenset({"ksh", "mksh"})
+_UNSET_REFERENCE_SHELLS = frozenset({"bash", "bash-posix", "ksh"})
+# Where ``-n`` is accepted. A name that cannot be referred to
+# (``declare -n f=run.py``) fails the declaration for that name, and ksh
+# stops; with no name at all, bash and ksh wait for the next value assigned
+# and mksh fails ("empty nameref target") and goes on (measured).
+_REFERENCE_SHELLS = frozenset({"bash", "bash-posix", "ksh", "mksh"})
+_EMPTY_REFERENCE_SHELLS = frozenset({"bash", "bash-posix", "ksh"})
+_BAD_REFERENCE_STOPS = frozenset({"ksh"})
+# A declaration that gives no value leaves the value as it was in bash, with
+# any option (``declare -u f`` upper-cases only a later assignment, and one
+# bash rejects changes nothing), except ``-n``; zsh, ksh and mksh convert it
+# at once (measured). Taking an attribute away (``+i``) leaves it in all.
+_DECLARATION_KEEPS_VALUE = frozenset({"bash", "bash-posix"})
+# The shells that go on after that failure, by the form of the assignment,
+# measured with ``readonly f=run.py; <form>; echo same-line``. A bare
+# assignment stops every shell (bash abandons the rest of its line).
+# An assignment to a name given ``-i`` evaluates the value, and one that is
+# not a number there (``run.py``) is an error. The shells that go on after
+# it, by form, measured with ``typeset -i f; <form>; echo same``: for a bare
+# assignment bash exits, as every shell with ``typeset`` does, so a value
+# that is not a plain number is read as stopping the shell except here.
+_INTEGER_ERROR_GOES_ON = {
+    "prefix": frozenset({"bash", "bash-posix", "ksh"}),
+    "prefix-special": frozenset({"bash", "bash-posix"}),
+    "typeset": frozenset({"ksh"}),
+    "read": frozenset({"ksh", "mksh"}),
+}
+_INTEGER_VALUE_RE = re.compile(r"[-+]?[0-9]+")
+
+
+def _integer_may_fail(value: str, scope: dict[str, str], depth: int = 0) -> bool:
+    """Whether evaluating ``value`` for a ``-i`` name may be an error: not for a
+    number, nor for a name that is unset, empty or holds one (it evaluates to
+    that); for anything else it may be (``run.py``), and is read as such."""
+    value = value.strip("\"'")
+    if _INTEGER_VALUE_RE.fullmatch(value):
+        return False
+    if not _SHELL_NAME_RE.fullmatch(value) or depth >= _MAX_SHELL_REFERENCE_DEPTH:
+        return True
+    held = scope.get(value)
+    return bool(held) and _integer_may_fail(held, scope, depth + 1)
+
+
+# A special builtin given an option the shell rejects (``export -n`` in dash,
+# ``unset -n`` in mksh) stops a POSIX shell, unless ``command`` runs it; bash
+# and zsh report it and go on (measured).
+_SPECIAL_BUILTIN_ERROR_STOPS = frozenset({"bash-posix", "dash", "ksh", "mksh", "ash"})
+_REFUSED_ASSIGNMENT_GOES_ON = {
+    "assignment": frozenset(),
+    "prefix": frozenset({"bash", "ksh"}),
+    "export": frozenset({"bash"}),
+    "readonly": frozenset({"bash"}),
+    "declare": frozenset({"bash", "bash-posix"}),
+    "typeset": frozenset({"bash", "bash-posix", "mksh"}),
+    "local": frozenset({"bash", "bash-posix", "ksh", "mksh"}),
+    "read": frozenset({"bash", "bash-posix", "ksh", "mksh"}),
+    "printf": frozenset({"bash", "bash-posix", "dash", "ksh", "mksh", "ash"}),
+    "unset": frozenset({"bash", "bash-posix", "ksh", "mksh"}),
+    "for": frozenset({"bash"}),
+    "eval": frozenset({"bash", "zsh", "ksh"}),
+}
+# How each shell binds variables, measured on bash, bash --posix, dash, zsh,
+# ksh, mksh and busybox ash with ``<form> f=run.py; python3 "$f"`` against a
+# script that writes a marker. ``declare`` exists in bash and zsh and
+# ``typeset`` also in ksh and mksh; where one is missing the command fails and
+# binds nothing. ``local`` outside a function binds in zsh and mksh only, and
+# the walk does not track function bodies, so its value is never settled.
+_DECLARING_BUILTINS = {
+    "bash": frozenset({"export", "readonly", "declare", "typeset"}),
+    "bash-posix": frozenset({"export", "readonly", "declare", "typeset"}),
+    "zsh": frozenset({"export", "readonly", "declare", "typeset"}),
+    "ksh": frozenset({"export", "readonly", "typeset"}),
+    "mksh": frozenset({"export", "readonly", "typeset"}),
+    "dash": frozenset({"export", "readonly"}),
+    "ash": frozenset({"export", "readonly"}),
+}
+_DECLARATION_BUILTINS = frozenset({"export", "readonly", "declare", "typeset", "local"})
+# What each declaration option does to the variables it names, where the
+# shell accepts it. Any other option (``-u`` upper-cases the value, ``-i``
+# evaluates it, ``-a`` and ``-n`` change what ``$f`` reads), or one this shell
+# rejects, leaves the named variables unsettled: some shells then carry on
+# with nothing changed and others stop.
+_DECLARATION_OPTIONS = {
+    "export": {"-n": "unexport", "-f": "functions", "-p": "print"},
+    "readonly": {"-f": "functions", "-p": "print"},
+    "declare": {
+        "-x": "export",
+        "+x": "unexport",
+        "-r": "readonly",
+        "+r": "none",
+        "-g": "none",
+        "-f": "functions",
+        "-F": "functions",
+        "-p": "print",
+    },
+}
+_DECLARATION_OPTIONS["typeset"] = _DECLARATION_OPTIONS["declare"]
+# Options only some shells accept, measured with ``export f=run.py; <form> f;
+# bash -c 'python3 "$f"'``: ``export -n`` unexports in bash and ash and is
+# rejected by dash, zsh, ksh and mksh; ``export -f`` names functions in bash.
+_DECLARATION_OPTION_SHELLS = {
+    ("export", "-n"): frozenset({"bash", "bash-posix", "ash"}),
+    ("export", "-f"): frozenset({"bash", "bash-posix"}),
+    ("readonly", "-f"): frozenset({"bash", "bash-posix"}),
+    ("declare", "-g"): frozenset({"bash", "bash-posix", "zsh"}),
+    ("typeset", "-g"): frozenset({"bash", "bash-posix", "zsh"}),
+}
+# Where a declaration assigns several names, most shells expand every value
+# before assigning any, so ``export f=run.py g=$f`` gives g the earlier f;
+# ksh assigns them in order. Prefix assignments are the reverse: every shell
+# but mksh assigns them in order, so ``f=run.py g=$f cmd`` hands cmd g=run.py.
+_DECLARATION_ASSIGNS_IN_ORDER = frozenset({"ksh"})
+_PREFIX_EXPANDS_FIRST = frozenset({"mksh"})
+# ``command export`` runs the builtin in every shell but zsh, where
+# ``command`` looks only for an external command; ``builtin export`` runs it
+# in bash, zsh and mksh, and elsewhere is not a way to reach it.
+_COMMAND_REACHES_BUILTINS = frozenset({"bash", "bash-posix", "dash", "ksh", "mksh", "ash"})
+_BUILTIN_REACHES_BUILTINS = frozenset({"bash", "bash-posix", "zsh", "mksh"})
+# Builtins that bind a variable from data the text does not carry: standard
+# input, a format string, the positional parameters.
+_RUNTIME_BINDING_BUILTINS = {"read": "REPLY", "mapfile": "MAPFILE", "readarray": "MAPFILE", "getopts": "OPTARG"}
+# An assignment written before a special builtin (``f=run.py :``) outlives
+# the command in the POSIX shells, bash --posix among them, and not in bash
+# or zsh. Before any other command it is that command's environment only,
+# and in every shell it is not seen by the command's own words:
+# ``f=run.py python3 "$f"`` runs python3 with an empty argument.
+_SPECIAL_BUILTINS = frozenset(
+    {
+        ":",
+        ".",
+        "break",
+        "continue",
+        "eval",
+        "exec",
+        "exit",
+        "export",
+        "readonly",
+        "return",
+        "set",
+        "shift",
+        "times",
+        "trap",
+        "unset",
+    }
+)
+_PREFIX_OUTLIVES_SPECIAL_BUILTIN = frozenset({"bash-posix", "dash", "ksh", "mksh", "ash"})
+
+
+def _binding_readings(shell: str | None) -> tuple[str, ...]:
+    """The binding rules a text is walked under.
+
+    The tool's own shell is read as bash, as elsewhere in this walk. ``sh`` is
+    dash on some systems, bash in POSIX mode on others and busybox ash on
+    Alpine, so it is walked under all three and disagreement is unresolved.
+    """
+    if shell is None:
+        return ("bash",)
+    if shell == "sh":
+        return ("dash", "bash-posix", "ash")
+    return (shell,) if shell in _DECLARING_BUILTINS else ("bash", "dash")
+
+
+def _refuse_assignment(
+    scope: dict[str, str],
+    name: str,
+    reading: str,
+    form: str = "assignment",
+    goes_on: dict[str, frozenset[str]] = _REFUSED_ASSIGNMENT_GOES_ON,
+) -> None:
+    """An assignment to ``name`` fails (read-only, or ``goes_on`` names the
+    failure): its value is unsettled, and where the shell stops there,
+    nothing after is credited as run."""
+    scope[name] = _UNSETTLED_VALUE
+    if reading not in goes_on.get(form, frozenset()):
+        scope[_ASSIGNMENT_REFUSED] = "1"
+
+
+def _bind(scope: dict[str, str], name: str, value: str, reading: str = "", form: str = "assignment") -> None:
+    """Bind ``name``, unless it is read-only, when the assignment fails."""
+    attributes = scope.get(_ATTRIBUTE_MARK + name, "")
+    if scope.get(_READONLY_MARK + name):
+        _refuse_assignment(scope, name, reading, form)
+    elif "i" in attributes and _integer_may_fail(value, scope):
+        _refuse_assignment(scope, name, reading, form, _INTEGER_ERROR_GOES_ON)
+    elif set(attributes) & set("iunc"):
+        scope[name] = _UNSETTLED_VALUE
+        target = value.strip("\"'")
+        if "n" in attributes and scope.get(_REFERENCE_MARK + name) == "" and _SHELL_NAME_RE.fullmatch(target):
+            # A reference that names nothing yet takes the value as the name
+            # it refers to (bash, ksh).
+            scope[_REFERENCE_MARK + name] = target
+        elif "n" in attributes and scope.get(_REFERENCE_MARK + name) == "":
+            # A value that is not a name fails there, as an assignment to a
+            # read-only name does.
+            _refuse_assignment(scope, name, reading, form)
+            if _UNSETTLED_VALUE in value:
+                scope[_REFERENCE_MARK + name] = _UNSETTLED_VALUE
+        elif "n" in attributes:
+            _pass_to_reference(scope, name)
+    else:
+        scope[name] = value.lower() if "l" in attributes else value
+    if scope.get(_ALLEXPORT_MARK):
+        scope[_EXPORTED_MARK + name] = "1"
+
+
+def _bind_unsettled(scope: dict[str, str], name: str, reading: str, form: str) -> None:
+    """Bind ``name`` to a value the text does not settle: a declaration whose
+    options the walk does not model."""
+    if scope.get(_READONLY_MARK + name):
+        _refuse_assignment(scope, name, reading, form)
+        return
+    scope[name] = _UNSETTLED_VALUE
+    if "n" in scope.get(_ATTRIBUTE_MARK + name, ""):
+        _pass_to_reference(scope, name)
+    if scope.get(_ALLEXPORT_MARK):
+        scope[_EXPORTED_MARK + name] = "1"
+
+
+def _pass_to_reference(
+    scope: dict[str, str], name: str, exported: bool = False, readonly: bool = False, depth: int = 0
+) -> None:
+    """What is done to a ``-n`` name is done to the name it refers to.
+
+    That name's value is unsettled, and it is marked exported where the
+    change exported or unexported it (so a child reads it as unsettled
+    rather than settled either way) and read-only where it was made so.
+    Where the text does not settle which name it is, every bound name is
+    treated so. A reference that names nothing yet changes nothing.
+    """
+    target = scope.get(_REFERENCE_MARK + name)
+    if target == "":
+        return
+    if target is None or target == name or not _SHELL_NAME_RE.fullmatch(target) or depth >= _MAX_SHELL_REFERENCE_DEPTH:
+        targets = [key for key in scope if _SHELL_NAME_RE.fullmatch(key)]
+    else:
+        targets = [target]
+        if "n" in scope.get(_ATTRIBUTE_MARK + target, ""):
+            _pass_to_reference(scope, target, exported, readonly, depth + 1)
+    for key in targets:
+        scope[key] = _UNSETTLED_VALUE
+        if exported or scope.get(_ALLEXPORT_MARK):
+            scope[_EXPORTED_MARK + key] = "1"
+        if readonly:
+            scope[_READONLY_MARK + key] = "1"
+
+
+def _apply_set_options(words: list[str], scope: dict[str, str]) -> None:
+    """Turn allexport on or off as ``set -a`` / ``set -o allexport`` and their
+    ``+`` forms do, reading options up to the first operand or ``--``."""
+    for position, word in enumerate(words):
+        if word == "--" or not word.startswith(("-", "+")) or len(word) < 2:
+            return
+        following = words[position + 1] if position + 1 < len(words) else ""
+        if word[1:] == "o":
+            if following == "allexport":
+                scope[_ALLEXPORT_MARK] = "1" if word[0] == "-" else ""
+        elif "a" in word[1:]:
+            scope[_ALLEXPORT_MARK] = "1" if word[0] == "-" else ""
+
+
+def _value_now(raw: str, scope: dict[str, str]) -> str:
+    """The value an assignment stores: each variable it reads, expanded now.
+
+    An assignment copies the value it reads; it is not a live alias, so
+    ``f=other.py; g=$f; f=run.py`` leaves g as other.py. A variable this text
+    has not bound reads as empty, as it does in the tool's clean environment.
+    What the text cannot settle (``$(...)``, ``${f:-x}``) is kept as written.
+    """
+    return _SHELL_VARIABLE_RE.sub(lambda match: scope.get(match.group(1) or match.group(2), ""), str(raw))
+
+
+def _attribute_changes(words: list[str]) -> tuple[set[str], set[str]]:
+    """The attribute letters (``_ATTRIBUTE_LETTERS``) a declaration's options
+    add with ``-`` and remove with ``+``."""
+    added: set[str] = set()
+    removed: set[str] = set()
+    for word in words:
+        if word == "--" or len(word) < 2 or word[0] not in "-+":
+            break
+        letters = set(word[1:]) & _ATTRIBUTE_LETTERS
+        (added if word[0] == "-" else removed).update(letters)
+    return added - removed, removed
+
+
+def _declaration_options(name: str, words: list[str], reading: str) -> tuple[list[str], set[str], bool]:
+    """Split a declaration's words into operands and option effects, and say
+    whether every option is one this shell accepts and the walk models."""
+    options: list[str] = []
+    operands: list[str] = []
+    ended = False
+    for word in words:
+        if not ended and word == "--":
+            ended = True
+        elif not ended and len(word) > 1 and word[0] in "-+":
+            options.extend(word[0] + letter for letter in word[1:])
+        else:
+            operands.append(word)
+    table = _DECLARATION_OPTIONS.get(name, {})
+    effects: set[str] = set()
+    known = True
+    for option in options:
+        effect = table.get(option)
+        shells = _DECLARATION_OPTION_SHELLS.get((name, option))
+        if effect is None or (shells is not None and reading not in shells):
+            known = False
+        else:
+            effects.add(effect)
+    return operands, effects, known
+
+
+def _apply_binding_builtin(command: list[str], cmd_idx: int, scope: dict[str, str], reading: str) -> bool:
+    """Apply what a builtin that binds variables does, and say whether it was one.
+
+    ``export f=run.py``, ``readonly f=run.py`` and, where the shell has them,
+    ``declare`` and ``typeset`` bind as ``f=run.py`` does, with each value
+    expanded when the builtin runs; ``export -n`` and ``+x`` unexport;
+    ``unset f`` leaves ``$f`` empty; ``read``, ``mapfile``, ``getopts`` and
+    ``printf -v`` bind from data the text does not carry, so their names are
+    unsettled. ``command`` and ``builtin`` before one, in any number, reach it
+    where the shell lets them. None of them runs a script, so the walk moves on
+    after them.
+    """
+    index = cmd_idx
+    vias: list[str] = []
+    while index < len(command):
+        via = _resolved_shell_arg(str(command[index]), scope).strip("\"'")
+        if via not in {"command", "builtin"}:
+            break
+        vias.append(via)
+        index += 1
+        while via == "command" and index < len(command) and str(command[index]) == "-p":
+            index += 1
+        if index >= len(command) or str(command[index]).startswith("-"):
+            # ``command -v``: a query, which binds nothing and is read as before.
+            return False
+    if index >= len(command):
+        return False
+    name = _resolved_shell_arg(str(command[index]), scope).strip("\"'")
+    if name == "nameref" and reading in _NAMEREF_SHELLS and (reading == "ksh" or not vias):
+        name = "typeset"
+        command = [*command[: index + 1], "-n", *command[index + 1 :]]
+    binding = name in _DECLARATION_BUILTINS or name in _RUNTIME_BINDING_BUILTINS or name in {"unset", "set", "printf"}
+    if binding and any(
+        reading not in (_COMMAND_REACHES_BUILTINS if via == "command" else _BUILTIN_REACHES_BUILTINS) for via in vias
+    ):
+        # The builtin is not reached: the command fails and changes nothing.
+        return name != "printf"
+    words = [str(word) for word in command[index + 1 :]]
+    if name in _DECLARATION_BUILTINS:
+        operands, effects, known = _declaration_options(name, words, reading)
+        names = [
+            (assignment.group(1) if assignment else word, assignment)
+            for word in operands
+            for assignment in [_SHELL_ASSIGNMENT_RE.match(word)]
+            if _SHELL_NAME_RE.fullmatch(assignment.group(1) if assignment else word)
+        ]
+        if name != "local" and name not in _DECLARING_BUILTINS.get(reading, frozenset()):
+            # Not a builtin in this shell: the command fails and binds nothing.
+            return True
+        if name == "local" or not known:
+            # ``local`` outside a function binds in zsh and mksh only, and an
+            # option this shell rejects or the walk does not model may leave
+            # the variable as it was or stop the shell: unsettled either way.
+            # A special builtin stops a POSIX shell on an option it rejects.
+            added, removed = _attribute_changes(words)
+            # ``export -n`` unexports; only a declaration gives attributes,
+            # and ``readonly`` those of an array.
+            letters_given = (
+                _ATTRIBUTE_LETTERS
+                if name in {"declare", "typeset", "local"}
+                else _READONLY_ATTRIBUTES.get(name, frozenset())
+            )
+            added, removed = added & letters_given, removed & letters_given
+            if name in _SPECIAL_BUILTINS and reading in _SPECIAL_BUILTIN_ERROR_STOPS and not vias:
+                scope[_ASSIGNMENT_REFUSED] = "1"
+            if "n" in added and reading not in _REFERENCE_SHELLS:
+                # ``-n`` is an option zsh rejects: the declaration binds nothing.
+                return True
+            for variable, assignment in names:
+                # ``-n`` refers the name to the one its value names, or with
+                # no value to the one it held.
+                value = _value_now(assignment.group(2), scope) if assignment else ""
+                target = (value if assignment else scope.get(variable, "")).strip("\"'")
+                if "n" in added and (
+                    (target and not _SHELL_NAME_RE.fullmatch(target) and not set(target) & {_UNSETTLED_VALUE, "$", "`"})
+                    or (not target and reading not in _EMPTY_REFERENCE_SHELLS)
+                ):
+                    # A name that cannot be referred to: the declaration fails
+                    # for it, and ksh stops.
+                    if reading in _BAD_REFERENCE_STOPS:
+                        scope[_ASSIGNMENT_REFUSED] = "1"
+                    continue
+                if "n" in added | removed and "n" in scope.get(_ATTRIBUTE_MARK + variable, ""):
+                    # Giving ``-n`` again points the name elsewhere and ``+n``
+                    # frees it; neither acts on the name it referred to.
+                    scope[_ATTRIBUTE_MARK + variable] = scope[_ATTRIBUTE_MARK + variable].replace("n", "")
+                letters = (set(scope.get(_ATTRIBUTE_MARK + variable, "")) | added) - removed
+                if assignment is not None and "i" in letters and _integer_may_fail(value, scope):
+                    _refuse_assignment(scope, variable, reading, name, _INTEGER_ERROR_GOES_ON)
+                elif (
+                    assignment is not None
+                    or name == "local"
+                    or (added and (reading not in _DECLARATION_KEEPS_VALUE or "n" in added))
+                ):
+                    # With no value, only taking attributes away, or giving
+                    # them in bash, leaves the value as it was.
+                    _bind_unsettled(scope, variable, reading, name)
+                if letters:
+                    scope[_ATTRIBUTE_MARK + variable] = "".join(sorted(letters))
+                else:
+                    scope.pop(_ATTRIBUTE_MARK + variable, None)
+                if "n" in added:
+                    # Empty where it names nothing yet, unsettled where the
+                    # text does not settle the name.
+                    scope[_REFERENCE_MARK + variable] = (
+                        target if _SHELL_NAME_RE.fullmatch(target) or not target else _UNSETTLED_VALUE
+                    )
+                elif "n" in removed:
+                    scope.pop(_REFERENCE_MARK + variable, None)
+            return True
+        if effects & {"functions", "print"}:
+            # Functions, or a listing: no variable changes.
+            return True
+        readonly = name == "readonly" or "readonly" in effects
+        unexport = "unexport" in effects
+        exported = name == "export" or "export" in effects
+        before = dict(scope)
+        for variable, assignment in names:
+            if assignment is not None:
+                source = scope if reading in _DECLARATION_ASSIGNS_IN_ORDER else before
+                _bind(scope, variable, _value_now(assignment.group(2), source), reading, name)
+            if readonly:
+                scope[_READONLY_MARK + variable] = "1"
+            if unexport:
+                scope.pop(_EXPORTED_MARK + variable, None)
+            elif exported:
+                scope[_EXPORTED_MARK + variable] = "1"
+            if "n" in scope.get(_ATTRIBUTE_MARK + variable, "") and (readonly or unexport or exported):
+                _pass_to_reference(scope, variable, exported or unexport, readonly)
+        return True
+    options = [word for word in words if word.startswith("-")]
+    operands = [word for word in words if not word.startswith("-")]
+    if name == "unset":
+        accepted = {"-f", "-v", *(("-n",) if reading in _UNSET_REFERENCE_SHELLS else ())}
+        if any(option not in accepted for option in options):
+            # An option this shell rejects: nothing is unset, and a POSIX
+            # shell stops.
+            if reading in _SPECIAL_BUILTIN_ERROR_STOPS and not vias:
+                scope[_ASSIGNMENT_REFUSED] = "1"
+            return True
+        if options == ["-f"]:
+            # Functions, not variables.
+            return True
+        for variable in operands:
+            if not _SHELL_NAME_RE.fullmatch(variable):
+                continue
+            reference = "n" in scope.get(_ATTRIBUTE_MARK + variable, "")
+            if scope.get(_READONLY_MARK + variable):
+                # A read-only name, which every shell refuses to unset, and
+                # some then stop.
+                _refuse_assignment(scope, variable, reading, "unset")
+            elif reference and "-n" not in options:
+                # A ``-n`` name: the name it refers to is unset instead.
+                _pass_to_reference(scope, variable)
+            elif options not in ([], ["-v"], ["-n"]):
+                # Options together that the walk does not model.
+                scope[variable] = _UNSETTLED_VALUE
+            elif options == ["-n"] and not reference and reading != "ksh":
+                # ``unset -n`` on a name that refers to nothing: bash leaves
+                # it, and ksh unsets it.
+                continue
+            else:
+                scope[variable] = ""
+                for mark in (_EXPORTED_MARK, _ATTRIBUTE_MARK, _REFERENCE_MARK):
+                    scope.pop(mark + variable, None)
+        return True
+    if name == "set":
+        # ``set`` binds nothing itself; the walk goes on to read it as before.
+        _apply_set_options(words, scope)
+        return False
+    if name in _RUNTIME_BINDING_BUILTINS or (name == "printf" and "-v" in words):
+        names_bound = (
+            words[words.index("-v") + 1 : words.index("-v") + 2]
+            if name == "printf"
+            else [*operands, _RUNTIME_BINDING_BUILTINS[name]]
+        )
+        for variable in names_bound:
+            if _SHELL_NAME_RE.fullmatch(variable):
+                _bind(scope, variable, _UNSETTLED_VALUE, reading, "printf" if name == "printf" else "read")
+        return True
+    return False
+
+
+# Expansions a binding cannot settle: command substitution, and a braced
+# expansion that is more than a plain name (``${f:-x}``, ``${#f}``).
+_UNSETTLED_EXPANSION_RE = re.compile(r"\$\(|`|\$\{(?![A-Za-z_][A-Za-z0-9_]*\})")
+
+
+def _apply_eval_bindings(words: list[str], scope: dict[str, str], reading: str, depth: int = 0) -> None:
+    """Leave unsettled what ``eval`` may bind: its words run again as commands here.
+
+    This shell expands the words first, so ``eval "$code"`` runs what ``code``
+    holds, while a ``$`` left quoted reaches eval's text as ``$``. The text is
+    then split into commands as the walk splits a line, and each is applied to
+    a copy of the bindings. A command word eval itself reads from a variable
+    (``eval '$code'``) is expanded and split there and is never an assignment.
+    A name the copy assigns, or whose value or attributes change there, is
+    unsettled afterwards, and exported if the copy exports it, because reading
+    quoted text a second time is not modelled exactly. So ``eval export -n f``
+    leaves no settled value for a child to inherit, and ``eval f=other.py``
+    none to read. Where the text is not settled here (a value the text cannot
+    settle, a command substitution), every bound name is left unsettled.
+    """
+    expanded = " ".join(_value_now(str(word), scope) for word in words)
+    text = expanded.replace(_LITERAL_DOLLAR, "$").replace(_QUOTED_NEWLINE, "\n")
+    if _UNSETTLED_VALUE in text or _UNSETTLED_EXPANSION_RE.search(text):
+        _unsettle_every_binding(scope)
+        return
+    trial = dict(scope)
+    assigned: set[str] = set()
+    segment: list[str] = []
+    for token in [*_shell_tokens(_mark_quoted_newlines(_mark_literal_dollars(text))), ";"]:
+        if token not in _SHELL_SEPARATORS:
+            segment.append(token)
+            continue
+        prefix: dict[str, str] = {}
+        cmd_idx = _command_start(segment, prefix) if segment else 0
+        for name, value in prefix.items():
+            assigned.add(name)
+            _bind(trial, name, _value_now(value, trial), reading, "eval")
+        command = [str(word) for word in segment[cmd_idx:]]
+        segment = []
+        if command and _SHELL_VARIABLE_RE.search(command[0]):
+            command = " ".join(_value_now(word, trial) for word in command).split()
+            if any(_UNSETTLED_VALUE in word for word in command):
+                _unsettle_every_binding(scope)
+                return
+        for name in _arithmetic_names(command):
+            assigned.add(name)
+            if "n" in trial.get(_ATTRIBUTE_MARK + name, ""):
+                _pass_to_reference(trial, name)
+        index = 0
+        while index < len(command) and command[index] in {"command", "builtin"}:
+            index += 1
+            while index < len(command) and command[index] == "-p":
+                index += 1
+        if index >= len(command):
+            continue
+        if command[index] in _LOOP_HEADER_WORDS and index + 1 < len(command):
+            assigned.add(command[index + 1])
+        elif command[index] == "eval" and depth < _MAX_SHELL_REFERENCE_DEPTH:
+            _apply_eval_bindings(command[index + 1 :], trial, reading, depth + 1)
+        else:
+            _apply_binding_builtin(command, 0, trial, reading)
+    for key in set(trial) | set(scope):
+        if trial.get(key) == scope.get(key):
+            continue
+        if key.startswith(_EXPORTED_MARK):
+            # Exported or unexported by the text: the value is unsettled, and
+            # the mark stays so that a child inherits that.
+            scope[key] = "1"
+            assigned.add(key.removeprefix(_EXPORTED_MARK))
+        elif key.startswith((_READONLY_MARK, _ATTRIBUTE_MARK, _REFERENCE_MARK)) or key in {
+            _ALLEXPORT_MARK,
+            _ASSIGNMENT_REFUSED,
+        }:
+            if key in trial:
+                scope[key] = trial[key]
+            else:
+                scope.pop(key, None)
+        else:
+            assigned.add(key)
+    for name in assigned:
+        if _SHELL_NAME_RE.fullmatch(name):
+            scope[name] = _UNSETTLED_VALUE
+
+
+def _unsettle_every_binding(scope: dict[str, str]) -> None:
+    """Text this walk cannot read may bind or unbind any name: none stays settled."""
+    for key in list(scope):
+        if _SHELL_NAME_RE.fullmatch(key):
+            scope[key] = _UNSETTLED_VALUE
+
+
+def _prefixed_scope(scope: dict[str, str], prefix: dict[str, str], reading: str) -> dict[str, str]:
+    """This shell's bindings with a command's ``NAME=value`` prefix over them.
+
+    The values are assigned in order, so a later one sees an earlier one,
+    except in mksh, which expands every value first (measured).
+    """
+    staged = dict(scope)
+    for name, value in prefix.items():
+        staged[name] = _value_now(value, scope if reading in _PREFIX_EXPANDS_FIRST else staged)
+        if "n" in scope.get(_ATTRIBUTE_MARK + name, ""):
+            staged[name] = _UNSETTLED_VALUE
+            _pass_to_reference(staged, name, exported=True)
+    return staged
+
+
+def _child_environment(
+    command: list[str], start: int, stop: int, scope: dict[str, str], prefix: dict[str, str], reading: str
+) -> dict[str, str] | None:
+    """What the command at ``stop`` inherits from this shell.
+
+    The exported names, then the segment's own ``NAME=value`` prefix, then
+    each ``env`` standing before the command, applied in order: ``-i`` and
+    ``-`` clear what came before, ``-u NAME`` removes one name, and its
+    assignments add names, expanded by this shell before env runs. ``None``
+    when a wrapper resets the environment in a way the text does not settle:
+    ``sudo`` and ``doas`` keep what their policy file says, and ``env -S``
+    splits a string into a command.
+    """
+    if any("n" in scope.get(_ATTRIBUTE_MARK + name, "") for name in prefix):
+        # A prefix on a ``-n`` name assigns the name it refers to.
+        return None
+    environment = {
+        key.removeprefix(_EXPORTED_MARK): scope.get(key.removeprefix(_EXPORTED_MARK), "")
+        for key in scope
+        if key.startswith(_EXPORTED_MARK)
+        # An array is never exported.
+        and not set(scope.get(_ATTRIBUTE_MARK + key.removeprefix(_EXPORTED_MARK), "")) & set("aA")
+    }
+    staged = _prefixed_scope(scope, prefix, reading)
+    for name in prefix:
+        environment[name] = staged[name]
+    index = start
+    while index < stop:
+        word = _shell_executable(_resolved_shell_arg(command[index], scope)).removesuffix(".exe")
+        if word in {"sudo", "doas"}:
+            return None
+        index += 1
+        if word != "env":
+            continue
+        options_done = False
+        while index < stop:
+            token = _resolved_shell_arg(command[index], scope).strip("\"'")
+            following = _resolved_shell_arg(command[index + 1], scope).strip("\"'") if index + 1 < stop else ""
+            assignment = _SHELL_ASSIGNMENT_RE.match(token)
+            if assignment is not None:
+                environment[assignment.group(1)] = _value_now(assignment.group(2), scope)
+                index += 1
+                continue
+            if options_done or not token.startswith("-"):
+                break
+            index += 1
+            if token == "--":
+                options_done = True
+            elif token in {"-", "-i", "--ignore-environment"}:
+                environment.clear()
+            elif token in {"-u", "--unset"}:
+                environment.pop(following, None)
+                index += 1
+            elif token.startswith("--unset="):
+                environment.pop(token.removeprefix("--unset="), None)
+            elif token in {"-C", "--chdir"}:
+                index += 1
+            elif token.startswith(("--chdir=", "--debug", "--null")) or token in {"-v", "-0"}:
+                continue
+            elif not token.startswith("--"):
+                letters = token[1:]
+                for position, letter in enumerate(letters):
+                    if letter == "i":
+                        environment.clear()
+                    elif letter in "v0":
+                        continue
+                    elif letter == "u":
+                        attached = letters[position + 1 :]
+                        environment.pop(attached or following, None)
+                        index += 0 if attached else 1
+                        break
+                    else:
+                        return None
+            else:
+                return None
+    return environment
+
+
+def _reader_scope(
+    command: list[str], start: int, stop: int, scope: dict[str, str], prefix: dict[str, str], reading: str
+) -> dict[str, str]:
+    """The bindings whatever reads a command's text next may expand.
+
+    ``eval`` reads it in this shell, and inline code hands it on with the
+    command's environment: this shell's bindings, the command's prefix and
+    what ``env`` gives it. Asked only whether the script is named, so a wider
+    view costs no more than partial credit.
+    """
+    view = _prefixed_scope(scope, prefix, reading)
+    view.update(_child_environment(command, start, stop, scope, prefix, reading) or {})
+    return view
 
 
 def _carries_a_nested_invocation(command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str) -> bool:
@@ -3933,9 +4724,14 @@ def _carries_a_nested_invocation(command: list[str], cmd_idx: int, assignments: 
             # "." is excluded: as an argument it is far more often a path or a
             # filter (`jq . run.py`) than a sourcing command.
             continue
-        if any(_script_path_matches(later, expected) for later in words[position + 1 :]):
+        if any(_script_path_matches(later, expected) or _unresolved_value(later) for later in words[position + 1 :]):
             return True
     return False
+
+
+def _unresolved_value(value: str) -> bool:
+    """Whether a resolved word holds a value the text bound but cannot settle."""
+    return _UNSETTLED_VALUE in value
 
 
 def _redirects_script_to_stdin(command: list[str], assignments: dict[str, str], expected: str) -> bool:
@@ -3947,10 +4743,10 @@ def _redirects_script_to_stdin(command: list[str], assignments: dict[str, str], 
     """
     for position, word in enumerate(command[:-1]):
         token = str(word)
-        if (
-            token in _INPUT_REDIRECTS or (token.endswith("<") and not token.startswith(_QUOTED_SYNTAX_MARK))
-        ) and _script_path_matches(_resolved_shell_arg(str(command[position + 1]), assignments), expected):
-            return True
+        if token in _INPUT_REDIRECTS or (token.endswith("<") and not token.startswith(_QUOTED_SYNTAX_MARK)):
+            operand = _resolved_shell_arg(str(command[position + 1]), assignments)
+            if _script_path_matches(operand, expected) or _unresolved_value(operand):
+                return True
     return False
 
 
@@ -3960,11 +4756,16 @@ def _command_names_script(command: list[str], cmd_idx: int, assignments: dict[st
     Inline code, a module, or text handed to ``eval`` can run the script
     without it ever appearing as an argument this walk resolves, so naming it
     is the difference between "nothing ran" and "this walk cannot tell".
+    A ``$`` this shell leaves quoted is read as a variable here: whatever
+    reads the text next (``eval``, a child shell, ``os.system``) may expand it.
     """
     target = str(expected).strip().strip("\"'")
     if not target:
         return False
-    return any(target in _resolved_shell_arg(str(word), assignments) for word in command[cmd_idx + 1 :])
+    return any(
+        target in _resolved_shell_arg(str(word).replace(_LITERAL_DOLLAR, "$"), assignments)
+        for word in command[cmd_idx + 1 :]
+    )
 
 
 def _names_script_anywhere(command_text: str, expected_script: str) -> bool:
@@ -4080,7 +4881,9 @@ def _loop_header_is_empty(
     return len(words) == 2 and bool(_SHELL_NAME_RE.fullmatch(words[0])) and words[1] == "in"
 
 
-def _loop_header_is_unresolved(command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str) -> bool:
+def _loop_header_is_unresolved(
+    command: list[str], cmd_idx: int, assignments: dict[str, str], expected: str, reading: str = "bash"
+) -> bool:
     """Bind a loop variable where the header settles it, else say whether it matters.
 
     ``for f in run.py; do python $f; done`` gives ``f`` exactly one value, so
@@ -4091,6 +4894,14 @@ def _loop_header_is_unresolved(command: list[str], cmd_idx: int, assignments: di
     values the command is unresolved, and otherwise the header runs nothing.
     """
     words = [_resolved_shell_arg(str(word), assignments).strip("\"'") for word in command[cmd_idx + 1 :]]
+    if words and _SHELL_NAME_RE.fullmatch(words[0]) and assignments.get(_READONLY_MARK + words[0]):
+        # The header cannot assign a read-only variable.
+        _refuse_assignment(assignments, words[0], reading, "for")
+        return _command_names_script(command, cmd_idx, assignments, expected)
+    if words and _SHELL_NAME_RE.fullmatch(words[0]) and "n" in assignments.get(_ATTRIBUTE_MARK + words[0], ""):
+        # A ``-n`` loop variable: bash refers it to each value in turn, and
+        # the name it referred to may be left changed.
+        _pass_to_reference(assignments, words[0])
     if words and _SHELL_NAME_RE.fullmatch(words[0]):
         if len(words) == 1:
             # The positional parameters, which this text does not carry: a
@@ -4100,7 +4911,7 @@ def _loop_header_is_unresolved(command: list[str], cmd_idx: int, assignments: di
         if len(words) >= 2 and words[1] == "in":
             values = words[2:]
             if len(values) == 1:
-                assignments[words[0]] = values[0]
+                _bind(assignments, words[0], _value_now(values[0], assignments), reading, "for")
                 return False
         # This header gives the variable several values the text does not
         # settle, or is ``for f; do`` over the positional parameters, so a
@@ -4111,11 +4922,15 @@ def _loop_header_is_unresolved(command: list[str], cmd_idx: int, assignments: di
     return _command_names_script(command, cmd_idx, assignments, expected)
 
 
-def _command_start(command: list[str], assignments: dict[str, str]) -> int:
+def _command_start(command: list[str], prefix: dict[str, str]) -> int:
     """Index of the word that is the command, past reserved words and assignments.
 
     ``then FOO=1 ./run.py`` runs ``./run.py``: the reserved word introduces the
-    command and the assignment is its environment, in either order.
+    command and the assignment is its environment, in either order. The
+    assignments are collected in ``prefix`` rather than bound, because where
+    they apply depends on what follows them: alone they bind in the shell,
+    before a command they are that command's environment only, and in neither
+    case do they reach the command's own words.
     """
     cmd_idx = 0
     while cmd_idx < len(command):
@@ -4126,7 +4941,7 @@ def _command_start(command: list[str], assignments: dict[str, str]) -> int:
         assignment = _SHELL_ASSIGNMENT_RE.match(word)
         if assignment is None:
             break
-        assignments[assignment.group(1)] = assignment.group(2)
+        prefix[assignment.group(1)] = assignment.group(2)
         cmd_idx += 1
     return cmd_idx
 
@@ -4147,7 +4962,21 @@ def _script_path_matches(value: Any, expected_script: str) -> bool:
     return candidate.rsplit("/", 1)[-1] == target
 
 
-_MAX_HEREDOC_OPERANDS = 8
+# How many heredoc and here-string operators one command's text is read for,
+# so the work stays bounded. Past it, the rest of the text is data: a script
+# named there is unresolved.
+_MAX_HEREDOC_OPERANDS = 256
+# How many heredocs one line may declare before the shell refuses the line.
+# Measured: bash and bash --posix exit with "maximum here-document count
+# exceeded" at 17 and mksh stops at 11 ("too many <<s"), before running
+# anything on the line; dash, zsh, ksh and busybox ash read 60 and more.
+# Past it, the line and everything after it are data.
+_MAX_HEREDOCS_PER_LINE = {"bash": 16, "bash-posix": 16, "mksh": 10}
+# dash and busybox ash have no here-string: ``<<<`` is a syntax error there,
+# and the shell runs nothing on the line that holds it, nor any of a compound
+# command spanning lines around it (measured), so nothing in such a text is
+# credited as run under those readings.
+_NO_HERE_STRING_SHELLS = frozenset({"dash", "ash"})
 # The word after ``<<`` that ends the body, optionally quoted or escaped. The
 # ``-`` of ``<<-`` asks for leading tabs to be stripped from the terminator.
 _HEREDOC_DELIMITER_RE = re.compile(r"\A(-?)[ \t]*((?:[^\s;&|<>()'\"`\\]|\\.|'[^']*'|\"[^\"]*\")+)")
@@ -4240,7 +5069,9 @@ def _arithmetic_close(tokens: list[str], start: int) -> tuple[int, int] | None:
     return None
 
 
-def _split_punctuation_runs(tokens: list[str], arithmetic: bool = True) -> list[str]:
+def _split_punctuation_runs(
+    tokens: list[str], arithmetic: bool = True, triple_opens_subshell: bool = True
+) -> list[str]:
     """Separate a grouped run of punctuation into the operators it is made of.
 
     With ``arithmetic``, a ``((`` at command position that closes as an
@@ -4250,7 +5081,15 @@ def _split_punctuation_runs(tokens: list[str], arithmetic: bool = True) -> list[
     arithmetic command, so its caller passes ``arithmetic=False`` and every
     ``((`` is two subshells. ``$((`` and ``for ((`` are not at command
     position and split as before.
+
+    The tokenizer hands ``(((`` over as one token. bash, zsh and mksh read it
+    as they read ``( ((``, a subshell around what may be an arithmetic
+    command, so with ``triple_opens_subshell`` the leading parentheses are
+    split off and the last two are tried as ``((``. ksh reads it as nested
+    subshells, which is what splitting every parenthesis gives. Measured
+    with ``f=other.py; (((for f in run.py; do :; done; python3 "$f")) | cat)``.
     """
+    tokens = list(tokens)
     separated: list[str] = []
     position = 0
     while position < len(tokens):
@@ -4258,6 +5097,9 @@ def _split_punctuation_runs(tokens: list[str], arithmetic: bool = True) -> list[
         at_command_position = (
             not separated or separated[-1] in _SHELL_SEPARATORS or separated[-1] in _COMMAND_POSITION_LEADERS
         )
+        if arithmetic and triple_opens_subshell and at_command_position and len(token) > 2 and set(token) == {"("}:
+            tokens[position : position + 1] = ["("] * (len(token) - 2) + ["(("]
+            continue
         if arithmetic and token == "((" and at_command_position:
             close = _arithmetic_close(tokens, position + 1)
             if close is not None:
@@ -4284,6 +5126,65 @@ def _split_punctuation_runs(tokens: list[str], arithmetic: bool = True) -> list[
 _ARITHMETIC_ASSIGNMENT_RE = re.compile(
     r"([A-Za-z_]\w*)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)|([A-Za-z_]\w*)\s*(?:\+\+|--)|(?:\+\+|--)\s*([A-Za-z_]\w*)"
 )
+# The walk hands ``$((`` over as ``$``, ``(``, ``(``.
+_ARITHMETIC_EXPANSION_RE = re.compile(r"\$\s*(?:\(\s*\(|\[)")
+
+
+def _arithmetic_texts(words: list[str], cmd_idx: int, expansions: bool = True) -> list[str]:
+    """The arithmetic a command evaluates, where an assignment binds as it does
+    in ``((...))``: that body, the words after ``let``, and with
+    ``expansions`` each ``$((...))`` and ``$[...]`` in its words, which this
+    shell evaluates as it expands them. A ``$`` left quoted is marked literal
+    and starts none. The caller passes ``expansions=False`` for text with no
+    ``$((`` or ``$[``, where ``$ ( (`` is ``$( (``, a command substitution."""
+    texts: list[str] = []
+    if "((" in words:
+        body = words.index("((") + 1
+        texts.append(words[body] if body < len(words) else "")
+    if cmd_idx < len(words) and words[cmd_idx].strip("\"'") == "let":
+        texts.append(" ".join(words[cmd_idx + 1 :]))
+    joined = " ".join(words) if expansions else ""
+    for match in _ARITHMETIC_EXPANSION_RE.finditer(joined):
+        depth = 0
+        end = len(joined)
+        for position in range(match.end(), len(joined)):
+            if joined[position] in "([":
+                depth += 1
+            elif joined[position] in ")]":
+                if depth == 0:
+                    end = position
+                    break
+                depth -= 1
+        texts.append(joined[match.end() : end])
+    return texts
+
+
+def _arithmetic_names(words: list[str], expansions: bool = True) -> list[str]:
+    """The names the arithmetic in a command assigns (``_arithmetic_texts``)."""
+    words = [str(word) for word in words]
+    return [
+        next(group for group in match.groups() if group)
+        for text in _arithmetic_texts(words, _command_start(words, {}), expansions)
+        for match in _ARITHMETIC_ASSIGNMENT_RE.finditer(text)
+    ]
+
+
+def _apply_arithmetic_assignments(
+    command: list[str], scope: dict[str, str], expected_script: str, expansions: bool = True
+) -> None:
+    """What the assignments in a command's arithmetic leave.
+
+    The variable ends as a number, unchanged after an error, or never read
+    because ksh aborted. Only when it held the script (or the script's name
+    is a number) is that a question. A ``-n`` name assigns the name it refers
+    to instead.
+    """
+    numeric_script = str(expected_script).rsplit("/", 1)[-1].isdigit()
+    for name in _arithmetic_names(command, expansions):
+        if "n" in scope.get(_ATTRIBUTE_MARK + name, ""):
+            _pass_to_reference(scope, name)
+        if numeric_script or _script_path_matches(_resolved_shell_arg(scope.get(name, ""), scope), expected_script):
+            scope[name] = _UNSETTLED_VALUE
 
 
 def _unquoted_separator_index(text: str) -> int:
@@ -4307,19 +5208,22 @@ def _unquoted_separator_index(text: str) -> int:
     return len(text)
 
 
-def _split_heredocs(command_text: str) -> tuple[str, str]:
+def _split_heredocs(command_text: str, reading: str = "bash") -> tuple[str, str, int]:
     """Split a command into the text to walk and the text that is operand data.
 
-    Returns the commands to walk and the heredoc or here-string data fed to
-    them. Quotes are tracked so ``echo '<<'`` is not mistaken for a heredoc,
+    Returns the commands to walk, the heredoc or here-string data fed to
+    them, and how many here-strings were read. Quotes are tracked so ``echo '<<'`` is not mistaken for a heredoc,
     arithmetic is skipped so ``echo $((1 << 2))`` is not either, a heredoc body
     ends at its terminator line so commands written after it are still walked,
     and a here-string consumes only its single operand.
     """
     commands: list[str] = []
     data: list[str] = []
+    here_strings = 0
     remaining = command_text
-    for _ in range(_MAX_HEREDOC_OPERANDS):
+    budget = _MAX_HEREDOC_OPERANDS
+    per_line = _MAX_HEREDOCS_PER_LINE.get(reading, _MAX_HEREDOC_OPERANDS)
+    while budget > 0:
         position = _heredoc_operator_index(remaining)
         if position < 0:
             break
@@ -4331,30 +5235,86 @@ def _split_heredocs(command_text: str) -> tuple[str, str]:
             cut = _unquoted_separator_index(operand)
             data.append(operand[:cut])
             remaining = " " + operand[cut:]
+            budget -= 1
+            here_strings += 1
             continue
-        delimiter = _HEREDOC_DELIMITER_RE.match(rest)
-        if delimiter is None:
-            # Nothing names the end of the body, so the rest of the text is it.
+        line_end = rest.find("\n")
+        header = _heredoc_header(rest if line_end == -1 else rest[:line_end])
+        if header is None:
+            # Nothing names the end of a body, so the rest of the text is data.
             data.append(rest)
             remaining = ""
             break
-        line_end = rest.find("\n", delimiter.end())
-        if line_end == -1:
-            # The body never starts, so what follows the delimiter is command.
-            commands.append(" " + rest[delimiter.end() :])
+        # The rest of the operator's own line still belongs to its commands,
+        # and every heredoc declared on it has its body read, in order, once
+        # the line ends: ``python3 <<A <<B run.py`` reads A's body, then B's.
+        header_text, header_data, terminators = header
+        budget -= len(terminators) + len(header_data)
+        if len(terminators) > per_line or budget < 0:
+            # The shell refuses the line, or which lines are bodies is past
+            # what is read here: the line, from its start, and all after it
+            # are data, so a script named there is unresolved.
+            walked = "".join(commands)
+            line_start = walked.rfind("\n") + 1
+            commands = [walked[:line_start]]
+            data.append(walked[line_start:] + "<<" + rest)
             remaining = ""
             break
-        # The rest of the operator's own line still belongs to its command.
-        commands.append(" " + rest[delimiter.end() : line_end])
-        body, resumed = _split_heredoc_body(
-            rest[line_end + 1 :],
-            delimiter.group(2).strip("\"'").replace("\\", ""),
-            bool(delimiter.group(1)),
-        )
-        data.append(body)
+        commands.append(header_text)
+        data.extend(header_data)
+        here_strings += len(header_data)
+        if line_end == -1:
+            # The bodies never start, so what follows the delimiters is command.
+            remaining = ""
+            break
+        resumed = rest[line_end + 1 :]
+        for terminator, strip_tabs in terminators:
+            body, resumed = _split_heredoc_body(resumed, terminator, strip_tabs)
+            data.append(body)
         remaining = "\n" + resumed
+    if budget <= 0 and _heredoc_operator_index(remaining) >= 0:
+        # More operators than are read: what is left may be bodies, so it is
+        # data rather than commands.
+        data.append(remaining)
+        remaining = ""
     commands.append(remaining)
-    return "".join(commands), "\n".join(data)
+    return "".join(commands), "\n".join(data), here_strings
+
+
+def _heredoc_header(line: str) -> tuple[str, list[str], list[tuple[str, bool]]] | None:
+    """Read the heredocs declared on one line, the first ``<<`` already consumed.
+
+    Returns the line's command text with each operator and delimiter removed,
+    the here-string operands on it, and each heredoc's terminator with whether
+    its ``<<-`` strips leading tabs, in the order the shell reads their bodies.
+    ``None`` when a ``<<`` names no terminator. Measured on bash, dash, zsh,
+    ksh, mksh and busybox ash: every heredoc on a line, across commands joined
+    by ``;`` or ``|`` included, takes its body after the line, in order.
+    """
+    pieces: list[str] = []
+    strings: list[str] = []
+    terminators: list[tuple[str, bool]] = []
+    rest = line
+    while True:
+        delimiter = _HEREDOC_DELIMITER_RE.match(rest)
+        if delimiter is None:
+            return None
+        terminators.append((delimiter.group(2).strip("\"'").replace("\\", ""), bool(delimiter.group(1))))
+        rest = " " + rest[delimiter.end() :]
+        while True:
+            position = _heredoc_operator_index(rest)
+            if position < 0:
+                pieces.append(rest)
+                return "".join(pieces), strings, terminators
+            pieces.append(rest[:position])
+            rest = rest[position + 2 :]
+            if not rest.startswith("<"):
+                break
+            # Here-string: one operand, then the line resumes.
+            operand = rest[1:].lstrip()
+            cut = _unquoted_separator_index(operand)
+            strings.append(operand[:cut])
+            rest = " " + operand[cut:]
 
 
 def _is_redirection_operator(token: str) -> bool:
@@ -4641,29 +5601,43 @@ def _cmd_executes_script(
     _depth: int = 0,
     _shell: str | None = None,
     _positional: bool = False,
+    _environment: dict[str, str] | None = None,
 ) -> bool | None:
     """Whether a shell command invokes ``expected_script``.
 
     ``_shell`` names the interpreter running this text, when it is known:
     a ``-c`` payload carries its shell, the tool call itself carries none.
-    Two rules in the walk depend on the shell: whether the last command of
-    a pipeline keeps its bindings, and whether ``((`` is arithmetic. Where
-    the shell does not settle one, the walk runs under both readings, and
-    disagreement is unresolved rather than one shell's answer presented as
-    every shell's.
+    ``_environment`` is what a payload's shell inherits: the names exported
+    to it and the prefix assignments of the command that started it.
+    Three rules in the walk depend on the shell: whether the last command of
+    a pipeline keeps its bindings, whether ``((`` is arithmetic, and how
+    variables are bound (which declaring builtins exist, and whether an
+    assignment before a special builtin outlives it). Where the shell does
+    not settle one, the walk runs under every reading, and disagreement is
+    unresolved rather than one shell's answer presented as every shell's.
     """
     keep = _pipeline_last_stage_keeps_bindings(_shell, str(cmd))
     arithmetic = _double_parens_are_arithmetic(_shell)
     results = {
-        _walk_for_invocation(cmd, expected_script, _depth, keep_stage, _positional, arithmetic_parens)
+        _walk_for_invocation(
+            cmd, expected_script, _depth, keep_stage, _positional, arithmetic_parens, binding_reading, _environment
+        )
         for keep_stage in ([keep] if keep is not None else [False, True])
         for arithmetic_parens in ([arithmetic] if arithmetic is not None else [True, False])
+        for binding_reading in _binding_readings(_shell)
     }
     return results.pop() if len(results) == 1 else None
 
 
 def _walk_for_invocation(
-    cmd: Any, expected_script: str, _depth: int, keep_last_stage: bool, positional: bool, arithmetic_parens: bool
+    cmd: Any,
+    expected_script: str,
+    _depth: int,
+    keep_last_stage: bool,
+    positional: bool,
+    arithmetic_parens: bool,
+    binding_reading: str = "bash",
+    environment: dict[str, str] | None = None,
 ) -> bool | None:
     """Whether a shell command invokes ``expected_script``.
 
@@ -4685,19 +5659,34 @@ def _walk_for_invocation(
     command_text = str(cmd)
     if not command_text.strip():
         return False
-    if not _names_script_anywhere(command_text, expected_script):
+    if not _names_script_anywhere(command_text, expected_script) and not (
+        _depth > 0 and _SHELL_VARIABLE_RE.search(command_text)
+    ):
         # An unresolved walk over a command that never names the script is
         # not evidence about that script, so it is a non-invocation, as it was
-        # before invocation evidence was required.
+        # before invocation evidence was required. A ``-c`` payload is the
+        # exception when it reads a variable: the command around it names the
+        # script, and ``python3 "$f"`` in the child may be given it through
+        # the environment.
         return False
     # A heredoc or here-string operand is data rather than further commands, but
     # the tokenizer turns its newlines into separators, so it is split out.
-    analysed_text, unexamined_text = _split_heredocs(command_text)
-    tokens = _split_punctuation_runs(_shell_tokens(analysed_text), arithmetic_parens)
+    analysed_text, unexamined_text, here_strings = _split_heredocs(command_text, binding_reading)
+    # A shell with no here-string rejects the text before running it.
+    syntax_rejected = bool(here_strings) and binding_reading in _NO_HERE_STRING_SHELLS
+    tokens = _split_punctuation_runs(
+        _shell_tokens(_mark_quoted_newlines(_mark_literal_dollars(analysed_text))),
+        arithmetic_parens,
+        binding_reading != "ksh",
+    )
     if not tokens:
         return None if str(expected_script) in command_text else False
 
     assignments: dict[str, str] = {}
+    for name, value in (environment or {}).items():
+        # Inherited, and exported onward to any shell this one starts.
+        assignments[name] = value
+        assignments[_EXPORTED_MARK + name] = "1"
     # Every scope a command can run in, innermost last. A ``( ... )`` group
     # and a compound command isolated as a pipeline stage each run in a
     # subshell, with a copy of the bindings around them that is dropped
@@ -4712,6 +5701,14 @@ def _walk_for_invocation(
 
     def innermost() -> dict[str, str]:
         return frames[-1][1] if frames else assignments
+
+    scope = assignments
+
+    def credited() -> bool:
+        """Whether an invocation found here counts: not once an assignment the
+        shell stops at has failed before it (see ``_ASSIGNMENT_REFUSED``), nor
+        in a text the shell rejects (``_NO_HERE_STRING_SHELLS``)."""
+        return not scope.get(_ASSIGNMENT_REFUSED) and not syntax_rejected
 
     def close_frames(parens: int) -> None:
         """Drop what ended with the previous segment, innermost first: a
@@ -4761,8 +5758,21 @@ def _walk_for_invocation(
         piped_into = end < len(tokens) and tokens[end] == "|"
         lead = next((word for word in position_words if word != "!"), None)
         opened = 0
+        # ``$((`` reaches the walk as ``$ ( (``, which opens groups here like
+        # ``$(`` does. Its arithmetic runs in the shell around them, so it
+        # binds in the scope in force before the first ``(`` after a ``$``.
+        parens = [position for position, token in enumerate(command) if token == "("]
+        expansion_opens = next(
+            (count for count, position in enumerate(parens) if position and str(command[position - 1]).endswith("$")),
+            None,
+        )
+        arithmetic_scope = None
         for event in events:
             if event == "(":
+                if expansion_opens is not None and arithmetic_scope is None:
+                    if expansion_opens == 0:
+                        arithmetic_scope = innermost()
+                    expansion_opens -= 1
                 frames.append(("group", dict(innermost()), compound_depth))
                 continue
             compound_end = closer_ends[opened]
@@ -4787,25 +5797,41 @@ def _walk_for_invocation(
                 # shell here (zsh, ksh), so what it binds is kept.
                 in_pipeline = False
         scope = dict(innermost()) if in_pipeline else innermost()
+        _apply_arithmetic_assignments(
+            command,
+            scope if in_pipeline or arithmetic_scope is None else arithmetic_scope,
+            expected_script,
+            "$((" in analysed_text or "$[" in analysed_text,
+        )
         if "((" in command:
-            body_index = command.index("((") + 1
-            arithmetic_text = str(command[body_index]) if body_index < len(command) else ""
-            numeric_script = str(expected_script).rsplit("/", 1)[-1].isdigit()
-            for match in _ARITHMETIC_ASSIGNMENT_RE.finditer(arithmetic_text):
-                name = next(group for group in match.groups() if group)
-                # The variable ends as a number, unchanged after an error, or
-                # never read because ksh aborted. Only when it held the script
-                # (or the script's name is a number) is that a question.
-                if numeric_script or _script_path_matches(
-                    _resolved_shell_arg(scope.get(name, ""), scope), expected_script
-                ):
-                    scope[name] = _UNSETTLED_VALUE
             idx = end + 1
             continue
 
-        cmd_idx = _command_start(command, scope)
+        prefix: dict[str, str] = {}
+        cmd_idx = _command_start(command, prefix)
         if cmd_idx >= len(command):
-            # Variable scope, or a bare reserved word, which run nothing.
+            # Assignments alone bind in this shell; a bare reserved word runs
+            # nothing. Neither runs a script.
+            for name, value in prefix.items():
+                _bind(scope, name, _value_now(value, scope), binding_reading)
+            idx = end + 1
+            continue
+        if _resolved_shell_arg(command[cmd_idx], scope).strip("\"'") in _SPECIAL_BUILTINS and (
+            binding_reading in _PREFIX_OUTLIVES_SPECIAL_BUILTIN
+        ):
+            for name, value in prefix.items():
+                _bind(scope, name, _value_now(value, scope), binding_reading, "prefix-special")
+        else:
+            for name, value in prefix.items():
+                if scope.get(_READONLY_MARK + name):
+                    # The assignment fails; bash and ksh still run the command
+                    # and go on, the other shells stop.
+                    _refuse_assignment(scope, name, binding_reading, "prefix")
+                elif "i" in scope.get(_ATTRIBUTE_MARK + name, "") and _integer_may_fail(
+                    _value_now(value, scope), scope
+                ):
+                    _refuse_assignment(scope, name, binding_reading, "prefix", _INTEGER_ERROR_GOES_ON)
+        if _apply_binding_builtin(command, cmd_idx, scope, binding_reading):
             idx = end + 1
             continue
         if command[cmd_idx] in _LOOP_HEADER_WORDS:
@@ -4830,7 +5856,7 @@ def _walk_for_invocation(
             # The header runs nothing itself. With a single value the loop
             # variable is bound for the body that follows; otherwise a script
             # named here is unresolved, never a settled non-invocation.
-            if _loop_header_is_unresolved(command, cmd_idx, scope, expected_script):
+            if _loop_header_is_unresolved(command, cmd_idx, scope, expected_script, binding_reading):
                 undecidable = True
             idx = end + 1
             continue
@@ -4846,8 +5872,13 @@ def _walk_for_invocation(
             idx = end + 1
             continue
         leading = _shell_executable(_resolved_shell_arg(command[cmd_idx], scope)).removesuffix(".exe")
+        # Where the words that start this command begin: the wrappers between
+        # here and the command decide what it inherits (``_child_environment``).
+        # They are skipped over copies of the bindings, so what ``env`` gives
+        # the command never reaches this shell or the command's own words.
+        start_idx = cmd_idx
         if leading in _WRAPPER_GRAMMARS:
-            wrapper_status, cmd_idx = _skip_wrapper_options(leading, command, cmd_idx, scope)
+            wrapper_status, cmd_idx = _skip_wrapper_options(leading, command, cmd_idx, dict(scope))
             if wrapper_status != _WRAPPER_OK:
                 if wrapper_status == _WRAPPER_NONE:
                     ran_a_wrapper_help = True
@@ -4855,7 +5886,7 @@ def _walk_for_invocation(
                     undecidable = True
                 idx = end + 1
                 continue
-        unwrapped_idx = _unwrap_shell_command(command, cmd_idx, scope)
+        unwrapped_idx = _unwrap_shell_command(command, cmd_idx, dict(scope))
         if unwrapped_idx is None:
             undecidable = True
             idx = end + 1
@@ -4905,39 +5936,60 @@ def _walk_for_invocation(
             if interpreter in _SHELL_COMMAND_INTERPRETERS and _runs_inline_code(executable, command, cmd_idx, scope):
                 payload = _shell_c_payload(command, cmd_idx, scope)
                 if payload is not None:
+                    # This shell expands what it did not leave quoted, a name
+                    # it never bound to nothing, before the child reads the rest.
+                    payload = _value_now(payload, scope).replace(_LITERAL_DOLLAR, "$")
                     # After the payload, the first operand is its $0 and the rest
                     # its positional parameters; they reach the payload only
                     # through a reference to them in its text.
                     after = _shell_c_positional(command, cmd_idx, scope)
                     argv0, params = after[:1], after[1:]
+                    child_environment = _child_environment(command, start_idx, cmd_idx, scope, prefix, binding_reading)
                     nested = _cmd_executes_script(
                         payload,
                         expected_script,
                         _depth=_depth + 1,
                         _shell=interpreter,
                         _positional=bool(params),
+                        _environment=child_environment or {},
                     )
                     if nested is True:
-                        return True
+                        if credited():
+                            return True
+                        undecidable = True
                     reaches = (
                         _READS_POSITIONAL_RE.search(payload)
                         and any(_script_path_matches(w, expected_script) for w in params)
                     ) or (
                         _READS_ARGV0_RE.search(payload) and any(_script_path_matches(w, expected_script) for w in argv0)
                     )
-                    if nested is None or reaches:
+                    if nested is None or reaches or (child_environment is None and _SHELL_VARIABLE_RE.search(payload)):
+                        # A payload reading a variable after ``sudo`` or ``env -S``
+                        # reads what the text does not carry.
                         undecidable = True
                     idx = end + 1
                     continue
 
             if executable in _OPAQUE_SHELL_BUILTINS:
-                if _command_names_script(command, cmd_idx, scope, expected_script):
+                # ``eval`` reads its words again in this shell, with the
+                # command's prefix in effect: ``f=run.py eval 'python3 "$f"'``.
+                if _command_names_script(
+                    command,
+                    cmd_idx,
+                    _reader_scope(command, start_idx, cmd_idx, scope, prefix, binding_reading),
+                    expected_script,
+                ):
                     undecidable = True
+                _apply_eval_bindings(command[cmd_idx + 1 :], scope, binding_reading)
                 idx = end + 1
                 continue
 
             if _script_path_matches(executable_path, expected_script):
-                return True
+                if credited():
+                    return True
+                undecidable = True
+                idx = end + 1
+                continue
 
             runs_a_script = interpreter in _INTERPRETER_GRAMMARS or interpreter in _SOURCING_COMMANDS
             if not runs_a_script and _carries_a_nested_invocation(command, cmd_idx, scope, expected_script):
@@ -4952,12 +6004,19 @@ def _walk_for_invocation(
                     # Inline code or a module can run the script itself, which
                     # this walk does not read, so naming it leaves the command
                     # unresolved rather than settled as running nothing.
-                    if _command_names_script(command, cmd_idx, scope, expected_script):
+                    if _command_names_script(
+                        command,
+                        cmd_idx,
+                        _reader_scope(command, start_idx, cmd_idx, scope, prefix, binding_reading),
+                        expected_script,
+                    ):
                         undecidable = True
                 elif status == _SCRIPT and script_arg is not None and str(script_arg).strip("\"'") != "-":
                     if _script_path_matches(_path_with_shell_cwd(script_arg, current_directory), expected_script):
-                        return True
-                    if _UNRESOLVED_ARG_RE.search(str(script_arg)) or _UNSETTLED_VALUE in str(script_arg):
+                        if credited():
+                            return True
+                        undecidable = True
+                    elif _UNRESOLVED_ARG_RE.search(str(script_arg)) or _unresolved_value(str(script_arg)):
                         undecidable = True
                 elif (
                     status in (_NO_SCRIPT, _SCRIPT)
@@ -4975,8 +6034,10 @@ def _walk_for_invocation(
 
     if undecidable:
         return None
-    if expected_script in unexamined_text:
-        # Named only in data this walk did not read as commands.
+    if expected_script in unexamined_text or expected_script in _value_now(unexamined_text, innermost()):
+        # Named only in data this walk did not read as commands, directly or
+        # through a variable the data reads: this shell expands an unquoted
+        # heredoc body, and a shell reading the data expands what it inherits.
         return None
     if ran_a_wrapper_help and not undecidable:
         # A wrapper printed its help and exited, so nothing ran.

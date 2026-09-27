@@ -1517,3 +1517,542 @@ def test_double_parentheses_are_read_by_how_they_close_and_by_shell(check, comma
     inside the arithmetic body are counted and stay in it.
     """
     assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('export f=run.py; python3 "$f"', 1.0),
+        ('readonly f=run.py; python3 "$f"', 1.0),
+        ("export f=run.py; python3 ${f}", 1.0),
+        ('declare f=run.py; python3 "$f"', 1.0),
+        ('typeset -x f=run.py; python3 "$f"', 1.0),
+        ('export -- f=run.py g=x; python3 "$f"', 1.0),
+        ('f=run.py; export f; python3 "$f"', 1.0),
+        ('export f=run.py; cat "$f"', 0.0),
+        ('readonly f=run.py; head -5 "$f"', 0.0),
+        ("dash -c 'declare f=run.py; python3 \"$f\"'", 0.0),
+        ("zsh -c 'declare f=run.py; python3 \"$f\"'", 1.0),
+        ("ksh -c 'typeset f=run.py; python3 \"$f\"'", 1.0),
+        ("sh -c 'declare f=run.py; python3 \"$f\"'", 0.75),
+        ('local f=run.py; python3 "$f"', 0.75),
+        ('declare -u f=run.py; python3 "$f"', 0.75),
+        ('f=other.py; echo run.py | { read f; python3 "$f"; }', 0.75),
+        ('printf -v f run.py; python3 "$f"', 0.75),
+        ('readonly f=run.py; f=other.py; python3 "$f"', 0.75),
+        ('f=run.py; unset f; python3 "$f"', 0.0),
+        ('f=run.py; unset -f f; python3 "$f"', 1.0),
+    ],
+)
+def test_builtins_that_bind_a_variable_are_read_as_bindings(check, command, expected) -> None:
+    """``export f=run.py`` and ``readonly f=run.py`` bind as ``f=run.py`` does
+    in every shell; ``declare`` binds in bash and zsh and ``typeset`` also in
+    ksh and mksh, and where a shell lacks one the command fails and binds
+    nothing, so ``sh`` (dash on some systems, bash on others) is unresolved.
+    ``unset f`` leaves ``$f`` empty. A value the text cannot settle leaves the
+    variable unsettled rather than a settled miss: ``local`` outside a function
+    (it binds in zsh and mksh only), an option that changes the value
+    (``declare -u``), ``read`` and ``printf -v``, and an assignment to a
+    read-only name. Reading the script stays uncredited.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=run.py python3 "$f"', 0.0),
+        ('f=run.py true; python3 "$f"', 0.0),
+        ('env f=run.py python3 "$f"', 0.0),
+        ('f=run.py :; python3 "$f"', 0.0),
+        ("bash -c 'f=run.py :; python3 \"$f\"'", 0.0),
+        ("dash -c 'f=run.py :; python3 \"$f\"'", 1.0),
+        ('f=run.py FOO=1; python3 "$f"', 1.0),
+        ("export f=run.py; bash -c 'python3 \"$f\"'", 1.0),
+        ("f=run.py; bash -c 'python3 \"$f\"'", 0.0),
+        ("f=run.py bash -c 'python3 \"$f\"'", 1.0),
+        ("env f=run.py bash -c 'python3 \"$f\"'", 1.0),
+        ("f=run.py; env f=run.py bash -c 'python3 \"$f\"'", 1.0),
+        ("env f=run.py bash -c 'cat \"$f\"'", 0.0),
+        ('f=run.py; bash -c "python3 $f"', 1.0),
+        ("set -a; f=run.py; bash -c 'python3 \"$f\"'", 1.0),
+        ("set -o allexport; f=run.py; bash -c 'python3 \"$f\"'", 1.0),
+        ("set -a; f=run.py; set +a; bash -c 'python3 \"$f\"'", 1.0),
+        ("f=run.py; set -a; bash -c 'python3 \"$f\"'", 0.0),
+        ("set -a; set +a; f=run.py; bash -c 'python3 \"$f\"'", 0.0),
+        ('f=run.py; bash -c "python3 \\$f"', 0.0),
+    ],
+)
+def test_an_assignment_before_a_command_is_that_commands_environment(check, command, expected) -> None:
+    """``f=run.py python3 "$f"`` expands ``$f`` before the assignment applies,
+    and the assignment is the command's environment only, so nothing after it
+    sees ``f`` either; ``env f=run.py`` is the same. Before a special builtin
+    (``:``) the assignment outlives the command in dash and the other POSIX
+    shells, not in bash or zsh. A ``-c`` payload's shell sees what it inherits:
+    the exported names (``export``, ``declare -x``, and anything bound while
+    ``set -a`` is on) and the prefix of the command that started it, and a
+    ``$f`` quoted or escaped from this shell is expanded there, not here.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("python3 <<A <<B run.py\nx\nA\ny\nB", 1.0),
+        ("python3 <<-A <<B run.py\n\tx\n\tA\ny\nB", 1.0),
+        ("python3 <<A <<B <<C run.py\nx\nA\ny\nB\nz\nC", 1.0),
+        ("cat <<A; python3 <<B run.py\nx\nA\ny\nB", 1.0),
+        ("cat <<A <<A\nx\nA\ny\nA\npython3 run.py", 1.0),
+        ("cat <<A <<B run.py\nx\nA\ny\nB", 0.0),
+        ("python3 <<A <<B other.py\nx\nA\ny\nB", 0.0),
+        ("cat <<A <<B\nx\nA\npython3 run.py\nB", 0.75),
+    ],
+)
+def test_every_heredoc_declared_on_a_line_takes_its_body_in_order(check, command, expected) -> None:
+    """Every heredoc declared on one line, across commands joined on that line
+    included, reads its body after the line ends, in the order declared, as
+    bash, dash, zsh, ksh, mksh and busybox ash all do up to the number each
+    accepts on a line (the limit is tested separately). The second declaration
+    is not left in the command's words, and a body that is data (a line inside
+    B's body) is not walked as a command.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=other.py; (((for f in run.py; do :; done; python3 "$f")) | cat); python3 "$f"', 0.0),
+        ('f=other.py; printf "" | (((for f in run.py; do :; done; python3 "$f")) | cat); python3 "$f"', 0.0),
+        ('zsh -c \'f=other.py; (((for f in run.py; do :; done; python3 "$f")) | cat); python3 "$f"\'', 0.0),
+        ('ksh -c \'f=other.py; (((for f in run.py; do :; done; python3 "$f")) | cat); python3 "$f"\'', 1.0),
+        ('dash -c \'f=other.py; (((for f in run.py; do :; done; python3 "$f")) | cat); python3 "$f"\'', 1.0),
+    ],
+)
+def test_three_opening_parentheses_are_a_subshell_around_double_parentheses(check, command, expected) -> None:
+    """The tokenizer hands ``(((`` over as one token. bash, zsh and mksh read it
+    as ``( ((``, so the inner ``((...))`` is an arithmetic command that runs
+    nothing; ksh and dash read nested subshells, where the loop's binding
+    reaches ``python3 "$f"`` and the script runs.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("export f=run.py; env -i bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; env -u f bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; env --ignore-environment bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; env --unset=f bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; env -uf bash -c 'python3 \"$f\"'", 0.0),
+        ('export f=run.py; env -i PATH="$PATH" bash -c \'python3 "$f"\'', 0.0),
+        ("export f=run.py; env -i env bash -c 'python3 \"$f\"'", 0.0),
+        ("f=run.py env -i bash -c 'python3 \"$f\"'", 0.0),
+        ("set -a; f=run.py; env -u f sh -c 'python3 \"$f\"'", 0.0),
+        ('export f=run.py; bash -c \'env -u f bash -c "python3 \\"\\$f\\""\'', 0.0),
+        ("export f=run.py; env -u g bash -c 'python3 \"$f\"'", 1.0),
+        ("export f=other.py; env -i f=run.py bash -c 'python3 \"$f\"'", 1.0),
+        ("export f=run.py; env -u f f=run.py bash -c 'python3 \"$f\"'", 1.0),
+        ("export f=run.py; env -u f env f=run.py bash -c 'python3 \"$f\"'", 1.0),
+        ("export f=run.py; env -S '-u f' bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; env -i bash -c 'cat \"$f\"'", 0.0),
+    ],
+)
+def test_env_removes_and_adds_names_before_the_child_starts(check, command, expected) -> None:
+    """``env -i``, ``-u NAME`` and their long forms and clusters take names out of
+    what the child inherits, in order, before and after its assignments: so
+    ``env -i f=run.py`` gives the child ``f`` again, ``env -u g`` leaves ``f``
+    alone, and a nested shell inherits only what reached its parent. ``env -S``
+    splits a string the walk does not read, so the child's view is unresolved.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=other.py; export g=$f; f=run.py; python3 "$g"', 0.0),
+        ('f=run.py; export g=$f; f=other.py; python3 "$g"', 1.0),
+        ('f=other.py; readonly g=$f; f=run.py; python3 "$g"', 0.0),
+        ('f=other.py; declare g=$f; f=run.py; python3 "$g"', 0.0),
+        ('f=other.py; typeset g=$f; f=run.py; python3 "$g"', 0.0),
+        ('f=other.py; g=$f; f=run.py; python3 "$g"', 0.0),
+        ('f=run.py; g=$f; f=other.py; python3 "$g"', 1.0),
+        ('f=run.py; g="${f}"; f=other.py; python3 "$g"', 1.0),
+        ('export f=other.py g=$f; python3 "$g"', 0.0),
+        ('f=run.py; export f=other.py g=$f; python3 "$g"', 1.0),
+        ("ksh -c 'f=run.py; typeset f=other.py g=$f; python3 \"$g\"'", 0.0),
+        ("ksh -c 'f=other.py; typeset f=run.py g=$f; python3 \"$g\"'", 1.0),
+        ("f=run.py; export g='$f'; python3 \"$g\"", 0.0),
+        ('f=run.py; export g=$f; unset f; python3 "$g"', 1.0),
+        ("f=other.py; export g=$f; f=run.py; bash -c 'python3 \"$g\"'", 0.0),
+        ("f=run.py; export g=$f; f=other.py; bash -c 'python3 \"$g\"'", 1.0),
+        ('for f in run.py; do g=$f; done; f=other.py; python3 "$g"', 1.0),
+    ],
+)
+def test_a_declaration_copies_the_value_when_it_runs(check, command, expected) -> None:
+    """``export g=$f`` copies what ``f`` holds when it runs, as ``g=$f`` does;
+    a later ``f=...`` does not reach ``g``. In one declaration of several names
+    bash expands every value before assigning any, and ksh assigns in order
+    (measured). A ``$`` quoted from this shell is kept literally.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("export f=run.py; declare +x f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; typeset +x f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; declare -x +x f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; export -n f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; command export -n f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; builtin export -n f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; command -p export -n f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; command command export -n f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; builtin declare +x f; bash -c 'python3 \"$f\"'", 0.0),
+        ("export f=run.py; eval export -n f; bash -c 'python3 \"$f\"'", 0.75),
+        ('dash -c \'export f=run.py; export -n f; bash -c "python3 \\"\\$f\\""\'', 0.75),
+        ('zsh -c \'export f=run.py; command export -n f; bash -c "python3 \\"\\$f\\""\'', 1.0),
+        ('export f=run.py; declare +x f; python3 "$f"', 1.0),
+        ("export f=run.py; export -f f; bash -c 'python3 \"$f\"'", 1.0),
+        ("export f=run.py; export -nf f; bash -c 'python3 \"$f\"'", 1.0),
+        ("export f=run.py; declare +x f; export f; bash -c 'python3 \"$f\"'", 1.0),
+        ("f=run.py; command export f; bash -c 'python3 \"$f\"'", 1.0),
+        ("f=run.py; builtin export f; bash -c 'python3 \"$f\"'", 1.0),
+    ],
+)
+def test_removing_the_export_attribute_is_honoured_however_the_builtin_is_reached(check, command, expected) -> None:
+    """``declare +x``, ``typeset +x`` and ``export -n`` take the export away,
+    and so do they after ``command``, ``command -p`` or ``builtin``, in any
+    number, where the shell lets those reach the builtin (not zsh's
+    ``command``). The value stays in this shell. ``export -f`` and ``-nf``
+    touch functions only. ``dash`` rejects ``export -n``, and what ``eval``
+    runs is not read exactly, so both leave the value unsettled.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+def _heredocs(count: int, before: str, after: str = "", body: str = "x", quote: str = "") -> str:
+    """``before``, then ``count`` heredocs declared on one line, ``after``, and each body in order."""
+    names = [f"D{index}" for index in range(count)]
+    declared = " ".join(f"<<{quote}{name}{quote}" for name in names)
+    return f"{before} {declared}{' ' + after if after else ''}\n" + "".join(f"{body}\n{name}\n" for name in names)
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (_heredocs(9, "cat", body="python3 run.py"), 0.75),
+        (_heredocs(9, "cat", body="python3 run.py", quote="'"), 0.75),
+        (_heredocs(12, "cat", body="python3 run.py"), 0.75),
+        (_heredocs(16, "cat", body="python3 run.py"), 0.75),
+        (_heredocs(17, "cat", body="python3 run.py"), 0.75),
+        (_heredocs(16, "python3", "run.py"), 1.0),
+        (_heredocs(17, "python3", "run.py"), 0.75),
+        (_heredocs(9, "cat", body="python3 run.py") + "python3 run.py", 1.0),
+        (_heredocs(16, "cat", body="python3 run.py") + "python3 run.py", 1.0),
+        (_heredocs(17, "cat", body="python3 run.py") + "python3 run.py", 0.75),
+        ("cat <<A\nx\nA\n" + _heredocs(17, "python3", "run.py"), 0.75),
+        ("echo a <<< x\n" + _heredocs(16, "python3", "run.py"), 1.0),
+        ("mksh -c '" + _heredocs(10, "python3", "run.py") + "'", 1.0),
+        ("mksh -c '" + _heredocs(11, "python3", "run.py") + "'", 0.75),
+        ("dash -c '" + _heredocs(17, "python3", "run.py") + "'", 1.0),
+    ],
+)
+def test_a_line_with_more_heredocs_than_the_shell_accepts_is_data(check, command, expected) -> None:
+    """Past the heredocs a shell accepts on one line, the line and everything
+    after it are data: bash exits with "maximum here-document count exceeded"
+    at 17 and mksh stops at 11 before running anything on the line (measured),
+    while dash reads more. A script named there is unresolved, never credited;
+    up to the limit every body is read in order.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("f=run.py eval 'python3 \"$f\"'", 0.75),
+        ("f=run.py; eval 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; eval 'python3 \"$f\"'", 0.75),
+        ("f=run.py; command eval 'python3 \"$f\"'", 0.75),
+        ("f=other.py eval 'python3 \"$f\"'", 0.0),
+        ('f=run.py; eval f=other.py; python3 "$f"', 0.75),
+        ("f=run.py; eval 'unset f'; python3 \"$f\"", 0.75),
+        ("f=run.py; eval 'read f <<< x'; python3 \"$f\"", 0.75),
+        ('f=run.py; eval \'echo "$f"\'; python3 "$f"', 1.0),
+        ("f=run.py python3 -c 'import os; os.system(\"python3 $f\")'", 0.75),
+        ("env f=run.py python3 -c 'import os; os.system(\"python3 $f\")'", 0.75),
+        ('f=run.py; bash <<EOF\npython3 "$f"\nEOF', 0.75),
+        ("export f=run.py; bash <<'EOF'\npython3 \"$f\"\nEOF", 0.75),
+    ],
+)
+def test_eval_and_inline_code_may_expand_a_quoted_variable(check, command, expected) -> None:
+    """``eval`` reads its words again in this shell, with the command's prefix in
+    effect, so a ``$f`` quoted from the first reading names the script there;
+    a name ``eval`` may bind is unsettled after it. Inline code and a shell
+    reading a heredoc or here-string receive the command's environment, and an
+    unquoted heredoc body is expanded here, so a variable that holds the
+    script leaves them unresolved rather than a settled miss.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("readonly f=run.py; f=other.py; python3 run.py", 0.75),
+        ("echo x; readonly f=run.py; f=other.py; env -i f=run.py bash -c 'python3 \"$f\"'", 0.75),
+        ("readonly f=run.py; export f=other.py; python3 run.py", 1.0),
+        ("readonly f=run.py; f=other.py true; python3 run.py", 1.0),
+        ("readonly f=run.py; unset f; python3 run.py", 1.0),
+        ("dash -c 'readonly f=run.py; export f=other.py; python3 run.py'", 0.75),
+        ("zsh -c 'readonly f=run.py; unset f; python3 run.py'", 0.75),
+        ("ksh -c 'readonly f=run.py; f=other.py true; python3 run.py'", 1.0),
+        ("sh -c 'readonly f=run.py; f=other.py :; python3 run.py'", 0.75),
+        ("(readonly f=run.py; f=other.py); python3 run.py", 1.0),
+        ("{ readonly f=run.py; f=other.py; } | cat; python3 run.py", 1.0),
+        ("readonly f=run.py; (f=other.py; python3 run.py)", 0.75),
+        ('readonly f=run.py; for f in other.py; do python3 "$f"; done', 0.75),
+    ],
+)
+def test_nothing_after_a_refused_read_only_assignment_is_credited(check, command, expected) -> None:
+    """An assignment to a read-only name fails. A bare one stops every shell
+    (bash abandons the rest of the line); bash goes on after every other form
+    and ksh after a prefix, while dash, zsh, mksh and ash stop (measured).
+    Where the shell stops, a script named after the failure is unresolved; a
+    subshell, a pipeline stage included, stops alone.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("export f=run.py; code='f=other.py'; eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='export -n f'; eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='unset f'; eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='declare +x f'; eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='export f=other.py'; eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='f=other.py'; eval eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='f=other.py'; command eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='export -n f'; eval '$code'; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='f=other.py'; eval '$code'; bash -c 'python3 \"$f\"'", 1.0),
+        ("export f=other.py; code='f=run.py'; eval \"$code\"; bash -c 'python3 \"$f\"'", 0.75),
+        ("export f=run.py; code='echo hi'; eval \"$code\"; bash -c 'python3 \"$f\"'", 1.0),
+        ('export f=run.py; eval "$(echo f=other.py)"; bash -c \'python3 "$f"\'', 0.75),
+        ('f=run.py; code=\'g=1\'; eval "$code"; python3 "$f"', 1.0),
+        ("code='python3 run.py'; eval \"$code\"", 0.75),
+    ],
+)
+def test_eval_program_held_in_a_variable_is_read_after_this_shell_expands_it(check, command, expected) -> None:
+    """This shell expands eval's words before eval reads them, so ``eval "$code"``
+    runs what ``code`` holds: a name it reassigns, unsets or unexports is
+    unsettled afterwards, through nested ``eval`` and ``command eval`` too.
+    ``eval '$code'`` expands the text itself, where a word read from a
+    variable is a command, never an assignment. Text this walk cannot read
+    (a command substitution) leaves every bound name unsettled.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=run.py; declare -i f; f=run.py; python3 "$f"', 0.75),
+        ('f=other.py; declare -i f; f=run.py; python3 "$f"', 0.75),
+        ("export f=run.py; declare -a f; f=run.py; bash -c 'python3 \"$f\"'", 0.0),
+        ('declare -a f; f=run.py; python3 "$f"', 1.0),
+        ('declare -l f; f=RUN.PY; python3 "$f"', 1.0),
+        ('declare -l f; f=run.py; python3 "$f"', 1.0),
+        ('declare -u f; f=run.py; python3 "$f"', 0.75),
+        ('declare -i f; unset f; f=run.py; python3 "$f"', 1.0),
+        ('declare -i f; declare +i f; f=run.py; python3 "$f"', 1.0),
+        ('declare -i f; for f in run.py; do python3 "$f"; done', 0.75),
+    ],
+)
+def test_attributes_that_change_a_later_assignment_are_kept_with_the_name(check, command, expected) -> None:
+    """``declare -i``, ``-u`` and ``-n`` change what a later assignment stores, so
+    the value is unsettled until ``unset`` or ``+i`` removes the attribute;
+    ``-l`` lowercases it; an array (``-a``) keeps its value in this shell and
+    is never exported to a child.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('g=run.py; declare -n f=g; f=other.py; python3 "$g"', 0.75),
+        ('g=other.py; declare -n f=g; f=run.py; python3 "$g"', 0.75),
+        ('declare -n f=g; f=run.py; python3 "$g"', 0.75),
+        ('g=run.py; declare -n f=g; unset f; python3 "$g"', 0.75),
+        ('g=run.py; declare -n f=g; export f=other.py; python3 "$g"', 0.75),
+        ('g=run.py; declare -n f=g; read f <<< other.py; python3 "$g"', 0.75),
+        ('g=run.py; declare -n f=g; ((f=1)); python3 "$g"', 0.75),
+        ('g=run.py; f=g; declare -n f; f=other.py; python3 "$g"', 0.75),
+        ("export g=run.py; declare -n f=g; export -n f; bash -c 'python3 \"$g\"'", 0.75),
+        ("ksh -c 'g=run.py; nameref f=g; f=other.py; python3 \"$g\"'", 0.75),
+        ("mksh -c 'g=run.py; nameref f=g; f=other.py; python3 \"$g\"'", 0.75),
+        ("bash -c 'g=run.py; nameref f=g; f=other.py; python3 \"$g\"'", 1.0),
+        ('g=run.py; declare -n f=g; h=other.py; python3 "$g"', 1.0),
+        ('g=run.py; declare -n f=g; declare +n f; f=other.py; python3 "$g"', 1.0),
+        ('g=run.py; declare -n f=g; unset -n f; f=other.py; python3 "$g"', 1.0),
+        ('g=run.py; declare -n f=g; declare -n f=h; f=other.py; python3 "$g"', 1.0),
+        ('g=other.py; declare -n f=g; declare -n f=h; f=run.py; python3 "$g"', 0.0),
+        ('g=run.py; declare -n f; f=g; python3 "$g"', 1.0),
+        ('g=run.py; declare -n f; f=g; f=other.py; python3 "$g"', 0.75),
+        ('h=run.py; declare -n f; f=g; python3 "$h"', 1.0),
+        ('g=run.py; declare -n f="$(echo g)"; f=other.py; python3 "$g"', 0.75),
+    ],
+)
+def test_a_reference_passes_what_is_done_to_it_on_to_the_name_it_refers_to(check, command, expected) -> None:
+    """After ``declare -n f=g`` (``nameref`` in ksh and mksh), assigning,
+    exporting, unexporting, reading into or unsetting ``f`` acts on ``g``,
+    which is unsettled afterwards, bound or not. ``+n``, ``unset -n`` and a
+    second ``-n`` free or re-point ``f`` and leave ``g`` alone, and an
+    unrelated name leaves it settled. A reference that names nothing yet takes
+    the first value assigned as its name; where the text does not settle the
+    name, every bound name is unsettled.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("declare -i f; f=other.py; python3 run.py", 0.75),
+        ("declare -i f; export f=run.py; python3 run.py", 0.75),
+        ("declare -i f; for f in run.py; do :; done; python3 run.py", 0.75),
+        ("declare -i f; f=5; python3 run.py", 1.0),
+        ("declare -i f; f=x; python3 run.py", 1.0),
+        ("declare -i f; f=other.py true; python3 run.py", 1.0),
+        ("ksh -c 'typeset -i f; typeset f=other.py; python3 run.py'", 1.0),
+        ("mksh -c 'typeset -i f; typeset f=other.py; python3 run.py'", 0.75),
+        ("dash -c 'export f=1; export -n f; python3 run.py'", 0.75),
+        ("dash -c 'export f=1; command export -n f; python3 run.py'", 1.0),
+        ("bash -c 'export -Q f; python3 run.py'", 1.0),
+        ("mksh -c 'unset -n f; python3 run.py'", 0.75),
+        ("bash -c 'f=run.py; unset -n f; python3 \"$f\"'", 1.0),
+        ("ksh -c 'f=run.py; unset -n f; python3 \"$f\"'", 0.0),
+        ("zsh -c 'f=run.py; unset -Q f; python3 \"$f\"'", 1.0),
+        ('g=run.py; declare -n f; f=other.py; python3 "$g"', 0.75),
+        ('f=other.py; declare -n f; f=run.py; python3 "$f"', 1.0),
+        ("ksh -c 'f=other.py; typeset -n f; python3 run.py'", 0.75),
+    ],
+)
+def test_an_assignment_or_builtin_that_fails_where_the_shell_stops_ends_the_credit(check, command, expected) -> None:
+    """A value that is not a number, given to a ``-i`` name, is an error, and
+    bash exits there, as every shell with ``typeset`` does for most forms
+    (bash goes on after a prefix, ksh after ``typeset``). A special builtin
+    given an option the shell rejects stops a POSIX shell unless ``command``
+    runs it; bash and zsh go on. A reference that names nothing given a value
+    that is not a name fails as a read-only assignment does, and a declaration
+    that refers to such a name fails, where ksh stops. Where the shell stops,
+    a script named after the failure is unresolved (measured).
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("dash -c 'export g=run.py; read f <<< x; for f in x; do :; done; python3 \"$g\"'", 0.75),
+        ("sh -c 'export g=run.py; command unset -Q f; read f <<< 7; python3 \"$g\"'", 0.75),
+        ("dash -c 'cat <<< x; python3 run.py'", 0.75),
+        ("dash -c 'export g=run.py; read f < /dev/null; python3 \"$g\"'", 1.0),
+        ("bash -c 'cat <<< x; python3 run.py'", 1.0),
+        ("zsh -c 'cat <<< x; python3 run.py'", 1.0),
+        ("ksh -c 'cat <<< x; python3 run.py'", 1.0),
+        ("mksh -c 'cat <<< x; python3 run.py'", 1.0),
+        ("dash -c \"echo '<<<'; python3 run.py\"", 1.0),
+        ("dash -c 'cat <<< x; cat run.py'", 0.0),
+        ("cat <<< x; python3 run.py", 1.0),
+    ],
+)
+def test_a_here_string_the_shell_cannot_parse_is_never_full_credit(check, command, expected) -> None:
+    """dash and busybox ash have no here-string: ``<<<`` is a syntax error that
+    stops the line holding it, and a compound command spanning lines around
+    it, before anything runs (measured). Under those readings nothing in the
+    text is credited as run; ``sh`` disagrees across its readings and stays
+    unresolved. Shells that read here-strings, and a quoted ``<<<``, are unchanged.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash -c 'cat <<EOF\npython3 run.py\nEOF'", 0.75),
+        ("dash -c 'cat <<EOF\npython3 run.py\nEOF'", 0.75),
+        ('bash -c "cat <<EOF\npython3 run.py\nEOF"', 0.75),
+        ("bash -c 'cat <<EOF\nx\nEOF\npython3 run.py'", 1.0),
+        ("bash -c 'echo a\npython3 run.py'", 1.0),
+        ("bash -c 'python3 run.py <<EOF\nignored\nEOF'", 1.0),
+        ("dash -c 'cat <<EOF\na <<< b\nEOF\npython3 run.py'", 1.0),
+        ('bash -c "f=run.py; python3 \\"$f\\""', 0.0),
+        ('bash -c "f=run.py\npython3 $f"', 0.0),
+        ('f=run.py; bash -c "python3 \\"$f\\""', 1.0),
+        ('bash -c "f=run.py; python3 \\"\\$f\\""', 1.0),
+        ("bash -c 'f=run.py; python3 \"$f\"'", 1.0),
+    ],
+)
+def test_a_heredoc_inside_a_c_payload_keeps_its_body_as_data(check, command, expected) -> None:
+    """A newline inside the quotes of a ``-c`` payload is kept for the payload's
+    shell, so a heredoc there takes its body after its line, as at the top
+    level: a script named only in the body is unresolved, and a command after
+    the terminator is walked as a command. This shell expands a ``$`` it did
+    not leave quoted before the child reads the payload, a name it never
+    bound to nothing, so ``bash -c "f=run.py; python3 $f"`` runs ``python3``
+    with no script.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('f=run.py; let f=1; python3 "$f"', 0.75),
+        ('f=run.py; let "f=1"; python3 "$f"', 0.75),
+        ('f=run.py; : $((f=1)); python3 "$f"', 0.75),
+        ('f=run.py; x=$((f+=1)); python3 "$f"', 0.75),
+        ('f=run.py; : $[f=1]; python3 "$f"', 0.75),
+        ('f=run.py; eval "let f=1"; python3 "$f"', 0.75),
+        ('f=run.py; let g=1; python3 "$f"', 1.0),
+        ('f=run.py; : $((g=1)); python3 "$f"', 1.0),
+        ("f=run.py; echo '$((f=1))'; python3 \"$f\"", 1.0),
+        ('f=run.py; (: $((f=1))); python3 "$f"', 1.0),
+        ('f=run.py; echo $((f=1)) | cat; python3 "$f"', 1.0),
+        ('f=run.py; : $( (f=1) ); python3 "$f"', 1.0),
+        ('f=run.py; python3 "$f" $((f=1))', 1.0),
+        ('f=other.py; let f=1; python3 "$f"', 0.0),
+    ],
+)
+def test_arithmetic_outside_an_arithmetic_command_binds_too(check, command, expected) -> None:
+    """``let``, ``$((...))`` and ``$[...]`` assign as ``((...))`` does: a
+    variable that held the script ends as a number, or unchanged after an
+    error, so a later read of it is unresolved. Quoted text, a subshell, a
+    pipeline stage and a command substitution keep this shell's value, and a
+    word expanded before the assignment reads the value it had.
+    """
+    assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected

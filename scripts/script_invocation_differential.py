@@ -576,7 +576,223 @@ def curated() -> list[tuple[str, str]]:
             add(f"{shell} -c '{body}'" if shell else body)
         add(f'f={first}; ((f={second}; {PY} "$f") ); {PY} "$f"')
         add(f'zsh -c \'f={first}; ((printf "" | for g in 1; do f={second}; {PY} "$f"; done)); {PY} "$f"\'')
+        # three opening parentheses: ( (( in bash, zsh and mksh, subshells in ksh and dash
+        for shell in ("", "zsh", "ksh", "mksh", "dash"):
+            body = f'f={first}; (((for f in {second}; do :; done; {PY} "$f")) | cat); {PY} "$f"'
+            add(f"{shell} -c '{body}'" if shell else body)
+
+    # from review of revision 16: builtins that bind a variable, in each shell
+    for declaration in BINDING_BUILTIN_FORMS:
+        add(f'{declaration} f={SCRIPT}; {PY} "$f"')
+        add(f'{declaration} f={SCRIPT}; cat "$f"')
+        for shell in ("dash", "zsh", "ksh", "mksh", "sh"):
+            add(f"{shell} -c '{declaration} f={SCRIPT}; {PY} \"$f\"'")
+    add(f'f={SCRIPT}; export f; {PY} "$f"')
+    add(f'f={SCRIPT}; unset f; {PY} "$f"')
+    add(f'f={SCRIPT}; unset -f f; {PY} "$f"')
+    add(f'readonly f={SCRIPT}; f={O}; {PY} "$f"')
+    add(f'f={O}; printf -v f {SCRIPT}; {PY} "$f"')
+    add(f'f={O}; echo {SCRIPT} | {{ read f; {PY} "$f"; }}')
+    # an assignment before a command is that command's environment only, and
+    # outlives a special builtin in the POSIX shells alone
+    for form in PREFIX_BINDING_FORMS:
+        text = form.format(v=SCRIPT, py=PY)
+        add(text)
+        for shell in ("bash", "dash", "zsh", "ksh", "mksh", "sh"):
+            add(f"{shell} -c '{text}'")
+    # what a -c payload's shell inherits, and a $ quoted or escaped from this shell
+    for launcher in (
+        f"export f={SCRIPT}; ",
+        f"f={SCRIPT}; ",
+        f"f={SCRIPT} ",
+        f"env f={SCRIPT} ",
+        f"set -a; f={SCRIPT}; ",
+        f"set -o allexport; f={SCRIPT}; set +a; ",
+        f"f={SCRIPT}; set -a; ",
+        f"set -a; set +a; f={SCRIPT}; ",
+    ):
+        add(f"{launcher}bash -c '{PY} \"$f\"'")
+    add(f'f={SCRIPT}; bash -c "{PY} $f"')
+    add(f'f={SCRIPT}; bash -c "{PY} \\$f"')
+    # every heredoc declared on a line takes its body after the line, in order
+    for form in MULTI_HEREDOC_FORMS:
+        add(form.format(py=PY, script=SCRIPT, other=O))
+
+    # from review of revision 17: env removes names before the child starts
+    for launcher in ENV_REMOVAL_FORMS:
+        add(f"export f={SCRIPT}; {launcher} bash -c '{PY} \"$f\"'")
+    add(f"export f={O}; env -i f={SCRIPT} bash -c '{PY} \"$f\"'")
+    add(f"export f={SCRIPT}; env -u g bash -c '{PY} \"$f\"'")
+    add(f"export f={SCRIPT}; env -u f f={SCRIPT} bash -c '{PY} \"$f\"'")
+    add(f'export f={SCRIPT}; bash -c \'env -u f bash -c "{PY} \\"\\$f\\""\'')
+    add(f"f={SCRIPT} env -i bash -c '{PY} \"$f\"'")
+    # a declaration copies the value when it runs, as a plain assignment does
+    for declaration in ("export ", "readonly ", "declare ", "typeset ", ""):
+        add(f'f={O}; {declaration}g=$f; f={SCRIPT}; {PY} "$g"')
+        add(f'f={SCRIPT}; {declaration}g=$f; f={O}; {PY} "$g"')
+    add(f'f={SCRIPT}; export f={O} g=$f; {PY} "$g"')
+    add(f"ksh -c 'f={O}; typeset f={SCRIPT} g=$f; {PY} \"$g\"'")
+    add(f"f={O}; export g=$f; f={SCRIPT}; bash -c '{PY} \"$g\"'")
+    # the export attribute removed, however the builtin is reached
+    for removal in EXPORT_REMOVAL_FORMS:
+        add(f"export f={SCRIPT}; {removal}; bash -c '{PY} \"$f\"'")
+        add(f'export f={SCRIPT}; {removal}; {PY} "$f"')
+    # more heredocs on a line than the shell accepts: the rest is data
+    for count in (9, 16, 17):
+        add(_heredocs(count, "cat", body=f"{PY} {SCRIPT}"))
+        add(_heredocs(count, PY, SCRIPT))
+        add(_heredocs(count, "cat") + f"{PY} {SCRIPT}")
+    for shell, count in (("mksh", 10), ("mksh", 11), ("dash", 17)):
+        add(f"{shell} -c '{_heredocs(count, PY, SCRIPT)}'")
+    # eval, inline code and a shell reading data may expand a quoted variable
+    for form in EVAL_FORMS:
+        add(form.format(v=SCRIPT, o=O, py=PY))
+    # an assignment to a read-only name fails, and some shells stop there
+    for refusal in ("f={o}", "export f={o}", "f={o} true", "unset f", "f={o} :", "for f in x; do :; done"):
+        text = f"readonly f={SCRIPT}; {refusal.format(o=O)}; {PY} {SCRIPT}"
+        add(text)
+        for shell in ("dash", "zsh", "ksh", "sh"):
+            add(f"{shell} -c '{text}'")
+    add(f"(readonly f={SCRIPT}; f={O}); {PY} {SCRIPT}")
+    add(f"readonly f={SCRIPT}; (f={O}; {PY} {SCRIPT})")
+    add(f"readonly f={SCRIPT}; f={O}; env -i f={SCRIPT} bash -c '{PY} \"$f\"'")
+    # an eval program held in a variable, and attributes kept with a name
+    for code in (f"f={O}", "export -n f", "unset f", "declare +x f", f"export f={O}", "echo hi"):
+        add(f"export f={SCRIPT}; code='{code}'; eval \"$code\"; bash -c '{PY} \"$f\"'")
+    add(f"export f={SCRIPT}; code='f={O}'; eval '$code'; bash -c '{PY} \"$f\"'")
+    add(f"export f={SCRIPT}; code='f={O}'; command eval \"$code\"; bash -c '{PY} \"$f\"'")
+    add(f"export f={O}; code='f={SCRIPT}'; eval \"$code\"; bash -c '{PY} \"$f\"'")
+    for attribute in ("-i", "-u", "-l", "-a"):
+        add(f'declare {attribute} f; f={SCRIPT}; {PY} "$f"')
+    add(f"export f={SCRIPT}; declare -a f; f={SCRIPT}; bash -c '{PY} \"$f\"'")
+    # a -n name passes what is done to it on to the name it refers to
+    for change in (f"f={O}", "unset f", f"export f={O}", f"read f <<< {O}", "((f=1))", "h=x"):
+        add(f'g={SCRIPT}; declare -n f=g; {change}; {PY} "$g"')
+    add(f'g={O}; declare -n f=g; f={SCRIPT}; {PY} "$g"')
+    add(f'g={SCRIPT}; declare -n f=g; declare +n f; f={O}; {PY} "$g"')
+    add(f'g={SCRIPT}; declare -n f=g; unset -n f; f={O}; {PY} "$g"')
+    add(f'g={SCRIPT}; declare -n f=g; declare -n f=h; f={O}; {PY} "$g"')
+    add(f"export g={SCRIPT}; declare -n f=g; export -n f; bash -c '{PY} \"$g\"'")
+    add(f'g={SCRIPT}; declare -n f; f=g; f={O}; {PY} "$g"')
+    add(f'h={SCRIPT}; declare -n f; f=g; {PY} "$h"')
+    for shell in ("ksh", "mksh", "bash"):
+        add(f"{shell} -c 'g={SCRIPT}; nameref f=g; f={O}; {PY} \"$g\"'")
+    # arithmetic binds: let, $((...)) and $[...]
+    for arithmetic in ("let f=1", 'let "f=1"', ": $((f=1))", "x=$((f+=1))", ": $[f=1]", 'eval "let f=1"'):
+        add(f'f={SCRIPT}; {arithmetic}; {PY} "$f"')
+    for control in ("let g=1", ": $((g=1))", "echo '$((f=1))'", "(: $((f=1)))", "echo $((f=1)) | cat", ": $( (f=1) )"):
+        add(f'f={SCRIPT}; {control}; {PY} "$f"')
+    add(f'f={SCRIPT}; {PY} "$f" $((f=1))')
+    # an assignment or builtin that fails where the shell stops
+    for failing in (f"f={O}", f"export f={SCRIPT}", f"for f in {SCRIPT}; do :; done", "f=5", "f=x", f"f={O} true"):
+        add(f"declare -i f; {failing}; {PY} {SCRIPT}")
+    for shell in ("ksh", "mksh"):
+        add(f"{shell} -c 'typeset -i f; typeset f={O}; {PY} {SCRIPT}'")
+    for shell in ("dash", "bash", "ksh", "mksh", "zsh"):
+        add(f"{shell} -c 'export f=1; export -n f; {PY} {SCRIPT}'")
+        add(f"{shell} -c 'f={SCRIPT}; unset -n f; {PY} \"$f\"'")
+    add(f"dash -c 'export f=1; command export -n f; {PY} {SCRIPT}'")
+    add(f'g={SCRIPT}; declare -n f; f={O}; {PY} "$g"')
+    add(f'f={O}; declare -n f; f={SCRIPT}; {PY} "$f"')
+    add(f"ksh -c 'f={O}; typeset -n f; {PY} {SCRIPT}'")
+    # a here-string the shell cannot parse; a heredoc inside a -c payload
+    for shell in ("dash", "sh", "bash", "zsh", "ksh", "mksh"):
+        add(f"{shell} -c 'cat <<< x; {PY} {SCRIPT}'")
+    add(f"dash -c 'export g={SCRIPT}; read f <<< x; {PY} \"$g\"'")
+    add(f"dash -c 'export g={SCRIPT}; read f < /dev/null; {PY} \"$g\"'")
+    add(f"dash -c \"echo '<<<'; {PY} {SCRIPT}\"")
+    for shell in ("bash", "dash"):
+        add(f"{shell} -c 'cat <<EOF\n{PY} {SCRIPT}\nEOF'")
+        add(f"{shell} -c 'cat <<EOF\nx\nEOF\n{PY} {SCRIPT}'")
+    add(f"bash -c '{PY} {SCRIPT} <<EOF\nignored\nEOF'")
+    add(f'bash -c "f={SCRIPT}; {PY} \\"$f\\""')
+    add(f'f={SCRIPT}; bash -c "{PY} \\"$f\\""')
+    add(f'bash -c "f={SCRIPT}; {PY} \\"\\$f\\""')
     return cases
+
+
+def _heredocs(count: int, before: str, after: str = "", body: str = "x") -> str:
+    """``before``, then ``count`` heredocs declared on one line, ``after``, and each body in order."""
+    names = [f"D{index}" for index in range(count)]
+    declared = " ".join(f"<<{name}" for name in names)
+    return f"{before} {declared}{' ' + after if after else ''}\n" + "".join(f"{body}\n{name}\n" for name in names)
+
+
+# Builtins that bind a variable: bound in every shell (export, readonly), in
+# some (declare, typeset), or to a value the text does not settle.
+BINDING_BUILTIN_FORMS = [
+    "export",
+    "readonly",
+    "declare",
+    "typeset",
+    "typeset -x",
+    "export --",
+    "local",
+    "declare -u",
+]
+PREFIX_BINDING_FORMS = [
+    'f={v} {py} "$f"',
+    'f={v} true; {py} "$f"',
+    'env f={v} {py} "$f"',
+    'f={v} :; {py} "$f"',
+    'f={v} export g; {py} "$f"',
+]
+MULTI_HEREDOC_FORMS = [
+    "{py} <<A <<B {script}\nx\nA\ny\nB",
+    "{py} <<-A <<B {script}\n\tx\n\tA\ny\nB",
+    "{py} <<A <<B <<C {script}\nx\nA\ny\nB\nz\nC",
+    "{py} <<'A' <<\"B\" {script}\nx\nA\ny\nB",
+    "{py} <<A {script} <<B\nx\nA\ny\nB",
+    "cat <<A; {py} <<B {script}\nx\nA\ny\nB",
+    "cat <<A <<B {script}\nx\nA\ny\nB",
+    "{py} <<A <<B {other}\nx\nA\ny\nB",
+    "cat <<A <<B\nx\nA\n{py} {script}\nB",
+    "cat <<A <<B\n{py} {script}\nA\ny\nB",
+    "cat <<A <<A\nx\nA\ny\nA\n{py} {script}",
+    "{py} <<A <<<y {script}\nx\nA",
+]
+
+# env options that take names out of what a child inherits.
+ENV_REMOVAL_FORMS = [
+    "env -i",
+    "env -u f",
+    "env -",
+    "env --ignore-environment",
+    "env --unset=f",
+    "env -uf",
+    'env -i PATH="$PATH"',
+    "env -i env",
+    "env -S '-u f'",
+]
+# Ways of taking the export attribute away, directly or through a builtin
+# prefix, and forms that touch functions only.
+EXPORT_REMOVAL_FORMS = [
+    "declare +x f",
+    "typeset +x f",
+    "declare -x +x f",
+    "export -n f",
+    "command export -n f",
+    "builtin export -n f",
+    "command command export -n f",
+    "command -p export -n f",
+    "builtin declare +x f",
+    "eval export -n f",
+    "export -f f",
+    "export -nf f",
+    "declare +x f; export f",
+]
+EVAL_FORMS = [
+    "f={v} eval '{py} \"$f\"'",
+    "f={v}; eval '{py} \"$f\"'",
+    "export f={v}; eval '{py} \"$f\"'",
+    "f={o} eval '{py} \"$f\"'",
+    'f={v}; eval f={o}; {py} "$f"',
+    "f={v}; eval 'unset f'; {py} \"$f\"",
+    'f={v}; eval \'echo "$f"\'; {py} "$f"',
+    "f={v} {py} -c 'import os; os.system(\"{py} $f\")'",
+    'f={v}; bash <<EOF\n{py} "$f"\nEOF',
+    "export f={v}; bash <<'EOF'\n{py} \"$f\"\nEOF",
+]
 
 
 # Scopes a binding can be made in, each wrapping the text inside it: groups,
@@ -684,7 +900,50 @@ def _generate(rng: random.Random) -> tuple[str, str]:
         reader = rng.choice([f'{interpreter} "$f"', 'cat "$f"'])
         shell = rng.choice(["", "zsh -c ", "bash -c ", "sh -c ", "dash -c ", "ksh -c "])
         body = f"{shell}'{binding}; {reader}'" if shell else f"{binding}; {reader}"
-    elif shape < 0.55:
+    elif shape < 0.48:
+        # a variable a builtin or a prefix binds, every heredoc on a line, and
+        # three opening parentheses (from review of revision 16)
+        inside = prefix.startswith(("cd ", "(cd "))
+        bound = "run.py" if inside else SCRIPT
+        other = "other.py" if inside else O
+        closing = "\n)" if prefix.startswith("(") else ""
+        form = rng.random()
+        if form < 0.25:
+            text = rng.choice(MULTI_HEREDOC_FORMS).format(py=interpreter, script=bound, other=other)
+            # a suffix after the last terminator would unterminate it
+            return prefix + text + closing, script
+        if form < 0.35:
+            text = f'f={other}; (((for f in {bound}; do :; done; {interpreter} "$f")) | cat); {interpreter} "$f"'
+            shell = rng.choice(["", "zsh -c ", "ksh -c ", "mksh -c ", "dash -c "])
+            return prefix + (f"{shell}'{text}'" if shell else text) + closing, script
+        binder = rng.choice(
+            [
+                *(f"{declaration} f={bound}" for declaration in BINDING_BUILTIN_FORMS),
+                f"f={bound}; export f",
+                f"f={bound}; unset f",
+                f"f={bound} true",
+                f"env f={bound} true",
+                f"f={bound} :",
+                f"f={other}; printf -v f {bound}",
+                f"readonly f={bound}; f={other}",
+                # from review of revision 17
+                f"export f={bound}; declare +x f",
+                f"export f={bound}; command export -n f",
+                f"g={other}; export f=$g; g={bound}",
+                f"g={bound}; export f=$g; g={other}",
+                f"f={bound}; eval f={other}",
+                f"export f={bound}; eval export -n f",
+            ]
+        )
+        shell = rng.choice(["", "", "zsh -c ", "dash -c ", "ksh -c ", "mksh -c ", "sh -c "])
+        readers = [f'{interpreter} "$f"', 'cat "$f"']
+        if not shell:
+            readers.append(f"bash -c '{interpreter} \"$f\"'")
+            readers.append(f"env -u f bash -c '{interpreter} \"$f\"'")
+            readers.append(f"env -i f={bound} bash -c '{interpreter} \"$f\"'")
+        text = f"{binder}; {rng.choice(readers)}"
+        body = f"{shell}'{text}'" if shell else text
+    elif shape < 0.58:
         body = f"{rng.choice(NON_EXECUTING_VERBS)} {target}"
     else:
         body = f"{rng.choice(WRAPPER_FORMS)}{interpreter} {rng.choice(INTERPRETER_FORMS)}{redirect}{target}"

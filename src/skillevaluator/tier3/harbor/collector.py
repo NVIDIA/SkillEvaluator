@@ -1577,7 +1577,7 @@ def _merge_constituent_default_reward_failure(
     )
 
 
-def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
+def _extract_rewards(job_dir: Path, *, arm_suffix: str = "") -> list[dict[str, Any]]:
     """Extract reward.json from all trials in a job directory."""
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
@@ -1605,10 +1605,13 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
         data["_started_at"] = result.get("started_at")
+        if arm_suffix:
+            data["_arm_suffix"] = arm_suffix
         if not data.get("entry_id"):
-            entry_id = _entry_id_from_harbor_result(result)
+            entry_id = _entry_id_from_harbor_result(result, arm_suffix=arm_suffix)
             if entry_id:
                 data["entry_id"] = entry_id
+                data["_result_entry_id"] = entry_id
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -1637,6 +1640,8 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
                     continue
                 data["_trial_name"] = trial_name
                 data["_trial_root_name"] = trial_dir.name
+                if arm_suffix:
+                    data["_arm_suffix"] = arm_suffix
                 if step_name:
                     data["_step_name"] = step_name
                 result_file = trial_dir / "result.json"
@@ -1646,9 +1651,10 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
                         _merge_constituent_default_reward_failure(data, result, trial_dir)
                         data["_started_at"] = result.get("started_at")
                         if not data.get("entry_id"):
-                            entry_id = _entry_id_from_harbor_result(result)
+                            entry_id = _entry_id_from_harbor_result(result, arm_suffix=arm_suffix)
                             if entry_id:
                                 data["entry_id"] = entry_id
+                                data["_result_entry_id"] = entry_id
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
                 if traj_file.exists():
                     data["_has_trajectory"] = True
@@ -1678,10 +1684,13 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
         data["_started_at"] = result.get("started_at")
+        if arm_suffix:
+            data["_arm_suffix"] = arm_suffix
         if not data.get("entry_id"):
-            entry_id = _entry_id_from_harbor_result(result)
+            entry_id = _entry_id_from_harbor_result(result, arm_suffix=arm_suffix)
             if entry_id:
                 data["entry_id"] = entry_id
+                data["_result_entry_id"] = entry_id
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -1765,26 +1774,53 @@ def _harbor_result_rewards(result: dict[str, Any]) -> dict[str, Any] | None:
     return aggregated or None
 
 
-def _entry_id_from_harbor_result(result: dict[str, Any]) -> str:
-    task_name = result.get("task_name")
-    if isinstance(task_name, str) and task_name.strip():
-        return task_name.strip().rsplit("/", 1)[-1]
+def _result_task_path_entry_id(task_path_value: Any) -> tuple[str, str]:
+    """Return (metadata_entry_id, dir_name) from a Harbor task path when available."""
+    if not isinstance(task_path_value, str) or not task_path_value.strip():
+        return "", ""
+    task_dir = Path(task_path_value.strip())
+    task_toml = task_dir / "task.toml"
+    if not task_toml.is_symlink() and task_toml.is_file():
+        raw_toml = _read_bounded_text(task_toml)
+        if raw_toml is not None:
+            try:
+                import tomllib
 
+                parsed = tomllib.loads(raw_toml)
+                metadata = parsed.get("metadata") if isinstance(parsed, dict) else None
+                if isinstance(metadata, dict) and metadata.get("entry_id"):
+                    return str(metadata["entry_id"]).strip(), task_dir.name
+            except Exception:
+                pass
+    return "", task_dir.name
+
+
+def _entry_id_from_harbor_result(result: dict[str, Any], *, arm_suffix: str = "") -> str:
+    fallback_dir_name = ""
     task_id = result.get("task_id")
     if isinstance(task_id, dict):
-        task_path = task_id.get("path")
-        if isinstance(task_path, str) and task_path.strip():
-            return Path(task_path).name
+        meta_id, dir_name = _result_task_path_entry_id(task_id.get("path"))
+        if meta_id:
+            return meta_id
+        fallback_dir_name = dir_name or fallback_dir_name
 
     config = result.get("config")
     if isinstance(config, dict):
         task = config.get("task")
         if isinstance(task, dict):
-            task_path = task.get("path")
-            if isinstance(task_path, str) and task_path.strip():
-                return Path(task_path).name
+            meta_id, dir_name = _result_task_path_entry_id(task.get("path"))
+            if meta_id:
+                return meta_id
+            fallback_dir_name = dir_name or fallback_dir_name
 
-    return ""
+    task_name = result.get("task_name")
+    if isinstance(task_name, str) and task_name.strip():
+        short_name = _strip_attempt_suffix(task_name.strip().rsplit("/", 1)[-1])
+        if arm_suffix and short_name.endswith(arm_suffix):
+            short_name = short_name.removesuffix(arm_suffix)
+        return _strip_attempt_suffix(short_name)
+
+    return fallback_dir_name
 
 
 def _overall_score(reward: dict[str, Any]) -> float | None:
@@ -1854,45 +1890,83 @@ def _strip_arm_suffix(value: str) -> str:
 
 
 def _strip_arm_and_attempt_suffixes(value: str) -> str:
-    """Remove dual-arm and attempt suffixes regardless of ordering."""
-    pass1 = _strip_arm_suffix(_strip_attempt_suffix(value))
-    return _strip_attempt_suffix(_strip_arm_suffix(pass1))
+    """Remove at most one dual-arm suffix and one attempt suffix regardless of ordering."""
+    attempt_stripped = _strip_attempt_suffix(value)
+    if attempt_stripped != value:
+        return _strip_arm_suffix(attempt_stripped)
+    return _strip_attempt_suffix(_strip_arm_suffix(value))
 
 
-def _canonical_case_id(value: str, expected_case_ids: set[str] | None = None) -> str:
+def _canonical_case_id(
+    value: str,
+    expected_case_ids: set[str] | None = None,
+    *,
+    strip_arm: bool = True,
+) -> str:
     """Normalize a task, trial, or entry identifier to its canonical case ID."""
     value = str(value or "").strip()
     if not value:
         return ""
+    if expected_case_ids and value in expected_case_ids:
+        return value
     name_part = value.rpartition("/")[2] or value
 
-    raw_candidates = [
-        name_part,
-        _strip_attempt_suffix(name_part),
-        _strip_arm_suffix(name_part),
-        _strip_arm_and_attempt_suffixes(name_part),
-    ]
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for candidate in raw_candidates + [c.removeprefix("skillevaluator-") for c in raw_candidates]:
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            candidates.append(candidate)
-
     if expected_case_ids:
+        raw_candidates = [
+            name_part,
+            _strip_attempt_suffix(name_part),
+        ]
+        if strip_arm:
+            raw_candidates.extend(
+                [
+                    _strip_arm_suffix(name_part),
+                    _strip_arm_and_attempt_suffixes(name_part),
+                ]
+            )
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for candidate in raw_candidates + [c.removeprefix("skillevaluator-") for c in raw_candidates]:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
         for candidate in candidates:
             if candidate in expected_case_ids:
                 return candidate
 
-    return _strip_arm_and_attempt_suffixes(name_part.removeprefix("skillevaluator-"))
+    return _strip_attempt_suffix(name_part)
 
 
 def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None) -> str:
     if reward.get("entry_id"):
-        return _canonical_case_id(str(reward["entry_id"]), expected_case_ids)
+        raw_entry_id = str(reward["entry_id"]).strip()
+        if not reward.get("_result_entry_id"):
+            if expected_case_ids:
+                if raw_entry_id in expected_case_ids:
+                    return raw_entry_id
+                stripped_attempt = _strip_attempt_suffix(raw_entry_id)
+                if stripped_attempt in expected_case_ids:
+                    return stripped_attempt
+            else:
+                return _strip_attempt_suffix(raw_entry_id)
+        return _canonical_case_id(
+            raw_entry_id,
+            expected_case_ids,
+            strip_arm=not bool(reward.get("_arm_suffix")),
+        )
     trial_name = str(reward.get("_trial_name") or "")
     if trial_name:
-        return _canonical_case_id(trial_name.split("__", 1)[0], expected_case_ids)
+        trial_prefix = trial_name.split("__", 1)[0]
+        arm_suffix = str(reward.get("_arm_suffix") or "")
+        if arm_suffix:
+            attempt_stripped = _strip_attempt_suffix(trial_prefix)
+            if attempt_stripped.endswith(arm_suffix):
+                trial_prefix = attempt_stripped.removesuffix(arm_suffix)
+        return _canonical_case_id(
+            trial_prefix,
+            expected_case_ids,
+            strip_arm=not bool(arm_suffix),
+        )
     return "unknown"
 
 
@@ -2441,11 +2515,17 @@ def _annotate_security_attribution(
     without_rewards: list[dict[str, Any]],
     *,
     baseline_run: bool = True,
+    expected_case_ids: list[str] | set[str] | None = None,
 ) -> dict[str, Any]:
     """Annotate with-skill security findings with baseline-aware attribution."""
+    expected_id_set = (
+        {str(case_id).strip() for case_id in expected_case_ids if str(case_id).strip()}
+        if expected_case_ids is not None
+        else None
+    )
     baseline_by_case: dict[str, list[dict[str, Any]]] = {}
     for reward in without_rewards:
-        baseline_by_case.setdefault(_entry_id(reward), []).extend(_security_score_findings(reward))
+        baseline_by_case.setdefault(_entry_id(reward, expected_id_set), []).extend(_security_score_findings(reward))
 
     summary = {
         "likely_skill_related": 0,
@@ -2457,7 +2537,7 @@ def _annotate_security_attribution(
     }
 
     for reward in with_rewards:
-        entry_id = _entry_id(reward)
+        entry_id = _entry_id(reward, expected_id_set)
         details = reward.get("details")
         if not isinstance(details, dict):
             continue
@@ -2756,8 +2836,14 @@ def _save_trials(
     variant: str,
     agent_model: str | None = None,
     agent_model_source: str | None = None,
+    expected_case_ids: list[str] | set[str] | None = None,
 ) -> None:
     """Save per-trial reward.json and trajectory.json into the results directory."""
+    expected_id_set = (
+        {str(case_id).strip() for case_id in expected_case_ids if str(case_id).strip()}
+        if expected_case_ids is not None
+        else None
+    )
     trials_dir.mkdir(parents=True, exist_ok=True)
     for reward in rewards:
         trial_name, trial_root_name = _persisted_trial_name(reward)
@@ -2782,8 +2868,8 @@ def _save_trials(
         # Harbor trial once per step.  This also populates the canonical report's
         # existing trial_id field instead of inventing a second report schema.
         clean_reward["trial_id"] = trial_root_name
-        if not clean_reward.get("entry_id"):
-            clean_reward["entry_id"] = _entry_id(reward)
+        if not clean_reward.get("entry_id") or reward.get("_result_entry_id"):
+            clean_reward["entry_id"] = _entry_id(reward, expected_id_set)
         clean_reward["agent"] = agent
         if agent_model:
             clean_reward["model"] = agent_model
@@ -3095,6 +3181,7 @@ def collect_harbor_results(
         with_job_failure = ""
         with_execution: dict[str, Any] = {}
 
+        with_arm_suffix = "-with-skill" if not skip_baseline else ""
         if with_job_dir:
             with_job_ok, with_job_failure = validate_harbor_job_result(
                 with_job_dir / "result.json",
@@ -3103,7 +3190,9 @@ def collect_harbor_results(
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
             with_trial_failures = _extract_trial_failures(with_job_dir)
             preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
-            with_collected_rewards = _extract_rewards(with_job_dir) if with_job_ok or preserve_partial else []
+            with_collected_rewards = (
+                _extract_rewards(with_job_dir, arm_suffix=with_arm_suffix) if with_job_ok or preserve_partial else []
+            )
             with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
             with_logical_rewards = _logical_attempt_rewards(with_rewards)
             with_trial_failures.extend(invalid_score_failures)
@@ -3147,6 +3236,7 @@ def collect_harbor_results(
                 variant="with_skill",
                 agent_model=agent_model,
                 agent_model_source=agent_model_source,
+                expected_case_ids=expected_case_ids,
             )
             (agent_dir / "with-skill" / "summary.json").write_text(
                 json.dumps(
@@ -3263,7 +3353,9 @@ def collect_harbor_results(
                 without_trial_failures = _extract_trial_failures(without_job_dir)
                 preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
                 without_collected_rewards = (
-                    _extract_rewards(without_job_dir) if without_job_ok or preserve_partial else []
+                    _extract_rewards(without_job_dir, arm_suffix="-without-skill")
+                    if without_job_ok or preserve_partial
+                    else []
                 )
                 without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
                 without_logical_rewards = _logical_attempt_rewards(without_rewards)
@@ -3307,6 +3399,7 @@ def collect_harbor_results(
                     variant="without_skill",
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
+                    expected_case_ids=expected_case_ids,
                 )
                 (agent_dir / "without-skill" / "summary.json").write_text(
                     json.dumps(
@@ -3452,6 +3545,7 @@ def collect_harbor_results(
                 with_rewards,
                 without_rewards,
                 baseline_run=not skip_baseline,
+                expected_case_ids=expected_case_ids,
             )
             (agent_dir / "security_attribution.json").write_text(
                 json.dumps(security_attribution, indent=2), encoding="utf-8"
@@ -3466,6 +3560,7 @@ def collect_harbor_results(
                     variant="with_skill",
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
+                    expected_case_ids=expected_case_ids,
                 )
 
         agent_execution = _aggregate_execution([with_execution, without_execution])

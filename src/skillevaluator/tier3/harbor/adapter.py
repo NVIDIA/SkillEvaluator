@@ -4229,28 +4229,240 @@ def _native_entry_id(task_dir: Path) -> str:
     return task_dir.name
 
 
-def _append_native_task_name_suffix(task_dir: Path, arm_suffix: str) -> None:
+_TOML_DOUBLE_QUOTE = '"'
+_TOML_SINGLE_QUOTE = "'"
+_TOML_MULTILINE_DOUBLE_QUOTE = '"""'
+_TOML_MULTILINE_SINGLE_QUOTE = "'''"
+_TOML_STRING_DELIMITERS = (
+    _TOML_MULTILINE_DOUBLE_QUOTE,
+    _TOML_MULTILINE_SINGLE_QUOTE,
+    _TOML_DOUBLE_QUOTE,
+    _TOML_SINGLE_QUOTE,
+)
+_TOML_ESCAPE_PAIR_LEN = 2  # backslash + escaped character
+
+
+def _skip_toml_string_literal(content: str, start: int) -> int:
+    """Return index immediately after the TOML string literal starting at *start*."""
+    n = len(content)
+    for delimiter in _TOML_STRING_DELIMITERS:
+        if not content.startswith(delimiter, start):
+            continue
+        delim_len = len(delimiter)
+        quote_char = delimiter[0]
+        supports_escapes = quote_char == _TOML_DOUBLE_QUOTE
+        is_multiline = delim_len > 1
+
+        i = start + delim_len
+        while i < n:
+            if supports_escapes and content[i] == "\\":
+                i += _TOML_ESCAPE_PAIR_LEN
+                continue
+            if content.startswith(delimiter, i):
+                i += delim_len
+                if is_multiline:
+                    while i < n and content[i] == quote_char:
+                        i += 1
+                return i
+            i += 1
+        return n
+    return start
+
+
+def _parse_toml_dotted_key(raw: str) -> tuple[str, ...]:
+    """Parse a TOML key or table path into unquoted segment names."""
+    parts: list[str] = []
+    for token in re.findall(r'"(?:\\.|[^"\\\r\n])*"|\'[^\'\r\n]*\'|[A-Za-z0-9_-]+', raw):
+        if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+            parts.append(token[1:-1])
+        else:
+            parts.append(token)
+    return tuple(parts)
+
+
+def _find_toml_table_key_value_span(content: str, target_table: str, target_key: str) -> tuple[int, int] | None:
+    """Return the (start, end) character span of a string value for [target_table].target_key."""
+    n = len(content)
+    i = 0
+    current_table: tuple[str, ...] = ()
+    bracket_depth = 0
+
+    while i < n:
+        while i < n and content[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        if content[i] in "\r\n":
+            i += 1
+            continue
+        if content[i] == "#":
+            while i < n and content[i] != "\n":
+                i += 1
+            continue
+
+        if bracket_depth == 0 and content[i] == "[":
+            line_end = content.find("\n", i)
+            if line_end == -1:
+                line_end = n
+            line = content[i:line_end]
+            header_match = re.match(r"^\[(\[?)\s*([^\[\]#\r\n]+?)\s*\]\]?\s*(?:#.*)?\r?$", line)
+            if header_match:
+                is_array_table, raw_table = header_match.groups()
+                table_parts = _parse_toml_dotted_key(raw_table)
+                current_table = (f"[[{'.'.join(table_parts)}]]",) if is_array_table else table_parts
+                i = line_end + 1
+                continue
+
+        if bracket_depth == 0:
+            key_match = re.match(
+                r"""^(?:[A-Za-z0-9_-]+|"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*')(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'))*\s*=""",
+                content[i:],
+            )
+            if key_match:
+                raw_lhs = content[i : i + key_match.end() - 1].strip()
+                key_parts = _parse_toml_dotted_key(raw_lhs)
+                full_path = (*current_table, *key_parts)
+                val_start = i + key_match.end()
+                while val_start < n and content[val_start] in " \t":
+                    val_start += 1
+                if full_path == (target_table, target_key) and val_start < n and content[val_start] in "\"'":
+                    val_end = _skip_toml_string_literal(content, val_start)
+                    return val_start, val_end
+                i = val_start
+
+        while i < n:
+            ch = content[i]
+            if ch in "\"'":
+                i = _skip_toml_string_literal(content, i)
+                continue
+            if ch in "[({":
+                bracket_depth += 1
+                i += 1
+                continue
+            if ch in "])}":
+                bracket_depth = max(0, bracket_depth - 1)
+                i += 1
+                continue
+            if ch == "#":
+                while i < n and content[i] != "\n":
+                    i += 1
+                continue
+            if ch == "\n":
+                i += 1
+                if bracket_depth == 0:
+                    break
+                continue
+            i += 1
+
+    return None
+
+
+def _ensure_native_metadata_entry_id(content: str, entry_id: str) -> str:
+    """Ensure [metadata].entry_id is present in a native task.toml document."""
+    n = len(content)
+    i = 0
+    bracket_depth = 0
+    while i < n:
+        while i < n and content[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        if content[i] in "\r\n":
+            i += 1
+            continue
+        if content[i] == "#":
+            while i < n and content[i] != "\n":
+                i += 1
+            continue
+        if bracket_depth == 0 and content[i] == "[":
+            line_end = content.find("\n", i)
+            if line_end == -1:
+                line_end = n
+            line = content[i:line_end]
+            header_match = re.match(r"^\[(\[?)\s*([^\[\]#\r\n]+?)\s*\]\]?\s*(?:#.*)?\r?$", line)
+            if header_match:
+                is_array_table, raw_table = header_match.groups()
+                if not is_array_table and _parse_toml_dotted_key(raw_table) == ("metadata",):
+                    insert_pos = line_end + 1 if line_end < n else n
+                    prefix = content[:insert_pos]
+                    if not prefix.endswith("\n"):
+                        prefix += "\n"
+                    return f"{prefix}entry_id = {_toml_quote(entry_id)}\n{content[insert_pos:]}"
+                i = line_end + 1
+                continue
+        while i < n:
+            ch = content[i]
+            if ch in "\"'":
+                i = _skip_toml_string_literal(content, i)
+                continue
+            if ch in "[({":
+                bracket_depth += 1
+                i += 1
+                continue
+            if ch in "])}":
+                bracket_depth = max(0, bracket_depth - 1)
+                i += 1
+                continue
+            if ch == "#":
+                while i < n and content[i] != "\n":
+                    i += 1
+                continue
+            if ch == "\n":
+                i += 1
+                if bracket_depth == 0:
+                    break
+                continue
+            i += 1
+
+    suffix = "" if content.endswith("\n") else "\n"
+    return f"{content}{suffix}\n[metadata]\nentry_id = {_toml_quote(entry_id)}\n"
+
+
+def _append_native_task_name_suffix(
+    task_dir: Path,
+    arm_suffix: str,
+    *,
+    entry_id: str | None = None,
+) -> None:
     """Append dual-arm suffix to [task] name in a native task's task.toml."""
     if not arm_suffix:
         return
     task_toml = task_dir / "task.toml"
     if not task_toml.exists():
         return
-    content = task_toml.read_text(encoding="utf-8")
+    try:
+        content = task_toml.read_text(encoding="utf-8")
+        data = tomllib.loads(content)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return
 
-    pattern = r'(?ms)(\[task\]\s*?\n(?:(?!\[)[^\n]*\n)*?\s*name\s*=\s*)(["\'])(.*?)\2'
+    task_table = data.get("task")
+    if not isinstance(task_table, dict):
+        return
+    old_name = task_table.get("name")
+    if not isinstance(old_name, str):
+        return
 
-    def _repl(m: re.Match[str]) -> str:
-        prefix, quote, old_name = m.groups()
-        if old_name.endswith(arm_suffix):
-            return m.group(0)
-        return f"{prefix}{quote}{old_name}{arm_suffix}{quote}"
+    new_name = f"{old_name}{arm_suffix}"
+    span = _find_toml_table_key_value_span(content, "task", "name")
+    if span is None:
+        return
+    val_start, val_end = span
+    new_content = f"{content[:val_start]}{_toml_quote(new_name)}{content[val_end:]}"
 
-    new_content, count = re.subn(pattern, _repl, content, count=1)
-    if count == 0:
-        fallback_pattern = r'(?m)^(\s*name\s*=\s*)(["\'])(.*?)\2'
-        new_content = re.sub(fallback_pattern, _repl, content, count=1)
+    metadata = data.get("metadata")
+    effective_entry_id = entry_id or (
+        str(metadata["entry_id"]) if isinstance(metadata, dict) and metadata.get("entry_id") else task_dir.name
+    )
+    if effective_entry_id and not (isinstance(metadata, dict) and "entry_id" in metadata):
+        candidate_content = _ensure_native_metadata_entry_id(new_content, effective_entry_id)
+        try:
+            tomllib.loads(candidate_content)
+            new_content = candidate_content
+        except tomllib.TOMLDecodeError:
+            pass
 
+    tomllib.loads(new_content)
     if new_content != content:
         task_toml.write_text(new_content, encoding="utf-8")
 
@@ -4669,7 +4881,7 @@ def _stage_native_harbor_tasks_into(
         baseline_aliases_prevalidated = True
     for task_dir in task_dirs:
         entry_id = _native_entry_id(task_dir)
-        _append_native_task_name_suffix(task_dir, arm_suffix)
+        _append_native_task_name_suffix(task_dir, arm_suffix, entry_id=entry_id)
         native_agent_workdir = _native_task_workdir(task_dir)
         _ensure_native_skills_dir(task_dir)
         entry = entries_by_id.get(entry_id)

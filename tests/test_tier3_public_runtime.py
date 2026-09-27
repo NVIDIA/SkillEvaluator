@@ -1375,45 +1375,41 @@ def test_strip_arm_and_attempt_suffixes(value: str, expected: str) -> None:
 @pytest.mark.parametrize(
     ("raw_input", "expected_ids", "expected_output"),
     [
-        # Bare case IDs without suffixes
+        # Bare case IDs without expected_case_ids preserve authored prefixes/suffixes
         ("case-001", None, "case-001"),
-        ("skillevaluator-case-001", None, "case-001"),
+        ("skillevaluator-case-001", None, "skillevaluator-case-001"),
         ("skillevaluator-case-001", {"case-001", "case-002"}, "case-001"),
-        # Dual-arm suffixes without expected_case_ids (fallback)
-        ("case-001-with-skill", None, "case-001"),
-        ("case-001-without-skill", None, "case-001"),
-        ("skillevaluator-case-001-with-skill", None, "case-001"),
-        ("skillevaluator-case-001-without-skill", None, "case-001"),
+        # Without expected_case_ids, authored -with-skill / -without-skill are preserved
+        ("case-001-with-skill", None, "case-001-with-skill"),
+        ("case-001-without-skill", None, "case-001-without-skill"),
+        ("skillevaluator-case-001-with-skill", None, "skillevaluator-case-001-with-skill"),
+        ("skillevaluator-case-001-without-skill", None, "skillevaluator-case-001-without-skill"),
         # Dual-arm suffixes with expected_case_ids matching
         ("case-001-with-skill", {"case-001", "case-002"}, "case-001"),
         ("case-001-without-skill", {"case-001", "case-002"}, "case-001"),
         ("skillevaluator-case-001-with-skill", {"case-001", "case-002"}, "case-001"),
         ("skillevaluator-case-001-without-skill", {"case-001", "case-002"}, "case-001"),
         # Namespaced task names (e.g., nvidia/...)
-        ("nvidia/skillevaluator-case-001", None, "case-001"),
+        ("nvidia/skillevaluator-case-001", None, "skillevaluator-case-001"),
         ("nvidia/skillevaluator-case-001", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-with-skill", None, "case-001"),
+        ("nvidia/skillevaluator-case-001-with-skill", None, "skillevaluator-case-001-with-skill"),
         ("nvidia/skillevaluator-case-001-with-skill", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-without-skill", None, "case-001"),
+        ("nvidia/skillevaluator-case-001-without-skill", None, "skillevaluator-case-001-without-skill"),
         ("nvidia/skillevaluator-case-001-without-skill", {"case-001"}, "case-001"),
         ("custom/repo/skillevaluator-case-002-with-skill", {"case-002"}, "case-002"),
         # Attempt suffixes combined with dual-arm suffixes in both orderings
-        ("case-001-with-skill-attempt1", None, "case-001"),
+        ("case-001-with-skill-attempt1", None, "case-001-with-skill"),
         ("case-001-with-skill-attempt1", {"case-001"}, "case-001"),
-        ("case-001-without-skill_attempt2", None, "case-001"),
+        ("case-001-without-skill_attempt2", None, "case-001-without-skill"),
         ("case-001-without-skill_attempt2", {"case-001"}, "case-001"),
-        ("case-001-attempt1-with-skill", None, "case-001"),
         ("case-001-attempt1-with-skill", {"case-001"}, "case-001"),
-        ("case-001_attempt2-without-skill", None, "case-001"),
         ("case-001_attempt2-without-skill", {"case-001"}, "case-001"),
-        ("skillevaluator-case-001-with-skill-attempt1", None, "case-001"),
+        ("skillevaluator-case-001-with-skill-attempt1", None, "skillevaluator-case-001-with-skill"),
         ("skillevaluator-case-001-with-skill-attempt1", {"case-001"}, "case-001"),
-        ("skillevaluator-case-001-attempt1-with-skill", None, "case-001"),
         ("skillevaluator-case-001-attempt1-with-skill", {"case-001"}, "case-001"),
         ("nvidia/skillevaluator-case-001-with-skill-attempt3", {"case-001"}, "case-001"),
         ("nvidia/skillevaluator-case-001-attempt3-with-skill", {"case-001"}, "case-001"),
-        ("nvidia/skillevaluator-case-001-without-skill_attempt4", None, "case-001"),
-        ("nvidia/skillevaluator-case-001_attempt4-without-skill", None, "case-001"),
+        ("nvidia/skillevaluator-case-001-without-skill_attempt4", None, "skillevaluator-case-001-without-skill"),
         # Legitimate case IDs ending with -with or -without preserved when in expected_case_ids
         ("case-with", {"case-with"}, "case-with"),
         ("case-without", {"case-without"}, "case-without"),
@@ -1444,6 +1440,11 @@ def test_strip_arm_and_attempt_suffixes(value: str, expected: str) -> None:
         ("", None, ""),
         ("   ", None, ""),
         ("", {"case-001"}, ""),
+        # Double arm suffixes must strip at most one arm suffix (never collapse authored -with-skill onto base case)
+        ("case-1-with-skill-with-skill", {"case-1"}, "case-1-with-skill-with-skill"),
+        ("case-1-with-skill-with-skill", {"case-1", "case-1-with-skill"}, "case-1-with-skill"),
+        ("case-1-with-skill-with-skill_attempt2", {"case-1", "case-1-with-skill"}, "case-1-with-skill"),
+        ("case-1-with-skill_attempt2-with-skill", {"case-1", "case-1-with-skill"}, "case-1-with-skill"),
     ],
 )
 def test_canonical_case_id_arm_stripping(
@@ -1496,6 +1497,239 @@ def test_stage_native_harbor_tasks_dual_arm_suffix(
     assert task["task"]["name"] == expected_task_name
 
 
+@pytest.mark.parametrize(
+    ("task_toml_body", "expected_task_name", "expected_metadata_name"),
+    [
+        (
+            'schema_version = "1.3"\n\n[task]\nname = """nvidia/case-001"""\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+        (
+            "schema_version = \"1.3\"\n\n[task]\nname = '''nvidia/case-001'''\n\n[environment]\n",
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+        (
+            'schema_version = "1.3"\n\n[metadata]\nname = "keep-metadata-name"\n\n'
+            '[task] # task identity\nauthors = [{ name = "Alice" }]\nname = "nvidia/case-001" # inline comment\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            "keep-metadata-name",
+        ),
+        (
+            'schema_version = "1.3"\n"task.name" = "root-quoted-dot-key"\n\n'
+            '[task.subtable]\nname = "subtable-name"\n\n'
+            '[task]\nkeywords = [\n  "alpha",\n  "beta",\n]\n'
+            'description = """\n[metadata]\n[task]\nname = "fake-inside-multiline"\n"""\n'
+            'name = "nvidia/case-001"\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+        (
+            'schema_version = "1.3"\nmetadata = { name = "inline-metadata-name" }\n\n'
+            '[task]\nname = "nvidia/case-001"\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            "inline-metadata-name",
+        ),
+        (
+            'schema_version = "1.3"\ntask.name = "nvidia/case-001"\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+    ],
+)
+def test_stage_native_harbor_tasks_structural_toml_variants(
+    tmp_path: Path,
+    task_toml_body: str,
+    expected_task_name: str,
+    expected_metadata_name: str | None,
+) -> None:
+    """Verify structural [task].name update preserves valid TOML across multiline strings, comments, and [metadata].name."""
+    skill_dir = tmp_path / "target-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
+    task_dir = skill_dir / "evals" / "harbor" / "case-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
+    (task_dir / "task.toml").write_text(task_toml_body, encoding="utf-8")
+    tests_dir = task_dir / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+
+    staged = stage_native_harbor_tasks(
+        skill_dir,
+        tmp_path / "out",
+        grading_mode="custom_only",
+        arm_suffix="-with-skill",
+    )[0]
+    parsed = tomllib.loads((staged / "task.toml").read_text(encoding="utf-8"))
+    assert parsed["task"]["name"] == expected_task_name
+    if expected_metadata_name is not None:
+        assert parsed["metadata"]["name"] == expected_metadata_name
+    if "task.name" in parsed:
+        assert parsed["task.name"] == "root-quoted-dot-key"
+        assert parsed["task"]["subtable"]["name"] == "subtable-name"
+
+
+def test_append_native_task_name_suffix_sad_paths(tmp_path: Path) -> None:
+    """Verify _append_native_task_name_suffix safely no-ops on missing, corrupt, or non-string task names."""
+    from skillevaluator.tier3.harbor.adapter import _append_native_task_name_suffix
+
+    missing_dir = tmp_path / "missing"
+    missing_dir.mkdir()
+    _append_native_task_name_suffix(missing_dir, "-with-skill")
+    assert not (missing_dir / "task.toml").exists()
+
+    for idx, body in enumerate(
+        (
+            "[task\nname = 'unclosed'\n",
+            'schema_version = "1.3"\n[environment]\n',
+            'schema_version = "1.3"\n[task]\nname = 123\n',
+        )
+    ):
+        case_dir = tmp_path / f"sad-{idx}"
+        case_dir.mkdir()
+        (case_dir / "task.toml").write_text(body, encoding="utf-8")
+        _append_native_task_name_suffix(case_dir, "-with-skill")
+        assert (case_dir / "task.toml").read_text(encoding="utf-8") == body
+
+    preserved_dir = tmp_path / "preserved-entry"
+    preserved_dir.mkdir()
+    (preserved_dir / "task.toml").write_text(
+        '[metadata]\nentry_id = "authored-entry"\n\n[task]\nname = "nvidia/case-1"\n',
+        encoding="utf-8",
+    )
+    _append_native_task_name_suffix(preserved_dir, "")
+    assert tomllib.loads((preserved_dir / "task.toml").read_text(encoding="utf-8"))["task"]["name"] == "nvidia/case-1"
+    _append_native_task_name_suffix(preserved_dir, "-with-skill", entry_id="authored-entry")
+    parsed = tomllib.loads((preserved_dir / "task.toml").read_text(encoding="utf-8"))
+    assert parsed["task"]["name"] == "nvidia/case-1-with-skill"
+    assert parsed["metadata"]["entry_id"] == "authored-entry"
+
+
+def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom_only_collection(
+    tmp_path: Path,
+) -> None:
+    """Verify dual-arm staging and custom-only collection keep 'case-1' and 'case-1-with-skill' distinct."""
+    from skillevaluator.tier3.harbor.collector import collect_harbor_results
+
+    skill_dir = tmp_path / "target-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
+    harbor_dir = skill_dir / "evals" / "harbor"
+    for case_id in ("case-1", "case-1-with-skill"):
+        task_dir = harbor_dir / case_id
+        task_dir.mkdir(parents=True)
+        (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
+        (task_dir / "task.toml").write_text(
+            f'schema_version = "1.3"\n\n[task]\nname = "nvidia/{case_id}"\n\n[environment]\n',
+            encoding="utf-8",
+        )
+        tests_dir = task_dir / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+
+    with_staged = {
+        p.name: tomllib.loads((p / "task.toml").read_text(encoding="utf-8"))
+        for p in stage_native_harbor_tasks(
+            skill_dir,
+            tmp_path / "staged-with",
+            grading_mode="custom_only",
+            arm_suffix="-with-skill",
+        )
+    }
+    without_staged = {
+        p.name: tomllib.loads((p / "task.toml").read_text(encoding="utf-8"))
+        for p in stage_native_harbor_tasks(
+            skill_dir,
+            tmp_path / "staged-without",
+            grading_mode="custom_only",
+            with_skill=False,
+            arm_suffix="-without-skill",
+        )
+    }
+
+    assert with_staged["case-1"]["task"]["name"] == "nvidia/case-1-with-skill"
+    assert with_staged["case-1-with-skill"]["task"]["name"] == "nvidia/case-1-with-skill-with-skill"
+    assert without_staged["case-1"]["task"]["name"] == "nvidia/case-1-without-skill"
+    assert without_staged["case-1-with-skill"]["task"]["name"] == "nvidia/case-1-with-skill-without-skill"
+
+    jobs_dir = tmp_path / "jobs"
+    for variant, staged_map, scores in (
+        ("with", with_staged, {"case-1": 1.0, "case-1-with-skill": 0.9}),
+        ("without", without_staged, {"case-1": 0.2, "case-1-with-skill": 0.3}),
+    ):
+        job_dir = jobs_dir / f"target-skill-opencode-{variant}"
+        trial_names: list[str] = []
+        for idx, (case_id, parsed_toml) in enumerate(staged_map.items(), start=1):
+            trial_name = f"trial-{idx}__attempt1"
+            trial_names.append(trial_name)
+            trial_dir = job_dir / trial_name
+            trial_dir.mkdir(parents=True)
+            (trial_dir / "result.json").write_text(
+                json.dumps(
+                    {
+                        "trial_name": trial_name,
+                        "task_name": f"{parsed_toml['task']['name']}_attempt1",
+                        "verifier_result": {"rewards": {"reward": scores[case_id]}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+        (job_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "n_total_trials": len(trial_names),
+                    "stats": {
+                        "n_trials": len(trial_names),
+                        "n_errors": 0,
+                        "evals": {
+                            "opencode": {
+                                "n_trials": len(trial_names),
+                                "n_errors": 0,
+                                "reward_stats": {"reward": {"1.0": trial_names}},
+                            }
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    for idx, expected_ids in enumerate((["case-1", "case-1-with-skill"], None)):
+        result = collect_harbor_results(
+            skill_name="target-skill",
+            agents=["opencode"],
+            output_dir=tmp_path / f"results-{idx}",
+            jobs_dir=jobs_dir,
+            n_attempts=1,
+            expected_cases=2,
+            expected_case_ids=expected_ids,
+        )
+
+        assert result["execution_status"] == "succeeded"
+        agent_res = result["agents"]["opencode"]
+        assert set(agent_res["pass_at_k"]["with_skill"]["cases"]) == {"case-1", "case-1-with-skill"}
+        assert set(agent_res["pass_at_k"]["without_skill"]["cases"]) == {"case-1", "case-1-with-skill"}
+        assert agent_res["pass_at_k"]["with_skill"]["cases"]["case-1"]["best_score"] == 1.0
+        assert agent_res["pass_at_k"]["with_skill"]["cases"]["case-1-with-skill"]["best_score"] == 0.9
+        assert agent_res["pass_at_k"]["without_skill"]["cases"]["case-1"]["best_score"] == 0.2
+        assert agent_res["pass_at_k"]["without_skill"]["cases"]["case-1-with-skill"]["best_score"] == 0.3
+
+    # Sad path: if only 'case-1' is expected, 'case-1-with-skill' must be flagged as unexpected, not collapsed onto 'case-1'
+    partial_expected_result = collect_harbor_results(
+        skill_name="target-skill",
+        agents=["opencode"],
+        output_dir=tmp_path / "results-unexpected",
+        jobs_dir=jobs_dir,
+        n_attempts=1,
+        expected_cases=2,
+        expected_case_ids=["case-1"],
+    )
+    assert partial_expected_result["execution_status"] == "failed"
+    assert any("case-1-with-skill" in err for err in partial_expected_result["execution_errors"])
+
+
 def test_stage_native_harbor_tasks_type_safety(tmp_path: Path) -> None:
     """Verify that native staging functions reject non-string arm_suffix values."""
     skill_dir = tmp_path / "target-skill"
@@ -1540,4 +1774,3 @@ def test_generate_harbor_tasks_dual_arm_suffix(tmp_path: Path) -> None:
             evaluator_skill_path=skill_dir,
             arm_suffix=123,  # type: ignore[arg-type]
         )
-

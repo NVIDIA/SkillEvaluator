@@ -2056,3 +2056,92 @@ def test_arithmetic_outside_an_arithmetic_command_binds_too(check, command, expe
     word expanded before the assignment reads the value it had.
     """
     assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("LANG=C for g in; do python3 run.py; done", 0.75),
+        ("f=x for g in; do echo; done; python3 run.py", 0.75),
+        ("A=1 for g in x; do python3 run.py; done", 0.75),
+        ("A=1 B=2 for g in x; do python3 run.py; done", 0.75),
+        ("A=1 select g in x; do python3 run.py; break; done", 0.75),
+        ("A=1 while true; do python3 run.py; break; done", 0.75),
+        ("A=1 until false; do python3 run.py; break; done", 0.75),
+        ("A=1 if true; then python3 run.py; fi", 0.75),
+        ("A=1 case x in x) python3 run.py;; esac", 0.75),
+        ("A=1 { python3 run.py; }", 0.75),
+        ("A=1 ( python3 run.py )", 0.75),
+        ("A=1 [[ -n x ]] && python3 run.py", 0.75),
+        ("A=1 (( 1 )) && python3 run.py", 0.75),
+        ("python3 run.py; A=1 for g in x; do :; done", 0.75),
+        ("sh -c 'A=1 for g in x; do python3 run.py; done'", 0.75),
+        ("A=1 for x; python3 run.py", 0.75),
+        ("python3 run.py\nA=1 for g in x; do :; done", 0.75),
+        (r'f=run.py\; for "f"', 0.0),
+        ("A=1 for g in x; do cat run.py; done", 0.0),
+        ("A=1 if true; then cat run.py; fi", 0.0),
+        ("A=(x y); python3 run.py", 1.0),
+        ("A='for' python3 run.py", 1.0),
+        ("for g in x; do A=1 python3 run.py; done", 1.0),
+        ("if true; then A=1 python3 run.py; fi", 1.0),
+        ("A=1; for g in x; do python3 run.py; done", 1.0),
+        ('f=run.py; for f in; do :; done; python3 "$f"', 1.0),
+    ],
+)
+def test_a_compound_word_after_an_assignment_is_refused_text(check, command, expected) -> None:
+    """A compound's opening word is reserved only where a command starts.
+    After an assignment, bash, bash --posix, dash, zsh, ksh, mksh and busybox
+    ash all refuse it with the compound's own syntax, so the line runs
+    nothing, while lines before it may run: an invocation there is partial,
+    never full credit, and never an exception. ``A=(`` is an array and
+    ``A='for'`` a value, and a loop word where a command starts is a loop.
+    """
+    assert check(_bash(command), EXPECTED_SCRIPT)["score"] == expected
+
+
+_DAMAGE_BASES = [
+    "python3 run.py",
+    'f=run.py; for f in; do :; done; python3 "$f"',
+    "for f in run.py; do python3 $f; done | cat",
+    "LANG=C python3 -u run.py 2>&1 > out.txt",
+    "if [ -f run.py ]; then python3 run.py; elif true; then :; else cat run.py; fi",
+    "case x in x) python3 run.py;; *) cat run.py;; esac",
+    "while read -r l; do python3 run.py; done < in.txt",
+    "(cd x && python3 run.py); { cat run.py; }",
+    "cat <<EOF\npython3 run.py\nEOF\npython3 run.py",
+    "python3 <<A <<B run.py\nx\nA\ny\nB",
+    'cat <<< "a; b"; python3 run.py',
+    "bash -c 'f=run.py; python3 \"$f\"'",
+    "export f=run.py; env -u f bash -c 'python3 \"$f\"'",
+    'readonly f=run.py; declare -n g=f; python3 "$g"',
+    'f=run.py; let f=1; : $((f=2)); python3 "$f"',
+    'f=run.py; eval "g=$f"; python3 "$g"',
+    '(((for f in run.py; do :; done; python3 "$f")) | cat)',
+    "timeout -- 30 env --help python3 run.py && xargs -r python3 run.py",
+    "sh -c 'cat <<< x; python3 run.py'",
+    "A=1 for g in x; do python3 run.py; done",
+]
+
+
+def _damaged(command: str) -> list[str]:
+    """Every prefix and every single-character deletion of a command: the
+    shapes a cut-off or mistyped tool call takes."""
+    return sorted(
+        {command[:end] for end in range(len(command))}
+        | {command[:index] + command[index + 1 :] for index in range(len(command))}
+    )
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize("command", _DAMAGE_BASES)
+def test_a_damaged_command_is_scored_never_raised(check, command) -> None:
+    """A malformed command gets a score like any other. Deleting one ``;``
+    from the second base gives ``f=run.py for f in; do :; ...``, which raised
+    ``IndexError`` before the walk read a loop word after an assignment as
+    the ordinary word it is.
+    """
+    for damaged in _damaged(command):
+        result = check(_bash(damaged), EXPECTED_SCRIPT)
+        assert result["score"] in {0.0, 0.75, 1.0}, damaged

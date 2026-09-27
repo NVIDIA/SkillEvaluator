@@ -708,6 +708,27 @@ def curated() -> list[tuple[str, str]]:
     add(f'bash -c "f={SCRIPT}; {PY} \\"$f\\""')
     add(f'f={SCRIPT}; bash -c "{PY} \\"$f\\""')
     add(f'bash -c "f={SCRIPT}; {PY} \\"\\$f\\""')
+    # a compound's opening word after an assignment, which every shell refuses
+    for opener in (
+        f"for g in; do {PY} {SCRIPT}; done",
+        f"for g in x; do {PY} {SCRIPT}; done",
+        f"while true; do {PY} {SCRIPT}; break; done",
+        f"if true; then {PY} {SCRIPT}; fi",
+        f"case x in x) {PY} {SCRIPT};; esac",
+        f"{{ {PY} {SCRIPT}; }}",
+        f"( {PY} {SCRIPT} )",
+        f"[[ -n x ]] && {PY} {SCRIPT}",
+        f"(( 1 )) && {PY} {SCRIPT}",
+    ):
+        add(f"LANG=C {opener}")
+    add(f"f=x for g in; do echo; done; {PY} {SCRIPT}")
+    add(f"A=1 for x; {PY} {SCRIPT}")
+    add(f"{PY} {SCRIPT}; A=1 for g in x; do :; done")
+    add(f"{PY} {SCRIPT}\nA=1 for g in x; do :; done")
+    add(f"dash -c 'A=1 for g in x; do {PY} {SCRIPT}; done'")
+    add(f"A=$(true) {PY} {SCRIPT}")
+    add(f"A='for' {PY} {SCRIPT}")
+    add(f"for g in x; do A=1 {PY} {SCRIPT}; done")
     return cases
 
 
@@ -1142,14 +1163,18 @@ def main() -> int:
 
     baseline = _load_baseline(arguments.baseline) if arguments.baseline else None
     buckets: dict[str, list[tuple[str, str]]] = {}
-    moves: dict[str, list[tuple[str, float, float]]] = {}
+    moves: dict[str, list[tuple[str, float | str, float]]] = {}
     for command, script in commands:
         outcome, detail, score, ran, calls = _run_one(command, script)
         buckets.setdefault(outcome, []).append((command, detail))
         if arguments.verbose:
             print(f"{outcome:22} {command!r} {detail}")
         if baseline is not None and score is not None:
-            before = baseline[0].check_script_execution(calls, script)["score"]
+            try:
+                before = baseline[0].check_script_execution(calls, script)["score"]
+            except Exception as error:  # an earlier checker may raise where this one scores
+                moves.setdefault("baseline raised, now scored", []).append((command, type(error).__name__, score))
+                continue
             if before != score:
                 if ran and score < before:
                     kind = "score lowered on a command that ran (review each)"
@@ -1198,6 +1223,7 @@ def main() -> int:
             "score raised on a command that did not run (review each)",
             "false positive repaired",
             "false negative repaired",
+            "baseline raised, now scored",
             "other move",
         ):
             entries = moves.get(kind, [])

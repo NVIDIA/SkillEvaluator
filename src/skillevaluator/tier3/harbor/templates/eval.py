@@ -4787,6 +4787,45 @@ def _names_script_anywhere(command_text: str, expected_script: str) -> bool:
 _COMPOUND_OPENERS = frozenset({"for", "select", "while", "until", "if", "case", "{"})
 _COMPOUND_CLOSERS = frozenset({"done", "fi", "esac", "}"})
 _COMMAND_POSITION_LEADERS = frozenset({"then", "do", "else", "elif", "!", "{", "("})
+# A compound's opening word is reserved only where a command starts, not after
+# an assignment. Written there, it and the compound's own syntax are refused
+# by bash, bash --posix, dash, zsh, ksh, mksh and busybox ash, for each of
+# these and for ``(`` and ``((``: ``A=1 if true; then python3 run.py; fi``
+# runs nothing.
+_OPENERS_REFUSED_AFTER_ASSIGNMENT = _COMPOUND_OPENERS | {"[["}
+
+
+def _compound_after_assignment(tokens: list[str]) -> bool:
+    """Whether a compound's opening word follows an assignment in a command.
+
+    Every modelled shell refuses the text before running the line that holds
+    it, but some run the lines before it, and the tokenizer does not keep
+    lines apart; the caller credits nothing in such a text. ``A=$(`` and
+    ``A=(`` reach here as an assignment ending in ``$`` or ``=`` and then
+    ``(``, a substitution or an array rather than a subshell.
+    """
+    assigned: str | None = None
+    at_start = True
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            assigned, at_start = None, True
+            continue
+        if not at_start:
+            continue
+        if assigned is None and (token in _COMMAND_INTRODUCING_WORDS or token in _COMMAND_POSITION_LEADERS):
+            continue
+        if _SHELL_ASSIGNMENT_RE.match(token):
+            assigned = token
+            continue
+        if assigned is not None:
+            if token in _OPENERS_REFUSED_AFTER_ASSIGNMENT:
+                return True
+            if token == "(" and not assigned.endswith(("$", "=")):
+                return True
+        at_start = False
+    return False
+
+
 # Whether the last command of a pipeline runs in the current shell, so a
 # binding it makes outlives the pipeline. zsh and ksh run it there; bash,
 # dash and mksh fork it like the other stages, unless bash has `lastpipe`
@@ -5672,13 +5711,15 @@ def _walk_for_invocation(
     # A heredoc or here-string operand is data rather than further commands, but
     # the tokenizer turns its newlines into separators, so it is split out.
     analysed_text, unexamined_text, here_strings = _split_heredocs(command_text, binding_reading)
-    # A shell with no here-string rejects the text before running it.
-    syntax_rejected = bool(here_strings) and binding_reading in _NO_HERE_STRING_SHELLS
     tokens = _split_punctuation_runs(
         _shell_tokens(_mark_quoted_newlines(_mark_literal_dollars(analysed_text))),
         arithmetic_parens,
         binding_reading != "ksh",
     )
+    # A shell with no here-string rejects the text before running it, and so
+    # does every shell given a compound's opening word after an assignment.
+    here_string_refused = bool(here_strings) and binding_reading in _NO_HERE_STRING_SHELLS
+    syntax_rejected = here_string_refused or _compound_after_assignment(tokens)
     if not tokens:
         return None if str(expected_script) in command_text else False
 
@@ -5707,7 +5748,8 @@ def _walk_for_invocation(
     def credited() -> bool:
         """Whether an invocation found here counts: not once an assignment the
         shell stops at has failed before it (see ``_ASSIGNMENT_REFUSED``), nor
-        in a text the shell rejects (``_NO_HERE_STRING_SHELLS``)."""
+        in a text the shell rejects (``_NO_HERE_STRING_SHELLS``,
+        ``_compound_after_assignment``)."""
         return not scope.get(_ASSIGNMENT_REFUSED) and not syntax_rejected
 
     def close_frames(parens: int) -> None:
@@ -5834,7 +5876,11 @@ def _walk_for_invocation(
         if _apply_binding_builtin(command, cmd_idx, scope, binding_reading):
             idx = end + 1
             continue
-        if command[cmd_idx] in _LOOP_HEADER_WORDS:
+        openers = [event for event in events if event != "("]
+        if command[cmd_idx] in _LOOP_HEADER_WORDS and openers and openers[-1] == command[cmd_idx]:
+            # Only a loop word where a command starts opens a loop. After an
+            # assignment or ``--`` it is an ordinary word with no closer to
+            # skip to (``_compound_after_assignment``).
             if _loop_header_is_empty(command, cmd_idx, scope, positional_known_empty):
                 # Zero iterations: the body is skipped whole, and the
                 # closing word it ends with is accounted for here.

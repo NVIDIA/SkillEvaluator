@@ -84,7 +84,9 @@ All notable changes to SkillEvaluator are documented in this file.
   body after the line, in order, and past the number a shell accepts on one
   line (16 in bash) the line and the rest are data; a here-string, which dash
   and busybox ash reject before running anything, leaves nothing credited
-  under those shells; `(((` is a subshell
+  under those shells, and so does a compound's opening word written after an
+  assignment (`A=1 for ...`, `A=1 if ...`, `A=1 ( ... )`), which every
+  modelled shell rejects and which no longer raises; `(((` is a subshell
   around `((` in bash, zsh and mksh; and `ksh`, `mksh` and `ash` are
   recognised shells.
   Applied to both the host checker and the bundled Harbor verifier.

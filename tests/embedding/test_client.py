@@ -90,10 +90,84 @@ class TestEmbed:
 
         assert result == expected
         mock_openai.embeddings.create.assert_called_once_with(
-            model="nvidia/nv-embed-v1",
+            model="nvidia/nemotron-3-embed-1b",
             input=["hello", "world"],
             encoding_format="float",
+            extra_body={"input_type": "passage"},
         )
+
+    @pytest.mark.parametrize("model", ["text-embedding-3-small", "custom-embedding-model"])
+    def test_other_models_keep_standard_openai_request(self, model: str) -> None:
+        client = EmbeddingClient(model=model, api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        sdk.embeddings.create.return_value = _make_fake_response([[1.0, 0.0]])
+        client._client = sdk
+
+        assert client.embed(["text"]) == [[1.0, 0.0]]
+        sdk.embeddings.create.assert_called_once_with(model=model, input=["text"], encoding_format="float")
+
+    @pytest.mark.parametrize("model", [None, "publisher/nvidia/nemotron-3-embed-1b"])
+    def test_nvidia_default_at_explicit_endpoint_includes_passage_type(self, model) -> None:
+        client = EmbeddingClient(model=model, api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        sdk.embeddings.create.return_value = _make_fake_response([[1.0, 0.0]])
+        client._client = sdk
+
+        client.embed(["text"])
+
+        assert sdk.embeddings.create.call_args.kwargs["model"] == (model or "nvidia/nemotron-3-embed-1b")
+        assert sdk.embeddings.create.call_args.kwargs["extra_body"] == {"input_type": "passage"}
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 429, 500])
+    def test_service_error_is_actionable_without_echoing_response(self, status: int) -> None:
+        import httpx
+        from openai import APIStatusError
+
+        client = EmbeddingClient(model="test-model", api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        request = httpx.Request("POST", "http://127.0.0.1:12345/v1/embeddings?secret-marker")
+        response = httpx.Response(status, request=request, json={"detail": "secret-marker"})
+        sdk.embeddings.create.side_effect = APIStatusError(
+            "secret-marker", response=response, body={"secret-marker": True}
+        )
+        client._client = sdk
+
+        with pytest.raises(SimilarityConfigError) as error:
+            client.embed(["private input text"])
+
+        assert f"HTTP {status}" in str(error.value)
+        assert "secret-marker" not in str(error.value)
+        assert "private input text" not in str(error.value)
+        if status in {404, 410}:
+            assert "SKILL_EVAL_EMBEDDING_MODEL" in str(error.value)
+
+    def test_connection_error_does_not_echo_endpoint_credentials(self) -> None:
+        import httpx
+        from openai import APIConnectionError
+
+        client = EmbeddingClient(model="test-model", api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        request = httpx.Request("POST", "http://127.0.0.1:12345/v1/embeddings?secret-marker")
+        sdk.embeddings.create.side_effect = APIConnectionError(message="secret-marker", request=request)
+        client._client = sdk
+
+        with pytest.raises(SimilarityConfigError, match="connection") as error:
+            client.embed(["private input text"])
+
+        assert "secret-marker" not in str(error.value)
+
+    def test_invalid_response_index_does_not_echo_provider_content(self) -> None:
+        client = EmbeddingClient(model="test-model", api_key="test-key", base_url="http://127.0.0.1:12345/v1")
+        sdk = MagicMock()
+        sdk.embeddings.create.return_value = _FakeEmbeddingResponse(
+            data=[_FakeEmbeddingItem(embedding=[1.0, 0.0], index="private-input-marker")]
+        )
+        client._client = sdk
+
+        with pytest.raises(SimilarityConfigError, match="index") as error:
+            client.embed(["text"])
+
+        assert "private-input-marker" not in str(error.value)
 
     def test_embed_reorders_out_of_order_provider_response_by_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
@@ -210,6 +284,51 @@ class TestEmbedChunked:
 
         assert result == pytest.approx([0.5, 0.5])
 
+    @pytest.mark.parametrize("overlap", [10, 11])
+    def test_embed_chunked_rejects_non_progressing_windows_before_provider_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        overlap: int,
+    ) -> None:
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        client = EmbeddingClient()
+
+        with (
+            patch.object(client, "embed") as mock_embed,
+            pytest.raises(SimilarityConfigError, match="overlap must be smaller"),
+        ):
+            client.embed_chunked("x" * 100, chunk_size=10, overlap=overlap)
+
+        mock_embed.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("chunk_size", "overlap"),
+        [
+            (True, 0),
+            (10.0, 0),
+            (10, True),
+            (10, 1.5),
+            (10, math.nan),
+        ],
+        ids=["bool-size", "float-size", "bool-overlap", "float-overlap", "nan-overlap"],
+    )
+    def test_embed_chunked_rejects_non_integer_windows_before_provider_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        chunk_size: object,
+        overlap: object,
+    ) -> None:
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        client = EmbeddingClient()
+
+        with (
+            patch.object(client, "embed") as mock_embed,
+            pytest.raises(SimilarityConfigError, match="must be an integer"),
+        ):
+            client.embed_chunked("x" * 100, chunk_size=chunk_size, overlap=overlap)  # type: ignore[arg-type]
+
+        mock_embed.assert_not_called()
+
 
 class TestSplitIntoChunks:
     def test_short_text_single_chunk(self) -> None:
@@ -235,6 +354,19 @@ class TestSplitIntoChunks:
     def test_empty_text_returns_original(self) -> None:
         chunks = _split_into_chunks("", chunk_size=100, overlap=10)
         assert chunks == [""]
+
+    @pytest.mark.parametrize(
+        ("chunk_size", "overlap", "message"),
+        [
+            (0, 0, "chunk size must be greater than zero"),
+            (10, -1, "chunk overlap must not be negative"),
+            (10, 10, "overlap must be smaller than the chunk size"),
+            (10, 11, "overlap must be smaller than the chunk size"),
+        ],
+    )
+    def test_rejects_invalid_chunk_windows(self, chunk_size: int, overlap: int, message: str) -> None:
+        with pytest.raises(SimilarityConfigError, match=message):
+            _split_into_chunks("x" * 100, chunk_size=chunk_size, overlap=overlap)
 
     def test_heading_split_preserves_heading_with_content(self) -> None:
         text = "# Title\nSome intro\n## Part 1\nDetails"

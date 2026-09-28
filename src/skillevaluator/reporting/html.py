@@ -35,7 +35,12 @@ from jinja2 import BaseLoader, Environment
 
 from skillevaluator import __version__
 from skillevaluator.constants import TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    additional_errors,
+    is_advisory_agent_eval_skip,
+    passes_required_gate,
+)
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 
 if TYPE_CHECKING:
@@ -294,6 +299,7 @@ class HTMLReporter(ReporterBase):
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
         environment.filters["related_paths"] = _related_paths
+        environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         return environment

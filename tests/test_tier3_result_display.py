@@ -5,6 +5,7 @@
 
 import io
 import re
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,103 @@ from rich.panel import Panel
 
 from skillevaluator.tier3.harbor.metrics import CUSTOM_ONLY_METRIC_SET, DEFAULT_METRIC_SET, DEFAULT_METRICS
 from skillevaluator.tier3.result_display import _with_skill_overall, render_evaluation_result, render_result
+
+
+@pytest.mark.parametrize("delta", [0.3, 0.0, -0.3])
+def test_overall_lift_headline_preserves_signed_persisted_value_and_original_tables(delta: float) -> None:
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.5 + delta, "without_skill": 0.5, "delta": delta}},
+                "dimensions_with_skill": {"effectiveness": {"score": 0.9}},
+                "dimensions_without_skill": {"effectiveness": {"score": 0.1}},
+            }
+        },
+    }
+    original = deepcopy(result)
+    output = render_result(result)
+
+    assert re.search(rf"OVERALL SKILL LIFT\s+{re.escape(f'{delta:+.2f}')}", output)
+    assert output.index("OVERALL SKILL LIFT") < output.index("With Skill")
+    assert output.count("Results by Evaluator") == 1
+    assert output.count("Results by Dimension") == 1
+    assert "Skill Lift" in output
+    assert "█" in output
+    assert result == original
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {
+            "conditions": {
+                "with_skill": {"execution_status": "failed"},
+                "without_skill": {"execution_status": "succeeded"},
+            }
+        },
+        {
+            "conditions": {
+                "with_skill": {"execution_status": "succeeded"},
+                "without_skill": {"execution_status": "skipped"},
+            }
+        },
+        {
+            "conditions": {
+                "with_skill": {"execution_status": "succeeded"},
+                "without_skill": {"execution_status": "failed"},
+            }
+        },
+        {"lift": {"overall": {"with_skill": 0.8, "without_skill": 0.5}}},
+        {"lift": {"overall": {"with_skill": 0.8, "without_skill": None, "delta": 0.3}}},
+        {"lift": {"overall": {"with_skill": float("nan"), "without_skill": 0.5, "delta": 0.3}}},
+        {"lift": {"overall": {"with_skill": 0.8, "without_skill": 0.5, "delta": float("inf")}}},
+        {"lift": {"overall": {"with_skill": 0.8, "without_skill": 0.5, "delta": True}}},
+    ],
+)
+def test_overall_lift_headline_omits_unusable_or_unscored_comparisons(change: dict) -> None:
+    agent = {
+        "execution_status": "succeeded",
+        "lift": {"overall": {"with_skill": 0.8, "without_skill": 0.5, "delta": 0.3}},
+        **change,
+    }
+    output = render_result({"execution_status": "succeeded", "agents": {"codex": agent}})
+    assert "OVERALL SKILL LIFT" not in output
+
+
+def test_overall_lift_headline_is_per_agent_and_highlighted_without_a_background() -> None:
+    from rich.console import Group
+    from rich.text import Text
+
+    printed = []
+
+    class RecordingConsole:
+        def print(self, value):
+            printed.append(value)
+
+    agents = {
+        name: {
+            "execution_status": "succeeded",
+            "lift": {"overall": {"with_skill": 0.5 + delta, "without_skill": 0.5, "delta": delta}},
+        }
+        for name, delta in (("codex", 0.3), ("opencode", -0.2))
+    }
+    render_evaluation_result({"execution_status": "succeeded", "agents": agents}, console=RecordingConsole())
+    evaluator_panels = [
+        item for item in printed if isinstance(item, Panel) and str(item.title) == "Results by Evaluator"
+    ]
+    assert len(evaluator_panels) == 2
+    console = Console()
+    for panel, (name, delta) in zip(evaluator_panels, (("codex", 0.3), ("opencode", -0.2)), strict=True):
+        assert isinstance(panel.renderable, Group)
+        headline = panel.renderable.renderables[0]
+        assert isinstance(headline, Text)
+        assert headline.plain == f"OVERALL SKILL LIFT   {delta:+.2f} · {name}"
+        style = headline.get_style_at_offset(console, headline.plain.index(f"{delta:+.2f}"))
+        assert style.bold
+        assert style.color.name == ("green" if delta > 0 else "red")
+        assert style.bgcolor is None
 
 
 def _skip_baseline_agent(with_skill: dict[str, float], *, pass_rate: float = 0.5) -> dict[str, object]:
@@ -227,7 +325,11 @@ def test_skip_baseline_unusable_agent_does_not_synthesize_with_skill_score(agent
     output = render_result(result)
 
     assert "opencode" in output
-    assert re.search(r"Security\s+NO SCORE", output)
+    if agent_status == "failed":
+        assert "Tier 3 Evaluation: INCOMPLETE" in output
+        assert "Results by Evaluator" not in output
+    else:
+        assert re.search(r"Security\s+NO SCORE", output)
     assert "0.71" not in output
     assert "0.50" not in output
     assert "job incomplete" in output
@@ -541,9 +643,181 @@ def test_failed_agent_without_diagnostic_says_no_score_and_explains_failure() ->
         }
     )
 
-    assert "NO SCORE" in output
-    assert "Findings" in output
-    assert "opencode evaluation failed without diagnostic details" in output
+    assert "Evaluation did not complete" in output
+    assert "Tier 3 Evaluation: INCOMPLETE" in output
+    assert "opencode: evaluation failed without diagnostic details" in output
+
+
+def _unscored_timeout_result() -> dict:
+    agent_reason = "AgentTimeoutError: Agent execution timed out after 300.0 seconds"
+    judge_reason = (
+        "Required judge evaluation failed: accuracy: LLM judge error: The read operation timed out; "
+        "behavior_check: LLM judge error: The read operation timed out"
+    )
+    aggregate = "Harbor job did not complete successfully: 1 errored"
+    conditions = {}
+    failures = {}
+    errors = []
+    for variant, trial, reason in (
+        ("with_skill", "case-001__with", agent_reason),
+        ("without_skill", "case-001__without", judge_reason),
+    ):
+        arm_errors = [f"Unscoreable reward in {trial}: {reason}"]
+        if variant == "with_skill":
+            arm_errors = [aggregate, f"Agent runtime failed in {trial}: {reason}", *arm_errors]
+        arm_errors.extend(["Missing scored attempts for cases: case-001", "Scored attempt coverage is 0/1"])
+        conditions[variant] = {
+            "execution_status": "failed",
+            "execution_errors": arm_errors,
+            "expected_attempts": 1,
+            "scored_attempts": 0,
+        }
+        failures[variant] = [{"trial": trial, "reason": reason}]
+        errors.extend(arm_errors)
+    feedback = "; ".join(
+        [
+            *errors,
+            f"With skill aggregate job: {aggregate}",
+            f"With skill trial case-001__with: {agent_reason}",
+            f"Without skill trial case-001__without: {judge_reason}",
+        ]
+    )
+    return {
+        "execution_status": "failed",
+        "expected_attempts": 2,
+        "scored_attempts": 0,
+        "execution_errors": [*errors, f"codex with-skill Harbor run failed: {aggregate}"],
+        "agents": {
+            "codex": {
+                "execution_status": "failed",
+                "execution_errors": errors,
+                "conditions": conditions,
+                "trial_failures": failures,
+                "with_skill": {},
+                "without_skill": {},
+                "num_trials_with": 0,
+            }
+        },
+        "tier3_feedback": {
+            "conclusions": [{"title": "Evaluation incomplete", "severity": "fail", "message": feedback}],
+            "recommendations": [{"message": feedback}],
+            "suggestions": [feedback],
+        },
+    }
+
+
+@pytest.mark.parametrize("width", [80, 120, 240])
+def test_unscored_execution_shows_each_arm_once_without_empty_tables(width: int) -> None:
+    result = _unscored_timeout_result()
+    original = deepcopy(result)
+    stream = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=stream, force_terminal=False, width=width))
+    output = stream.getvalue()
+    normalized = " ".join(line.strip(" │") for line in output.splitlines())
+
+    assert "Tier 3 Evaluation: INCOMPLETE" in output
+    assert "Scored attempts: 0/2" in output
+    assert "with-skill (0/1 scored)" in output
+    assert "without-skill (0/1 scored)" in output
+    assert normalized.count("300.0 seconds") == 1
+    assert normalized.count("The read operation timed out") == 1
+    assert "accuracy, behavior_check" in normalized
+    assert "--timeout-multiplier" in normalized
+    assert "Results by Evaluator" not in output
+    assert "Results by Dimension" not in output
+    assert "Feedback & Suggestions" not in output
+    assert "0 trial(s)" not in output
+    assert result == original
+
+
+def test_unscored_execution_preserves_unknown_errors_and_real_recommendations() -> None:
+    result = _unscored_timeout_result()
+    result["execution_errors"].append("Distinct top-level error")
+    result["agents"]["codex"]["execution_errors"].append("Distinct agent error")
+    result["agents"]["codex"]["conditions"]["with_skill"]["execution_errors"].append("Distinct arm error")
+    result["tier3_feedback"]["recommendations"].append({"message": "Check the task's required service credentials."})
+    result["tier3_feedback"]["conclusions"].append({"message": "Additional independent observation."})
+
+    output = render_result(result)
+
+    for message in (
+        "Distinct top-level error",
+        "Distinct agent error",
+        "Distinct arm error",
+        "Check the task's required service credentials.",
+        "Additional independent observation.",
+    ):
+        assert output.count(message) == 1
+
+
+def test_unscored_execution_preserves_distinct_trial_ids_and_distinct_judge_failures() -> None:
+    result = _unscored_timeout_result()
+    failures = result["agents"]["codex"]["trial_failures"]
+    failures["with_skill"].append({"trial": "case-002__with", "reason": failures["with_skill"][0]["reason"]})
+    failures["without_skill"][0]["reason"] = (
+        "Required judge evaluation failed: accuracy: LLM judge error: provider timed out; "
+        "behavior_check: LLM judge error: invalid JSON"
+    )
+
+    output = render_result(result)
+
+    assert "case-001__with" in output
+    assert "case-002__with" in output
+    assert "accuracy: LLM judge error: provider timed out" in output
+    assert "behavior_check: LLM judge error: invalid JSON" in output
+
+
+def test_unscored_execution_does_not_hide_unexplained_job_errors_or_inconsistent_counts() -> None:
+    result = _unscored_timeout_result()
+    errors = result["agents"]["codex"]["conditions"]["with_skill"]["execution_errors"]
+    errors.extend(["Harbor job did not complete successfully: 4 errored", "Scored attempt coverage is 1/5"])
+
+    output = render_result(result)
+
+    assert "Harbor job did not complete successfully: 4 errored" in output
+    assert "Scored attempt coverage is 1/5" in output
+
+
+def test_unscored_execution_does_not_invent_attempt_counts() -> None:
+    output = render_result({"execution_status": "failed", "execution_errors": ["setup failed"], "agents": {}})
+
+    assert "setup failed" in output
+    assert "Scored attempts:" not in output
+    assert "0/0" not in output
+    assert "No scores available" not in output
+
+
+def test_both_incomplete_arms_preserve_partial_scored_attempt_counts() -> None:
+    result = {
+        "execution_status": "failed",
+        "expected_attempts": 4,
+        "scored_attempts": 2,
+        "agents": {
+            "codex": {
+                "execution_status": "failed",
+                "conditions": {
+                    variant: {
+                        "execution_status": "failed",
+                        "expected_attempts": 2,
+                        "scored_attempts": 1,
+                        "execution_errors": ["Scored attempt coverage is 1/2"],
+                    }
+                    for variant in ("with_skill", "without_skill")
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert "Tier 3 Evaluation: INCOMPLETE" in output
+    assert "Scored attempts: 2/4" in output
+    assert "with-skill (1/2 scored)" in output
+    assert "without-skill (1/2 scored)" in output
+    assert "No scores available" not in output
+    assert "skill lift was not measured" in output
+    assert "Results by Evaluator" not in output
 
 
 def test_multi_agent_result_has_one_shared_dimension_panel() -> None:

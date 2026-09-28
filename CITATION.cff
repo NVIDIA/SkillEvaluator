@@ -1,9 +1,40 @@
 cff-version: 1.2.0
-message: "If you use SkillEvaluator in academic or technical work, please cite this software."
+message: "If you use SkillEvaluator in academic or technical work, please cite the methodology paper under preferred-citation and record the SkillEvaluator version used for reproducibility."
 title: "SkillEvaluator"
 type: software
-version: "0.2.1"
+version: "0.3.0"
 authors:
   - name: "NVIDIA Corporation"
 license: Apache-2.0
 repository-code: "https://github.com/NVIDIA/SkillEvaluator"
+preferred-citation:
+  type: article
+  title: "Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills"
+  authors:
+    - family-names: "Kevin"
+      given-names: "Christopher"
+    - family-names: "Raghavan"
+      given-names: "Narendran"
+    - family-names: "Puget"
+      given-names: "Jean-Francois"
+    - family-names: "Malani"
+      given-names: "Roshni"
+    - family-names: "Puvvadi"
+      given-names: "Meghana"
+    - family-names: "Abramovitch"
+      given-names: "Moshe"
+    - family-names: "Gupta"
+      given-names: "Mohit"
+    - family-names: "Akkiraju"
+      given-names: "Rama"
+    - family-names: "Prabhu"
+      given-names: "Subodh"
+    - family-names: "Dangi"
+      given-names: "Yogesh"
+    - family-names: "Luo"
+      given-names: "Wei"
+    - family-names: "Lee"
+      given-names: "Seong Hee"
+  year: 2026
+  doi: "10.48550/arXiv.2608.20614"
+  url: "https://arxiv.org/abs/2608.20614"

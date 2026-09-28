@@ -19,7 +19,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from skillevaluator.evidence import evidence_ref_identity
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    additional_errors,
+    is_advisory_agent_eval_skip,
+    passes_required_gate,
+)
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -350,16 +355,19 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"**{s.errors} errors, {s.warnings} warnings**")
         lines.append("")
 
-        if result.findings:
-            self._render_findings(result.findings, lines)
-
-        elif result.errors:
-            # Fall back to legacy errors
-            for error in result.errors[: self.max_findings_shown]:
-                lines.append(f"- ❌ {error}")
-            remaining = len(result.errors) - self.max_findings_shown
+        errors = additional_errors(result)
+        if errors:
+            label = "Execution errors" if result.is_incomplete else "Errors"
+            lines.extend([f"**{label}:**", ""])
+            for error in errors[: self.max_findings_shown]:
+                lines.append(f"- ❌ {html.escape(error, quote=False)}")
+            remaining = len(errors) - self.max_findings_shown
             if remaining > 0:
                 lines.append(f"- *... and {remaining} more errors*")
+            lines.append("")
+
+        if result.findings:
+            self._render_findings(result.findings, lines)
 
     def _render_findings(self, findings: list[Finding], lines: list[str]) -> None:
         """Render a shared findings table for blocking and non-blocking results."""

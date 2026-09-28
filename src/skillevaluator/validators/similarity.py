@@ -150,7 +150,16 @@ class SimilarityValidator(ValidatorBase):
                         "catalog_saved",
                         f"Saved local catalog to {self._catalog_display_name(self._save_catalog_path)}",
                     )
-        except (SimilarityConfigError, ValueError, OSError) as exc:
+        except SimilarityConfigError as exc:
+            result.mark_scan_incomplete("embedding-provider")
+            result.add_error(
+                sanitize_path_text(
+                    f"Embedding provider error: {exc}",
+                    (skill_path, self._catalog_path, self._save_catalog_path),
+                )
+            )
+            return result
+        except (ValueError, OSError) as exc:
             result.add_error(
                 sanitize_path_text(
                     str(exc),

@@ -16,18 +16,18 @@ Turn SkillEvaluator into a merge gate for your skill repository. The recommended
 | `2` | Configuration error — bad flags or an unreadable target | Fix the pipeline, not the skill |
 | `3` | Runtime error — an unexpected internal failure | Re-run; the skill was never judged. File an issue if it persists |
 
-Tier 1 checks always gate the exit code. Tier 2 deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below instead disables Tier 2 with `--no-dedup`. Tier 3 live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each tier.
+Tier 1 checks always gate the exit code. Tier 2 deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below selects `--tiers 1` to exclude Tier 2 and Tier 3. Tier 3 live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each tier. Without an explicit scope, `validate` runs all three tiers for skills, including Tier 3 autopilot.
 
 ## The recommended gate
 
 ```bash title="Keyless CI gate"
-skillevaluator validate ./skills --external --no-dedup -r json,markdown -o reports --min-score 70
+skillevaluator validate ./skills --external --tiers 1 -r json,markdown -o reports --min-score 70
 ```
 
 Each flag earns its place:
 
 - **`--external`** pins the public-publication profile explicitly instead of relying on the environment, so the gate behaves identically on every runner. The active profile name is stamped into the HTML report and `BENCHMARK.md` (and printed in the run banner with `--verbose`), so a run always records which gate was applied.
-- **`--no-dedup`** skips Tier 2, which needs an embedding-capable provider key (`--no-tier2` is an equivalent alias). Without it the run is fully keyless and hermetic. Drop this flag once you add a provider secret.
+- **`--tiers 1`** runs static checks without the provider-backed Tier 2 and Tier 3 stages. Use `--tiers 1,2` once you add a provider secret, or omit the option to include Tier 3 after configuring its runtime. `--no-dedup` alone skips only Tier 2 and still runs Tier 3.
 - **`-r json,markdown,sarif`** writes machine-readable JSON, a Markdown PR comment, and a SARIF file for GitHub Code Scanning.
 - **`-o reports`** collects everything in one directory for artifact upload.
 - **`--min-score 70`** is the default quality bar, written out explicitly so raising it later is a visible one-line diff.
@@ -78,7 +78,7 @@ jobs:
 
       - name: Validate skills
         run: |
-          skillevaluator validate ./skills --external --no-dedup \
+          skillevaluator validate ./skills --external --tiers 1 \
             -r json,markdown,sarif -o reports --min-score 70
 
       - name: Upload reports
@@ -160,7 +160,7 @@ The same shape ports to any CI system: install, run `validate`, gate on the exit
 Point `validate` at a folder of skills and it validates each one:
 
 ```bash title="Validate a whole collection"
-skillevaluator validate ./skills --external --no-dedup -c -r json,markdown -o reports
+skillevaluator validate ./skills --external --tiers 1 -c -r json,markdown -o reports
 ```
 
 Two flags control how a multi-skill run behaves:
@@ -182,7 +182,7 @@ You do not have to turn on the strictest gate on day one. A path that works well
   Run the gate but never fail the build. Contributors see reports and get used to the findings before anything blocks a merge.
 
   ```bash title="Report-only mode"
-  skillevaluator validate ./skills --external --no-dedup -r markdown -o reports || true
+  skillevaluator validate ./skills --external --tiers 1 -r markdown -o reports || true
   ```
 
   ### Gate on Tier 1
@@ -195,11 +195,11 @@ You do not have to turn on the strictest gate on day one. A path that works well
 
   ### Add LLM-backed checks
 
-  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and drop `--no-dedup` so Tier 2 overlap checks run too. Once dedup runs, its findings gate alongside Tier 1 by default; add `--no-block-on-dedup` if you want evidence without enforcing it yet. See [Providers & Credentials](configuration.mdx) for provider setup.
+  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and select `--tiers 1,2` so Tier 2 overlap checks run too. Once dedup runs, its findings gate alongside Tier 1 by default; add `--no-block-on-dedup` if you want evidence without enforcing it yet. See [Providers & Credentials](configuration.mdx) for provider setup.
 
   ### Add an advisory Tier 3 job
 
-  Run live agent evaluation as a separate job — either `skillevaluator tier3 evaluate` on its own or `validate --tier3` (`--agent-eval` is a supported compatibility alias and is not currently deprecated; `validate --full` runs Tier 1+2+3 in one shot). Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. The standalone `tier3 evaluate` exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+  Run live agent evaluation as a separate job with `skillevaluator tier3 ./my-skill`, or remove `--tiers 1,2` from `validate` to run all three tiers. Both workflows reuse existing evaluation sources and generate one starter case when none exists. Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. Standalone Tier 3 exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
 </Steps>
 
 <Note>
@@ -220,7 +220,7 @@ severity_overrides:
 ```
 
 ```bash title="Gate with a pinned policy"
-skillevaluator validate ./skills --external --policy ./policy.yaml --no-dedup -r json,markdown -o reports
+skillevaluator validate ./skills --external --policy ./policy.yaml --tiers 1 -r json,markdown -o reports
 ```
 
 The policy overlays the external profile, and the resulting profile name is stamped into the HTML report and `BENCHMARK.md` (and printed in the run banner with `--verbose`) — so a run always tells you which gate produced it. Full overlay syntax is on the [Tier 1: Validation](tier1-validation.mdx) page.

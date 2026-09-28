@@ -109,6 +109,11 @@ def _live_tier3_result() -> ValidationResult:
         },
         "dataset_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1",
+        "evaluated_source": {
+            "repository": "NVIDIA/demo_skills",
+            "commit": "2263a2ebdab903e87f7e7c0a001d22c3a926a9cf",
+            "evaluator_container_revision": "ghcr.io/nvidia/skillevaluator@sha256:0117bc2e3e54da4244a656466526c5b1b5a559ea0117bc2e3e54da4244a65646",
+        },
         "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5},
         "agents": {
             "claude-code": {

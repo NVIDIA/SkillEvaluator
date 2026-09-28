@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
 from skillevaluator.inference import LLMClient, LLMClientError
+from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.tier2_paths import safe_path_label
 from skillevaluator.validators.base import ValidatorBase
@@ -230,15 +232,8 @@ class IntraSkillValidator(ValidatorBase):
             logger.info("Embedding complete")
 
         except SimilarityConfigError as e:
-            result.add_finding(
-                Finding(
-                    category="CONTENT_DEDUP",
-                    severity=Severity.CRITICAL,
-                    check_name="embedding_error",
-                    message=f"Embedding provider error: {e}",
-                    file_path=report_path,
-                )
-            )
+            result.mark_scan_incomplete("embedding-provider")
+            result.add_error(f"Embedding provider error: {e}")
             return result
 
         # Step 4: Cluster by similarity
@@ -269,7 +264,14 @@ class IntraSkillValidator(ValidatorBase):
 
         # Step 5: LLM analysis for each cluster (concurrent)
         logger.info("Running LLM analysis on %d cluster(s) concurrently...", len(clusters))
-        llm = LLMClient(model=self._llm_model)
+        try:
+            llm = LLMClient(model=self._llm_model)
+            config = llm._resolved_config()
+            provider, model = safe_llm_labels(config.provider, config.model)
+        except LLMClientError:
+            result.mark_scan_incomplete("deduplication-llm")
+            result.add_error("LLM analysis could not start. Check the LLM provider configuration, then rerun Tier 2.")
+            return result
 
         def analyze_one(cluster):
             logger.info(
@@ -280,10 +282,11 @@ class IntraSkillValidator(ValidatorBase):
             try:
                 verdict = analyze_cluster(llm, cluster)
                 logger.info("  [thread] Verdict: %s (confidence: %.2f)", verdict.verdict, verdict.confidence)
-                return (cluster, verdict)
-            except LLMClientError as e:
-                logger.error("  [thread] LLM failed: %s", e)
-                return (cluster, None)
+                return (cluster, verdict, None)
+            except Exception as exc:
+                # A provider exception or malformed model response is missing
+                # evidence, not a duplicate-content finding. Never log raw bodies.
+                return (cluster, None, llm_failure_diagnostic(exc))
 
         cluster_results = []
         max_workers = min(len(clusters), 5)
@@ -293,18 +296,29 @@ class IntraSkillValidator(ValidatorBase):
             for future in as_completed(futures):
                 cluster_results.append(future.result())
 
+        failures = Counter(diagnostic for _, _, diagnostic in cluster_results if diagnostic is not None)
+        failed_count = sum(failures.values())
+        result.metadata["llm_analysis"] = {
+            "provider": provider,
+            "model": model,
+            "clusters_total": len(clusters),
+            "clusters_completed": len(clusters) - failed_count,
+            "clusters_failed": failed_count,
+            "failures": [{"count": count, "diagnostic": diagnostic} for diagnostic, count in sorted(failures.items())],
+        }
+        if failures:
+            result.mark_scan_incomplete("deduplication-llm")
+            summary = (
+                f"LLM analysis did not complete for {failed_count} of {len(clusters)} content clusters "
+                f"(provider: {provider}; model: {model})."
+            )
+            details = " ".join(f"{count} cluster(s): {diagnostic}" for diagnostic, count in sorted(failures.items()))
+            result.add_error(f"{summary} {details}")
+            logger.error("%s %s", summary, details)
+
         # Process results
-        for cluster, verdict in cluster_results:
+        for cluster, verdict, _ in cluster_results:
             if verdict is None:
-                result.add_finding(
-                    Finding(
-                        category="CONTENT_DEDUP",
-                        severity=Severity.CRITICAL,
-                        check_name="llm_error",
-                        message="LLM analysis failed for a content cluster",
-                        file_path=report_path,
-                    )
-                )
                 continue
 
             severity = verdict_to_severity(verdict)

@@ -4,6 +4,73 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Keep headings and comments inside fenced code examples in their enclosing Markdown
+  section during Tier 2 content chunking, preserving original source line numbers.
+- Run the public Docker image as an unprivileged user, with writable default report and home directories.
+  Document UID/GID overrides for host-owned output mounts.
+- Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
+
+- Preserve full Codex gateway model IDs in cloud environments, including E2B
+  and Daytona, while retaining local runtime setup and native provider routing.
+- Keep Tier 2 execution diagnostics visible alongside duplicate findings in
+  CLI, HTML, and Markdown reports, without repeating the findings as errors.
+- Use `nvidia/nemotron-3-super-120b-a12b` as the shared NVIDIA Build default for
+  evaluator chat, agent execution, and judging, preserving explicit model overrides.
+  Request nonstreaming chat responses explicitly to match the response parser.
+- Tier 2 LLM failures now identify the selected provider and model, HTTP status,
+  safe error metadata, and failed-cluster count without exposing response bodies.
+- Replace the retired NVIDIA embedding default with `nvidia/nemotron-3-embed-1b`
+  and send the required passage input type for NVIDIA document comparisons.
+  Existing catalogs and caches must be rebuilt when switching embedding models.
+- Report Tier 2 embedding and LLM service failures as incomplete checks, retaining
+  a nonzero exit without inventing duplicate-content findings. Provider error
+  messages include recovery guidance without echoing raw response bodies.
+
+### Added
+
+- Interactive top-level help now opens with a green SkillEvaluator wordmark,
+  installed version, and tier overview. Narrow terminals use a compact header;
+  redirected output and subcommands keep their existing output format.
+
+- OpenAI-compatible gateways now have chat, embedding, and separate Codex,
+  Claude Code, and OpenCode model defaults. Set the provider, URL, and key;
+  override model IDs when the gateway uses different catalog names. Claude
+  Code inherits the gateway route unless an explicit Anthropic route is set.
+  Run reports identify harness defaults separately from CLI/config overrides.
+
+- Run individual tiers directly with `skillevaluator tier1 PATH`, `tier2 PATH`,
+  and `tier3 PATH`, while retaining the expert subcommands. Tier 1 includes
+  dependency checks and enables LLM checks when configured; Tier 2 reports
+  whether a catalog comparison ran; Tier 3 creates a missing starter dataset
+  and preserves existing evaluation sources.
+
+### Changed
+
+- `validate PATH` now runs all three tiers for skills by default. Tier 3
+  autopilot reuses an existing evaluation source or creates one starter case
+  when none exists. `--full` remains compatible but is unnecessary;
+  `--tiers`, `--no-tier3`, and `--no-autopilot` provide explicit scope controls.
+  Keyless static CI gates should select `--tiers 1`.
+- Tier 3 now selects a provider-native agent when `--agents` is omitted:
+  OpenCode for NVIDIA Build, Codex for OpenAI, and Claude Code for Anthropic.
+  NVIDIA Build agent runs default to Nemotron Super; explicit agent and model
+  overrides remain unchanged.
+- Tier 3's extra agent runtime preflight is now disabled by default because it
+  executes the first real task prompt and incurs agent runtime and model cost.
+  Enable it explicitly with `--agent-runtime-preflight` on either `tier3` or
+  `validate`, or with `harbor.agent_runtime_preflight: true` in `evals/config.yml`.
+- Missing-provider and API-key errors now show concise, copyable setup steps
+  and a link to advanced configuration. Tier 1 also explains `--no-llm`.
+- `tier1 validate` now runs only Tier 1, matching `tier1 PATH`. The top-level
+  `validate` command retains its combined pipeline behavior.
+- README and getting-started guides lead with provider-plus-key setup for
+  NVIDIA Build and OpenAI, explain inherited model defaults, and separate
+  credentials from scanner and agent runtime requirements.
+
+## 0.3.0 - 2026-09-17
+
 ### Added
 
 - Catalog validation now writes `catalog-summary.json` at the reports root with
@@ -18,12 +85,58 @@ All notable changes to SkillEvaluator are documented in this file.
   HTTP proxy so its bearer token is not offered to an intermediary. The
   transport rechecks authorization before dispatch and rejects hosts that
   are no longer allowed.
+- Published benchmark cards record the evaluated source identity. `BENCHMARK.md`
+  now carries `Evaluated source`, `Evaluated source revision` and
+  `Evaluator container revision` as separate fields, so a reader can tell which
+  source tree was evaluated apart from the evaluator build that evaluated it.
+  Previously two skills evaluated from different repositories by the same
+  evaluator container produced cards whose only recorded revision was the shared
+  container tag. `validate` and `tier3 evaluate` take the identity as
+  `--evaluated-source-repository`, `--evaluated-source-revision` and
+  `--evaluator-container-revision`. `validate` records it on the card and in
+  the top-level `evaluated_source` object of its JSON report and forwards it to
+  every child of a parallel catalog run; both commands persist it into a Tier 3
+  run's `run_config.json`. It can also arrive as the `evaluated_source`
+  argument to `build_agent_eval_payload`, as an `evaluated_source` object in the
+  run's `run_config.json`, or as `metadata["evaluated_source"]` on any
+  validation result. It is never inferred from repository state while rendering,
+  because the tree that renders a card is the evaluator checkout rather than the
+  evaluated skill's source. Every populated carrier, including the payload of
+  every Tier 3 result, is folded into one identity before any report is
+  written, so carriers that disagree fail closed with nothing published instead
+  of letting result ordering decide which source tree a card claims to describe.
+  A revision is accepted only in an unambiguous shape: a full Git object id
+  (40 or 64 hex characters), or a digest whose width matches the algorithm it
+  names. A container revision is an image reference validated by component (a
+  repository path of up to 255 characters, an optional tag of up to 128, and a
+  digest at its algorithm's width), so a long repository name is no longer
+  discarded. The 255 bound measures the path once the registry host is split
+  off it. Path components are lower case, as the OCI grammar requires, while a
+  registry host may use any case and is read as a host only when it is
+  `localhost`, carries a dot, or carries a port.
+  `check_public_benchmarks.py --require-source-provenance` requires the
+  fields and fails any card publishing a `PASS` without them, including a
+  `PASS` whose evaluator container is named by a mutable tag rather than
+  pinned by digest. SkillEvaluator's own CI now runs the scan with that flag;
+  it stays opt-in for trees whose cards predate the contract
+  ([#72](https://github.com/NVIDIA/SkillEvaluator/issues/72)).
 - SARIF 2.1.0 reporter (`-r sarif`) for GitHub Code Scanning and other SARIF
   consumers. Findings map to rule IDs, severity levels, and file locations from
   Tier 1 validation results.
 
 ### Fixed
 
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
+- Fully covered documentation-only skills no longer fail security validation
+  solely because non-applicable SkillSpector analyzers report a partial status
+  ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).
+- Embedding chunking now rejects zero-sized or non-progressing windows before
+  entering the splitter or contacting the embedding provider
+  ([#139](https://github.com/NVIDIA/SkillEvaluator/issues/139)).
+- Scoped network exfiltration command flag patterns in security checks, enforcing command-position anchoring, quote-aware argument segmentation, explicit HTTP method flags, and case-sensitive `-F`/`-d`/`-T` flags to prevent false-positive flags on safe URLs, packages, or download scripts while reliably detecting quoted secrets and subshell wrappers.
 - Malformed, non-UTF-8, or unreadable bundled and custom policy files now
   produce path-specific CLI errors instead of leaking raw parser or I/O errors
   ([#128](https://github.com/NVIDIA/SkillEvaluator/issues/128)).
@@ -62,6 +175,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Gitleaks path allowlist now skips test/example/fixture/mock directories
   instead of any path containing those substrings, so files like `latest.py`
   are scanned.
+- Gitleaks CI now limits pull-request and push scans to history reachable from
+  the checked-out commit, while audit events retain all-ref coverage,
+  preventing unrelated refs from causing false failures
+  ([#106](https://github.com/NVIDIA/SkillEvaluator/pull/106)).
 - The Tier 3 agent runtime preflight now fails with an actionable diagnostic when
   the results directory is not visible to the Docker daemon. Previously the smoke
   run passed -- agent output travels over the Docker exec API rather than through

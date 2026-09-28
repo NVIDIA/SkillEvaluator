@@ -54,18 +54,18 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
 
     assert result.exit_code == 0
     headings = (
+        "Tier workflows:",
         "Core workflows:",
         "Tier 1 · Static and security:",
         "Tier 2 · Deduplication:",
         "Tier 3 · Live evaluation:",
-        "Expert aliases:",
     )
     positions = [result.output.index(heading) for heading in headings]
     assert positions == sorted(positions)
 
-    core = result.output.split(headings[0], 1)[1].split(headings[1], 1)[0]
+    core = result.output.split("Core workflows:", 1)[1].split("Tier 1 · Static and security:", 1)[0]
     assert all(command in core for command in ("validate", "health-check", "doctor", "models"))
-    tier3 = result.output.split(headings[3], 1)[1].split(headings[4], 1)[0]
+    tier3 = result.output.split("Tier 3 · Live evaluation:", 1)[1]
     assert all(command in tier3 for command in ("create-eval-dataset", "compare", "view", "harbor-view"))
     assert "Other commands:" not in result.output
 
@@ -255,7 +255,7 @@ def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path:
 
     result = CliRunner().invoke(
         cli,
-        ["validate", str(linked_target), "--no-dedup", "--checks", "schema"],
+        ["validate", "--no-tier3", str(linked_target), "--no-dedup", "--checks", "schema"],
     )
 
     assert result.exit_code == 0, result.output
@@ -562,7 +562,7 @@ def test_live_eval_help_uses_skill_evaluator_runtime_and_grading_names() -> None
     assert "default_plus_custom" in evaluate.output
     assert "harbor-environment" not in evaluate.output
     assert "k8s-sandbox" not in evaluate.output
-    assert "local" not in evaluate.output
+    assert "local" in evaluate.output
     assert "--autopilot" in evaluate.output
     assert "--progress [auto|rich|plain|off]" in evaluate.output
 
@@ -591,6 +591,84 @@ def test_live_eval_progress_is_presentation_only(monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 0, result.output
     assert isinstance(captured["reporter"], PlainProgressReporter)
     assert "progress" not in captured["options"].engine_kwargs()
+
+
+_EVALUATED_REPOSITORY = "NVIDIA/NVFlare"
+_EVALUATED_COMMIT = "2263a2ebdab903e87f7e7c0a001d22c3a926a9cf"
+_EVALUATOR_CONTAINER = "ghcr.io/nvidia/skillevaluator@sha256:" + "0117bc2e" * 8
+
+
+def test_standalone_evaluate_forwards_the_evaluated_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The standalone producer records the identity instead of persisting null.
+
+    ``tier3 evaluate`` writes its own ``run_config.json``, so an identity the
+    operator supplied has to reach the engine here just as it does through
+    ``validate``.
+    """
+    from skillevaluator.evaluation import EvaluationService
+
+    captured: dict[str, object] = {}
+
+    def _fake_evaluate(self, options, *, progress_reporter=None):
+        captured["options"] = options
+        return {"execution_status": "succeeded", "execution_errors": []}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "evaluate",
+            str(Path(__file__).parent / "fixtures" / "skills" / "simple"),
+            "--progress",
+            "plain",
+            "--evaluated-source-repository",
+            _EVALUATED_REPOSITORY,
+            "--evaluated-source-revision",
+            _EVALUATED_COMMIT,
+            "--evaluator-container-revision",
+            _EVALUATOR_CONTAINER,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["options"].engine_kwargs()["evaluated_source"] == {
+        "repository": _EVALUATED_REPOSITORY,
+        "commit": _EVALUATED_COMMIT,
+        "evaluator_container_revision": _EVALUATOR_CONTAINER,
+    }
+
+
+def test_standalone_evaluate_refuses_a_non_canonical_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refusing at the boundary beats a card that says the field was never recorded."""
+    from skillevaluator.evaluation import EvaluationService
+
+    def _unreachable(self, options, *, progress_reporter=None):
+        raise AssertionError("the engine must not run on a non-canonical identity")
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _unreachable, raising=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "evaluate",
+            str(Path(__file__).parent / "fixtures" / "skills" / "simple"),
+            "--progress",
+            "plain",
+            "--evaluated-source-revision",
+            _EVALUATED_COMMIT[:7],
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "expected" in result.output
+
+
+def test_tier3_evaluate_help_lists_the_provenance_options() -> None:
+    result = CliRunner().invoke(cli, ["tier3", "evaluate", "--help"])
+
+    assert result.exit_code == 0
+    assert "--evaluated-source-repository" in result.output
+    assert "--evaluated-source-revision" in result.output
+    assert "--evaluator-container-revision" in result.output
 
 
 def test_harbor_view_command_uses_the_skillevaluator_wrapper() -> None:
@@ -633,13 +711,14 @@ def test_validate_help_is_detailed() -> None:
     assert "skillevaluator validate ./my-skill" in result.output
 
 
-def test_tier1_validate_alias_shares_detailed_help() -> None:
-    # The tier1 alias is the same command object, so it carries the same help.
+def test_tier1_validate_alias_shows_only_tier1_options() -> None:
     result = CliRunner().invoke(cli, ["tier1", "validate", "-h"])
 
     assert result.exit_code == 0
-    assert "Tier 3 · Live Agent Evaluation:" in result.output
-    assert "Examples:" in result.output
+    assert "--checks" in result.output
+    assert "--no-llm" in result.output
+    assert "--agents" not in result.output
+    assert "--dedup" not in result.output
 
 
 def test_validate_code_integrity_reports_only_static_test_evidence(tmp_path: Path, monkeypatch) -> None:
@@ -698,6 +777,7 @@ def test_validate_code_integrity_reports_only_static_test_evidence(tmp_path: Pat
         cli,
         [
             "validate",
+            "--no-tier3",
             str(skill),
             "--verbose",
             "--checks",

@@ -223,13 +223,31 @@ harbor:
     assert calls == []
 
 
-def test_agent_runtime_preflight_defaults_to_enabled(
+def test_agent_runtime_preflight_defaults_to_disabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     calls = _observe_preflight(monkeypatch)
 
     result, _captured = _run_engine(monkeypatch, tmp_path, USER_CONFIG, agent_runtime_preflight=None)
+
+    assert "error" not in result
+    assert calls == []
+
+
+def test_agent_runtime_preflight_config_key_enables_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = """\
+schema_version: 1
+harbor:
+  task_source: evals_json
+  agent_runtime_preflight: true
+"""
+    calls = _observe_preflight(monkeypatch)
+
+    result, _captured = _run_engine(monkeypatch, tmp_path, config, agent_runtime_preflight=None)
 
     assert "error" not in result
     assert calls == ["opencode"]

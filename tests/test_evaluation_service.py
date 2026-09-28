@@ -109,6 +109,24 @@ def test_engine_kwargs_excludes_skill_path() -> None:
     assert kwargs["env_mode"] == "docker"
 
 
+def test_evaluation_options_leave_agent_selection_to_the_provider() -> None:
+    assert EvaluationOptions(skill_path=Path("/tmp/x")).agents is None
+
+
+def test_cli_evaluate_rejects_an_empty_explicit_agent_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3 import commands
+
+    monkeypatch.setattr(commands, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai"))
+    monkeypatch.setattr(commands, "run_harbor_eval", lambda **_kwargs: pytest.fail("must reject before execution"))
+
+    result = CliRunner().invoke(cli, ["evaluate", str(FIXTURE), "--agents", "", "--progress", "off"])
+
+    assert result.exit_code != 0
+    assert "Select at least one agent" in result.output
+
+
 def test_service_defaults_to_null_progress_reporter(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillevaluator.tier3 import commands
     from skillevaluator.tier3.harbor.progress import NullProgressReporter
@@ -202,7 +220,7 @@ def test_cli_autopilot_uses_keyed_llm_one_case_generation_and_forwards_options(
     skill = _autopilot_skill(tmp_path)
     calls = []
     captured: dict[str, object] = {}
-    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai"))
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai", model="m"))
 
     def create(_self, _skill_path, *, use_llm):
         calls.append(use_llm)
@@ -279,7 +297,7 @@ def test_cli_autopilot_warns_and_falls_back_when_llm_generation_errors(
     from skillevaluator.inference.client import LLMClient
 
     skill = _autopilot_skill(tmp_path)
-    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai"))
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai", model="m"))
     monkeypatch.setattr(
         LLMClient,
         "completions",
@@ -494,7 +512,7 @@ def test_cli_evaluate_renders_real_command_failure_before_nonzero_exit(
     result = CliRunner().invoke(cli, ["evaluate", str(FIXTURE), "--skip-baseline", "--progress", "off"])
 
     assert result.exit_code != 0
-    assert "FAILED" in result.output
+    assert "INCOMPLETE" in result.output
     assert "401 Unauthorized" in result.output
     assert "🔍 Inspect jobs" not in result.output
 

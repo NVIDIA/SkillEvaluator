@@ -57,6 +57,16 @@ _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
+_SKILLSPECTOR_DOCS_ONLY_APPLICABILITY_VERSION = (2, 11, 2)
+_SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = frozenset(
+    {
+        "behavioral_ast",
+        "behavioral_taint_tracking",
+        "bundled_execution_surface",
+        "mcp_least_privilege",
+        "meta_analyzer",
+    }
+)
 _SKILLSPECTOR_SEMANTIC_ANALYZERS = frozenset(
     {
         "semantic_developer_intent",
@@ -1078,6 +1088,8 @@ class SecurityValidator(ValidatorBase):
                 expected_limitations: list[str] = []
                 observed_analyzer_ids: set[str] = set()
                 analyzer_evidence: dict[str, list[tuple[str, dict[str, int]]]] = {}
+                not_applicable_analyzer_ids: set[str] = set()
+                not_applicable_evidence_valid = True
                 for index, analyzer_status in enumerate(analyzer_statuses):
                     if not isinstance(analyzer_status, dict):
                         result.add_error(
@@ -1188,6 +1200,12 @@ class SecurityValidator(ValidatorBase):
                             if isinstance(message, str) and message
                             else f"Analyzer {analyzer_id} status: {analyzer_state}."
                         )
+                    elif analyzer_state == "not_applicable":
+                        not_applicable_analyzer_ids.add(analyzer_id)
+                        not_applicable_evidence_valid &= (
+                            analyzer_status.get("reason_code") == "no_applicable_files"
+                            and not any(analyzer_counts.values())
+                        )
                     elif analyzer_state not in {"completed", "not_applicable"}:
                         result.add_error(
                             "skillspector JSON field 'analysis_completeness.analyzer_statuses' reports "
@@ -1214,7 +1232,39 @@ class SecurityValidator(ValidatorBase):
                         "missing required analyzer evidence; security scan did not complete"
                     )
                     return False
-                if (is_complete or uses_statusless_completeness_schema) and counts["total_components"]:
+                docs_only_analyzer_states_valid = all(
+                    all(
+                        state
+                        == (
+                            "not_applicable"
+                            if analyzer_id in _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS
+                            else "completed"
+                        )
+                        for state, _accounting in analyzer_evidence[analyzer_id]
+                    )
+                    for analyzer_id in required_analyzer_ids
+                )
+                complete_by_applicability = (
+                    uses_completeness_schema
+                    and skillspector_version == _SKILLSPECTOR_DOCS_ONLY_APPLICABILITY_VERSION
+                    and not is_complete
+                    and completeness_status == "partial"
+                    and coverage_percent == 100
+                    and counts["partially_inspected_files"] == 0
+                    and counts["entirely_uninspected_files"] == 0
+                    and not ledger_exceptions
+                    and not limitations
+                    and report_metadata.get("has_executable_scripts") is False
+                    and not_applicable_analyzer_ids
+                    == _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS
+                    and not_applicable_evidence_valid
+                    and docs_only_analyzer_states_valid
+                )
+                if (
+                    is_complete
+                    or uses_statusless_completeness_schema
+                    or complete_by_applicability
+                ) and counts["total_components"]:
                     universal_analyzer_ids = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | (
                         {"artifact_integrity"} if uses_completeness_schema else set()
                     )
@@ -1307,7 +1357,7 @@ class SecurityValidator(ValidatorBase):
                             "security scan did not complete"
                         )
                         return False
-                else:
+                elif not complete_by_applicability:
                     if not (
                         counts["partially_inspected_files"]
                         or counts["entirely_uninspected_files"]

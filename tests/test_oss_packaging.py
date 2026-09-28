@@ -245,8 +245,10 @@ def test_public_docs_declare_support_and_security_sections() -> None:
 
 def test_public_readme_is_a_concise_docs_landing_page() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    quickstart = readme.partition("\n## Quickstart\n")[2].partition("\n## LLM provider setup\n")[0]
-    deeper_evaluations = readme.partition("\n## Run deeper evaluations\n")[2].partition("\n## Documentation\n")[0]
+    quickstart = readme.partition("\n## Quickstart\n")[2].partition("\n## Run the combined pipeline\n")[0]
+    combined_pipeline = readme.partition("\n## Run the combined pipeline\n")[2].partition(
+        "\n## Run from a source checkout\n"
+    )[0]
     normalized = " ".join(readme.split())
 
     positioning = (
@@ -262,23 +264,29 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "docs/assets/three-tier-overview.svg" in readme
     assert "\n## Quickstart\n" in readme
     assert "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git" in readme
-    assert (
-        "skillevaluator validate ./my-skill \\\n  --checks schema,pii,license,quality,unicode,lint \\\n  --no-dedup"
-    ) in quickstart
-    assert "skillevaluator quality-check ./my-skill" not in quickstart
-    assert "SKILL_EVAL_LLM_PROVIDER=nv_build" in readme
-    assert "NVIDIA_API_KEY='nvapi-...'" in readme
-    assert "skillevaluator context-optimization-check ./my-skill" in readme
-    assert (
-        "skillevaluator validate ./my-skill \\\n  --full \\\n  --agents codex \\\n  --env-mode docker"
-    ) in deeper_evaluations
-    assert "Semgrep, SkillSpector, and Gitleaks" in deeper_evaluations
-    assert "enables autopilot" in deeper_evaluations
-    assert "evals/evals.json" in deeper_evaluations
-    assert "only for trusted skills and workspaces" in deeper_evaluations
-    assert "skillevaluator create-eval-dataset ./my-skill --full" in deeper_evaluations
-    assert "skillevaluator tier3 evaluate ./my-skill" not in deeper_evaluations
-    assert "--n-attempts 1" not in deeper_evaluations
+    for tier in (1, 2, 3):
+        assert f"skillevaluator tier{tier} ./my-skill" in quickstart
+        assert f"skillevaluator tier{tier} run" not in quickstart
+    assert "export SKILL_EVAL_LLM_PROVIDER=nv_build" in quickstart
+    assert "export NVIDIA_API_KEY='nvapi-...'" in quickstart
+    assert "export SKILL_EVAL_LLM_PROVIDER=openai" in quickstart
+    assert "export OPENAI_API_KEY='sk-...'" in quickstart
+    assert "set just two variables" in normalized
+    assert "Semgrep, SkillSpector, and Gitleaks" in quickstart
+    assert "skillevaluator doctor --env-mode docker" in quickstart
+    assert "skillevaluator quality-check ./my-skill" in quickstart
+    assert "--catalog ./skill-catalog.json" in quickstart
+    assert "inter-skill comparison did not run" in normalized
+    assert "one starter evaluation case" in normalized
+    assert "Valid existing sources are reused unchanged; invalid ones produce an error" in normalized
+    assert "configured defaults, not automatically updated selections of the latest models" in normalized
+    assert "```bash\nskillevaluator validate ./my-skill\n```" in combined_pipeline
+    assert "with autopilot by default" in combined_pipeline
+    assert "`--full` remains supported but is unnecessary" in combined_pipeline
+    assert "skillevaluator tier3 create-eval-dataset ./my-skill --full" in combined_pipeline
+    assert "--block-on-agent-eval" in combined_pipeline
+    assert "--n-attempts 1" not in combined_pipeline
+    assert "uv run --extra all skillevaluator tier1 ./my-skill" in readme
     assert "tier3-live-evaluation#plan-for-cost" in readme
     assert "\n## Tier 1:" not in readme
     assert "Skill Evaluator" not in readme
@@ -517,8 +525,8 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert "gpt-5.6-sol" in public_docs
     assert "gpt-5.4-mini" in public_docs
     assert "claude-opus-5" in public_docs
-    assert "nvidia/nemotron-3-nano-30b-a3b" in public_docs
-    assert "nvidia/nvidia/nemotron-3-nano-30b-a3b" in public_docs
+    assert "nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
     assert "Nemotron Super" in public_docs
     assert "meta/llama-3.1-8b-instruct" in public_docs
     assert "--agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
@@ -528,8 +536,8 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert "skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
     assert "skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker\n" in tier3
     assert "skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker\n" in tier3
-    assert "never changes models silently" in public_docs
-    assert "direct OpenCode" in public_docs
+    assert "Explicit model overrides are preserved exactly" in public_docs
+    assert "OpenCode renders it as" in public_docs
     assert "Docker or local compatibility bridge" in public_docs
     assert "experimental Claude Code" in public_docs
 
@@ -630,10 +638,11 @@ def test_harbor_atif_and_agent_eval_alias_are_defined() -> None:
         content = (REPO_ROOT / "docs" / name).read_text(encoding="utf-8")
         assert "Agent Trajectory Interchange Format (ATIF)" in content
 
-    for name in ("tier1-validation.mdx", "ci-integration.mdx", "cli-reference.mdx", "tier3-live-evaluation.mdx"):
+    for name in ("cli-reference.mdx", "tier3-live-evaluation.mdx"):
         content = (REPO_ROOT / "docs" / name).read_text(encoding="utf-8")
         assert "--agent-eval" in content
-        assert "not currently deprecated" in " ".join(content.split())
+        assert "--tier3" in content
+        assert "alias" in content
 
 
 def test_public_product_branding_uses_the_canonical_name() -> None:

@@ -4,42 +4,63 @@ sidebar-title: "Tier 1: Validation"
 description: "Deterministic quality gates for skills — schema, quality, security, PII, license, code-integrity, Unicode, and script checks, plus optional LLM judging."
 ---
 
-Tier 1 gives you a deterministic quality gate for your skill: schema, quality, security, PII, license, secrets, code-integrity, Unicode-safety, and script checks that all run offline once the scanner binaries are installed. You need no API key for any of it — the only LLM-backed pieces are `rubric-eval` and the optional `--llm`/`--llm-verify` flags, which require a configured provider (see [Providers & Credentials](configuration.mdx)).
+Run Tier 1 directly to check a skill's structure, security, quality, and
+dependencies:
+
+```bash title="Run Tier 1"
+skillevaluator tier1 ./my-skill
+```
+
+Static checks need no model key. With a configured provider, this command also
+runs rubric judging, LLM security analysis, and finding verification. Without a
+provider, those LLM stages are explicitly reported as skipped. Use `--no-llm`
+for static checks only, or `--llm` to require a provider instead of allowing a
+keyless run. Full scanner coverage still requires the external tools listed in
+[Installation](installation.mdx#system-tools).
+
+The two-variable [provider setup](configuration.mdx) is enough to configure the
+LLM stages for NVIDIA Build or OpenAI. Calling `skillevaluator tier1` without a
+path shows help; expert subcommands remain available below.
 
 ## What Tier 1 checks
 
-Tier 1 is exposed through one umbrella command and five standalone commands. Each is also available under the expert alias group as `skillevaluator tier1 <command>`.
+The direct `tier1 PATH` workflow runs Tier 1 only, as does
+`tier1 validate PATH`. The focused checks below are also available as
+`skillevaluator tier1 <command>`. Top-level `validate` is the combined pipeline.
 
 | Command | Purpose | Needs a key? |
 | --- | --- | --- |
-| `validate` | Run the selected Tier 1 checks, Tier 2 deduplication by default, and optional advisory Tier 3 evaluation | No (only with `--llm`/`--llm-verify`) |
+| Top-level `validate` | Run the selected Tier 1 checks, Tier 2 deduplication, and Tier 3 autopilot for skills | Yes for the full pipeline; `--tiers 1` selects keyless static checks |
 | `quality-check` | Score skill quality across four weighted categories | No |
 | `rubric-eval` | Run the nine-criterion LLM-as-judge rubric | Yes |
 | `security-scan` | Run SkillSpector static scanning and optional LLM analysis | No (only with `--llm`/`--llm-verify`) |
 | `pii-scan` | Detect PII, credentials, secrets, and local identifiers | No (only with `--llm-verify`) |
 | `lint-scripts` | Run advisory AST-based checks on Python scripts | No |
 
-`validate` is the umbrella command: Tier 1 checks always gate the exit code (non-zero on failure or incomplete required scanner evidence), Tier 2 dedup runs and gates by default while degrading gracefully without embedding access, and Tier 3 can be attached as an advisory pass with `--tier3`, `--autopilot`, `--full`, or an explicit tier selection such as `--tiers 1,3` (`--agent-eval` remains a supported compatibility alias and is not currently deprecated). Use `--no-block-on-dedup` to keep Tier 2 advisory or `--block-on-agent-eval` to promote Tier 3 into the gate.
+`validate` is the umbrella command: all three tiers run by default for skills, with autopilot creating one starter evaluation case if no source exists. Tier 1 checks always gate the exit code (non-zero on failure or incomplete required scanner evidence), Tier 2 dedup runs and gates by default, and Tier 3 is advisory by default. Use `--tiers 1` for static checks only, `--no-block-on-dedup` to keep Tier 2 advisory, or `--block-on-agent-eval` to promote Tier 3 into the gate.
 
-## Run a validation
+## Run the combined or focused validation commands
+
+Unlike direct `tier1 PATH`, `validate` includes Tier 2 and Tier 3 by default
+for skills. Its Tier 1 LLM checks still run only when requested.
 
 <Steps>
   ### Run the default suite
 
-  ```bash title="Tier 1 + Tier 2, no key needed"
+  ```bash title="All three tiers, provider and runtime required"
   skillevaluator validate ./my-skill
   ```
 
-  By default you get a compact pipeline view in the terminal — a per-check ticker per tier — and the run writes HTML and JSON report files unless you pass `-r` explicitly, which is then honored exactly (including `-r cli` for terminal-only output). Add `--verbose` for the full per-check detail stream instead of the compact view. Tier 2 dedup is skipped gracefully when no embedding provider is configured. The exit code is `0` when every gate passes and `1` when one fails.
+  By default you get a compact pipeline view in the terminal — a per-check ticker per tier — and the run writes HTML and JSON report files unless you pass `-r` explicitly, which is then honored exactly (including `-r cli` for terminal-only output). Add `--verbose` for the full per-check detail stream instead of the compact view. The full pipeline needs the [provider and runtime setup](quickstart.mdx); use `--tiers 1` for static checks only. The exit code is `0` when every gate passes and `1` when one fails.
 
   ### Run the complete offline gate
 
-  Install Gitleaks once, then disable dedup for a fully hermetic run:
+  Install the scanners, then select only Tier 1 for a fully hermetic run:
 
   ```bash title="Complete offline Tier 1"
   brew install gitleaks semgrep
   uv tool install git+https://github.com/NVIDIA/SkillSpector.git
-  skillevaluator validate ./my-skill --no-dedup
+  skillevaluator validate ./my-skill --tiers 1
   ```
 
   With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine.
@@ -49,7 +70,7 @@ Tier 1 is exposed through one umbrella command and five standalone commands. Eac
   `--checks` (alias `--tier1-checks`) takes a comma-separated subset when you want fast, targeted feedback:
 
   ```bash title="Selective checks"
-  skillevaluator validate ./my-skill --checks schema,security
+  skillevaluator validate ./my-skill --tiers 1 --checks schema,security
   ```
 
   Only the selected Tier 1 checks run; the others are skipped entirely.
@@ -59,11 +80,14 @@ Tier 1 is exposed through one umbrella command and five standalone commands. Eac
   With a provider configured, `--llm` (alias `--tier1-llm`; disable with `--no-llm` or `--no-tier1-llm`) adds LLM security analysis on top of the static findings, and `--llm-verify` runs a second pass that reviews each static finding in context:
 
   ```bash title="LLM-backed validation"
-  skillevaluator validate ./my-skill --llm --llm-verify
+  skillevaluator validate ./my-skill --tiers 1 --llm --llm-verify
   ```
 
   Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
 </Steps>
+
+Direct `tier1 PATH` and `tier1 validate PATH` print the terminal report and
+write JSON and HTML reports by default. Use `-r cli` for terminal-only output.
 
 Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, `html`, `markdown`) and written to `-o`/`--output-dir` (default `reports/`). File naming, `BENCHMARK.md`, and the JSON contract are covered in [Reports & Results](reports.mdx).
 
@@ -120,7 +144,7 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
 
 ## The checks
 
-The default set is `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, and `lint`. Only the `dependency` check requires explicit selection with `--checks` (alias `--tier1-checks`). Accepted check-name aliases include `code`/`code-risk` for `code-integrity`, `scripts`/`script-lint` for `lint`, `dependencies`/`deps`/`dependency-audit` for `dependency`, and `licence`/`license-check` for `license`.
+For `validate`, the default set is `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, and `lint`. The `dependency` check requires explicit selection with `--checks` (alias `--tier1-checks`) for `validate`; direct `tier1 PATH` includes it by default. Accepted check-name aliases include `code`/`code-risk` for `code-integrity`, `scripts`/`script-lint` for `lint`, `dependencies`/`deps`/`dependency-audit` for `dependency`, and `licence`/`license-check` for `license`.
 
 <AccordionGroup>
   <Accordion title="schema — frontmatter and repository governance">

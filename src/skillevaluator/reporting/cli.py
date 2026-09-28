@@ -27,7 +27,7 @@ from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
 )
-from skillevaluator.reporting.base import ReporterBase, passes_required_gate
+from skillevaluator.reporting.base import ReporterBase, additional_errors, passes_required_gate
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -459,18 +459,22 @@ class CLIReporter(ReporterBase):
 
     def _print_findings(self, result: ValidationResult, console: Console) -> None:
         """Print findings with tree structure."""
+        errors = additional_errors(result)
+        if errors:
+            label = "Execution errors" if result.is_incomplete else "Errors"
+            console.print(f"[dim]{label}:[/dim]")
+            for error in errors:
+                console.print(f"  [red]•[/red] {rich_escape(str(error))}")
         if not result.findings:
-            # Fall back to legacy errors/warnings
-            if result.errors:
-                console.print("[dim]Errors:[/dim]")
-                for error in result.errors:
-                    console.print(f"  [red]•[/red] {rich_escape(str(error))}")
+            # Preserve legacy warnings when there are no structured findings.
             if result.warnings:
                 console.print("[dim]Warnings:[/dim]")
                 for warning in result.warnings:
                     console.print(f"  [yellow][WARN][/yellow] {rich_escape(str(warning))}")
             return
 
+        if errors:
+            console.print()
         console.print("[dim]Issues:[/dim]")
         for i, finding in enumerate(result.findings, 1):
             self._print_finding(i, finding, console)

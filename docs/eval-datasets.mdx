@@ -114,13 +114,13 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `create-eval-dataset` writes `evals/evals.json` for you, grounded in your
 `SKILL.md` name, description, body, and script filenames:
 
-```bash title="Generate the full four-case dataset"
+```bash title="Generate the full bucket dataset"
 skillevaluator create-eval-dataset ./my-skill --full
 ```
 
 | Flag | Effect |
 | --- | --- |
-| `--full` | Generate the full 4-bucket dataset (four cases) instead of one. |
+| `--full` | Generate the full bucket set instead of one. LLM mode targets four cases; `--no-llm` template mode emits three cases unless `EVAL.md` includes a negative prompt. |
 | `--no-llm` | Use local templates only — no API key required. |
 | `--dry-run` | Preview without writing. |
 | `--force` | Overwrite existing `evals/evals.json`. |
@@ -134,13 +134,15 @@ same templates `--no-llm` uses, so the command always succeeds. Exact defaults
 for every flag are in the
 [CLI Reference](cli-reference.mdx#create-eval-dataset).
 
-You don't have to generate a dataset up front at all: `tier3 evaluate
---autopilot` (and `validate --full` or `validate --autopilot`) creates exactly
+You don't have to generate a dataset up front at all: `validate PATH`,
+`tier3 PATH`, or `tier3 evaluate PATH --autopilot` creates exactly
 one eval case when no evaluation source exists — LLM-generated with your
 configured provider, falling back to a deterministic template case when no
 key is available. Autopilot never overwrites an existing source; if
 `evals/evals.json` (or `evals/harbor/`) is already there, it runs with what
-you wrote.
+you wrote. Dataset generation does not replace the provider and runtime
+requirements for the live evaluation. Use `validate PATH --no-autopilot` to
+require an existing source instead of generating one.
 
 <Warning>
   `--force` overwrites `evals/evals.json` without a backup. `--refine` implies
@@ -149,8 +151,10 @@ you wrote.
 
 ### The four case buckets
 
-`--full` generates one case per bucket. The mix matters: the negative case
-protects against a skill that triggers when it shouldn't.
+`--full` with an LLM provider targets one case per bucket, including a negative
+case that should not trigger the skill. In `--no-llm` template mode, the negative
+bucket is omitted unless eval guidance includes an off-skill prompt under a
+supported negative heading (see below).
 
 | Bucket | Intent |
 | --- | --- |
@@ -162,7 +166,7 @@ protects against a skill that triggers when it shouldn't.
 ### Guide generation with EVAL.md
 
 Place an `EVAL.md` in `evals/` and the generator picks it up automatically.
-Three headings are parsed as structured hints; everything else is general
+Four headings are parsed as structured hints; everything else is general
 context:
 
 ```markdown title="evals/EVAL.md"
@@ -171,6 +175,9 @@ context:
 
 ## Behaviors
 - Expected agent behaviors to verify
+
+## Negative Cases
+- Off-skill prompts for the negative bucket in template `--full` mode
 
 ## Notes
 - General context and constraints
@@ -243,7 +250,7 @@ grading:
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
 | `harbor.timeout_multiplier` | number > 0 | Scales task timeouts. |
-| `harbor.agent_runtime_preflight` | boolean | Bounded one-task smoke run that checks agent runtime readiness before the full evaluation. Default: `true`. |
+| `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |

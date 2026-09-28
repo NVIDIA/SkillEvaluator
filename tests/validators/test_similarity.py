@@ -233,6 +233,24 @@ class TestValidateConfigError:
 
         assert not result.passed
         assert any("API key" in e for e in result.errors)
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["embedding-provider"]
+        assert result.findings == []
+
+    @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
+    @patch("skillevaluator.validators.similarity.EmbeddingClient")
+    def test_invalid_catalog_is_not_reclassified_as_provider_failure(
+        self, _mock_client_cls, mock_registry_cls, tmp_path: Path
+    ) -> None:
+        catalog = tmp_path / "catalog.json"
+        catalog.write_text("{}")
+        mock_registry_cls.return_value.load_catalog.side_effect = ValueError("Catalog model mismatch")
+
+        result = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(tmp_path)
+
+        assert result.status == "failed"
+        assert result.incomplete_scans == []
+        assert result.errors == ["Catalog model mismatch"]
 
 
 class TestValidateCacheWorkflow:

@@ -141,19 +141,8 @@ class SkillEvaluatorLocalClaudeCode(ClaudeCode):
         )
 
 
-class SkillEvaluatorLocalCodex(Codex):
-    """Codex wrapper that uses the managed local CLI and writes CODEX_HOME config."""
-
-    # Harbor's upstream Codex integration uses /tmp/codex-home. In local mode
-    # concurrent trials share the host /tmp, so use per-trial log paths instead.
-    _REMOTE_CODEX_HOME = PurePosixPath(EnvironmentPaths.agent_dir / "codex-home")
-    _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "codex-secrets")
-
-    async def install(self, environment: BaseEnvironment) -> None:
-        await self.exec_as_agent(environment, command="codex --version")
-
-    def get_version_command(self) -> str | None:
-        return "codex --version"
+class SkillEvaluatorGatewayCodex(Codex):
+    """Use an explicit Responses gateway without truncating its catalog model ID."""
 
     def _preserve_gateway_model_name(self, command: str, env: dict[str, str] | None) -> str:
         """Undo Harbor's default Codex model truncation when routing through an OpenAI-compatible gateway."""
@@ -166,7 +155,7 @@ class SkillEvaluatorLocalCodex(Codex):
         def replace(match: re.Match[str]) -> str:
             if match.group("model") != short_model:
                 return match.group(0)
-            return f"{match.group('prefix')}{model_name}{match.group('suffix')}"
+            return f"{match.group('prefix')}{shlex.quote(model_name)}{match.group('suffix')}"
 
         return _rewrite_launcher_segment(command, lambda text: _CODEX_MODEL_ARG_RE.sub(replace, text))
 
@@ -178,13 +167,6 @@ class SkillEvaluatorLocalCodex(Codex):
         cwd: str | None = None,
         timeout_sec: int | None = None,
     ):
-        command = _rewrite_launcher_segment(
-            command,
-            lambda text: text.replace(
-                "/tmp/codex-secrets",
-                self._REMOTE_CODEX_SECRETS_DIR.as_posix(),
-            ),
-        )
         command = self._preserve_gateway_model_name(command, env)
         return await super().exec_as_agent(
             environment,
@@ -210,6 +192,61 @@ class SkillEvaluatorLocalCodex(Codex):
                 ),
             )
         await super().run(instruction=instruction, environment=environment, context=context)
+
+
+class SkillEvaluatorLocalCodex(SkillEvaluatorGatewayCodex):
+    """Use the installed local CLI with per-trial state and gateway routing."""
+
+    _REMOTE_CODEX_HOME = PurePosixPath(EnvironmentPaths.agent_dir / "codex-home")
+    _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "codex-secrets")
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        await self.exec_as_agent(environment, command="codex --version")
+
+    def get_version_command(self) -> str | None:
+        return "codex --version"
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        command = _rewrite_launcher_segment(
+            command,
+            lambda text: text.replace("/tmp/codex-secrets", self._REMOTE_CODEX_SECRETS_DIR.as_posix()),
+        )
+        return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
+
+
+class SkillEvaluatorGatewayOpenCode(OpenCode):
+    """Use Chat Completions for an explicitly OpenAI-compatible gateway."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        namespace, separator, model_id = str(self.model_name or "").partition("/")
+        if namespace != "openai" or not separator or not model_id:
+            raise ValueError("Gateway OpenCode requires an openai/MODEL identifier")
+        # OpenCode's built-in openai loader always selects Responses, even when
+        # its npm SDK is overridden. A distinct transport namespace is needed;
+        # the gateway's catalog model ID remains unchanged after the first slash.
+        self.model_name = f"skillevaluator-gateway/{model_id}"
+        self._opencode_config = self._deep_merge(
+            copy.deepcopy(self._opencode_config),
+            {
+                "provider": {
+                    "skillevaluator-gateway": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {
+                            "baseURL": os.environ.get("OPENAI_BASE_URL", ""),
+                            "apiKey": "{env:OPENAI_API_KEY}",
+                        },
+                    }
+                }
+            },
+        )
 
 
 class SkillEvaluatorLocalOpenCode(OpenCode):

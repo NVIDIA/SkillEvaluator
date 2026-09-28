@@ -41,7 +41,7 @@ def _write_skill(root: Path, name: str, author_line: str | None) -> Path:
 def _validate(skill: Path, out: Path, *args: str) -> int:
     result = CliRunner().invoke(
         cli,
-        ["validate", str(skill), "--no-llm", "--checks", "schema", "-o", str(out), *args],
+        ["validate", str(skill), "--tiers", "1", "--no-llm", "--checks", "schema", "-o", str(out), *args],
     )
     return result.exit_code
 

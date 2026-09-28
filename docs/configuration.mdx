@@ -3,7 +3,36 @@ title: "Providers & Credentials"
 description: "Configure LLM providers, embeddings, and agent credentials for SkillEvaluator — and see exactly which commands run with no key at all."
 ---
 
-This page gets SkillEvaluator's LLM-backed features working: choosing a provider, wiring embeddings for Tier 2, and separating evaluator credentials from agent credentials in Tier 3. Most of Tier 1 needs no credential at all — start with the map below to see whether you need a key in the first place.
+**For NVIDIA Build, getting started requires just two variables: the provider
+and its API key.** Default chat and embedding models are already configured:
+
+```bash title="One provider and key for all three tiers"
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+export NVIDIA_API_KEY='nvapi-...'
+```
+
+The same key covers Tier 1 LLM checks, Tier 2 embeddings and chat, and supported
+Tier 3 agents in Docker or local mode. OpenAI likewise starts with
+`SKILL_EVAL_LLM_PROVIDER=openai` and `OPENAI_API_KEY`, using Codex for Tier 3.
+External scanners, agent runtimes, and sandboxes remain prerequisites; model
+credentials do not install them.
+
+```bash title="Run the tier you need"
+skillevaluator tier1 ./my-skill
+skillevaluator tier2 ./my-skill
+skillevaluator tier3 ./my-skill
+```
+
+No model override is needed. Defaults are pinned in the installed release,
+not automatically selected as the latest available model. Set
+`SKILL_EVAL_LLM_MODEL` only when you want a different evaluator model; the
+standard judge inherits it unless a judge override is set. Embeddings use their
+own model, and Tier 3 agent selection is separate. NVIDIA Build's Codex and
+Claude Code agents use a Super default even when the evaluator uses Nano.
+
+Anthropic and Bedrock need a separate embedding provider for Tier 2; custom
+OpenAI-compatible endpoints require an explicit URL and key, with optional model overrides.
+Those advanced setups are covered below.
 
 For the exhaustive variable-by-variable inventory, see [Environment Variables](environment-variables.mdx).
 
@@ -14,18 +43,22 @@ the live agents need from the backend configuration Harbor itself reads.
 
 ## What needs a key
 
-Tiers describe evaluation depth; credentials are a separate axis. This is the complete map — everything not listed under "needs a provider" runs fully offline:
+Tiers describe evaluation depth; model credentials are a separate concern.
+Keyless checks do not need an LLM provider, although dependency audits can
+contact package and vulnerability services.
 
-| Runs with no credential at all | Needs a provider key |
+| Runs without an LLM credential | Needs a provider key |
 | --- | --- |
-| `validate --no-dedup` (all deterministic checks: schema, security scanners including secret detection, PII, license, code-integrity, unicode, quality, lint) | `rubric-eval` — LLM-as-judge scoring (chat LLM) |
-| `quality-check`, `security-scan`, `pii-scan`, `lint-scripts` | `validate --llm` / `security-scan --llm` — deeper LLM security analysis |
+| `tier1 PATH --no-llm` and `validate PATH --tiers 1` (deterministic checks: schema, security scanners including secret detection, PII, license, code-integrity, unicode, quality, lint; direct Tier 1 also checks dependencies) | `rubric-eval` — LLM-as-judge scoring (chat LLM) |
+| `quality-check`, `security-scan`, `pii-scan`, `lint-scripts` | `tier1 PATH` automatically enables LLM stages when configured; `validate --llm` / `security-scan --llm` — deeper LLM security analysis |
 | `doctor`, `health-check` (offline readiness probes by default; missing credentials are reported as not ready) | `--llm-verify` on `validate`, `security-scan`, `pii-scan` — LLM false-positive suppression |
 | | All Tier 2 commands — embeddings API; `context-optimization-check` and `dedup-scan` also use a chat LLM (`similarity-check` is embeddings-only). A local OpenAI-compatible server works too — see [Fully local setup](#fully-local-setup) |
 | Tier 3 scaffolding and inspection: `create-eval-dataset --no-llm`, `init-custom-grader`, `init-harbor-task`, `tier3 validate`, `view`, `harbor-view`, and `compare` | Tier 3 LLM dataset generation needs a provider key; `tier3 evaluate` needs a provider key plus a credential the selected live agent can use — with NVIDIA Build in `--env-mode docker` or `local`, one `NVIDIA_API_KEY` covers both roles |
 | | `models` and `doctor --verify-models` — provider-catalog reachability and membership checks; public catalogs do not prove that an inference key works |
 
-`validate` without `--no-dedup` stays usable keyless: the Tier 2 dedup pass skips gracefully when no embedding provider is configured.
+`validate PATH` runs all three tiers for skills and needs the provider and
+Tier 3 runtime setup. Use `--tiers 1` for keyless static checks. `--no-dedup`
+alone skips Tier 2 but still runs Tier 3.
 
 Before Tier 3 prepares images or stages Harbor tasks, `tier3 evaluate` also
 makes a bounded credential-bearing catalog request for each distinct agent route
@@ -34,18 +67,19 @@ A definitive native-provider credential rejection or deterministic Bedrock
 credential/configuration error fails immediately. Catalog permission and
 membership are not authoritative for OpenAI Responses access, and NVIDIA Build
 or a compatible gateway may expose a catalog without authenticating inference,
-so those checks are reported as degraded and evaluation continues to the real
-per-agent runtime preflight. That smoke proves agent routes only: when a
+so those checks are reported as degraded and evaluation continues. When enabled
+with `--agent-runtime-preflight` or `harbor.agent_runtime_preflight: true`, the
+extra agent-only execution proves agent routes only: when a
 degraded credential route is used solely by the standard grader, inference on
 that route remains unproven until grading begins. The same applies when native
 Harbor must resolve at runtime whether a task or step verifier declaration
 supersedes the configured judge fallback. Redacted per-route outcomes are retained under
-`run_config.credential_validation` in `result.json`, including when that later
-agent runtime preflight fails.
+`run_config.credential_validation` in `result.json`, including when an enabled
+agent runtime preflight fails. The extra execution is disabled by default.
 
 ## Choose an LLM provider
 
-Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. The selected provider determines which credential SkillEvaluator reads. All but `openai-compatible` ship a default model that `SKILL_EVAL_LLM_MODEL` overrides.
+Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. The selected provider determines which credential SkillEvaluator reads. Each ships a default evaluator model that `SKILL_EVAL_LLM_MODEL` overrides.
 
 <Tabs>
   <Tab title="OpenAI" language="openai">
@@ -74,7 +108,9 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export NVIDIA_API_KEY='nvapi-...'
     ```
 
-    Default model: `nvidia/nemotron-3-nano-30b-a3b`. The endpoint is fixed to `https://integrate.api.nvidia.com/v1` — `SKILL_EVAL_LLM_BASE_URL` and `SKILL_EVAL_EMBEDDING_BASE_URL` do not override it. To point at a custom or self-hosted endpoint, use the `openai-compatible` provider instead.
+    Default model: `nvidia/nemotron-3-super-120b-a12b`, shared by evaluator chat, Tier 3's default OpenCode agent, and the standard judge. The endpoint is fixed to `https://integrate.api.nvidia.com/v1` — `SKILL_EVAL_LLM_BASE_URL` and `SKILL_EVAL_EMBEDDING_BASE_URL` do not override it. To point at a custom or self-hosted endpoint, use the `openai-compatible` provider instead.
+
+    The previous default, `nvidia/nemotron-3-nano-30b-a3b`, has a deprecated public endpoint. If you explicitly pinned that model in `SKILL_EVAL_LLM_MODEL`, remove the override to use the current default. Explicit model selections are preserved; SkillEvaluator does not silently switch models after a failed request.
 
     <Tip>
     The quickest start is a free NVIDIA API Catalog key from [build.nvidia.com](https://build.nvidia.com/), exported as `NVIDIA_API_KEY` — it covers LLM judging and Tier 2 embeddings with one credential.
@@ -94,11 +130,24 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     ```bash title="OpenAI-compatible setup"
     export SKILL_EVAL_LLM_PROVIDER=openai-compatible
     export SKILL_EVAL_LLM_BASE_URL='http://your-server:8000/v1'
-    export SKILL_EVAL_LLM_MODEL='your-model-name'
     export SKILL_EVAL_LLM_API_KEY='your-key'
     ```
 
-    All three values are required — there is no default model or endpoint. Any OpenAI-compatible server works: vLLM, Ollama, llama.cpp, NVIDIA NIM, or a hosted gateway.
+    These three variables select the gateway. Model overrides are optional when the gateway serves the defaults below; no endpoint or credential is built into SkillEvaluator.
+
+    | Role | Default model | Override |
+    | --- | --- | --- |
+    | Evaluator and standard judge | `nvidia/nvidia/nemotron-3-super-120b-long-ctx` | `SKILL_EVAL_LLM_MODEL`; judge-only: `LLM_JUDGE_MODEL` then `SKILL_EVAL_JUDGE_MODEL` |
+    | Tier 2 embeddings | `nvidia/nvidia/nemotron-3-embed-1b` | `SKILL_EVAL_EMBEDDING_MODEL` |
+    | Codex agent | `openai/openai/gpt-5.6-sol` | `--agent-model codex=MODEL` |
+    | Claude Code agent | `aws/anthropic/bedrock-claude-opus-5` | `--agent-model claude-code=MODEL` |
+    | OpenCode agent | `nvidia/nvidia/nemotron-3-super-120b-long-ctx` | `--agent-model opencode=openai/MODEL` |
+
+    Gateways can use different catalog IDs. Supply those exact IDs through the overrides; SkillEvaluator never substitutes a different model after a request fails. OpenCode's `openai/` prefix selects its adapter and is removed before sending the catalog ID. `SKILL_EVAL_LLM_MODEL` controls evaluation and judging; it does not replace these separate gateway agent defaults. Agent selection uses `--agent-model` / `--model`, then `harbor.agents.AGENT.model`, then the harness default, and records the model source in the run report.
+
+    For Tier 3 in Docker, OpenCode requires Chat Completions, Codex requires Responses, and Claude Code requires Anthropic Messages, each with tool-call support. Selecting a shared URL does not add those APIs to a server. See the [Claude gateway requirements](https://code.claude.com/docs/en/llm-gateway).
+
+    Claude Code inherits the shared key and URL, stripping a terminal `/v1` from its API root while retaining any path prefix. An explicit `ANTHROPIC_BASE_URL` overrides that root. An explicit `ANTHROPIC_API_KEY` selects an independent Claude route: without `ANTHROPIC_BASE_URL`, it keeps the native Anthropic endpoint and defaults to `claude-opus-5`. CLI and skill-config model overrides still take precedence. Existing native-provider routes are unchanged.
   </Tab>
 </Tabs>
 
@@ -119,10 +168,14 @@ Tier 2 uses an OpenAI-compatible embeddings API. `SKILL_EVAL_EMBEDDING_PROVIDER`
 | Provider (`SKILL_EVAL_EMBEDDING_PROVIDER`) | Credential | Default embedding model |
 | --- | --- | --- |
 | `openai` | `OPENAI_API_KEY` | `text-embedding-3-small` |
-| `nv_build` | `NVIDIA_API_KEY` | `nvidia/nv-embed-v1` |
-| `openai-compatible` | `SKILL_EVAL_EMBEDDING_API_KEY` (falls back to `SKILL_EVAL_LLM_API_KEY`) | _(explicit — `SKILL_EVAL_EMBEDDING_MODEL` required)_ |
+| `nv_build` | `NVIDIA_API_KEY` | `nvidia/nemotron-3-embed-1b` |
+| `openai-compatible` | `SKILL_EVAL_EMBEDDING_API_KEY` (falls back to `SKILL_EVAL_LLM_API_KEY`) | `nvidia/nvidia/nemotron-3-embed-1b` |
 
 Use `SKILL_EVAL_EMBEDDING_MODEL` and `SKILL_EVAL_EMBEDDING_BASE_URL` to override defaults; for `openai-compatible`, the base URL falls back to `SKILL_EVAL_LLM_BASE_URL`. The `nv_build` endpoint is fixed to `https://integrate.api.nvidia.com/v1` — only its model can be overridden.
+
+NVIDIA Build uses the same `NVIDIA_API_KEY` for chat and embeddings; no extra key is needed. Deduplication sends document inputs with `input_type=passage`, as required by the [NVIDIA embedding API](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-embed-1b-infer).
+
+The previous NVIDIA default, `nvidia/nv-embed-v1`, is retired. Remove any explicit override to that model to use the current default. Rebuild comparison catalogs and embedding caches when changing models: vectors from different models cannot be compared, and similarity scores may change. A provider failure is reported as **INCOMPLETE**, not a duplicate-content finding.
 
 <Note>
 Anthropic and Bedrock do not provide embeddings, and SkillEvaluator rejects them as embedding providers. When one of those is your LLM provider, configure an embedding-capable provider separately for Tier 2:
@@ -173,7 +226,7 @@ The `openai-compatible` provider accepts any local OpenAI-compatible server (Oll
 
 ## Tier 3 credentials: two roles
 
-Live evaluation involves two distinct credentials, and they are not interchangeable:
+Live evaluation has two credential roles. They can share a key when the selected provider supports both:
 
 | Role | Who uses it | How you configure it |
 | --- | --- | --- |
@@ -185,6 +238,11 @@ Both roles resolve from the operator's environment; a skill's `evals/config.yml`
 - **NVIDIA Build, one key** (`--env-mode docker` or `local`): a single `NVIDIA_API_KEY` powers the evaluator and all three supported agents — `opencode` calls NVIDIA Build directly, while `claude-code` and `codex` route through SkillEvaluator's compatibility bridge (in-container in Docker mode; an authenticated in-process host bridge in `local` mode). Agent models must be full NVIDIA Build catalog IDs in `publisher/model` form.
 - **NVIDIA Build on Harbor cloud modes** (`daytona`, `e2b`, ...): the bridge is not available. `claude-code` needs its own native `ANTHROPIC_API_KEY`, `codex` needs a full OpenAI Responses API credential (`OPENAI_API_KEY` plus `OPENAI_BASE_URL`), and each needs an explicit model via `--agent-model` or `harbor.agents.<agent>.model`.
 - **Matching native provider**: when the evaluator provider is the agent's own (for example `anthropic` with `claude-code`, or `openai` with `codex`), the same key serves both roles automatically.
+- **OpenAI-compatible gateway**: Codex, OpenCode, and Claude Code inherit the shared URL and key. The gateway must support the selected harness's API and model. Explicit Claude credentials and endpoint settings take precedence as described above.
+
+When `--agents` is omitted, SkillEvaluator chooses that native route:
+NVIDIA Build uses OpenCode, OpenAI uses Codex, and Anthropic uses Claude Code.
+Passing `--agents` always replaces the automatic selection.
 
 ### Judge failures are not zero scores
 
@@ -215,7 +273,7 @@ skillevaluator models --limit 20
 skillevaluator models --json
 ```
 
-`skillevaluator models` prints a filtered, bounded view of the provider catalog (`--limit` accepts 1–100, default 10; `--json` emits machine-readable output). It uses the same provider and credential resolution as evaluation, so it checks catalog routing and model discovery where that surface is supported. NVIDIA Build and some compatible gateways can expose a public catalog, so a listed model is not proof that the inference key works or that a given agent harness supports it. Tier 3's real per-agent runtime preflight is the stronger check for agent routes; a separate degraded standard-grader route remains unproven until grading begins. Bedrock exposes no HTTP model catalog, so `models` errors on that provider; use `doctor --verify-models` there instead.
+`skillevaluator models` prints a filtered, bounded view of the provider catalog (`--limit` accepts 1–100, default 10; `--json` emits machine-readable output). It uses the same provider and credential resolution as evaluation, so it checks catalog routing and model discovery where that surface is supported. NVIDIA Build and some compatible gateways can expose a public catalog, so a listed model is not proof that the inference key works or that a given agent harness supports it. Tier 3's optional real per-agent runtime preflight is the stronger check for agent routes; enable it with `--agent-runtime-preflight` when that extra billable execution is appropriate. A separate degraded standard-grader route remains unproven until grading begins. Bedrock exposes no HTTP model catalog, so `models` errors on that provider; use `doctor --verify-models` there instead.
 
 ### `runtime_env` is for task values, not credentials
 
@@ -259,8 +317,8 @@ Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name 
   <Accordion title="&quot;SKILL_EVAL_EMBEDDING_PROVIDER is required because anthropic does not provide embeddings&quot;">
     Your LLM provider is `anthropic` or `bedrock`, and neither offers an embeddings API. Set `SKILL_EVAL_EMBEDDING_PROVIDER` to `openai`, `nv_build`, or `openai-compatible` with the matching credential — see [Embeddings](#embeddings).
   </Accordion>
-  <Accordion title="&quot;SKILL_EVAL_LLM_MODEL is required for openai-compatible providers&quot;">
-    The `openai-compatible` provider has no defaults. Set all three of `SKILL_EVAL_LLM_MODEL`, `SKILL_EVAL_LLM_BASE_URL`, and `SKILL_EVAL_LLM_API_KEY` (local servers still require the key variable to be set, even if they ignore its value).
+  <Accordion title="A gateway rejects the default model or API">
+    Check your gateway's catalog and API support. Override `SKILL_EVAL_LLM_MODEL`, `SKILL_EVAL_EMBEDDING_MODEL`, or `--agent-model AGENT=MODEL` with its exact model IDs. OpenCode uses Chat Completions, Codex uses Responses, and Claude Code uses Anthropic Messages; a server exposing only one API cannot run all three harnesses. Older releases requiring an explicit model must be upgraded to use these defaults. Local servers still require the key variable even if they ignore its value.
   </Accordion>
 </AccordionGroup>
 

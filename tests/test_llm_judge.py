@@ -36,6 +36,7 @@ def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model
         "model": model,
         "max_completion_tokens": 321,
         "messages": [{"role": "user", "content": "Judge this response"}],
+        "stream": False,
     }
     assert "max_tokens" not in payload
     assert "temperature" not in payload

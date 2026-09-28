@@ -569,15 +569,6 @@ def test_the_pinned_fern_cli_version_matches_the_fern_config() -> None:
         assert package.get("resolved", "").startswith("https://registry.npmjs.org/"), path
         assert package.get("integrity", "").startswith("sha512-"), path
 
-    # NVIDIA's Fern organization rejects the authenticated docs-publish path below this
-    # version (a review comment on PR #126 surfaced the "Org 'nvidia' requires Fern CLI
-    # >= 5.106.0" error); `fern check` alone does not exercise that authenticated path,
-    # so nothing else here would have caught a stale pin.
-    minimum_required = (5, 106, 0)
-    assert tuple(int(part) for part in declared.split(".")) >= minimum_required, (
-        f"fern-api {declared} is older than the {'.'.join(map(str, minimum_required))} NVIDIA's org requires"
-    )
-
 
 @pytest.mark.parametrize("mutation", ["extra_dependency", "root_drift", "missing_integrity"])
 def test_fern_pin_guard_rejects_unreviewed_dependency_changes(

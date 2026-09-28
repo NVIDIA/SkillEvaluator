@@ -153,7 +153,7 @@ only the static suite. `--no-autopilot` requires an existing evaluation source.
 Rules, workflows, and plugins retain their applicable validation stages without
 automatically enabling skill evaluation.
 
-To prepare broader coverage before a run, generate and review a four-bucket dataset:
+Generate and review broader coverage; templates omit negatives unless authored in `EVAL.md`:
 
 ```bash
 skillevaluator tier3 create-eval-dataset ./my-skill --full

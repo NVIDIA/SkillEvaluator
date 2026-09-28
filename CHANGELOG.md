@@ -18,7 +18,8 @@ All notable changes to SkillEvaluator are documented in this file.
   per-skill ceiling. Invalid Python command API budgets raise option-specific
   errors before provider initialization. Similarity comparisons validate and
   normalize each vector once instead of once per pair, making large pairwise
-  scans more than an order of magnitude faster.
+  scans more than an order of magnitude faster. Equal nonzero embeddings score
+  exactly 1.0, so `--threshold 1` reports exact duplicates.
 - Keep headings and comments inside fenced code examples in their enclosing Markdown
   section during Tier 2 content chunking, preserving original source line numbers.
 - Run the public Docker image as an unprivileged user, with writable default report and home directories.

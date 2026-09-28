@@ -3,6 +3,7 @@
 
 """Collection size and comparison work are independent, configurable limits."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -211,3 +212,82 @@ def test_catalog_queries_keep_catalog_capacity_and_apply_work_budget(
             getattr(registry, query_method)(target, 0.75)
         client.embed_single.assert_not_called()
         cosine.assert_not_called()
+
+
+# Distinct skills with this embedding previously scored 0.9999999999999999 after normalization.
+_EXACT_DUPLICATE_VECTOR = [-5.479683767155414, -6.166558151604646]
+
+
+def _identical_client() -> MagicMock:
+    client = _client()
+    client.embed.side_effect = lambda texts: [list(_EXACT_DUPLICATE_VECTOR) for _ in texts]
+    client.embed_single.return_value = list(_EXACT_DUPLICATE_VECTOR)
+    return client
+
+
+def test_cli_reports_identical_embeddings_at_threshold_one(tmp_path: Path, monkeypatch) -> None:
+    _collection(tmp_path / "skills", 2)
+    client = _identical_client()
+    monkeypatch.setattr("skillevaluator.validators.similarity.EmbeddingClient", lambda **_kwargs: client)
+    reports = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "similarity-check",
+            str(tmp_path / "skills"),
+            "--type",
+            "skill",
+            "--threshold",
+            "1",
+            "-r",
+            "json",
+            "sarif",
+            "-o",
+            str(reports),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    (finding,) = json.loads((reports / "skillevaluator-similarity.json").read_text())["results"][0]["findings"]
+    assert finding["check_name"] == "EXACT_DUPLICATE"
+    assert finding["metadata"]["score"] == 1.0
+    sarif = json.loads((reports / "skillevaluator-similarity.sarif.json").read_text())
+    assert [item["ruleId"] for item in sarif["runs"][0]["results"]] == ["Similarity-Check/EXACT_DUPLICATE"]
+
+
+@pytest.mark.parametrize("query_method", ["query", "query_entry"])
+def test_catalog_queries_report_identical_embeddings_at_threshold_one(tmp_path: Path, query_method: str) -> None:
+    _collection(tmp_path, 2)
+    registry = EmbeddingRegistry(_identical_client())
+    registry.build_from_directory(tmp_path, "skill")
+    target = ContentEntry("target", "Target skill", "target", "skill") if query_method == "query_entry" else "target"
+
+    assert [match.score for match in getattr(registry, query_method)(target, 1.0)] == [1.0, 1.0]
+    assert [match.score for match in registry.find_duplicates(1.0)] == [1.0]
+
+
+@pytest.mark.parametrize("operation", ["find_duplicates", "query", "query_entry"])
+def test_loaded_catalog_rejects_over_budget_work_before_normalizing(
+    tmp_path: Path, monkeypatch, operation: str
+) -> None:
+    _collection(tmp_path, 3)
+    client = _client()
+    source = EmbeddingRegistry(client)
+    source.build_from_directory(tmp_path, "skill")
+    catalog = tmp_path / "catalog.json"
+    source.save_catalog(catalog)
+    registry = EmbeddingRegistry(client, max_scalar_comparisons=8)
+    registry.load_catalog(catalog)
+    normalize = MagicMock(side_effect=AssertionError("the work budget must fail before normalizing the catalog"))
+    monkeypatch.setattr(registry_module, "normalize_embedding_vector", normalize)
+    target = ContentEntry("target", "Target skill", "target", "skill") if operation == "query_entry" else "target"
+
+    with pytest.raises(ValueError, match="--max-scalar-comparisons"):
+        if operation == "find_duplicates":
+            registry.find_duplicates(0.75)
+        else:
+            getattr(registry, operation)(target, 0.75)
+
+    normalize.assert_not_called()
+    client.embed_single.assert_not_called()

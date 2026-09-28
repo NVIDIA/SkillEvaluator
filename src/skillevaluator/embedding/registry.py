@@ -288,8 +288,9 @@ class EmbeddingRegistry:
                 f"Pairwise comparison limit exceeded ({self._max_pairwise_comparisons}); "
                 "increase --max-entries within its supported range to compare the complete collection"
             )
-        unit_vectors, vector_dimension = _normalized_registry_vectors(entries, self._vector_dimension)
+        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
         _validate_scalar_work(comparison_count, vector_dimension, self._max_scalar_comparisons)
+        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
         matches: list[SimilarityMatch] = []
 
         for (a, unit_a), (b, unit_b) in combinations(zip(entries, unit_vectors, strict=True), 2):
@@ -317,8 +318,9 @@ class EmbeddingRegistry:
         """
         _validate_threshold(threshold)
         entries = list(self._entries.values())
-        unit_vectors, vector_dimension = _normalized_registry_vectors(entries, self._vector_dimension)
+        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
         _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
+        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
         query_vector = _normalized_vector(vector, vector_dimension or self._vector_dimension)
@@ -346,8 +348,9 @@ class EmbeddingRegistry:
         """Compare one extracted target entry against every catalog entry."""
         _validate_threshold(threshold)
         catalog_entries = list(self._entries.values())
-        unit_vectors, vector_dimension = _normalized_registry_vectors(catalog_entries, self._vector_dimension)
+        vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
         _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
+        unit_vectors = _normalized_registry_vectors(catalog_entries, vector_dimension)
         text = entry.full_text if self._full_body else entry.embedding_text
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
@@ -617,17 +620,16 @@ def _normalized_vector(vector: object, expected_dimension: int | None) -> list[f
         raise ValueError(str(exc)) from exc
 
 
-def _normalized_registry_vectors(
-    entries: list[RegistryEntry], expected_dimension: int | None
-) -> tuple[list[list[float]], int]:
-    """Validate every vector and normalize each once before repeated comparisons."""
-    dimension = expected_dimension
-    normalized: list[list[float]] = []
-    for entry in entries:
-        vector = _normalized_vector(entry.embedding, dimension)
-        dimension = len(vector)
-        normalized.append(vector)
-    return normalized, dimension or 0
+def _registry_vector_dimension(entries: list[RegistryEntry], expected_dimension: int | None) -> int:
+    """Return the width for work-budget checks without retaining normalized copies."""
+    if expected_dimension is not None or not entries:
+        return expected_dimension or 0
+    return _validate_vector(entries[0].embedding, None)
+
+
+def _normalized_registry_vectors(entries: list[RegistryEntry], dimension: int) -> list[list[float]]:
+    """Validate every vector against the registry width and normalize each once."""
+    return [_normalized_vector(entry.embedding, dimension or None) for entry in entries]
 
 
 def _validate_scalar_work(comparison_count: int, vector_dimension: int, max_scalar_comparisons: int) -> None:

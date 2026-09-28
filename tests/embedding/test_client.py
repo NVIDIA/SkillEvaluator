@@ -58,6 +58,15 @@ class TestCosineSimilarity:
 
         assert EmbeddingClient.cosine_similarity(a, b) == pytest.approx(expected, abs=1e-15)
 
+    def test_equal_nonzero_vectors_score_exactly_one(self) -> None:
+        vector = [-5.479683767155414, -6.166558151604646]
+        unit = normalize_embedding_vector(vector)
+
+        assert math.sumprod(unit, unit) < 1.0  # Rounding alone would hide the duplicate at --threshold 1.
+        assert unit_vector_similarity(unit, list(unit)) == 1.0
+        assert EmbeddingClient.cosine_similarity(vector, list(vector)) == 1.0
+        assert unit_vector_similarity([0.0, 0.0], [0.0, 0.0]) == 0.0
+
     def test_normalized_vectors_reuse_the_same_score(self) -> None:
         a, b = [3.0, 4.0, 0.0], [4.0, 3.0, 0.0]
         unit_a, unit_b = normalize_embedding_vector(a), normalize_embedding_vector(b)

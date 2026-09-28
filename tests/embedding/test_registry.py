@@ -353,10 +353,13 @@ class TestFindDuplicates:
         )
         cosine = MagicMock(side_effect=AssertionError("limit must fail before cosine"))
         monkeypatch.setattr(registry_module, "unit_vector_similarity", cosine)
+        normalize = MagicMock(side_effect=AssertionError("limit must fail before normalizing vectors"))
+        monkeypatch.setattr(registry_module, "normalize_embedding_vector", normalize)
 
         with pytest.raises(ValueError, match=r"scalar.*limit|work limit"):
             registry.find_duplicates(0.75)
         cosine.assert_not_called()
+        normalize.assert_not_called()
 
 
 class TestCachePersistence:

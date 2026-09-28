@@ -83,7 +83,11 @@ def unit_vector_similarity(left: list[float], right: list[float]) -> float:
 
     Pairwise scans normalize each vector once with :func:`normalize_embedding_vector`
     instead of revalidating and renormalizing both vectors for every pair.
+    Equal nonzero vectors score exactly 1.0 so rounding cannot hide exact
+    duplicates at ``--threshold 1``; zero vectors still score 0.0.
     """
+    if left == right:
+        return 1.0 if any(left) else 0.0
     score = math.sumprod(left, right)
     if not math.isfinite(score):
         raise SimilarityConfigError("Cosine similarity produced a non-finite result.")

@@ -35,7 +35,10 @@ are reported separately and never counted as either kind of defect.
 
 Add ``--compose N`` to execute N commands that nest binding scopes (groups,
 brace groups, compound commands and pipeline stages, two or three deep, under
-bash, zsh and ksh). Add ``--baseline REF`` to also score every command with the checker as it
+bash, zsh and ksh). Commands a native tool call runs under the shell it names
+are executed by that shell (bash, zsh, ksh, mksh, dash and sh) and scored with
+the name passed through, and lines around one the shell refuses are scored
+even though it reports a syntax error. Add ``--baseline REF`` to also score every command with the checker as it
 stood at that git ref, and list each command whose score moved, against the
 marker. A fix that lowers the score of a command that ran, or raises it for
 one that did not, is a regression whatever else it repaired, so those are
@@ -729,7 +732,131 @@ def curated() -> list[tuple[str, str]]:
     add(f"A=$(true) {PY} {SCRIPT}")
     add(f"A='for' {PY} {SCRIPT}")
     add(f"for g in x; do A=1 {PY} {SCRIPT}; done")
+    cases.extend(refusal_units())
     return cases
+
+
+# Lines placed before and after a line the shell refuses: what ran before it
+# still ran, and nothing on or after it did; only a plain first command is
+# credited, so the rest are partial whether they ran or not. These are scored
+# even though the shell reports a syntax error, because the error is the
+# point of the shape.
+_REFUSED_LINES = (
+    "A=1 for g in x; do :; done",
+    "A=1 if true; then :; fi",
+    "A=1 ( : )",
+    "A=1 { :; }",
+    "A=1 (( 1 ))",
+)
+_BEFORE_REFUSED_LINE = (
+    f"{PY} {SCRIPT}",
+    f"cat {SCRIPT}",
+    f"echo a\n{PY} {SCRIPT}",
+    f"{PY} {SCRIPT} # comment",
+    f"for x in 1; do\n{PY} {SCRIPT}\ndone",
+    f"if true; then\n{PY} {SCRIPT}\nfi",
+    f"{{ {PY} {SCRIPT}\n}}",
+    f"( {PY} {SCRIPT}\n)",
+    f"f() {{\n{PY} {SCRIPT}\n}}\nf",
+    f"x=$(echo a\n); {PY} {SCRIPT}",
+    f"a=(1\n2)\n{PY} {SCRIPT}",
+    f"echo 'a\nb'; {PY} {SCRIPT}",
+    f"cat <<EOF\nx\nEOF\n{PY} {SCRIPT}",
+    f"cat <<'EOF'\nA=1 for g in x; do :; done\nEOF\n{PY} {SCRIPT}",
+    f"{PY} {SCRIPT} <<EOF\ny\nEOF",
+    f"case x in\nx) :;;\nesac\n{PY} {SCRIPT}",
+    f'export f={SCRIPT}\n{PY} "$f"',
+    f"{PY} {SCRIPT} &&",
+    f"{PY} {SCRIPT} |",
+    f"{PY} {SCRIPT} \\",
+    f"{PY} {SCRIPT};",
+    # Refused on its own line, or run after something that stops it.
+    f"{PY} {SCRIPT} >",
+    f"{PY} {SCRIPT} <",
+    f"{PY} {SCRIPT} 2>",
+    f"{PY} {SCRIPT} 2>&",
+    f"{PY} {SCRIPT} >;",
+    f"{PY} {SCRIPT} > # out",
+    f"{PY} {SCRIPT} >#out",
+    f"{PY} {SCRIPT}; ;",
+    f"if {PY} {SCRIPT}; fi",
+    f"{PY} {SCRIPT}\\\necho a",
+    f"exit\n{PY} {SCRIPT}",
+    f"exec true\n{PY} {SCRIPT}",
+    f"false && {PY} {SCRIPT}",
+    f"f() {{\n{PY} {SCRIPT}\n}}",
+    f"bash -c '{PY} {SCRIPT}'",
+    f"bash -c '{PY} {SCRIPT} >'",
+    # A carriage return before the newline is part of the word before it.
+    f"{PY} {SCRIPT}\r",
+    f"{PY} {SCRIPT};\r",
+    f"{PY} {SCRIPT} |&\r",
+    f"time -p {PY} {SCRIPT}\r",
+    f"f() {{\n{PY} {SCRIPT}\n}}\nf\r",
+    # Complete: these run.
+    f"{PY} {SCRIPT} 2>&1",
+    f"{PY} {SCRIPT} '>'",
+    f"{PY} {SCRIPT} >out #c",
+)
+
+
+def refusal_units() -> list[tuple[str, str]]:
+    """A refused line after complete commands, inside a compound, and before
+    an invocation, at the top level and in ``-c`` payloads."""
+    cases: list[tuple[str, str]] = []
+    for before in _BEFORE_REFUSED_LINE:
+        for refused in _REFUSED_LINES[:3]:
+            cases.append((f"{before}\n{refused}", "run.py"))
+        cases.append((f"{before}\n{_REFUSED_LINES[0]}\n{PY} {SCRIPT}", "run.py"))
+    for refused in _REFUSED_LINES:
+        cases.append((f"{PY} {SCRIPT}\n{refused}", "run.py"))
+        cases.append((f"{PY} {SCRIPT}; {refused}", "run.py"))
+        cases.append((f"{refused}\n{PY} {SCRIPT}", "run.py"))
+        cases.append((f"if true; then\n{PY} {SCRIPT}\n{refused}\nfi", "run.py"))
+    for shell in ("bash", "dash", "sh", "zsh", "ksh", "mksh"):
+        cases.append((f"{shell} -c '{PY} {SCRIPT}\n{_REFUSED_LINES[0]}'", "run.py"))
+        cases.append((f"{shell} -c '{PY} {SCRIPT}\ncat <<< x'", "run.py"))
+        cases.append((f"{shell} -c 'cat <<< x\n{PY} {SCRIPT}'", "run.py"))
+        cases.append((f"{shell} -c '{PY} {SCRIPT}; cat <<< x'", "run.py"))
+        cases.append((f"{shell} -c '{PY} {SCRIPT}\r\n{_REFUSED_LINES[0]}'", "run.py"))
+        cases.append((f"{shell} -c '{PY} {SCRIPT} >\n{_REFUSED_LINES[0]}'", "run.py"))
+    return cases
+
+
+_SCORED_DESPITE_SYNTAX_ERROR = frozenset(command for command, _ in refusal_units())
+
+
+# Commands a native tool call ran under the shell it names in
+# ``action_input.shell`` (Codex's ``exec_command``). Each is executed by that
+# shell and scored with the name passed through.
+_NATIVE_SHELL_COMMANDS = (
+    f'printf "" | for f in {SCRIPT}; do :; done; {PY} "$f"',
+    f'f={O}; printf "" | for f in {SCRIPT}; do :; done; {PY} "$f"',
+    f'printf "" | {{ f={SCRIPT}; }}; {PY} "$f"',
+    f'echo | while read -r l; do f={SCRIPT}; done; {PY} "$f"',
+    f'printf "" | for f in {SCRIPT}; do :; done | cat; {PY} "$f"',
+    f"cat <<< x; {PY} {SCRIPT}",
+    f"{PY} {SCRIPT}\ncat <<< x",
+    f"cat <<< x\n{PY} {SCRIPT}",
+    f"{PY} {SCRIPT}\nA=1 for g in x; do :; done",
+    f"{PY} {SCRIPT}; A=1 for g in x; do :; done",
+    f"A=1 for g in x; do :; done\n{PY} {SCRIPT}",
+    f"{PY} {SCRIPT} >\nA=1 for g in x; do :; done",
+    f"{PY} {SCRIPT}\r\nA=1 for g in x; do :; done",
+    f'declare f={SCRIPT}; {PY} "$f"',
+    f'typeset f={SCRIPT}; {PY} "$f"',
+    f'export f={SCRIPT}; {PY} "$f"',
+    f'f={SCRIPT}; ((f=1)); {PY} "$f"',
+    f'f={SCRIPT}; let f=1; {PY} "$f"',
+    f"{PY} {SCRIPT}",
+    f"cat {SCRIPT}",
+    f'for f in {SCRIPT}; do {PY} "$f"; done',
+)
+_NATIVE_SHELLS = ("bash", "zsh", "ksh", "mksh", "dash", "sh")
+
+
+def native_shell_cases() -> list[tuple[str, str, str]]:
+    return [(command, "run.py", shell) for shell in _NATIVE_SHELLS for command in _NATIVE_SHELL_COMMANDS]
 
 
 def _heredocs(count: int, before: str, after: str = "", body: str = "x") -> str:
@@ -1047,15 +1174,20 @@ def _missing_tool(command: str) -> str | None:
     return None
 
 
-def _run_one(command: str, script: str) -> tuple[str, str, float | None, bool | None, list[dict[str, str]]]:
+def _run_one(
+    command: str, script: str, shell: str | None = None
+) -> tuple[str, str, float | None, bool | None, list[dict[str, str]]]:
     """Execute one command and compare the marker against both checkers.
 
-    Returns the outcome, its detail, the host score, whether the script
-    ran, and the tool call the checkers read, so a baseline can score it.
+    With ``shell``, the command is run by that shell and scored as a native
+    call naming it. Returns the outcome, its detail, the host score, whether
+    the script ran, and the tool call the checkers read, so a baseline can
+    score it.
     """
-    missing = _missing_tool(command)
+    missing = _missing_tool(command) if shell is None else (None if shutil.which(shell) else shell)
     if missing is not None:
         return ("inconclusive", f"{missing}: not installed here", None, None, [])
+    executable = shutil.which(shell) if shell is not None else "/bin/bash"
     directory = Path(tempfile.mkdtemp())
     try:
         _build(directory)
@@ -1068,7 +1200,7 @@ def _run_one(command: str, script: str) -> tuple[str, str, float | None, bool | 
                 text=True,
                 timeout=30,
                 stdin=subprocess.DEVNULL,
-                executable="/bin/bash",
+                executable=executable,
             )
         except subprocess.TimeoutExpired:
             return ("inconclusive", "timed out", None, None, [])
@@ -1079,13 +1211,20 @@ def _run_one(command: str, script: str) -> tuple[str, str, float | None, bool | 
             while not ran and time.monotonic() < deadline:
                 time.sleep(0.05)
                 ran = any(directory.rglob(f"MARKER.{script}"))
-        if not ran and ("command not found" in output or "syntax error" in output):
+        refused_shape = shell is not None or command in _SCORED_DESPITE_SYNTAX_ERROR
+        if not ran and ("command not found" in output or ("syntax error" in output and not refused_shape)):
             return ("inconclusive", output.strip().splitlines()[0][:70] if output.strip() else "", None, None, [])
 
         calls = [
             {
                 "action": "Bash",
                 "action_input": {"command": command},
+                "observation": output[:400] + f"\nExit code {completed.returncode}",
+            }
+            if shell is None
+            else {
+                "action": "exec_command",
+                "action_input": {"cmd": command, "shell": executable},
                 "observation": output[:400] + f"\nExit code {completed.returncode}",
             }
         ]
@@ -1164,8 +1303,13 @@ def main() -> int:
     baseline = _load_baseline(arguments.baseline) if arguments.baseline else None
     buckets: dict[str, list[tuple[str, str]]] = {}
     moves: dict[str, list[tuple[str, float | str, float]]] = {}
-    for command, script in commands:
-        outcome, detail, score, ran, calls = _run_one(command, script)
+    runs: list[tuple[str, str, str | None]] = [(command, script, None) for command, script in commands]
+    runs += native_shell_cases()
+    commands = [(command, script) for command, script, _ in runs]
+    for command, script, shell in runs:
+        outcome, detail, score, ran, calls = _run_one(command, script, shell)
+        if shell is not None:
+            command = f"[{shell}] {command}"
         buckets.setdefault(outcome, []).append((command, detail))
         if arguments.verbose:
             print(f"{outcome:22} {command!r} {detail}")

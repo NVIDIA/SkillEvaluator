@@ -1991,9 +1991,10 @@ def test_an_assignment_or_builtin_that_fails_where_the_shell_stops_ends_the_cred
 def test_a_here_string_the_shell_cannot_parse_is_never_full_credit(check, command, expected) -> None:
     """dash and busybox ash have no here-string: ``<<<`` is a syntax error that
     stops the line holding it, and a compound command spanning lines around
-    it, before anything runs (measured). Under those readings nothing in the
-    text is credited as run; ``sh`` disagrees across its readings and stays
-    unresolved. Shells that read here-strings, and a quoted ``<<<``, are unchanged.
+    it, before anything on it runs (measured). Under those readings nothing
+    from that line on is credited as run; ``sh`` disagrees across its
+    readings and stays unresolved. Shells that read here-strings, and a
+    quoted ``<<<``, are unchanged.
     """
     assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
 
@@ -2078,7 +2079,7 @@ def test_arithmetic_outside_an_arithmetic_command_binds_too(check, command, expe
         ("python3 run.py; A=1 for g in x; do :; done", 0.75),
         ("sh -c 'A=1 for g in x; do python3 run.py; done'", 0.75),
         ("A=1 for x; python3 run.py", 0.75),
-        ("python3 run.py\nA=1 for g in x; do :; done", 0.75),
+        ("python3 run.py\nA=1 for g in x; do :; done", 1.0),
         (r'f=run.py\; for "f"', 0.0),
         ("A=1 for g in x; do cat run.py; done", 0.0),
         ("A=1 if true; then cat run.py; fi", 0.0),
@@ -2094,11 +2095,263 @@ def test_a_compound_word_after_an_assignment_is_refused_text(check, command, exp
     """A compound's opening word is reserved only where a command starts.
     After an assignment, bash, bash --posix, dash, zsh, ksh, mksh and busybox
     ash all refuse it with the compound's own syntax, so the line runs
-    nothing, while lines before it may run: an invocation there is partial,
-    never full credit, and never an exception. ``A=(`` is an array and
-    ``A='for'`` a value, and a loop word where a command starts is a loop.
+    nothing: an invocation on it is partial, never full credit, and never an
+    exception. A command completed on a line before it has already run (see
+    the next test). ``A=(`` is an array and ``A='for'`` a value, and a loop
+    word where a command starts is a loop.
     """
     assert check(_bash(command), EXPECTED_SCRIPT)["score"] == expected
+
+
+_REFUSED = "A=1 for g in x; do :; done"
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("python3 run.py\nA=1 for g in x; do :; done", 1.0),
+        ("python3 run.py # comment\nA=1 for g in x; do :; done", 1.0),
+        ("# first\n\npython3 run.py\nA=1 ( : )", 1.0),
+        ("python3 run.py;\nA=1 if true; then :; fi", 1.0),
+        ("python3 run.py | cat\nA=1 for g in x; do :; done", 1.0),
+        ("python3 run.py > out 2>&1 &\nA=1 { :; }", 1.0),
+        ("python3 run.py <<EOF\nA=1 for g in x; do :; done\nEOF\nA=1 ( : )", 1.0),
+        ("python3 run.py\necho a\nA=1 for g in x; do :; done", 1.0),
+        ("python3 run.py\ncat <<< x", 1.0),
+        ("python3 run.py; A=1 for g in x; do :; done", 0.75),
+        ("if true; then\npython3 run.py\nA=1 for g in x; do :; done\nfi", 0.75),
+        ("python3 run.py &&\nA=1 for g in x; do :; done", 0.75),
+        ("python3 run.py |\nA=1 ( : )", 0.75),
+        ("python3 run.py \\\n; A=1 for g in x; do :; done", 0.75),
+        ("A=1 for g in x; do :; done\npython3 run.py", 0.75),
+        ('export f=run.py\nA=1 for g in x; do :; done\npython3 "$f"', 0.75),
+        ("cat run.py\nA=1 for g in x; do :; done\npython3 run.py", 0.75),
+        ("cat run.py\nA=1 for g in x; do :; done", 0.0),
+    ],
+)
+def test_a_command_completed_before_a_refused_line_keeps_its_credit(check, command, expected) -> None:
+    """bash, bash --posix, dash, ksh, mksh and busybox ash parse and run a
+    text one complete command at a time, so the first command, completed on
+    a line before the one the shell refuses, has already run (measured). It
+    keeps its credit when it is a plain pipeline: blank lines and comments
+    may come before it, a heredoc body may follow it, and what comes after
+    it does not matter. A line joined to the refused one by ``&&``, ``|`` or
+    a trailing backslash, and a compound spanning lines around it, run
+    nothing, and nothing after it runs.
+    """
+    assert check(_bash(command), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo a\npython3 run.py\nA=1 if true; then :; fi",
+        "for x in 1; do\npython3 run.py\ndone\nA=1 for g in x; do :; done",
+        "{ python3 run.py\n}\nA=1 ( : )",
+        "f() {\npython3 run.py\n}\nf\nA=1 for g in x; do :; done",
+        "x=$(echo a\n)\npython3 run.py\nA=1 ( : )",
+        "a=(1\n2)\npython3 run.py\nA=1 { :; }",
+        "case x in\nx) :;;\nesac\npython3 run.py\nA=1 for g in x; do :; done",
+        "echo 'a\nb'; python3 run.py\nA=1 for g in x; do :; done",
+        "cat <<EOF\nx\nEOF\npython3 run.py\nA=1 for g in x; do :; done",
+        'export f=run.py\npython3 "$f"\nA=1 for g in x; do :; done',
+        "exit\npython3 run.py\nA=1 for g in x; do :; done",
+        "exec true\npython3 run.py\nA=1 for g in x; do :; done",
+        "set -n\npython3 run.py\nA=1 for g in x; do :; done",
+        "kill $$\npython3 run.py\nA=1 for g in x; do :; done",
+        "set -e; false\npython3 run.py\nA=1 for g in x; do :; done",
+        "false && python3 run.py\nA=1 for g in x; do :; done",
+        "true || python3 run.py\nA=1 for g in x; do :; done",
+        "PATH= python3 run.py\nA=1 for g in x; do :; done",
+        "f() {\npython3 run.py\n}\nA=1 for g in x; do :; done",
+        "f() {\npython3 run.py\n}\nf; A=1 for g in x; do :; done",
+        "bash -c 'python3 run.py'\nA=1 for g in x; do :; done",
+        "bash -c 'python3 run.py >'\nA=1 for g in x; do :; done",
+        "sh -c 'python3 run.py; fi'\nA=1 for g in x; do :; done",
+    ],
+)
+def test_only_a_plain_first_command_is_credited_before_a_refused_line(check, command) -> None:
+    """The walk does not model every command that stops the ones after it
+    (``exit``, ``exec``, ``set -n``, ``kill $$``, a failed ``set -e`` step,
+    an emptied ``PATH``) or that decides whether they run (``&&``, ``||``,
+    a function called or not), and a ``-c`` payload's own text may be refused
+    for a reason the walk does not detect. So when a later line is refused,
+    only the first command is credited, and only a plain pipeline with no
+    payload: nothing ran before it that could have stopped it. Everything
+    else stays partial, as at 4594693, whether or not it ran. Measured: the
+    first ten and the plain payload run in bash, bash --posix, ksh and mksh,
+    and in dash and busybox ash but for the array; the others run nothing.
+    """
+    assert check(_bash(command), EXPECTED_SCRIPT)["score"] == 0.75
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # The internal review's two cases, and the variants it compared.
+        (f"python3 run.py >\n{_REFUSED}", 0.75),
+        (f"python3 run.py\r\n{_REFUSED}", 0.75),
+        (f"python3 run.py <\n{_REFUSED}", 0.75),
+        (f"python3 run.py 2>\n{_REFUSED}", 0.75),
+        (f"python3 run.py |&\r\n{_REFUSED}", 0.75),
+        (f"time -p python3 run.py\r\n{_REFUSED}", 0.75),
+        (f"f() {{\npython3 run.py\n}}\nf\r\n{_REFUSED}", 0.75),
+        (f"f() {{\r\npython3 run.py\r\n}}\r\nf\r\n{_REFUSED}", 0.75),
+        (f"python3 run.py; function f\r\n{_REFUSED}", 0.75),
+        (f"python3 run.py; f()\r\n{_REFUSED}", 0.75),
+        (f"python3 run.py;\r\n{_REFUSED}", 0.75),
+        # Every redirection operator without its operand refuses its line.
+        *(
+            (f"python3 run.py {op}\n{_REFUSED}", 0.75)
+            for op in (">>", ">|", "&>", "&>>", "<>", ">&", "<&", "2>&", "1>")
+        ),
+        (f"python3 run.py >;\n{_REFUSED}", 0.75),
+        (f"python3 run.py > # out\n{_REFUSED}", 0.75),
+        (f"python3 run.py >#out\n{_REFUSED}", 0.75),
+        (f"python3 run.py 2>#out\n{_REFUSED}", 0.75),
+        (f"python3 run.py >\nout\n{_REFUSED}", 0.75),
+        (f"python3 run.py <<<\necho a\n{_REFUSED}", 0.75),
+        (f"python3 run.py 2>&1\r\n{_REFUSED}", 0.75),
+        # Other lines every modelled shell refuses on their own.
+        (f"python3 run.py; ;\n{_REFUSED}", 0.75),
+        (f"python3 run.py ;;\n{_REFUSED}", 0.75),
+        (f"; python3 run.py\n{_REFUSED}", 0.75),
+        (f"python3 run.py & ;\n{_REFUSED}", 0.75),
+        (f"python3 run.py; then\n{_REFUSED}", 0.75),
+        (f"if python3 run.py; fi\n{_REFUSED}", 0.75),
+        (f"python3 run.py (x)\n{_REFUSED}", 0.75),
+        (f"python3 run.py\\\necho a\n{_REFUSED}", 0.75),
+        (f'echo "$(echo "a\npython3 run.py\nb")"\n{_REFUSED}', 0.75),
+        # The same commands complete: they run, and keep their credit.
+        (f"python3 run.py '>'\n{_REFUSED}", 1.0),
+        (f"python3 run.py \\>\n{_REFUSED}", 1.0),
+        (f"python3 run.py 2>&1\n{_REFUSED}", 1.0),
+        (f"python3 run.py > out\n{_REFUSED}", 1.0),
+        (f"python3 run.py >&-\n{_REFUSED}", 1.0),
+        (f"python3 run.py >out #c\n{_REFUSED}", 1.0),
+        (f"python3 run.py\n{_REFUSED}\r", 1.0),
+    ],
+)
+def test_a_line_refused_on_its_own_is_not_credited_before_a_refused_line(check, command, expected) -> None:
+    """A redirection operator without its operand (at the line's end, before
+    ``;``, or before a comment, which a ``#`` starts after an operator too),
+    an empty command, a reserved word out of place or a parenthesis after a
+    word is refused on its own line by bash, bash --posix, dash, mksh and
+    busybox ash, which then run nothing (measured); ksh accepts an empty
+    command and ``2>#out``. A carriage return before the newline is part of
+    the word before it: ``python3 run.py\\r`` opens ``run.py\\r``, and an
+    escaped newline joins the next line to the word. None of these is a
+    plain pipeline, so none is credited and the text stays partial, as at
+    4594693, including the forms some shells run (``python3 run.py;\\r``).
+    A CR on the refused line itself does not touch the command before it.
+    """
+    assert check(_bash(command), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash -c 'python3 run.py\nA=1 for g in x; do :; done'", 0.75),
+        ("ksh -c 'python3 run.py\nA=1 ( : )'", 0.75),
+        ("dash -c 'python3 run.py\ncat <<< x'", 0.75),
+        ("sh -c 'python3 run.py\ncat <<< x'", 0.75),
+        ("zsh -c 'python3 run.py\nA=1 for g in x; do :; done'", 0.75),
+        ("dash -c 'cat <<< x\npython3 run.py'", 0.75),
+        ("dash -c 'python3 run.py; cat <<< x'", 0.75),
+        ("bash -c 'python3 run.py >\nA=1 for g in x; do :; done'", 0.75),
+        ("bash -c 'python3 run.py\r\nA=1 for g in x; do :; done'", 0.75),
+        ("bash -c 'echo a\npython3 run.py\nA=1 for g in x; do :; done'", 0.75),
+    ],
+)
+def test_a_payload_with_a_line_its_shell_refuses_stays_partial(check, command, expected) -> None:
+    """A ``-c`` payload is refused by its own shell: a here-string under dash
+    and busybox ash, a compound's opening word after an assignment under
+    each. bash, dash, ksh, mksh and ash run the commands before the refused
+    line and zsh runs none, but the payload is read from what the tokenizer
+    left of it, not from the text its shell reads (a carriage return there
+    becomes a line's end), so no command in it is credited on its own. The
+    payload stays partial, as at 4594693.
+    """
+    assert check(_bash(command), EXPECTED_SCRIPT)["score"] == expected
+
+
+def _native(command: str, shell: object = None) -> list[dict[str, object]]:
+    arguments: dict[str, object] = {"cmd": command}
+    if shell is not None:
+        arguments["shell"] = shell
+    return [{"action": "exec_command", "action_input": arguments, "observation": "done"}]
+
+
+_LAST_STAGE_BINDING = 'printf "" | for f in run.py; do :; done; python3 "$f"'
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "shell", "expected"),
+    [
+        (_LAST_STAGE_BINDING, "/bin/zsh", 1.0),
+        (_LAST_STAGE_BINDING, "zsh", 1.0),
+        (_LAST_STAGE_BINDING, "/usr/local/bin/zsh5.9", 1.0),
+        (_LAST_STAGE_BINDING, "/usr/bin/ksh", 1.0),
+        (_LAST_STAGE_BINDING, "/bin/bash", 0.0),
+        (_LAST_STAGE_BINDING, "C:\\msys64\\usr\\bin\\bash.exe", 0.0),
+        (_LAST_STAGE_BINDING, "/bin/mksh", 0.0),
+        (_LAST_STAGE_BINDING, "/bin/sh", 0.0),
+        (_LAST_STAGE_BINDING, "", 0.0),
+        (_LAST_STAGE_BINDING, None, 0.0),
+        ('printf "" | { f=run.py; }; python3 "$f"', "/bin/zsh", 1.0),
+        ('printf "" | { f=run.py; }; python3 "$f"', "/bin/bash", 0.0),
+        ("python3 run.py\nA=1 for g in x; do :; done", "/bin/zsh", 0.75),
+        ("python3 run.py\nA=1 for g in x; do :; done", "/bin/bash", 1.0),
+        ("python3 run.py\nA=1 for g in x; do :; done", "/bin/dash", 1.0),
+        ("cat <<< x; python3 run.py", "/bin/dash", 0.75),
+        ("cat <<< x; python3 run.py", "/bin/bash", 1.0),
+        ("python3 run.py\ncat <<< x", "/bin/dash", 1.0),
+        ("python3 run.py && true\ncat <<< x", "/bin/dash", 0.75),
+        ("python3 run.py >\nA=1 for g in x; do :; done", "/bin/bash", 0.75),
+        ("python3 run.py >\nA=1 for g in x; do :; done", "/bin/zsh", 0.75),
+        ("python3 run.py\r\nA=1 for g in x; do :; done", "/bin/bash", 0.75),
+        ("python3 run.py\r\nA=1 for g in x; do :; done", "/bin/zsh", 0.75),
+        ('declare f=run.py; python3 "$f"', "/bin/dash", 0.0),
+        ('typeset f=run.py; python3 "$f"', "/bin/mksh", 1.0),
+        ('f=run.py; ((f=1)); python3 "$f"', "/bin/dash", 1.0),
+        ('f=run.py; ((f=1)); python3 "$f"', "/bin/zsh", 0.75),
+    ],
+)
+def test_a_native_tool_call_is_read_under_the_shell_it_names(check, command, shell, expected) -> None:
+    """A native call can name the shell that ran its command (Codex's
+    ``exec_command`` keeps ``shell`` in its arguments). The rules that differ
+    between shells follow it: zsh and ksh keep a binding made in a
+    pipeline's last stage, dash has no here-string, no ``declare`` and no
+    arithmetic command, and zsh parses a whole text before running it. A
+    call that names no shell is read as bash, as before; ``sh`` is walked
+    under each shell it may be, and disagreement is unresolved.
+    """
+    assert check(_native(command, shell), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "shell", "expected"),
+    [
+        (_LAST_STAGE_BINDING, "/usr/bin/fish", 0.75),
+        ("python3 run.py", "/usr/bin/fish", 0.75),
+        ("cat run.py", "pwsh.exe", 0.75),
+        ("echo done", "/usr/bin/fish", 0.0),
+        (_LAST_STAGE_BINDING, ["/bin/zsh"], 0.75),
+    ],
+)
+def test_a_shell_this_walk_does_not_model_leaves_the_command_unresolved(check, command, shell, expected) -> None:
+    """A shell outside the modelled ones reads the text by rules this walk does
+    not know, so no definite score is given: a command that names the script
+    is unresolved, and one that never names it is not evidence about it.
+    """
+    result = check(_native(command, shell), EXPECTED_SCRIPT)
+    assert result["score"] == expected
 
 
 _DAMAGE_BASES = [
@@ -2122,6 +2375,8 @@ _DAMAGE_BASES = [
     "timeout -- 30 env --help python3 run.py && xargs -r python3 run.py",
     "sh -c 'cat <<< x; python3 run.py'",
     "A=1 for g in x; do python3 run.py; done",
+    "echo a # it's\npython3 run.py\nA=1 for g in x; do :; done",
+    "cat <<EOF\nx\nEOF\ncase x in\nx) :;;\nesac\npython3 run.py\nA=1 ( : )",
 ]
 
 

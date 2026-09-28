@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import shlex
 from fnmatch import fnmatchcase
+from functools import lru_cache
 from typing import Any
 
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
@@ -3062,7 +3063,10 @@ _COMMAND_POSITION_LEADERS = frozenset({"then", "do", "else", "elif", "!", "{", "
 # an assignment. Written there, it and the compound's own syntax are refused
 # by bash, bash --posix, dash, zsh, ksh, mksh and busybox ash, for each of
 # these and for ``(`` and ``((``: ``A=1 if true; then python3 run.py; fi``
-# runs nothing.
+# runs nothing. Only zsh refuses ``[[`` there, or an opening word with none of
+# its compound's syntax after it (``A=1 for x; ...``); the others run it as a
+# command name that is not found. Both are read as refused, so an invocation
+# on such a line is unresolved rather than given a definite score.
 _OPENERS_REFUSED_AFTER_ASSIGNMENT = _COMPOUND_OPENERS | {"[["}
 
 
@@ -3070,8 +3074,8 @@ def _compound_after_assignment(tokens: list[str]) -> bool:
     """Whether a compound's opening word follows an assignment in a command.
 
     Every modelled shell refuses the text before running the line that holds
-    it, but some run the lines before it, and the tokenizer does not keep
-    lines apart; the caller credits nothing in such a text. ``A=$(`` and
+    it, but most run the complete commands before it, so the caller may
+    credit the first of those (``_command_run_before_refusal``). ``A=$(`` and
     ``A=(`` reach here as an assignment ending in ``$`` or ``=`` and then
     ``(``, a substitution or an array rather than a subshell.
     """
@@ -3095,6 +3099,328 @@ def _compound_after_assignment(tokens: list[str]) -> bool:
                 return True
         at_start = False
     return False
+
+
+# zsh parses the whole of a ``-c`` text before running any of it, so a syntax
+# error anywhere in it runs nothing. bash, bash --posix, dash, ksh, mksh and
+# busybox ash parse and run one complete command at a time: a command on a
+# line before the refused one has already run. Measured with
+# ``python3 run.py`` on the line before ``A=1 for g in x; do :; done``, and
+# before ``cat <<< x`` under dash and ash.
+_PARSES_WHOLE_TEXT_FIRST = frozenset({"zsh"})
+# How many lines are examined for where a complete command ends, and how much
+# text in all is read to decide it. Past either, the lines that remain are read
+# as one unit with the one before them.
+_MAX_PARSE_UNIT_LINES = 256
+_MAX_PARSE_UNIT_READ = 2 * _MAX_SHELL_REFERENCE_CHARS
+# An unquoted newline, kept apart from ``;`` while a unit's syntax is read, so
+# that ``;;`` in a ``case`` is not confused with a blank line.
+_UNIT_NEWLINE = ""
+# Only the first command of a text is credited when a later line is refused,
+# and only when the walk reads it as the shell does: one pipeline of simple
+# commands on its own lines (``_plain_pipeline``). Nothing ran before it, so no
+# command the walk does not model can have stopped it, and a line refused for
+# a reason the walk does not detect is not credited. Measured before a refused
+# line: ``exit``, ``exec true``, ``set -n`` or ``kill $$`` on the line before
+# ``python3 run.py``, and ``python3 run.py`` ending in ``>``, ``; fi``, ``(x)``,
+# ``;;`` or a carriage return, run nothing in bash, bash --posix, dash, zsh,
+# ksh, mksh or busybox ash; an empty command (``; python3 run.py``) runs
+# nothing but in ksh.
+_NOT_A_SIMPLE_COMMAND = (
+    _COMPOUND_OPENERS | _COMPOUND_CLOSERS | _COMMAND_POSITION_LEADERS | {"in", "[[", "]]", "time", "coproc", "function"}
+)
+_REDIRECTION_OPERATOR_RE = re.compile(r"\A\d*(?:&>>?|>>|>\||>&|<&|<>|<<<|<<-|<<|>|<)\Z")
+# A token of operator characters alone: ``|``, a redirection, or anything
+# else the tokenizer left joined (``>;``, ``|&``, ``<(``).
+_OPERATOR_TOKEN_RE = re.compile(r"\A\d*[;&|()<>]+\Z")
+# A substitution or an expansion inside ``"..."`` reads its own quotes, and
+# ``$'...'`` can hold an escaped one; a scan pairing quote characters would
+# misplace them, and with them where a line ends.
+_NESTED_QUOTING_RE = re.compile(r"\$[({']|`")
+# What closes each compound, when its opening word stands where a command may.
+_UNIT_CLOSERS = {
+    "for": "done",
+    "select": "done",
+    "while": "done",
+    "until": "done",
+    "if": "fi",
+    "case": "esac",
+    "{": "}",
+    "[[": "]]",
+}
+
+
+def _heredoc_body_spans(text: str, reading: str) -> list[tuple[int, int]] | None:
+    """Where each heredoc body lies in ``text``, as ``_split_heredocs`` reads it.
+
+    Each span runs from the newline that ends the line declaring the heredoc
+    to the newline that ends its terminator line, so neither of those, nor any
+    line of the body, can end a command. ``None`` when the text declares more
+    heredocs than are read, or one whose terminator is never named.
+    """
+    spans: list[tuple[int, int]] = []
+    position = 0
+    budget = _MAX_HEREDOC_OPERANDS
+    per_line = _MAX_HEREDOCS_PER_LINE.get(reading, _MAX_HEREDOC_OPERANDS)
+    while True:
+        offset = _heredoc_operator_index(text[position:])
+        if offset < 0:
+            return spans
+        after = position + offset + 2
+        if text.startswith("<", after):
+            # A here-string's operand stays on its line.
+            position = after + 1
+            budget -= 1
+            if budget <= 0:
+                return None
+            continue
+        line_end = text.find("\n", after)
+        header = _heredoc_header(text[after:] if line_end == -1 else text[after:line_end])
+        if header is None:
+            return None
+        _, strings, terminators = header
+        budget -= len(terminators) + len(strings)
+        if len(terminators) > per_line or budget < 0:
+            return None
+        if line_end == -1:
+            return spans
+        body_position = line_end + 1
+        for terminator, strip_tabs in terminators:
+            segment = text[body_position:]
+            _, resumed = _split_heredoc_body(segment, terminator, strip_tabs)
+            body_position += len(segment) - len(resumed)
+        end = body_position - 1 if body_position > line_end + 1 and text[body_position - 1] == "\n" else body_position
+        spans.append((line_end, end))
+        position = body_position
+
+
+def _unit_is_complete(unit: str, reading: str, arithmetic_parens: bool) -> bool:
+    """Whether ``unit`` ends a complete command, so the newline after it ends
+    what the shell parses before running it.
+
+    Every compound it opens is closed, and it does not end on ``|``, ``&&``,
+    ``||``, ``!`` or a function's name awaiting its body. Anything the reading
+    here does not settle is incomplete, so the next line joins the unit.
+    """
+    analysed = _split_heredocs(unit, reading)[0]
+    if not analysed.strip():
+        return True
+    marked = _mark_quoted_newlines(_mark_literal_dollars(analysed)).replace("\n", f" {_UNIT_NEWLINE} ")
+    tokens = [
+        token for token in _split_punctuation_runs(_shell_tokens(marked), arithmetic_parens, reading != "ksh") if token
+    ]
+    if not tokens:
+        return False
+    stack: list[str] = []
+    at_command = True
+    case_header = False
+    case_pattern = False
+    previous = ""
+    for token in tokens:
+        if stack and stack[-1] == "esac" and case_pattern:
+            if token == "esac":
+                stack.pop()
+                case_pattern = False
+                at_command = False
+            elif token == ")":
+                case_pattern = False
+                at_command = True
+            previous = token
+            continue
+        if token == _UNIT_NEWLINE or token in _SHELL_SEPARATORS:
+            if stack and stack[-1] == "esac" and not case_header and token in {";", "&"} and previous == ";":
+                # ``;;``, ``;&`` or ``;;&``: the next word is a pattern.
+                case_pattern = True
+            at_command = True
+            previous = token
+            continue
+        if _PUNCTUATION_RUN_RE.match(token) or token in {"<(", ">("}:
+            # A group, a substitution, an arithmetic command or a process
+            # substitution is open until its parenthesis closes.
+            for char in token:
+                if char == "(":
+                    stack.append(")")
+                elif char == ")":
+                    if not stack or stack[-1] != ")":
+                        return False
+                    stack.pop()
+            at_command = True
+            previous = token
+            continue
+        if case_header:
+            if token == "in":
+                case_header = False
+                case_pattern = True
+            previous = token
+            continue
+        if previous == "function":
+            # ``function f {``: the body follows the name.
+            at_command = True
+            previous = token
+            continue
+        if stack and stack[-1] == "]]" and token == "]]":
+            stack.pop()
+        elif at_command and token in _UNIT_CLOSERS:
+            stack.append(_UNIT_CLOSERS[token])
+            case_header = token == "case"
+        elif at_command and token in {"done", "fi", "esac", "}"}:
+            if not stack or stack[-1] != token:
+                return False
+            stack.pop()
+        at_command = token in _COMMAND_POSITION_LEADERS or token in {"time", "!"} or token in _COMMAND_INTRODUCING_WORDS
+        previous = token
+    last = [token for token in tokens if token != _UNIT_NEWLINE]
+    if stack or case_header or not last:
+        return False
+    if last[-1] in {"|", "&&", "||", "!", "time", "function"} or last[-2:] == ["|", "&"]:
+        return False
+    # A function's name awaits its body on the next line.
+    return last[-2:] != ["(", ")"] and not (len(last) >= 2 and last[-2] == "function")
+
+
+def _parse_unit_starts(text: str, reading: str, arithmetic_parens: bool) -> tuple[list[int], str]:
+    """Where each top-level unit the shell parses before running it starts,
+    and the text with its comments blanked.
+
+    The first is the start of the text; each other follows an unquoted
+    newline, outside a comment and a heredoc body, that ends a complete
+    command (``_unit_is_complete``). A newline whose place the text does not
+    settle ends nothing, so the lines around it are read as one unit. A
+    comment starts at a ``#`` that begins a word, after an operator too:
+    ``python3 run.py >#x`` leaves its redirection without an operand.
+    """
+    starts = [0]
+    if len(text) > _MAX_SHELL_REFERENCE_CHARS:
+        return starts, text
+    spans = _heredoc_body_spans(text, reading)
+    if spans is None:
+        return starts, text
+    span_ends = dict(spans)
+    blanked = list(text)
+    quote: str | None = None
+    lines = 0
+    read = 0
+    index = 0
+    while index < len(text):
+        if quote is None and index in span_ends:
+            index = span_ends[index]
+            continue
+        char = text[index]
+        if char == "\\" and quote != "'" and index + 1 < len(text):
+            index += 2
+            continue
+        if quote is not None:
+            if char == quote[-1]:
+                quote = None
+            index += 1
+            continue
+        if char == "#" and (index == 0 or text[index - 1].isspace() or text[index - 1] in _SHELL_METACHARS):
+            end = text.find("\n", index)
+            end = len(text) if end < 0 else end
+            blanked[index:end] = " " * (end - index)
+            index = end
+            continue
+        if char == "$" and text.startswith("'", index + 1):
+            quote = "$'"
+            index += 2
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == "\n":
+            lines += 1
+            read += index - starts[-1]
+            if lines > _MAX_PARSE_UNIT_LINES or read > _MAX_PARSE_UNIT_READ:
+                break
+            if _unit_is_complete("".join(blanked[starts[-1] : index]), reading, arithmetic_parens):
+                starts.append(index + 1)
+        index += 1
+    return starts, "".join(blanked)
+
+
+def _plain_pipeline(unit: str, reading: str, arithmetic_parens: bool) -> bool:
+    """Whether ``unit``, its comments blanked, is one pipeline of simple
+    commands that the walk reads as the shell does.
+
+    Words and complete redirections, joined only by ``|``, with at most a
+    trailing ``;`` or ``&``. Not a reserved word, a group or an assignment
+    where a command starts, a parenthesis, ``&&`` or ``||``, a substitution,
+    a redirection operator without its operand, a here-string (a missing
+    operand is read from the next line), or a carriage return or an escaped
+    newline, which the walk reads as a line's end and the shells as part of
+    the word before it (``python3 run.py\\r`` opens ``run.py\\r``, and
+    ``python3 run.py\\`` joins the next line to ``run.py``). Anything else
+    is not plain, which only withholds credit.
+    """
+    if "\r" in unit or "\\\n" in unit or _NESTED_QUOTING_RE.search(unit):
+        return False
+    analysed, _, here_strings = _split_heredocs(unit, reading)
+    if here_strings:
+        return False
+    marked = _mark_quoted_newlines(_mark_literal_dollars(analysed)).replace("\n", f" {_UNIT_NEWLINE} ")
+    tokens = [
+        token for token in _split_punctuation_runs(_shell_tokens(marked), arithmetic_parens, reading != "ksh") if token
+    ]
+    while tokens and tokens[-1] == _UNIT_NEWLINE:
+        tokens.pop()
+    if tokens and tokens[-1] in {";", "&"}:
+        tokens.pop()
+    started = False  # a word or a redirection of this command has been read
+    named = False  # and its first word
+    joined = False  # a ``|`` has been read, and nothing of the next command
+    pending = False  # a redirection operator awaits its operand
+    for token in tokens:
+        operator = bool(_OPERATOR_TOKEN_RE.match(token))
+        if pending:
+            if token == _UNIT_NEWLINE or operator:
+                return False
+            pending = False
+        elif token == _UNIT_NEWLINE:
+            # Only the command after a ``|`` may start on a later line.
+            if not joined:
+                return False
+        elif token == "|":
+            if not started:
+                return False
+            started = named = False
+            joined = True
+        elif _REDIRECTION_OPERATOR_RE.match(token):
+            started, joined, pending = True, False, True
+        elif operator:
+            return False
+        else:
+            if not named and (token in _NOT_A_SIMPLE_COMMAND or _SHELL_ASSIGNMENT_RE.match(token)):
+                return False
+            started = named = True
+            joined = False
+    return started and not pending
+
+
+@lru_cache(maxsize=256)
+def _command_run_before_refusal(text: str, reading: str, arithmetic_parens: bool) -> str:
+    """The first command of ``text``, when the shell runs it before refusing a
+    later one and the walk reads it as the shell does; empty otherwise.
+
+    A unit is refused as the whole text is (a here-string under a shell that
+    has none, a compound's opening word after an assignment). The first unit
+    that is not blank must come before the first refused one and be a plain
+    pipeline (``_plain_pipeline``); it is returned with its comments blanked.
+    """
+    starts, blanked = _parse_unit_starts(text, reading, arithmetic_parens)
+    first: str | None = None
+    for number, start in enumerate(starts):
+        end = starts[number + 1] if number + 1 < len(starts) else len(text)
+        analysed, _, here_strings = _split_heredocs(text[start:end], reading)
+        tokens = _split_punctuation_runs(
+            _shell_tokens(_mark_quoted_newlines(_mark_literal_dollars(analysed))),
+            arithmetic_parens,
+            reading != "ksh",
+        )
+        if (here_strings and reading in _NO_HERE_STRING_SHELLS) or _compound_after_assignment(tokens):
+            return first or ""
+        unit = blanked[start:end]
+        if first is None and unit.strip(" \t\n"):
+            first = unit if _plain_pipeline(unit, reading, arithmetic_parens) else ""
+    return ""
 
 
 # Whether the last command of a pipeline runs in the current shell, so a
@@ -3284,8 +3610,8 @@ _MAX_HEREDOC_OPERANDS = 256
 _MAX_HEREDOCS_PER_LINE = {"bash": 16, "bash-posix": 16, "mksh": 10}
 # dash and busybox ash have no here-string: ``<<<`` is a syntax error there,
 # and the shell runs nothing on the line that holds it, nor any of a compound
-# command spanning lines around it (measured), so nothing in such a text is
-# credited as run under those readings.
+# command spanning lines around it, nor anything after (measured), so under
+# those readings only the complete commands before it are credited as run.
 _NO_HERE_STRING_SHELLS = frozenset({"dash", "ash"})
 # The word after ``<<`` that ends the body, optionally quoted or escaped. The
 # ``-`` of ``<<-`` asks for leading tabs to be stripped from the terminator.
@@ -3916,7 +4242,8 @@ def _cmd_executes_script(
     """Whether a shell command invokes ``expected_script``.
 
     ``_shell`` names the interpreter running this text, when it is known:
-    a ``-c`` payload carries its shell, the tool call itself carries none.
+    a ``-c`` payload carries its shell, and a tool call may name its own
+    (``_tool_call_shell``); a text with neither is read as bash.
     ``_environment`` is what a payload's shell inherits: the names exported
     to it and the prefix assignments of the command that started it.
     Three rules in the walk depend on the shell: whether the last command of
@@ -3948,6 +4275,7 @@ def _walk_for_invocation(
     arithmetic_parens: bool,
     binding_reading: str = "bash",
     environment: dict[str, str] | None = None,
+    own_commands_only: bool = False,
 ) -> bool | None:
     """Whether a shell command invokes ``expected_script``.
 
@@ -3955,7 +4283,9 @@ def _walk_for_invocation(
     invoked directly, an interpreter given it as its script argument, a
     ``source``, or a ``sh -c`` payload that does one of those. Every other
     command is reported as not an invocation, so reading, printing, searching,
-    copying or deleting the file needs no special case.
+    copying or deleting the file needs no special case. ``own_commands_only``
+    leaves a ``-c`` payload unresolved, for a command credited before a line
+    its shell refuses: the payload's own text may be refused too.
 
     ``None`` means undecidable rather than negative, and is returned only when
     the shell resolves the path at run time or an unrecognised option may have
@@ -3991,6 +4321,28 @@ def _walk_for_invocation(
     # does every shell given a compound's opening word after an assignment.
     here_string_refused = bool(here_strings) and binding_reading in _NO_HERE_STRING_SHELLS
     syntax_rejected = here_string_refused or _compound_after_assignment(tokens)
+    if syntax_rejected and _depth == 0 and binding_reading not in _PARSES_WHOLE_TEXT_FIRST:
+        # This shell ran the text's first command before the one it refuses.
+        # When nothing the walk misreads can have stopped it, an invocation
+        # there counts as it would on its own (``_command_run_before_refusal``).
+        # Only in the text a tool call gives: a ``-c`` payload is what the
+        # tokenizer left of it (a carriage return there reads as a line's end).
+        first = _command_run_before_refusal(command_text, binding_reading, arithmetic_parens)
+        if first and (
+            _walk_for_invocation(
+                first,
+                expected_script,
+                _depth,
+                keep_last_stage,
+                positional,
+                arithmetic_parens,
+                binding_reading,
+                environment,
+                own_commands_only=True,
+            )
+            is True
+        ):
+            return True
     if not tokens:
         return None if str(expected_script) in command_text else False
 
@@ -4020,7 +4372,8 @@ def _walk_for_invocation(
         """Whether an invocation found here counts: not once an assignment the
         shell stops at has failed before it (see ``_ASSIGNMENT_REFUSED``), nor
         in a text the shell rejects (``_NO_HERE_STRING_SHELLS``,
-        ``_compound_after_assignment``)."""
+        ``_compound_after_assignment``); the first command it ran before
+        rejecting it may be credited above (``_command_run_before_refusal``)."""
         return not scope.get(_ASSIGNMENT_REFUSED) and not syntax_rejected
 
     def close_frames(parens: int) -> None:
@@ -4252,6 +4605,10 @@ def _walk_for_invocation(
             interpreter = _VERSION_SUFFIX_RE.sub("", executable) or executable
             if interpreter in _SHELL_COMMAND_INTERPRETERS and _runs_inline_code(executable, command, cmd_idx, scope):
                 payload = _shell_c_payload(command, cmd_idx, scope)
+                if payload is not None and own_commands_only:
+                    undecidable = True
+                    idx = end + 1
+                    continue
                 if payload is not None:
                     # This shell expands what it did not leave quoted, a name
                     # it never bound to nothing, before the child reads the rest.
@@ -4369,6 +4726,27 @@ def _walk_for_invocation(
     return False
 
 
+def _tool_call_shell(tool_call: dict[str, Any]) -> tuple[str | None, bool]:
+    """The shell a tool call says ran its command, and whether this walk models it.
+
+    A native call can name its shell (Codex's ``exec_command`` keeps
+    ``shell``, such as ``/bin/zsh``, in its arguments), and the rules that
+    differ between shells then follow it. A call that names none is read as
+    bash, as elsewhere in this walk: ``(None, True)``. The name is taken
+    without its directory, a ``.exe`` suffix or a version number, so
+    ``/usr/local/bin/bash5.2`` is bash; one outside the modelled shells, or a
+    value that is not a name, is ``(name, False)``.
+    """
+    shell = _action_args(tool_call).get("shell")
+    if shell is None or (isinstance(shell, str) and not shell.strip()):
+        return None, True
+    if not isinstance(shell, str):
+        return str(shell), False
+    name = shell.split()[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    name = _VERSION_SUFFIX_RE.sub("", name) or name
+    return name, name in _SHELL_COMMAND_INTERPRETERS
+
+
 def check_script_execution(
     tool_calls: list[dict[str, Any]],
     expected_script: str | None,
@@ -4380,7 +4758,15 @@ def check_script_execution(
     exec_calls = [tc for tc in tool_calls if _is_execution_action(str(tc["action"]))]
     unclassified_reference = False
     for call in exec_calls:
-        verdict = _cmd_executes_script(_command_text(call), expected_script)
+        command = _command_text(call)
+        shell, modelled = _tool_call_shell(call)
+        if modelled:
+            verdict = _cmd_executes_script(command, expected_script, _shell=shell)
+        else:
+            # A shell this walk does not model reads the text by rules it does
+            # not know, so the text settles nothing: a command naming the
+            # script is unresolved, the same reference test the base applied.
+            verdict = None if expected_script in command else False
         if verdict is True:
             return {"passed": True, "score": 1.0, "reason": f"Executed {expected_script}"}
         if verdict is None:

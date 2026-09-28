@@ -593,3 +593,40 @@ def test_openai_provider_missing_both_keys_raises() -> None:
     """Raise ProviderConfigurationError when neither OPENAI_API_KEY nor SKILL_EVAL_LLM_API_KEY is set."""
     with pytest.raises(ProviderConfigurationError, match="OPENAI_API_KEY or SKILL_EVAL_LLM_API_KEY is required"):
         resolve_llm_provider({"SKILL_EVAL_LLM_PROVIDER": "openai"})
+
+
+@pytest.mark.parametrize(
+    "invalid_override",
+    ["not-a-number", "-5", "0", "nan", "inf", "-inf"],
+)
+def test_compute_adc_job_timeout_falls_back_to_effective_ceiling_on_invalid_override(
+    invalid_override: str,
+) -> None:
+    """Fall back to effective_ceiling when configured_timeout_sec is malformed, non-positive, or non-finite."""
+    from skillevaluator.provider_config import compute_adc_job_timeout
+
+    timeout = compute_adc_job_timeout(
+        expiry_epoch=1900.0,
+        now_epoch=1000.0,
+        configured_timeout_sec=invalid_override,
+    )
+    assert timeout == pytest.approx(810.0)
+
+
+def test_sync_refreshed_adc_persistent_env_scrubs_expiry_and_updates_existing_key() -> None:
+    """Scrub CREDENTIAL_EXPIRY_ENV and update OPENAI_API_KEY only when already present and non-empty."""
+    from skillevaluator.provider_config import CREDENTIAL_EXPIRY_ENV, sync_refreshed_adc_persistent_env
+
+    persistent = {
+        CREDENTIAL_EXPIRY_ENV: "1700003600",
+        "OPENAI_API_KEY": "ya29.stale-token",
+    }
+    updated = sync_refreshed_adc_persistent_env(persistent, fresh_token="ya29.fresh-token")
+    assert updated is True
+    assert CREDENTIAL_EXPIRY_ENV not in persistent
+    assert persistent["OPENAI_API_KEY"] == "ya29.fresh-token"
+
+    without_key = {CREDENTIAL_EXPIRY_ENV: "1700003600"}
+    assert sync_refreshed_adc_persistent_env(without_key, fresh_token="ya29.fresh-token") is False
+    assert CREDENTIAL_EXPIRY_ENV not in without_key
+    assert "OPENAI_API_KEY" not in without_key

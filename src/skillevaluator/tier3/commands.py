@@ -772,6 +772,11 @@ def doctor(
     rows: list[tuple[str, str, str]] = []
     rows.append(("CLI package", "pass", f"skillevaluator {__version__}"))
 
+    resolved_env_kwargs = _resolve_environment_kwargs(
+        env_mode,
+        cli_kwargs=environment_kwargs,
+        environ=os.environ,
+    )
     provider = None
     model_resolution: dict[str, tuple[str, str]] = {}
     runtime_plans: dict[str, Any] = {}
@@ -816,7 +821,7 @@ def doctor(
                     configured_runtime_env={},
                     env_mode=env_mode,
                     model_sources={agent: details[1] for agent, details in model_resolution.items()},
-                    environment_kwargs=environment_kwargs,
+                    environment_kwargs=resolved_env_kwargs,
                 )
             except ValueError as exc:
                 plan_error = str(exc)
@@ -844,11 +849,6 @@ def doctor(
     else:
         rows.append(("Harbor agents", "pass", ", ".join(agent_list)))
 
-    resolved_env_kwargs = _resolve_environment_kwargs(
-        env_mode,
-        cli_kwargs=environment_kwargs,
-        environ=os.environ,
-    )
     prereq_errors = _check_prerequisites(
         env_mode=env_mode,
         agents=agent_list,

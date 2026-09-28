@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING, Any
 from harbor.environments.gke import GKEEnvironment, stream
 from kubernetes import client as k8s_client
 
-from skillevaluator.provider_config import refresh_host_vertex_adc_environment
+from skillevaluator.provider_config import (
+    CREDENTIAL_EXPIRY_ENV,
+    refresh_host_vertex_adc_environment,
+    sync_refreshed_adc_persistent_env,
+)
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 
@@ -296,15 +300,19 @@ class SkillEvaluatorGKEEnvironment(GKEEnvironment):
             merged,
             fallback_env=os.environ,
             require_existing_api_key=True,
+            fail_on_expired=True,
             update_os_environ=True,
         )
+        merged.pop(CREDENTIAL_EXPIRY_ENV, None)
+        updated_persistent = sync_refreshed_adc_persistent_env(
+            getattr(self, "_persistent_env", None),
+            fresh_token=fresh_token,
+        )
+        if env is not None and CREDENTIAL_EXPIRY_ENV in env:
+            env = dict(env)
+            env.pop(CREDENTIAL_EXPIRY_ENV, None)
         if fresh_token:
             merged["OPENAI_API_KEY"] = fresh_token
-            persistent = getattr(self, "_persistent_env", None)
-            updated_persistent = False
-            if isinstance(persistent, dict) and persistent.get("OPENAI_API_KEY", "").strip():
-                persistent["OPENAI_API_KEY"] = fresh_token
-                updated_persistent = True
             if env is not None and env.get("OPENAI_API_KEY", "").strip():
                 env = dict(env)
                 env["OPENAI_API_KEY"] = fresh_token

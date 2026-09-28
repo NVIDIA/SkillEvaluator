@@ -31,17 +31,21 @@ from uuid import uuid4
 from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import (
+    ADC_DISCOVERY_ENV_VARS,
     CHAT_DEFAULT_ANTHROPIC,
     CHAT_DEFAULT_NVIDIA,
+    CREDENTIAL_EXPIRY_ENV,
     CREDENTIAL_SOURCE_ADC,
     CREDENTIAL_SOURCE_ENV,
     GATEWAY_AGENT_DEFAULT_MODELS,
-    GOOGLE_ADC_TOKEN_LIFETIME_SEC,
     ProviderConfig,
     ProviderConfigurationError,
     _get_google_access_token,
     _is_vertex_openapi_endpoint,
     _normalize_anthropic_base_url,
+    _normalize_expiry_epoch,
+    compute_adc_job_timeout,
+    get_adc_token_expiry,
     refresh_host_vertex_adc_environment,
     resolve_llm_provider,
 )
@@ -260,17 +264,14 @@ _BEDROCK_HOST_ENV_VARS = frozenset(
         "AWS_WEB_IDENTITY_TOKEN_FILE",
     }
 )
+_ADC_HOST_ENV_VARS = ADC_DISCOVERY_ENV_VARS
 _VERTEX_HOST_ENV_VARS = frozenset(
     {
         "ANTHROPIC_VERTEX_PROJECT_ID",
         "CLAUDE_CODE_USE_VERTEX",
-        "CLOUDSDK_CONFIG",
-        "CLOUDSDK_CORE_PROJECT",
         "CLOUD_ML_REGION",
-        "GCP_PROJECT",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "GOOGLE_CLOUD_PROJECT",
         "SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY",
+        *_ADC_HOST_ENV_VARS,
     }
 )
 _RUNTIME_ENV_HOST_CONTROL_NAMES = (
@@ -361,6 +362,7 @@ _OPERATOR_OWNED_AGENT_ENV = frozenset(
         "NVIDIA_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        CREDENTIAL_EXPIRY_ENV,
         CREDENTIAL_SOURCE_ENV,
         GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
     }
@@ -755,6 +757,11 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
         fresh_token = _get_google_access_token()
         api_key = fresh_token or getattr(config, "api_key", None) or ""
         environment[CREDENTIAL_SOURCE_ENV] = CREDENTIAL_SOURCE_ADC
+        expiry_epoch = get_adc_token_expiry(api_key)
+        if expiry_epoch is None and not fresh_token:
+            expiry_epoch = getattr(config, "credential_expiry", None)
+        if expiry_epoch is not None:
+            environment[CREDENTIAL_EXPIRY_ENV] = str(expiry_epoch)
     else:
         api_key = getattr(config, "api_key", None) or ""
 
@@ -1324,6 +1331,12 @@ def _harbor_subprocess_environment(
     environment.update(_selected_host_environment(_HARBOR_ENV_MODE_VARS.get(env_mode, frozenset()), host_env))
     if provider.provider == "bedrock":
         environment.update(_selected_host_environment(_BEDROCK_HOST_ENV_VARS, host_env))
+    is_adc = (
+        getattr(provider, "credential_env", None) == CREDENTIAL_SOURCE_ADC
+        or provider_env.get(CREDENTIAL_SOURCE_ENV) == CREDENTIAL_SOURCE_ADC
+    )
+    if is_adc and env_mode != ENV_MODE_LOCAL:
+        environment.update(_selected_host_environment(_ADC_HOST_ENV_VARS, host_env))
     environment.update(configured_runtime_env)
     environment.update(provider_env)
     if env_mode == "gke":
@@ -1688,8 +1701,15 @@ def _resolve_agent_runtime_plan(
     effective_provider = provider
     if provider.provider in {"openai", "openai-compatible"}:
         refreshed_key = provider_env.get("OPENAI_API_KEY")
-        if refreshed_key and refreshed_key != provider.api_key:
-            effective_provider = replace(provider, api_key=refreshed_key)
+        refreshed_expiry = _normalize_expiry_epoch(provider_env.get(CREDENTIAL_EXPIRY_ENV))
+        if (refreshed_key and refreshed_key != provider.api_key) or refreshed_expiry != getattr(
+            provider, "credential_expiry", None
+        ):
+            effective_provider = replace(
+                provider,
+                api_key=refreshed_key or provider.api_key,
+                credential_expiry=refreshed_expiry,
+            )
     elif provider.provider == "anthropic":
         refreshed_key = provider_env.get("ANTHROPIC_API_KEY")
         if refreshed_key and refreshed_key != provider.api_key:
@@ -1876,13 +1896,22 @@ def _run_harbor(
     include_task_names: list[str] | None = None,
     environment_kwargs: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
-    base_url = (verifier_env or {}).get("OPENAI_BASE_URL") or run_env.get("OPENAI_BASE_URL")
-    run_env_copy = dict(run_env)
-    fresh_token = refresh_host_vertex_adc_environment(
-        run_env_copy,
-        base_url_override=base_url,
-        token_getter=_get_google_access_token,
+    base_url = (
+        (verifier_env or {}).get("OPENAI_BASE_URL")
+        or run_env.get("OPENAI_BASE_URL")
+        or (verifier_env or {}).get("SKILL_EVAL_LLM_BASE_URL")
+        or run_env.get("SKILL_EVAL_LLM_BASE_URL")
     )
+    run_env_copy = dict(run_env)
+    try:
+        fresh_token = refresh_host_vertex_adc_environment(
+            run_env_copy,
+            base_url_override=base_url,
+            fail_on_expired=True,
+            token_getter=_get_google_access_token,
+        )
+    except RuntimeError as exc:
+        return False, str(exc)
     if fresh_token:
         run_env = run_env_copy
         if verifier_env is not None and "OPENAI_API_KEY" in verifier_env:
@@ -1892,13 +1921,16 @@ def _run_harbor(
     adc_timeout: float | None = None
     is_adc = run_env.get(CREDENTIAL_SOURCE_ENV) == CREDENTIAL_SOURCE_ADC
     if is_adc and _is_vertex_openapi_endpoint(base_url) and env_mode != "gke":
+        active_token = run_env.get("OPENAI_API_KEY")
+        expiry_epoch = get_adc_token_expiry(active_token) or _normalize_expiry_epoch(run_env.get(CREDENTIAL_EXPIRY_ENV))
         raw_timeout = os.environ.get(VERTEX_ADC_JOB_TIMEOUT_ENV, "").strip()
         try:
-            adc_timeout = float(raw_timeout) if raw_timeout else _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
-        except ValueError:
-            adc_timeout = _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
-        if adc_timeout <= 0 or adc_timeout >= GOOGLE_ADC_TOKEN_LIFETIME_SEC:
-            adc_timeout = _VERTEX_ADC_MAX_JOB_TIMEOUT_SEC
+            adc_timeout = compute_adc_job_timeout(
+                expiry_epoch=expiry_epoch,
+                configured_timeout_sec=raw_timeout or None,
+            )
+        except ValueError as exc:
+            return False, str(exc)
 
     command = build_harbor_run_command(
         dataset_path=dataset,

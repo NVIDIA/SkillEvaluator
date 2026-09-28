@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 from click.testing import CliRunner
 
+import skillevaluator.embedding.registry as registry_module
 from skillevaluator.cli import cli
 from skillevaluator.embedding.client import EmbeddingClient
 from skillevaluator.embedding.extractor import ContentEntry, discover_and_extract
@@ -116,9 +117,8 @@ def test_cli_passes_comparison_budget_through_real_pipeline(tmp_path: Path, monk
     _collection(tmp_path, 3)
     client = _client()
     monkeypatch.setattr("skillevaluator.validators.similarity.EmbeddingClient", lambda **_kwargs: client)
-    original_cosine = EmbeddingClient.cosine_similarity
-    cosine = MagicMock(wraps=original_cosine)
-    monkeypatch.setattr(EmbeddingClient, "cosine_similarity", cosine)
+    cosine = MagicMock(wraps=registry_module.unit_vector_similarity)
+    monkeypatch.setattr(registry_module, "unit_vector_similarity", cosine)
 
     result = CliRunner().invoke(
         cli,
@@ -198,9 +198,8 @@ def test_catalog_queries_keep_catalog_capacity_and_apply_work_budget(
     registry = EmbeddingRegistry(client, max_entries=1, max_scalar_comparisons=limit)
     registry.load_catalog(catalog)
     assert registry.size == 3
-    original_cosine = EmbeddingClient.cosine_similarity
-    cosine = MagicMock(wraps=original_cosine)
-    monkeypatch.setattr(EmbeddingClient, "cosine_similarity", cosine)
+    cosine = MagicMock(wraps=registry_module.unit_vector_similarity)
+    monkeypatch.setattr(registry_module, "unit_vector_similarity", cosine)
     target = ContentEntry("target", "Target skill", "target", "skill") if query_method == "query_entry" else "target"
     if succeeds:
         matches = getattr(registry, query_method)(target, 0.75)

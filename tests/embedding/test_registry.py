@@ -305,6 +305,20 @@ class TestFindDuplicates:
         scores = [m.score for m in matches]
         assert scores == sorted(scores, reverse=True)
 
+    def test_pairwise_scan_normalizes_each_vector_once(self, monkeypatch) -> None:
+        vectors = {"a": [1.0, 0.0, 2.0], "b": [3.0, 0.5, 1.0], "c": [2.0, 1.0, 4.0], "d": [0.2, 3.0, 1.0]}
+        registry = self._build_registry_with_entries(_make_mock_client([]), vectors)
+        normalize = MagicMock(wraps=registry_module.normalize_embedding_vector)
+        monkeypatch.setattr(registry_module, "normalize_embedding_vector", normalize)
+
+        matches = registry.find_duplicates(threshold=0.0)
+
+        assert normalize.call_count == len(vectors)
+        assert len(matches) == 6
+        for match in matches:
+            expected = EmbeddingClient.cosine_similarity(vectors[match.entry_a], vectors[match.entry_b])
+            assert match.score == pytest.approx(expected, abs=1e-15)
+
     def test_pairwise_comparison_limit_fails_before_comparing(self, monkeypatch) -> None:
         client = _make_mock_client([])
         registry = self._build_registry_with_entries(
@@ -313,7 +327,7 @@ class TestFindDuplicates:
             max_entries=2,
         )
         cosine = MagicMock(side_effect=AssertionError("limit must fail before cosine"))
-        monkeypatch.setattr(EmbeddingClient, "cosine_similarity", cosine)
+        monkeypatch.setattr(registry_module, "unit_vector_similarity", cosine)
 
         with pytest.raises(ValueError, match="comparison limit"):
             registry.find_duplicates(0.75)
@@ -338,7 +352,7 @@ class TestFindDuplicates:
             max_scalar_comparisons=1,
         )
         cosine = MagicMock(side_effect=AssertionError("limit must fail before cosine"))
-        monkeypatch.setattr(EmbeddingClient, "cosine_similarity", cosine)
+        monkeypatch.setattr(registry_module, "unit_vector_similarity", cosine)
 
         with pytest.raises(ValueError, match=r"scalar.*limit|work limit"):
             registry.find_duplicates(0.75)

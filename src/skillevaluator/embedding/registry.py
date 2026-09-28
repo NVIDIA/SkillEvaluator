@@ -38,7 +38,13 @@ from skillevaluator.constants import (
     SIMILARITY_MAX_ENTRIES,
     SIMILARITY_MEDIUM_THRESHOLD,
 )
-from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
+from skillevaluator.embedding.client import (
+    EmbeddingClient,
+    SimilarityConfigError,
+    normalize_embedding_vector,
+    unit_vector_similarity,
+    validate_embedding_vector,
+)
 from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
@@ -282,12 +288,12 @@ class EmbeddingRegistry:
                 f"Pairwise comparison limit exceeded ({self._max_pairwise_comparisons}); "
                 "increase --max-entries within its supported range to compare the complete collection"
             )
-        vector_dimension = _validate_registry_vectors(entries, self._vector_dimension)
+        unit_vectors, vector_dimension = _normalized_registry_vectors(entries, self._vector_dimension)
         _validate_scalar_work(comparison_count, vector_dimension, self._max_scalar_comparisons)
         matches: list[SimilarityMatch] = []
 
-        for a, b in combinations(entries, 2):
-            score = EmbeddingClient.cosine_similarity(a.embedding, b.embedding)
+        for (a, unit_a), (b, unit_b) in combinations(zip(entries, unit_vectors, strict=True), 2):
+            score = unit_vector_similarity(unit_a, unit_b)
             if score >= threshold:
                 if len(matches) >= MAX_SIMILARITY_MATCHES:
                     raise ValueError(f"Similarity match limit exceeded ({MAX_SIMILARITY_MATCHES})")
@@ -311,15 +317,15 @@ class EmbeddingRegistry:
         """
         _validate_threshold(threshold)
         entries = list(self._entries.values())
-        vector_dimension = _validate_registry_vectors(entries, self._vector_dimension)
+        unit_vectors, vector_dimension = _normalized_registry_vectors(entries, self._vector_dimension)
         _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
-        _validate_vector(vector, vector_dimension or self._vector_dimension)
+        query_vector = _normalized_vector(vector, vector_dimension or self._vector_dimension)
 
         matches: list[SimilarityMatch] = []
-        for entry in entries:
-            score = EmbeddingClient.cosine_similarity(vector, entry.embedding)
+        for entry, unit_vector in zip(entries, unit_vectors, strict=True):
+            score = unit_vector_similarity(query_vector, unit_vector)
             if score >= threshold:
                 if len(matches) >= MAX_SIMILARITY_MATCHES:
                     raise ValueError(f"Similarity match limit exceeded ({MAX_SIMILARITY_MATCHES})")
@@ -340,17 +346,17 @@ class EmbeddingRegistry:
         """Compare one extracted target entry against every catalog entry."""
         _validate_threshold(threshold)
         catalog_entries = list(self._entries.values())
-        vector_dimension = _validate_registry_vectors(catalog_entries, self._vector_dimension)
+        unit_vectors, vector_dimension = _normalized_registry_vectors(catalog_entries, self._vector_dimension)
         _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
         text = entry.full_text if self._full_body else entry.embedding_text
         _validate_embedding_text(text, full_body=self._full_body)
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
-        _validate_vector(vector, vector_dimension or self._vector_dimension)
+        query_vector = _normalized_vector(vector, vector_dimension or self._vector_dimension)
         target_path = Path(entry.path).name or "."
 
         matches: list[SimilarityMatch] = []
-        for catalog_entry in catalog_entries:
-            score = EmbeddingClient.cosine_similarity(vector, catalog_entry.embedding)
+        for catalog_entry, unit_vector in zip(catalog_entries, unit_vectors, strict=True):
+            score = unit_vector_similarity(query_vector, unit_vector)
             if score >= threshold:
                 if len(matches) >= MAX_SIMILARITY_MATCHES:
                     raise ValueError(f"Similarity match limit exceeded ({MAX_SIMILARITY_MATCHES})")
@@ -598,11 +604,30 @@ def _validate_vector(vector: object, expected_dimension: int | None) -> int:
         raise ValueError(str(exc)) from exc
 
 
-def _validate_registry_vectors(entries: list[RegistryEntry], expected_dimension: int | None) -> int:
+def _normalized_vector(vector: object, expected_dimension: int | None) -> list[float]:
+    if isinstance(vector, list) and len(vector) > MAX_VECTOR_DIMENSION:
+        raise ValueError(f"Catalog vector dimension exceeds {MAX_VECTOR_DIMENSION}")
+    try:
+        return normalize_embedding_vector(
+            vector,
+            expected_dimension,
+            context="Catalog embedding",
+        )
+    except SimilarityConfigError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _normalized_registry_vectors(
+    entries: list[RegistryEntry], expected_dimension: int | None
+) -> tuple[list[list[float]], int]:
+    """Validate every vector and normalize each once before repeated comparisons."""
     dimension = expected_dimension
+    normalized: list[list[float]] = []
     for entry in entries:
-        dimension = _validate_vector(entry.embedding, dimension)
-    return dimension or 0
+        vector = _normalized_vector(entry.embedding, dimension)
+        dimension = len(vector)
+        normalized.append(vector)
+    return normalized, dimension or 0
 
 
 def _validate_scalar_work(comparison_count: int, vector_dimension: int, max_scalar_comparisons: int) -> None:

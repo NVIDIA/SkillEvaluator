@@ -5050,7 +5050,8 @@ def _parse_unit_starts(text: str, reading: str, arithmetic_parens: bool) -> tupl
             index = end
             continue
         if char == "$" and text.startswith("'", index + 1):
-            quote = "$'"
+            # Keep the opening token to distinguish ANSI-C from plain single quotes.
+            quote = text[index : index + 2]
             index += 2
             continue
         if char in "'\"`":

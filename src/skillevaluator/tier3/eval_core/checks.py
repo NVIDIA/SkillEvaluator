@@ -2329,6 +2329,44 @@ def _integer_may_fail(value: str, scope: dict[str, str], depth: int = 0) -> bool
     return bool(held) and _integer_may_fail(held, scope, depth + 1)
 
 
+# A numeric attribute (``-i``, and ``-F`` or ``-E`` for a float) given to a
+# name whose value is not a number stops zsh and ksh, whether the value is
+# given with it or held (measured with ``typeset -F f=run.py; python3 run.py``
+# and ``f=run.py; typeset -i f; python3 run.py``); a decimal, or nothing, is
+# a number there.
+_NUMERIC_ATTRIBUTE_STOPS = frozenset({"zsh", "ksh"})
+_NUMERIC_ATTRIBUTES = frozenset("iFE")
+_DECIMAL_VALUE_RE = re.compile(r"[-+]?(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?|0[xX][0-9a-fA-F]+)")
+# ``base#digits``: zsh takes a base from 2 to 36 and digits below it, and ksh
+# at least that (measured: ``2#9``, ``1#1`` and ``99#1`` stop zsh).
+_BASED_VALUE_RE = re.compile(r"[-+]?([0-9]+)#([0-9a-zA-Z]+)")
+# A width given with ``-L``, ``-R`` or ``-Z`` (``typeset -L3 f``) cuts or pads
+# the value a name holds, at once, in zsh, ksh and mksh (measured with
+# ``f=run.py; typeset -L3 f; python3 "$f"``, which runs ``run``).
+_JUSTIFYING_SHELLS = frozenset({"zsh", "ksh", "mksh"})
+
+
+def _number_may_fail(value: str, scope: dict[str, str]) -> bool:
+    """Whether a numeric attribute may fail on ``value``: as ``_integer_may_fail``,
+    where a decimal, ``0x10`` and ``16#ff`` are numbers too and nothing (an unset
+    or empty name) is 0. An expression (``g+1``) is not evaluated, and may fail."""
+    value = value.strip("\"'")
+    if not value or _DECIMAL_VALUE_RE.fullmatch(value):
+        return False
+    based = _BASED_VALUE_RE.fullmatch(value)
+    if based:
+        # zsh and ksh read the base as a decimal and drop its leading zeros
+        # (``016#ff`` is 255 in both, measured). A base of more than two
+        # digits is past 36 and is not converted: int() refuses a string of
+        # more than 4,300 digits.
+        base_digits = based.group(1).lstrip("0")
+        if len(base_digits) > 2:
+            return True
+        base = int(base_digits or "0")
+        return not (2 <= base <= 36 and all(int(digit, 36) < base for digit in based.group(2)))
+    return _integer_may_fail(value, scope)
+
+
 # A special builtin given an option the shell rejects (``export -n`` in dash,
 # ``unset -n`` in mksh) stops a POSIX shell, unless ``command`` runs it; bash
 # and zsh report it and go on (measured).
@@ -2386,13 +2424,32 @@ _DECLARATION_OPTIONS["typeset"] = _DECLARATION_OPTIONS["declare"]
 # Options only some shells accept, measured with ``export f=run.py; <form> f;
 # bash -c 'python3 "$f"'``: ``export -n`` unexports in bash and ash and is
 # rejected by dash, zsh, ksh and mksh; ``export -f`` names functions in bash.
+# A listing (``-p``) or functions (``-f``, ``-F``) change no variable only in
+# the shells named here, measured with ``f=other.py; <form> f=run.py;
+# python3 "$f"`` and ``f=run.py; <form> f; f=other.py; python3 "$f"``:
+# ``declare -p`` and ``typeset -p`` only list in bash and zsh, whatever else
+# is given with them. ksh's ``typeset -p`` and ``typeset -f`` assign, and so
+# does mksh's ``typeset -px``; ``-F`` is a floating-point attribute in zsh
+# and ksh, which stop on a value such as run.py.
 _DECLARATION_OPTION_SHELLS = {
     ("export", "-n"): frozenset({"bash", "bash-posix", "ash"}),
     ("export", "-f"): frozenset({"bash", "bash-posix"}),
     ("readonly", "-f"): frozenset({"bash", "bash-posix"}),
     ("declare", "-g"): frozenset({"bash", "bash-posix", "zsh"}),
     ("typeset", "-g"): frozenset({"bash", "bash-posix", "zsh"}),
+    ("declare", "-p"): frozenset({"bash", "bash-posix", "zsh"}),
+    ("typeset", "-p"): frozenset({"bash", "bash-posix", "zsh"}),
+    ("typeset", "-f"): frozenset({"bash", "bash-posix", "zsh", "mksh"}),
+    ("declare", "-F"): frozenset({"bash", "bash-posix"}),
+    ("typeset", "-F"): frozenset({"bash", "bash-posix"}),
 }
+# Given names, ``export -p`` and ``readonly -p`` act on them as they do
+# without ``-p`` in bash, bash --posix, ksh, mksh and busybox ash, which list
+# only when no name is given; dash and zsh list the names and change nothing.
+# Measured with ``export f=other.py; <form> f=run.py; python3 "$f"``,
+# ``<form> f=run.py; bash -c 'python3 "$f"'`` and ``f=run.py; <form> f;
+# f=other.py; python3 "$f"``.
+_LISTING_ACTS_ON_NAMES = frozenset({"bash", "bash-posix", "ksh", "mksh", "ash"})
 # Where a declaration assigns several names, most shells expand every value
 # before assigning any, so ``export f=run.py g=$f`` gives g the earlier f;
 # ksh assigns them in order. Prefix assignments are the reverse: every shell
@@ -2591,8 +2648,14 @@ def _declaration_options(name: str, words: list[str], reading: str) -> tuple[lis
         shells = _DECLARATION_OPTION_SHELLS.get((name, option))
         if effect is None or (shells is not None and reading not in shells):
             known = False
+        elif effect == "print" and name in {"export", "readonly"} and reading in _LISTING_ACTS_ON_NAMES:
+            # Names given, it acts on them; none given, it names nothing.
+            effects.add("none")
         else:
             effects.add(effect)
+    if "print" in effects and name in {"declare", "typeset"}:
+        # ``declare -p`` lists whatever else is given with it.
+        return operands, {"print"}, True
     return operands, effects, known
 
 
@@ -2633,7 +2696,7 @@ def _apply_binding_builtin(command: list[str], cmd_idx: int, scope: dict[str, st
     ):
         # The builtin is not reached: the command fails and changes nothing.
         return name != "printf"
-    words = [str(word) for word in command[index + 1 :]]
+    words = _without_redirections(command[index + 1 :])
     if name in _DECLARATION_BUILTINS:
         operands, effects, known = _declaration_options(name, words, reading)
         names = [
@@ -2659,6 +2722,26 @@ def _apply_binding_builtin(command: list[str], cmd_idx: int, scope: dict[str, st
                 else _READONLY_ATTRIBUTES.get(name, frozenset())
             )
             added, removed = added & letters_given, removed & letters_given
+            numeric_letters: set[str] = set()
+            width = False
+            for position, word in enumerate(words):
+                if word == "--" or len(word) < 2 or word[0] not in "-+":
+                    break
+                if word[0] == "-":
+                    # ksh applies ``-i`` before a later ``+i`` takes it away.
+                    numeric_letters |= set(word[1:]) & _NUMERIC_ATTRIBUTES
+                following = words[position + 1] if position + 1 < len(words) else ""
+                # A width is given in the word (``-L3``) or as the next one
+                # (``-L 3``, ``-Lx 3``).
+                width = width or (
+                    word[0] == "-"
+                    and bool(set(word[1:]) & set("LRZ"))
+                    and (any(c.isdigit() for c in word) or following.isdigit())
+                )
+            # ``local`` outside a function declares in zsh and mksh only.
+            declares = name in {"declare", "typeset"} or (name == "local" and reading in {"zsh", "mksh"})
+            numeric = declares and bool(numeric_letters)
+            width = declares and width
             if name in _SPECIAL_BUILTINS and reading in _SPECIAL_BUILTIN_ERROR_STOPS and not vias:
                 scope[_ASSIGNMENT_REFUSED] = "1"
             if "n" in added and reading not in _REFERENCE_SHELLS:
@@ -2683,12 +2766,24 @@ def _apply_binding_builtin(command: list[str], cmd_idx: int, scope: dict[str, st
                     # frees it; neither acts on the name it referred to.
                     scope[_ATTRIBUTE_MARK + variable] = scope[_ATTRIBUTE_MARK + variable].replace("n", "")
                 letters = (set(scope.get(_ATTRIBUTE_MARK + variable, "")) | added) - removed
-                if assignment is not None and "i" in letters and _integer_may_fail(value, scope):
+                if (
+                    numeric
+                    and reading in _NUMERIC_ATTRIBUTE_STOPS
+                    and _number_may_fail(value if assignment else scope.get(variable, ""), scope)
+                ):
+                    _refuse_assignment(scope, variable, reading, "numeric attribute")
+                elif (
+                    not (numeric and reading in _NUMERIC_ATTRIBUTE_STOPS)
+                    and assignment is not None
+                    and "i" in letters
+                    and _integer_may_fail(value, scope)
+                ):
                     _refuse_assignment(scope, variable, reading, name, _INTEGER_ERROR_GOES_ON)
                 elif (
                     assignment is not None
                     or name == "local"
                     or (added and (reading not in _DECLARATION_KEEPS_VALUE or "n" in added))
+                    or (width and reading in _JUSTIFYING_SHELLS)
                 ):
                     # With no value, only taking attributes away, or giving
                     # them in bash, leaves the value as it was.
@@ -2735,6 +2830,11 @@ def _apply_binding_builtin(command: list[str], cmd_idx: int, scope: dict[str, st
             # shell stops.
             if reading in _SPECIAL_BUILTIN_ERROR_STOPS and not vias:
                 scope[_ASSIGNMENT_REFUSED] = "1"
+            return True
+        if not operands and reading == "ksh" and not vias:
+            # ksh refuses ``unset`` given no name, and stops (measured with
+            # ``f=run.py; unset > f; python3 "$f"``); ``command unset`` goes on.
+            scope[_ASSIGNMENT_REFUSED] = "1"
             return True
         if options == ["-f"]:
             # Functions, not variables.
@@ -3956,6 +4056,34 @@ def _heredoc_header(line: str) -> tuple[str, list[str], list[tuple[str, bool]]] 
 
 def _is_redirection_operator(token: str) -> bool:
     return _is_output_redirect(token) or _is_heredoc_redirect(token) or token in _INPUT_REDIRECT_OPERATORS
+
+
+# A redirection operator as the tokenizer hands it over: a word of its own,
+# made only of ``<``, ``>``, ``&`` and ``|`` (zsh's ``>>|`` and ``&>|`` among
+# them), with a descriptor only where one was written flush against it
+# (``2>``, kept with its operator before tokenizing). An unquoted operator
+# never stays inside a word, so a word that ends or starts with one (``g=>``
+# from ``g='>'``, ``>x`` from ``'>x'``) is data, and a quoted operator
+# (``'>'``) carries the mark.
+_REDIRECTION_WORD_RE = re.compile(r"\d*[<>&|]*[<>][<>&|]*")
+
+
+def _without_redirections(words: list[str]) -> list[str]:
+    """A command's words with each redirection and its operand removed, as the
+    shell removes them: ``export -p > f=other.py`` writes a listing to a file
+    named f=other.py and binds nothing, and ``export g='>' f=run.py`` binds
+    both names."""
+    kept: list[str] = []
+    skip_next = False
+    for word in words:
+        token = str(word)
+        if skip_next:
+            skip_next = False
+        elif _REDIRECTION_WORD_RE.fullmatch(token):
+            skip_next = True
+        else:
+            kept.append(token)
+    return kept
 
 
 def _interpreter_operands(command: list[str], cmd_idx: int, assignments: dict[str, str]) -> list[str]:

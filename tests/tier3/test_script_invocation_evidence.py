@@ -1742,6 +1742,265 @@ def test_removing_the_export_attribute_is_honoured_however_the_builtin_is_reache
     assert check(_bash(command, "done"), EXPECTED_SCRIPT)["score"] == expected
 
 
+_OTHER_THEN_LISTED = 'export f=run.py; export -p f=other.py; python3 "$f"'
+_LISTED_ALONE = 'export -p f=run.py; python3 "$f"'
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "shell", "expected"),
+    [
+        (_OTHER_THEN_LISTED, None, 0.0),
+        (_OTHER_THEN_LISTED, "/bin/bash", 0.0),
+        (_OTHER_THEN_LISTED, "/bin/ksh", 0.0),
+        (_OTHER_THEN_LISTED, "/bin/mksh", 0.0),
+        (_OTHER_THEN_LISTED, "/bin/zsh", 1.0),
+        (_OTHER_THEN_LISTED, "/bin/dash", 1.0),
+        (_OTHER_THEN_LISTED, "/bin/sh", 0.75),
+        (_LISTED_ALONE, None, 1.0),
+        (_LISTED_ALONE, "/bin/ksh", 1.0),
+        (_LISTED_ALONE, "/bin/mksh", 1.0),
+        (_LISTED_ALONE, "/bin/zsh", 0.0),
+        (_LISTED_ALONE, "/bin/dash", 0.0),
+        (_LISTED_ALONE, "/bin/sh", 0.75),
+        ('readonly -p f=run.py; python3 "$f"', None, 1.0),
+        ('readonly -p f=run.py; python3 "$f"', "/bin/zsh", 0.0),
+        ('f=other.py; readonly -p f=run.py; python3 "$f"', None, 1.0),
+        ('f=other.py; readonly -p f=run.py; python3 "$f"', "/bin/dash", 0.0),
+        ('export f=run.py; readonly -p f=other.py; python3 "$f"', None, 0.0),
+        ('export f=run.py; readonly -p f=other.py; python3 "$f"', "/bin/zsh", 1.0),
+        ("export -p f=run.py; bash -c 'python3 \"$f\"'", None, 1.0),
+        ("f=run.py; export -p f; bash -c 'python3 \"$f\"'", None, 1.0),
+        ("f=run.py; export -p f; bash -c 'python3 \"$f\"'", "/bin/zsh", 0.0),
+        ('f=run.py; readonly -p f; f=other.py; python3 "$f"', None, 0.75),
+        ('f=run.py; readonly -p f; f=other.py; python3 "$f"', "/bin/dash", 0.0),
+        ('f=run.py; export -p >/dev/null; python3 "$f"', None, 1.0),
+        ('f=run.py; export -p >/dev/null; python3 "$f"', "/bin/zsh", 1.0),
+        ('export -pn f=run.py; python3 "$f"', None, 1.0),
+        ("f=run.py; export f; export -pn f; bash -c 'python3 \"$f\"'", None, 0.0),
+        ("f=run.py; export f; export -pn f; bash -c 'python3 \"$f\"'", "/bin/zsh", 1.0),
+        ('command export -p f=run.py; python3 "$f"', None, 1.0),
+        ('command export -p f=run.py; python3 "$f"', "/bin/zsh", 0.0),
+        ("bash -c 'export f=run.py; export -p f=other.py; python3 \"$f\"'", None, 0.0),
+        ("zsh -c 'export -p f=run.py; python3 \"$f\"'", None, 0.0),
+        ('declare -p f=run.py; python3 "$f"', None, 0.0),
+        ('f=other.py; declare -px f=run.py; python3 "$f"', None, 0.0),
+        ('f=other.py; typeset -p f=run.py; python3 "$f"', "/bin/zsh", 0.0),
+        ('f=other.py; typeset -p f=run.py; python3 "$f"', "/bin/ksh", 0.75),
+        ('f=other.py; typeset -px f=run.py; python3 "$f"', "/bin/mksh", 0.75),
+        ('export f=run.py; export -p > f=other.py; python3 "$f"', None, 1.0),
+        ('export f=run.py; export -p >f=other.py; python3 "$f"', "/bin/ksh", 1.0),
+        ('export f=run.py; readonly -p 2> f=other.py; python3 "$f"', None, 1.0),
+        ('f=other.py; export -p > f=run.py; python3 "$f"', None, 0.0),
+        ("f=run.py; export -p > f; bash -c 'python3 \"$f\"'", None, 0.0),
+        ('export f=run.py; export > f=other.py; python3 "$f"', None, 1.0),
+        ("typeset -pF f=run.py; python3 run.py", "/bin/zsh", 1.0),
+    ],
+)
+def test_a_listing_option_given_names_acts_on_them_where_the_shell_does(check, command, shell, expected) -> None:
+    """``export -p`` and ``readonly -p`` given names act on them as they do
+    without ``-p`` in bash, bash --posix, ksh, mksh and busybox ash, which list
+    only when no name is given: ``export f=run.py; export -p f=other.py``
+    runs other.py there, and ``export -p f=run.py`` binds and exports run.py.
+    dash and zsh list the names and change nothing. ``declare -p`` and
+    ``typeset -p`` list in bash and zsh, whatever else is given with them;
+    ksh's ``typeset -p`` and mksh's ``typeset -px`` assign, which is read as
+    unsettled. A redirection and its operand are not names: ``export -p >
+    f=other.py`` writes the listing to a file and binds nothing. Measured
+    with a marker in each shell.
+    """
+    assert check(_native(command, shell), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "shell", "expected"),
+    [
+        ('f=other.py; typeset -f f=run.py; python3 "$f"', None, 0.0),
+        ('f=other.py; typeset -f f=run.py; python3 "$f"', "/bin/zsh", 0.0),
+        ('f=other.py; typeset -f f=run.py; python3 "$f"', "/bin/mksh", 0.0),
+        ('f=other.py; typeset -f f=run.py; python3 "$f"', "/bin/ksh", 0.75),
+        ('f=run.py; declare -F f; python3 "$f"', None, 1.0),
+        ('f=run.py; declare -F f; python3 "$f"', "/bin/zsh", 0.75),
+        ("typeset -F f=run.py; python3 run.py", None, 1.0),
+        ("typeset -F f=run.py; python3 run.py", "/bin/zsh", 0.75),
+        ("typeset -F f=run.py; python3 run.py", "/bin/ksh", 0.75),
+        ("typeset -F f=run.py; python3 run.py", "/bin/mksh", 1.0),
+        ("typeset -E f=run.py; python3 run.py", "/bin/zsh", 0.75),
+        ("typeset -F f=2; python3 run.py", "/bin/zsh", 1.0),
+        ("f=1.5; typeset -F f; python3 run.py", "/bin/ksh", 1.0),
+        ("typeset -F f; python3 run.py", "/bin/zsh", 1.0),
+        ("g=run.py; typeset -F f=g; python3 run.py", "/bin/zsh", 0.75),
+        ("f=run.py; (typeset -F f); python3 run.py", "/bin/zsh", 1.0),
+        ("f=run.py; local -F f; python3 run.py", "/bin/zsh", 0.75),
+        ("f=run.py; typeset -i f; python3 run.py", None, 1.0),
+        ("f=run.py; typeset -i f; python3 run.py", "/bin/zsh", 0.75),
+        ("f=run.py; typeset -i f; python3 run.py", "/bin/ksh", 0.75),
+        ("f=run.py; typeset -i f; python3 run.py", "/bin/mksh", 1.0),
+        ("f=2.5; typeset -i f; python3 run.py", "/bin/zsh", 1.0),
+        ("typeset -i f=run.py; python3 run.py", "/bin/ksh", 0.75),
+        ('f=run.py; typeset -L3 f; python3 "$f"', None, 1.0),
+        ('f=run.py; typeset -L3 f; python3 "$f"', "/bin/zsh", 0.75),
+        ('f=run.py; typeset -Z3 f; python3 "$f"', "/bin/ksh", 0.75),
+        ('f=run.py; typeset -R8 f; python3 "$f"', "/bin/mksh", 0.75),
+        ('f=run.py; typeset -L f; python3 "$f"', "/bin/zsh", 1.0),
+        ('f=run.py; typeset -L 3 f; python3 "$f"', "/bin/zsh", 0.75),
+        ('f=run.py; typeset -x -Z 3 f; python3 "$f"', "/bin/ksh", 0.75),
+        ("typeset -i f=0x10; python3 run.py", "/bin/ksh", 1.0),
+        ("typeset -i f=0x10; python3 run.py", "/bin/zsh", 1.0),
+        ("typeset -i f=16#ff; python3 run.py", "/bin/ksh", 1.0),
+        ("typeset -i f=2#101; python3 run.py", "/bin/zsh", 1.0),
+        ("typeset -i f=99#1; python3 run.py", "/bin/zsh", 0.75),
+        ("typeset -i f=2#9; python3 run.py", "/bin/zsh", 0.75),
+        ('f=run.py; typeset -Lx 3 f; python3 "$f"', "/bin/zsh", 0.75),
+        ("f=0x10; typeset -i f; python3 run.py", "/bin/zsh", 1.0),
+        ("typeset -F f=0x10; python3 run.py", "/bin/ksh", 1.0),
+        ("typeset -i f=g+1; python3 run.py", "/bin/zsh", 0.75),
+        ("f=run.py; typeset -i +i f; python3 run.py", "/bin/ksh", 0.75),
+        ('f=run.py; typeset -A m; python3 "$f"', "/bin/zsh", 1.0),
+    ],
+)
+def test_function_float_and_width_options_follow_each_shell(check, command, shell, expected) -> None:
+    """``-f`` and ``-F`` name functions and change no variable in bash, but not
+    everywhere: ksh's ``typeset -f f=run.py`` assigns, and ``-F`` and ``-E``
+    are float attributes in zsh and ksh. A numeric attribute (``-i`` too)
+    given to a name whose value is not a number, given or held, stops zsh and
+    ksh; a decimal, ``0x10``, ``16#ff`` or nothing is a number, and an
+    expression is not evaluated. A width given with ``-L``, ``-R`` or ``-Z``,
+    in the word or as the next one, cuts or pads the value at once in zsh, ksh
+    and mksh, so the name is unsettled. Measured with a marker in each shell.
+    """
+    assert check(_native(command, shell), EXPECTED_SCRIPT)["score"] == expected
+
+
+_ZEROS = "0" * 4400
+
+
+@pytest.mark.parametrize("module", [shared_checks, TEMPLATE], ids=["host", "harbor-verifier"])
+@pytest.mark.parametrize(
+    ("command", "shell", "expected"),
+    [
+        ("typeset -F f=" + "9" * 4400 + "#1; python3 run.py", "/bin/zsh", 0.75),
+        ("typeset -i f=" + "9" * 4301 + "#1; python3 run.py", "/bin/ksh", 0.75),
+        ("typeset -i f=" + _ZEROS + "16#ff; python3 run.py", "/bin/zsh", 1.0),
+        ("typeset -F f=" + _ZEROS + "36#z; python3 run.py", "/bin/ksh", 1.0),
+        ("typeset -i f=" + _ZEROS + "2#9; python3 run.py", "/bin/zsh", 0.75),
+        ("typeset -i f=" + _ZEROS + "37#1; python3 run.py", "/bin/zsh", 0.75),
+        ("typeset -i f=016#ff; python3 run.py", "/bin/zsh", 1.0),
+        ("typeset -i f=36#z; python3 run.py", "/bin/zsh", 1.0),
+        ("typeset -i f=37#1; python3 run.py", "/bin/zsh", 0.75),
+        ("typeset -i f=1#1; python3 run.py", "/bin/zsh", 0.75),
+    ],
+)
+def test_a_numeric_base_of_any_length_is_scored(module, command, shell, expected) -> None:
+    """zsh and ksh read a ``base#digits`` base as a decimal and drop its leading
+    zeros, so ``016#ff`` and a base written after thousands of zeros are 16.
+    A base past 36 is not a number the walk accepts, however many digits it
+    has, and the command still gets a score from both public scorers: int()
+    refuses a string of more than 4,300 digits, so the base is not converted
+    until it is known to be short. Measured with a marker in zsh and ksh.
+    """
+    calls = _native(command, shell)
+    assert module.check_script_execution(calls, EXPECTED_SCRIPT)["score"] == expected
+    aggregate = module.score_skill_execution(calls, "demo", EXPECTED_SCRIPT)
+    assert aggregate["details"]["script_execution"]["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "shell", "expected"),
+    [
+        ("export g='>' f=run.py; python3 \"$f\"", None, 1.0),
+        ("export g='>' f=run.py; python3 \"$f\"", "/bin/zsh", 1.0),
+        ("export g='>' f=run.py; python3 \"$f\"", "/bin/dash", 1.0),
+        ("export g='>' f=run.py; python3 \"$f\"", "/bin/ksh", 1.0),
+        ("f=run.py; export g='>' f=other.py; python3 \"$f\"", None, 0.0),
+        ("f=run.py; export g='>' f=other.py; python3 \"$f\"", "/bin/zsh", 0.0),
+        ("f=run.py; export g='>' f=other.py; python3 \"$f\"", "/bin/dash", 0.0),
+        ("f=run.py; export g='>' f=other.py; python3 \"$f\"", "/bin/ksh", 0.0),
+        ("export g='>>' f=run.py; python3 \"$f\"", None, 1.0),
+        ("export g='>' f=run.py >output; python3 \"$f\"", None, 1.0),
+        ('export g=\\> f=run.py; python3 "$f"', None, 1.0),
+        ("export g='2>' f=run.py; python3 \"$f\"", None, 1.0),
+        ("readonly g='>' f=run.py; python3 \"$f\"", "/bin/dash", 1.0),
+        ("typeset g='>' f=run.py; python3 \"$f\"", "/bin/ksh", 1.0),
+        ("f=run.py; typeset g='>' f=other.py; python3 \"$f\"", "/bin/zsh", 0.0),
+        ("declare g='>' f=run.py; python3 \"$f\"", None, 1.0),
+        ('export f=run.py > out; python3 "$f"', None, 1.0),
+        ('export >out f=run.py; python3 "$f"', "/bin/dash", 1.0),
+        ('export 2>err f=run.py; python3 "$f"', None, 1.0),
+        ('export 2> err f=run.py; python3 "$f"', "/bin/ksh", 1.0),
+        ('export f=run.py 2>&1; python3 "$f"', "/bin/zsh", 1.0),
+        ('export f=run.py 0<run.py; python3 "$f"', None, 1.0),
+        ('export g=2> f=run.py; python3 "$f"', None, 0.0),
+        ('export 2 > f=run.py; python3 "$f"', None, 0.0),
+        ('f=run.py; export -p > f=other.py; python3 "$f"', None, 1.0),
+        ('f=other.py; export >>| f=run.py; python3 "$f"', "/bin/zsh", 0.0),
+        ('f=other.py; export &>| f=run.py; python3 "$f"', "/bin/zsh", 0.0),
+    ],
+)
+def test_an_assignment_ending_in_an_operator_is_not_a_redirection(check, command, shell, expected) -> None:
+    """An unquoted redirection operator is a word of its own, so only such a
+    word, with a descriptor written flush against it (``2>``), takes the next
+    word as its operand. ``export g='>' f=run.py`` binds both names in every
+    shell: ``g=>`` is an assignment that ends in ``>``, and f is bound. A real
+    redirection, separate or attached, still takes its operand, zsh's ``>>|``
+    and ``&>|`` included, and ``export g=2> f=run.py`` writes to a file named
+    f=run.py. Measured with a marker in each shell.
+    """
+    assert check(_native(command, shell), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+@pytest.mark.parametrize(
+    ("command", "shell", "expected"),
+    [
+        ('f=run.py; unset > f; python3 "$f"', "/bin/ksh", 0.75),
+        ('f=run.py; unset; python3 "$f"', "/bin/ksh", 0.75),
+        ('f=run.py; unset -v; python3 "$f"', "/bin/ksh", 0.75),
+        ('f=run.py; command unset; python3 "$f"', "/bin/ksh", 1.0),
+        ('f=run.py; (unset); python3 "$f"', "/bin/ksh", 1.0),
+        ('f=run.py; unset > f; python3 "$f"', None, 1.0),
+        ('f=run.py; unset > f; python3 "$f"', "/bin/mksh", 1.0),
+        ('f=run.py; unset; python3 "$f"', "/bin/dash", 1.0),
+    ],
+)
+def test_ksh_stops_on_unset_given_no_name(check, command, shell, expected) -> None:
+    """``unset`` given no name prints its usage and stops ksh, unless ``command``
+    runs it or a subshell holds it; the other shells go on. The target of a
+    redirection is not a name, so ``unset > f`` gives none. Measured with a
+    marker in each shell.
+    """
+    assert check(_native(command, shell), EXPECTED_SCRIPT)["score"] == expected
+
+
+@pytest.mark.parametrize("module", [shared_checks, TEMPLATE], ids=["host", "harbor-verifier"])
+@pytest.mark.parametrize(
+    ("text", "second_unit", "comment"),
+    [
+        ("echo $'it\\'s # kept'\npython3 run.py", None, None),
+        ("echo $'a\n# still quoted'\ntrue", "true", None),
+        ("echo 'a\\'\npython3 run.py # gone", "python3 run.py # gone", "# gone"),
+    ],
+)
+def test_an_ansi_c_quote_honours_its_escapes_when_finding_where_commands_end(
+    module, text, second_unit, comment
+) -> None:
+    """``$'...'`` closes on ``'`` as ``'...'`` does, but a backslash escapes the
+    character after it: in ``$'it\\'s # kept'`` the ``#`` is quoted and starts
+    no comment, and in ``$'a\n# still quoted'`` the newline ends nothing. In
+    ``'a\\'`` the backslash is literal, so the quote closes and a later
+    ``#`` starts a comment. Where the text does not settle a newline (the
+    escaped quote in the first), the lines are read as one unit.
+    """
+    starts, blanked = module._parse_unit_starts(text, "bash", False)
+    assert starts == ([0] if second_unit is None else [0, text.index(second_unit)])
+    if comment is None:
+        assert blanked == text
+    else:
+        assert comment not in blanked and blanked.replace(" ", "") == text.replace(comment, "").replace(" ", "")
+
+
 def _heredocs(count: int, before: str, after: str = "", body: str = "x", quote: str = "") -> str:
     """``before``, then ``count`` heredocs declared on one line, ``after``, and each body in order."""
     names = [f"D{index}" for index in range(count)]

@@ -142,13 +142,14 @@ def is_retriable_exception(exc: BaseException) -> bool:
 def retry_call_with_backoff[T](
     operation: Callable[[], T],
     *,
+    config: RetryConfig | None = None,
     max_retries: int | None = None,
     base_delay: float | None = None,
     max_delay: float | None = None,
     on_retry: Callable[[BaseException, int, float], None] | None = None,
 ) -> T:
     """Execute operation, retrying on transient HTTP or network faults using full jitter."""
-    cfg = resolve_retry_config()
+    cfg = config if config is not None else resolve_retry_config()
     retries_limit = cfg.max_retries if max_retries is None else max(0, max_retries)
     ceiling_delay = cfg.max_delay if max_delay is None else max(0.0, max_delay)
     initial_delay = min(ceiling_delay, cfg.base_delay if base_delay is None else max(0.0, base_delay))

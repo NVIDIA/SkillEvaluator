@@ -5,10 +5,14 @@
 
 from __future__ import annotations
 
+import email.message
+import io
 import json
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests.conftest import MockUrllibResponse, load_harbor_eval_template
 
 from skillevaluator.provider_config import CHAT_CHEAP_OPENAI, CHAT_DEFAULT_OPENAI
 from skillevaluator.tier3.eval_core import llm_judge
@@ -23,6 +27,7 @@ from skillevaluator.tier3.eval_core import llm_judge
     ],
 )
 def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model: str) -> None:
+    """Verify native OpenAI gpt-5 requests use max_completion_tokens without temperature."""
     payload = llm_judge._chat_completion_payload(
         model=model,
         prompt="Judge this response",
@@ -52,10 +57,12 @@ def test_native_openai_gpt5_uses_max_completion_tokens_without_temperature(model
     ],
 )
 def test_gpt5_family_rejects_custom_temperature(model: str) -> None:
+    """Verify gpt-5 models do not support custom temperature."""
     assert not llm_judge._supports_custom_temperature(model)
 
 
 def test_older_models_accept_custom_temperature() -> None:
+    """Verify legacy model families support custom temperature."""
     assert llm_judge._supports_custom_temperature("gpt-4.1-mini")
     assert llm_judge._supports_custom_temperature("claude-opus-4-6")
     assert llm_judge._supports_custom_temperature("claude-opus-4-20250514")
@@ -82,12 +89,14 @@ def test_older_models_accept_custom_temperature() -> None:
     ],
 )
 def test_newer_claude_models_reject_custom_temperature(model: str) -> None:
+    """Verify newer Claude models do not accept custom temperature."""
     assert not llm_judge._supports_custom_temperature(model)
 
 
 def test_call_public_llm_uses_production_gpt5_payload_without_temperature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify call_public_llm formats gpt-5 payload with max_completion_tokens and no temperature."""
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
@@ -324,9 +333,6 @@ def test_structured_judges_pass_openai_response_format_schema(
     valid_response: str,
 ) -> None:
     """Verify OpenAI/compatible judge calls pass strict json_schema in both shared judge and template."""
-    import importlib.util
-    from pathlib import Path
-
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
     monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
@@ -349,30 +355,14 @@ def test_structured_judges_pass_openai_response_format_schema(
     assert rf["json_schema"]["schema"]["additionalProperties"] is False
 
     # Verify Harbor template parity on the HTTP boundary
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_slice1", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
-
+    eval_template = load_harbor_eval_template("harbor_template_eval_slice1")
     captured_requests: list[dict] = []
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self):
-            return json.dumps({"choices": [{"message": {"content": valid_response}}]}).encode()
+    resp = MockUrllibResponse({"choices": [{"message": {"content": valid_response}}]})
 
     monkeypatch.setattr(
         eval_template.urllib.request,
         "urlopen",
-        lambda req, **_: captured_requests.append(json.loads(req.data)) or _Resp(),
+        lambda req, **_: captured_requests.append(json.loads(req.data)) or resp,
     )
     template_result = getattr(eval_template, judge_name)(*call_args)
     assert template_result["score"] == 1.0
@@ -384,9 +374,6 @@ def test_structured_judges_pass_anthropic_output_config_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify Anthropic judge calls pass output_config.format.json_schema instead of response_format."""
-    import importlib.util
-    from pathlib import Path
-
     valid_response = json.dumps(
         {
             "criteria": {
@@ -419,30 +406,14 @@ def test_structured_judges_pass_anthropic_output_config_schema(
     assert anth_kwargs["output_config"]["format"]["type"] == "json_schema"
     assert anth_kwargs["output_config"]["format"]["schema"] == llm_judge.ACCURACY_JSON_SCHEMA
 
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_anth", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
-
+    eval_template = load_harbor_eval_template("harbor_template_eval_anth")
     captured_requests: list[dict] = []
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self):
-            return json.dumps({"content": [{"type": "text", "text": valid_response}]}).encode()
+    anth_resp = MockUrllibResponse({"content": [{"type": "text", "text": valid_response}]})
 
     monkeypatch.setattr(
         eval_template.urllib.request,
         "urlopen",
-        lambda req, **_: captured_requests.append(json.loads(req.data)) or _Resp(),
+        lambda req, **_: captured_requests.append(json.loads(req.data)) or anth_resp,
     )
     template_result = eval_template.judge_accuracy("question", "ground truth", "agent response")
     assert template_result["score"] == 1.0
@@ -474,11 +445,6 @@ def test_client_and_template_downgrade_on_400_422_and_memoize_across_calls(
     status_code: int,
 ) -> None:
     """Verify HTTP 400/422 on schema calls downgrades to prompt-only and memoizes the model."""
-    import importlib.util
-    import io
-    import urllib.error
-    from pathlib import Path
-
     valid_response = json.dumps(
         {
             "criteria": {
@@ -526,25 +492,9 @@ def test_client_and_template_downgrade_on_400_422_and_memoize_across_calls(
     assert "response_format" not in sdk_calls[2]
 
     # Verify Harbor template parity for 400/422 downgrade + memoization
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location(f"harbor_template_eval_{status_code}", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
-
+    eval_template = load_harbor_eval_template(f"harbor_template_eval_{status_code}")
     http_requests: list[dict] = []
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self):
-            return json.dumps({"choices": [{"message": {"content": valid_response}}]}).encode()
+    ok_resp = MockUrllibResponse({"choices": [{"message": {"content": valid_response}}]})
 
     def fake_urlopen(req, **_):
         payload = json.loads(req.data)
@@ -554,10 +504,10 @@ def test_client_and_template_downgrade_on_400_422_and_memoize_across_calls(
                 req.full_url,
                 status_code,
                 "Bad Request",
-                {},
+                email.message.Message(),
                 io.BytesIO(b'{"error": "json_schema not supported"}'),
             )
-        return _Resp()
+        return ok_resp
 
     monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
     tres1 = eval_template.judge_accuracy("q1", "gt1", "ans1")
@@ -620,10 +570,8 @@ def test_template_model_fallback_isolates_schema_memoization_per_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify memoizing primary-model as schema-unsupported does not strip schema from fallback-model."""
-    import importlib.util
     import io
     import urllib.error
-    from pathlib import Path
 
     valid_response = json.dumps(
         {
@@ -644,25 +592,9 @@ def test_template_model_fallback_isolates_schema_memoization_per_model(
     monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "old-primary-model")
     monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "modern-fallback-model")
 
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_fallback_iso", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
-
+    eval_template = load_harbor_eval_template("harbor_template_eval_fallback_iso")
     http_requests: list[dict] = []
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self):
-            return json.dumps({"choices": [{"message": {"content": valid_response}}]}).encode()
+    ok_resp = MockUrllibResponse({"choices": [{"message": {"content": valid_response}}]})
 
     def fake_urlopen(req, **_):
         payload = json.loads(req.data)
@@ -673,17 +605,17 @@ def test_template_model_fallback_isolates_schema_memoization_per_model(
                     req.full_url,
                     400,
                     "Bad Request",
-                    {},
+                    email.message.Message(),
                     io.BytesIO(b'{"error": "json_schema not supported"}'),
                 )
             raise urllib.error.HTTPError(
                 req.full_url,
                 404,
                 "Not Found",
-                {},
+                email.message.Message(),
                 io.BytesIO(b'{"error": "model not found"}'),
             )
-        return _Resp()
+        return ok_resp
 
     monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
     res = eval_template.judge_accuracy("q", "gt", "ans")
@@ -702,9 +634,6 @@ def test_reasoning_token_exhaustion_missing_message_retries_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify missing 'message' or message=None on finish_reason='length' is treated as empty content."""
-    import importlib.util
-    from pathlib import Path
-
     valid_response = json.dumps(
         {
             "criteria": {
@@ -730,35 +659,17 @@ def test_reasoning_token_exhaustion_missing_message_retries_cleanly(
         res = llm_judge.judge_accuracy("q", "gt", "ans")
     assert res["score"] == 1.0
 
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_missing_msg", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
-
+    eval_template = load_harbor_eval_template("harbor_template_eval_missing_msg")
     responses = iter(
         [
-            {"choices": [{"finish_reason": "length", "index": 0, "message": None}]},
-            {"choices": [{"finish_reason": "stop", "index": 0, "message": {"content": valid_response}}]},
+            MockUrllibResponse({"choices": [{"finish_reason": "length", "index": 0, "message": None}]}),
+            MockUrllibResponse(
+                {"choices": [{"finish_reason": "stop", "index": 0, "message": {"content": valid_response}}]}
+            ),
         ]
     )
 
-    class _Resp:
-        def __init__(self, data):
-            self._data = data
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self):
-            return json.dumps(self._data).encode()
-
-    monkeypatch.setattr(eval_template.urllib.request, "urlopen", lambda _req, **_: _Resp(next(responses)))
+    monkeypatch.setattr(eval_template.urllib.request, "urlopen", lambda _req, **_: next(responses))
     tres = eval_template.judge_accuracy("q", "gt", "ans")
     assert tres["score"] == 1.0
 
@@ -805,10 +716,8 @@ def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
     monkeypatch: pytest.MonkeyPatch, schema_error: str
 ) -> None:
     """Verify Anthropic provider downgrades output_config on HTTP 400 and memoizes across calls."""
-    import importlib.util
     import io
     import urllib.error
-    from pathlib import Path
 
     valid_response = json.dumps(
         {
@@ -855,25 +764,9 @@ def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
     assert "output_config" not in anth_calls[1]
     assert "output_config" not in anth_calls[2]
 
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_anth_400", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
-
+    eval_template = load_harbor_eval_template("harbor_template_eval_anth_400")
     http_requests: list[dict] = []
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self):
-            return json.dumps({"content": [{"type": "text", "text": valid_response}]}).encode()
+    anth_resp = MockUrllibResponse({"content": [{"type": "text", "text": valid_response}]})
 
     def fake_urlopen(req, timeout=90):
         payload = json.loads(req.data)
@@ -883,10 +776,10 @@ def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
                 req.full_url,
                 400,
                 "Bad Request",
-                {},
+                email.message.Message(),
                 io.BytesIO(json.dumps({"error": schema_error}).encode()),
             )
-        return _Resp()
+        return anth_resp
 
     monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
     tres1 = eval_template.judge_accuracy("q1", "gt1", "ans1")
@@ -911,7 +804,7 @@ def test_judge_schema_not_spoofed_by_transcript_containing_accuracy_tokens(monke
     client_mod._SCHEMA_UNSUPPORTED_TARGETS.clear()
     monkeypatch.setenv("LLM_JUDGE_PROVIDER", "openai")
     monkeypatch.setenv("LLM_JUDGE_MODEL", "google/gemini-3.8-flash")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123456")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
     captured_kwargs: list[dict] = []
 
@@ -968,7 +861,7 @@ def test_schema_builders_and_downgrade_warning_log(monkeypatch, caplog):
     client_mod._SCHEMA_UNSUPPORTED_TARGETS.clear()
     monkeypatch.setenv("LLM_JUDGE_PROVIDER", "openai")
     monkeypatch.setenv("LLM_JUDGE_MODEL", "legacy/model-400")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123456")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
     valid_response = json.dumps(
         {
@@ -1069,7 +962,7 @@ def test_unrelated_400_does_not_disable_schema_flags(error_message: str) -> None
     client = LLMClient(
         model="gpt-5.6-sol",
         base_url="https://api.openai.com/v1",
-        api_key="sk-test-fake",
+        api_key="test-openai-key",
         max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(mock_handler)),
     )
@@ -1110,7 +1003,7 @@ def test_schema_downgrade_memoized_only_on_confirmed_success() -> None:
     client_a = LLMClient(
         model="gpt-5.6-sol",
         base_url="https://api.openai.com/v1",
-        api_key="sk-test-fake",
+        api_key="test-openai-key",
         max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(mock_handler_failure)),
     )
@@ -1136,7 +1029,7 @@ def test_schema_downgrade_memoized_only_on_confirmed_success() -> None:
     client_b = LLMClient(
         model="gpt-5.6-sol",
         base_url="https://api.openai.com/v1",
-        api_key="sk-test-fake",
+        api_key="test-openai-key",
         max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(mock_handler_success)),
     )
@@ -1159,56 +1052,36 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
     monkeypatch: pytest.MonkeyPatch, error_message: str
 ) -> None:
     """Verify template eval.py does not treat unrelated 400 as schema capability failure."""
-    import importlib.util
-    import io
-    import urllib.error
-    from pathlib import Path
-
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_unrelated_400", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
+    eval_template = load_harbor_eval_template("harbor_template_eval_unrelated_400")
 
     eval_template._SCHEMA_UNSUPPORTED_TARGETS.clear()
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
 
     http_requests: list[dict] = []
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self):
-            return json.dumps(
+    ok_resp = MockUrllibResponse(
+        {
+            "choices": [
                 {
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "criteria": {
-                                            "SKILL_IDENTIFIED": True,
-                                            "ACTION_CORRECT": True,
-                                            "FACTUALLY_ACCURATE": True,
-                                            "TASK_ADDRESSED": True,
-                                            "ACTIONABLE": True,
-                                        },
-                                        "score": 1.0,
-                                        "reason": "ok",
-                                    }
-                                )
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "criteria": {
+                                    "SKILL_IDENTIFIED": True,
+                                    "ACTION_CORRECT": True,
+                                    "FACTUALLY_ACCURATE": True,
+                                    "TASK_ADDRESSED": True,
+                                    "ACTIONABLE": True,
+                                },
+                                "score": 1.0,
+                                "reason": "ok",
                             }
-                        }
-                    ]
+                        )
+                    }
                 }
-            ).encode()
+            ]
+        }
+    )
 
     call_count = 0
 
@@ -1222,10 +1095,10 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
                 req.full_url,
                 400,
                 "Bad Request",
-                {},
+                email.message.Message(),
                 io.BytesIO(json.dumps({"error": {"message": error_message}}).encode()),
             )
-        return _Resp()
+        return ok_resp
 
     monkeypatch.setattr(eval_template.urllib.request, "urlopen", fake_urlopen)
 
@@ -1252,17 +1125,9 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
     ],
 )
 def test_schema_rejection_grammar_accepts_direct_option_errors(message: str) -> None:
-    import importlib.util
-    from pathlib import Path
-
+    """Verify structured schema rejection regex matches direct option error messages."""
     from skillevaluator.inference import client as client_mod
 
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-    )
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_rejection_grammar", template_path)
-    assert spec and spec.loader
-    eval_template = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(eval_template)
+    eval_template = load_harbor_eval_template("harbor_template_eval_rejection_grammar")
     assert client_mod._message_rejects_schema_option(message)
     assert eval_template._message_rejects_schema_option(message)

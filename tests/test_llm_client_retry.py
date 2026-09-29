@@ -141,33 +141,13 @@ def test_llm_client_respects_custom_retry_params() -> None:
     assert client.retry_max_delay == 45.0
 
 
-def test_openai_transport_level_request_count_zero_retries() -> None:
-    """Verify OpenAI SDK with max_retries=0 executes exactly one request on 429."""
-    import openai
-
-    request_count = 0
-
-    def mock_handler(request: httpx.Request) -> httpx.Response:
-        nonlocal request_count
-        request_count += 1
-        return httpx.Response(429, json={"error": {"message": "Rate limit reached", "type": "rate_limit_error"}})
-
-    client = LLMClient(
-        model="gpt-5.6-sol",
-        base_url="https://api.openai.com/v1",
-        api_key="sk-test-fake",
-        max_retries=0,
-        http_client=httpx.Client(transport=httpx.MockTransport(mock_handler)),
-    )
-    with pytest.raises(openai.RateLimitError) as exc_info:
-        client.completions("system", "user")
-
-    assert "rate_limit" in str(exc_info.value).lower() or exc_info.value.status_code == 429
-    assert request_count == 1
-
-
-def test_openai_transport_level_request_count_with_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify OpenAI SDK with max_retries=3 executes exactly four requests on persistent 429."""
+@pytest.mark.parametrize(("max_retries", "expected_requests"), [(0, 1), (3, 4)])
+def test_openai_transport_level_request_count(
+    monkeypatch: pytest.MonkeyPatch,
+    max_retries: int,
+    expected_requests: int,
+) -> None:
+    """Verify OpenAI SDK executes exactly expected number of requests on rate limits."""
     import openai
 
     monkeypatch.setattr("time.sleep", lambda _: None)
@@ -181,52 +161,29 @@ def test_openai_transport_level_request_count_with_retries(monkeypatch: pytest.M
     client = LLMClient(
         model="gpt-5.6-sol",
         base_url="https://api.openai.com/v1",
-        api_key="sk-test-fake",
-        max_retries=3,
+        api_key="test-openai-key",
+        max_retries=max_retries,
         retry_base_delay=0.01,
         http_client=httpx.Client(transport=httpx.MockTransport(mock_handler)),
     )
     with pytest.raises(openai.RateLimitError):
         client.completions("system", "user")
 
-    assert request_count == 4  # 1 initial + 3 retries, outer loop owns budget
+    assert request_count == expected_requests
 
 
-def test_anthropic_transport_level_request_count_zero_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify Anthropic SDK with max_retries=0 executes exactly one request on 429."""
-    import anthropic
-
-    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-fake")
-    request_count = 0
-
-    def mock_handler(request: httpx.Request) -> httpx.Response:
-        nonlocal request_count
-        request_count += 1
-        return httpx.Response(
-            429,
-            json={"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited"}},
-        )
-
-    client = LLMClient(
-        model="claude-3-opus",
-        max_retries=0,
-        http_client=httpx.Client(transport=httpx.MockTransport(mock_handler)),
-    )
-    with pytest.raises(anthropic.RateLimitError) as exc_info:
-        client.completions("system", "user")
-
-    assert "rate" in str(exc_info.value).lower() or exc_info.value.status_code == 429
-    assert request_count == 1
-
-
-def test_anthropic_transport_level_request_count_with_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify Anthropic SDK with max_retries=3 executes exactly four requests on persistent 429."""
+@pytest.mark.parametrize(("max_retries", "expected_requests"), [(0, 1), (3, 4)])
+def test_anthropic_transport_level_request_count(
+    monkeypatch: pytest.MonkeyPatch,
+    max_retries: int,
+    expected_requests: int,
+) -> None:
+    """Verify Anthropic SDK executes exactly expected number of requests on rate limits."""
     import anthropic
 
     monkeypatch.setattr("time.sleep", lambda _: None)
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-fake")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     request_count = 0
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
@@ -239,11 +196,11 @@ def test_anthropic_transport_level_request_count_with_retries(monkeypatch: pytes
 
     client = LLMClient(
         model="claude-3-opus",
-        max_retries=3,
+        max_retries=max_retries,
         retry_base_delay=0.01,
         http_client=httpx.Client(transport=httpx.MockTransport(mock_handler)),
     )
     with pytest.raises(anthropic.RateLimitError):
         client.completions("system", "user")
 
-    assert request_count == 4  # 1 initial + 3 retries, outer loop owns budget
+    assert request_count == expected_requests

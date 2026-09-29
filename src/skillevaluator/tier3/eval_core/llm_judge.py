@@ -616,6 +616,7 @@ def _call_validated_json_judge(
     extract: Any,
     **call_kwargs: Any,
 ) -> tuple[Any, str | None, dict[str, Any]]:
+    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
     call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
 
     def invoke(call_prompt: str) -> tuple[Any, str | None, dict[str, Any], str | None]:
@@ -745,6 +746,7 @@ _ACCURACY_CRITERIA_KEYS = frozenset(
 
 
 def _valid_accuracy_criteria(value: Any) -> bool:
+    """Return True when value is a complete 5-criterion boolean mapping."""
     return (
         isinstance(value, dict)
         and value.keys() == _ACCURACY_CRITERIA_KEYS
@@ -753,6 +755,7 @@ def _valid_accuracy_criteria(value: Any) -> bool:
 
 
 def _accuracy_payload_error(parsed: Any) -> str | None:
+    """Validate a parsed accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     if "reason" in parsed and not isinstance(parsed["reason"], str):
@@ -842,6 +845,7 @@ Respond with ONLY a JSON object:
 
 
 def _goal_payload_error(parsed: Any) -> str | None:
+    """Validate a parsed goal-accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     for field in ("reason", "user_goal", "end_state"):
@@ -972,7 +976,8 @@ def judge_behavior_check(
     if error:
         return _judge_error(f"LLM judge error: {error}", results=[])
 
-    def _parse_judge_object(text: str) -> dict[str, Any] | list[Any] | None:
+    def _parse_judge_object(text: str | None) -> dict[str, Any] | list[Any] | None:
+        """Parse a JSON object or list from judge response text."""
         return _extract_json(text) if text else None
 
     parsed = _parse_judge_object(content)

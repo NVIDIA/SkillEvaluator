@@ -32,6 +32,7 @@ These variables select and configure the provider used for LLM-backed checks and
 | `SKILL_EVAL_LLM_MAX_RETRIES` | `3` | Extra attempts for transient LLM judge failures after the initial request. `0` disables retries; invalid or negative values use the default. |
 | `SKILL_EVAL_LLM_RETRY_BASE_DELAY` | `1` second | Base for exponential jitter between direct LLM judge attempts. Values must be finite and nonnegative. |
 | `SKILL_EVAL_LLM_RETRY_MAX_DELAY` | `30` seconds | Maximum sleep between direct LLM judge attempts. A `Retry-After` value above this limit fails fast; values must be finite and nonnegative. |
+| `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` | `180` seconds | Wall-time budget per required LLM judge in the Harbor verifier. Values must be finite and positive; invalid or nonpositive values use the default. |
 | `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` | unset | Comma-separated hosts whose model catalog may be read over plain HTTP. Catalog reads otherwise require HTTPS unless the host is loopback, because the request carries a bearer token. Use this only when the transport is already encrypted and authenticated below HTTP — a WireGuard or comparable tunnel peer, for example — where the tool cannot see that the link is protected. Each entry matches one whole host as written, with no resolution, no suffix matching, and no wildcards. A plain-HTTP request to an accepted host also bypasses any inherited HTTP proxy, so the bearer token is never offered to an intermediary. The transport rechecks authorization before dispatch and rejects hosts that are no longer allowed. HTTPS routing is unchanged. |
 | `NVIDIA_API_KEY` | — | Credential for the `nv_build` provider (NVIDIA Build). |
 | `OPENAI_API_KEY` | — | Credential for the `openai` provider. |
@@ -44,7 +45,8 @@ These variables select and configure the provider used for LLM-backed checks and
 The retry settings apply to the shared host LLM client and direct public-provider
 calls in the Harbor verifier. The canonical OpenAI RAGAS goal scorer uses its
 own adapter and scoring path. Harbor's managed verifier limits each required
-judge to 180 seconds so retries leave time to write a failed-run report.
+judge to `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` (180 seconds by default) so retries
+leave time to write a failed-run report.
 
 ### Anthropic endpoint roots
 

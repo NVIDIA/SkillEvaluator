@@ -22,6 +22,7 @@ RAGAS is used for goal_accuracy and accuracy when available.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import ipaddress
 import json
@@ -42,7 +43,7 @@ from contextvars import ContextVar
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote, unquote_to_bytes, urlparse, urlsplit
 
 import idna
@@ -1538,7 +1539,36 @@ _DEFAULT_MAX_DELAY = 30.0
 # Three required judges run sequentially under the managed 600-second Harbor
 # verifier timeout. Reserve one minute for deterministic checks and artifacts.
 _JUDGE_WALL_TIME_BUDGET_SEC = 180.0
-_ACTIVE_JUDGE_DEADLINE = ContextVar("active_judge_deadline", default=None)
+_ACTIVE_JUDGE_DEADLINE: ContextVar[float | None] = ContextVar("active_judge_deadline", default=None)
+
+
+class EvalRetryConfig(NamedTuple):
+    """Represent bounded retry and backoff settings for direct verifier LLM calls."""
+
+    max_retries: int
+    base_delay: float
+    max_delay: float
+
+
+class SchemaTargetKey(NamedTuple):
+    """Identify a provider endpoint and model for structured output schema memoization."""
+
+    provider: str
+    base_url: str
+    model: str
+
+
+def _resolve_judge_wall_time_budget():
+    """Resolve the per-judge wall-time budget in seconds from the environment."""
+    raw = str(os.environ.get("SKILL_EVAL_LLM_JUDGE_BUDGET_SEC", "")).strip()
+    if raw:
+        try:
+            val = float(raw)
+            if math.isfinite(val) and val > 0.0:
+                return val
+        except ValueError:
+            pass
+    return _JUDGE_WALL_TIME_BUDGET_SEC
 
 
 def _remaining_judge_timeout(timeout):
@@ -1608,12 +1638,29 @@ def _resolve_eval_retry_config():
     max_retries = _read_int("SKILL_EVAL_LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
     base_delay = _read_float("SKILL_EVAL_LLM_RETRY_BASE_DELAY", _DEFAULT_BASE_DELAY)
     raw_max_delay = _read_float("SKILL_EVAL_LLM_RETRY_MAX_DELAY", _DEFAULT_MAX_DELAY)
-    return max_retries, base_delay, max(base_delay, raw_max_delay)
+    return EvalRetryConfig(max_retries=max_retries, base_delay=base_delay, max_delay=max(base_delay, raw_max_delay))
+
+
+def _compute_bounded_retry_delay(retry_after_str, *, attempt, base_delay, max_delay, error):
+    """Compute a bounded retry sleep duration and verify the judge deadline allows it."""
+    if retry_after_str is not None:
+        parsed = _parse_retry_after(retry_after_str, fallback_delay=base_delay)
+        if parsed > max_delay:
+            raise error
+        delay = parsed + random.uniform(0.1, 0.5)
+    else:
+        delay = _calculate_jitter_delay(attempt, base_delay=base_delay, max_delay=max_delay)
+
+    sleep_duration = min(delay, max_delay)
+    deadline = _ACTIVE_JUDGE_DEADLINE.get()
+    if deadline is not None and time.monotonic() + sleep_duration >= deadline:
+        raise TimeoutError("LLM judge time budget exhausted before retry") from error
+    return sleep_duration
 
 
 def _urlopen_with_retry(request, timeout=90):
     """Open a URL request with exponential backoff and full jitter on transient failures."""
-    max_retries, base_delay, max_delay = _resolve_eval_retry_config()
+    retry_config = _resolve_eval_retry_config()
     attempt = 0
     while True:
         request_timeout = _remaining_judge_timeout(timeout)
@@ -1624,7 +1671,7 @@ def _urlopen_with_retry(request, timeout=90):
             is_http = isinstance(error, urllib.error.HTTPError)
             is_network = isinstance(error, (urllib.error.URLError, ConnectionError, OSError))
             if (
-                attempt >= max_retries
+                attempt >= retry_config.max_retries
                 or (not is_http and not is_network)
                 or (is_http and error.code not in _RETRIABLE_HTTP_CODES)
             ):
@@ -1634,25 +1681,20 @@ def _urlopen_with_retry(request, timeout=90):
             if is_http and error.headers:
                 retry_after_str = error.headers.get("retry-after") or error.headers.get("Retry-After")
 
-            if retry_after_str is not None:
-                parsed = _parse_retry_after(retry_after_str, fallback_delay=base_delay)
-                if parsed > max_delay:
-                    raise
-                delay = parsed + random.uniform(0.1, 0.5)
-            else:
-                delay = _calculate_jitter_delay(attempt, base_delay=base_delay, max_delay=max_delay)
-
-            sleep_duration = min(delay, max_delay)
-            deadline = _ACTIVE_JUDGE_DEADLINE.get()
-            if deadline is not None and time.monotonic() + sleep_duration >= deadline:
-                raise TimeoutError("LLM judge time budget exhausted before retry") from error
+            sleep_duration = _compute_bounded_retry_delay(
+                retry_after_str,
+                attempt=attempt,
+                base_delay=retry_config.base_delay,
+                max_delay=retry_config.max_delay,
+                error=error,
+            )
             status_label = f"HTTP {error.code}" if is_http else type(error).__name__
             logger.warning(
                 "LLM judge transient error (%s). Retrying in %.2fs (attempt %d/%d)...",
                 status_label,
                 sleep_duration,
                 attempt + 1,
-                max_retries,
+                retry_config.max_retries,
             )
             if is_http:
                 error.close()
@@ -1734,11 +1776,12 @@ def _is_schema_unsupported_http_error(error):
     return _message_rejects_schema_option(text, error_param)
 
 
-_SCHEMA_UNSUPPORTED_TARGETS = set()
+_SCHEMA_UNSUPPORTED_TARGETS: set[SchemaTargetKey] = set()
 
 
 def _urlopen_with_schema_fallback(build_request, *, target_key, use_schema, timeout=90):
     """Open URL with retry, falling back to prompt-only on confirmed schema capability errors."""
+    normalized_key = target_key if isinstance(target_key, SchemaTargetKey) else SchemaTargetKey(*target_key)
     try:
         return _urlopen_with_retry(build_request(use_schema), timeout=timeout)
     except urllib.error.HTTPError as error:
@@ -1747,11 +1790,11 @@ def _urlopen_with_schema_fallback(build_request, *, target_key, use_schema, time
             logger.warning(
                 "Structured output schema unsupported by provider=%s model=%s; "
                 "downgrading to prompt-only JSON and memoizing target.",
-                target_key[0],
-                target_key[2],
+                normalized_key.provider,
+                normalized_key.model,
             )
             response = _urlopen_with_retry(build_request(False), timeout=timeout)
-            _SCHEMA_UNSUPPORTED_TARGETS.add(target_key)
+            _SCHEMA_UNSUPPORTED_TARGETS.add(normalized_key)
             return response
         raise
 
@@ -1761,7 +1804,7 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     if not api_key:
         return None, "ANTHROPIC_API_KEY is required for the anthropic provider"
     target_url = _anthropic_url()
-    target_key = ("anthropic", target_url, model)
+    target_key = SchemaTargetKey(provider="anthropic", base_url=target_url, model=model)
     use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
 
     def _build_request(include_schema):
@@ -1801,21 +1844,138 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     return content.strip(), None
 
 
-def _call_bedrock(prompt, model, max_tokens, temperature):
+_RETRIABLE_BEDROCK_ERROR_CODES = frozenset(
+    {
+        "ThrottlingException",
+        "Throttling",
+        "TooManyRequestsException",
+        "ServiceUnavailableException",
+        "ServiceUnavailable",
+        "InternalServerException",
+        "InternalServerError",
+        "InternalFailure",
+        "ModelTimeoutException",
+        "RequestTimeout",
+        "RequestTimeoutException",
+    }
+)
+_RETRIABLE_BOTOCORE_EXCEPTION_NAMES = frozenset(
+    {
+        "EndpointConnectionError",
+        "ConnectionClosedError",
+        "ReadTimeoutError",
+        "ConnectTimeoutError",
+    }
+)
+
+
+def _classify_bedrock_retry_error(error):
+    """Return (is_retriable, status_label, retry_after_str) for a Bedrock Converse exception."""
+    if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
+        return False, type(error).__name__, None
+    if isinstance(error, (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)):
+        return False, type(error).__name__, None
+
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        response = {}
+    metadata = response.get("ResponseMetadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    http_status = metadata.get("HTTPStatusCode")
+    if not isinstance(http_status, int) or isinstance(http_status, bool):
+        http_status = None
+
+    err_info = response.get("Error")
+    if not isinstance(err_info, dict):
+        err_info = {}
+    error_code = str(err_info.get("Code") or "").strip()
+
+    headers = metadata.get("HTTPHeaders")
+    retry_after_str = None
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            if isinstance(k, str) and k.lower() == "retry-after" and v is not None:
+                retry_after_str = str(v)
+                break
+
+    if http_status is not None or error_code:
+        is_retriable = (
+            http_status in _RETRIABLE_HTTP_CODES or http_status == 408 or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
+        )
+        status_label = f"HTTP {http_status}" if http_status is not None else error_code
+        return is_retriable, status_label, retry_after_str
+
+    type_name = type(error).__name__
+    is_network = (
+        isinstance(error, (ConnectionError, TimeoutError, OSError)) or type_name in _RETRIABLE_BOTOCORE_EXCEPTION_NAMES
+    )
+    return is_network, type_name, None
+
+
+def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90):
     try:
         import boto3
     except ImportError:
         return None, "boto3 is required for the bedrock provider"
+    BotoConfig = None
+    with contextlib.suppress(ImportError):
+        from botocore.config import Config as BotoConfig
     try:
-        client = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-west-2"))
+        retry_config = _resolve_eval_retry_config()
+        region_name = os.environ.get("AWS_REGION", "us-west-2")
+        initial_timeout = _remaining_judge_timeout(timeout)
+        client_kwargs = {"region_name": region_name}
+        if BotoConfig is not None:
+            client_kwargs["config"] = BotoConfig(
+                connect_timeout=initial_timeout,
+                read_timeout=initial_timeout,
+                retries={"max_attempts": 0, "mode": "standard"},
+            )
+        try:
+            client = boto3.client("bedrock-runtime", **client_kwargs)
+        except TypeError:
+            client = boto3.client("bedrock-runtime", region_name=region_name)
+
         inference_config = {"maxTokens": max_tokens}
         if temperature is not None and _supports_custom_temperature(model):
             inference_config["temperature"] = temperature
-        response = client.converse(
-            modelId=model,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig=inference_config,
-        )
+
+        attempt = 0
+        while True:
+            request_timeout = _remaining_judge_timeout(timeout)
+            endpoint = getattr(client, "_endpoint", None)
+            if endpoint is not None and hasattr(endpoint, "timeout"):
+                endpoint.timeout = request_timeout
+            try:
+                response = client.converse(
+                    modelId=model,
+                    messages=[{"role": "user", "content": [{"text": prompt}]}],
+                    inferenceConfig=inference_config,
+                )
+                break
+            except Exception as error:
+                is_retriable, status_label, retry_after_str = _classify_bedrock_retry_error(error)
+                if attempt >= retry_config.max_retries or not is_retriable:
+                    raise
+
+                sleep_duration = _compute_bounded_retry_delay(
+                    retry_after_str,
+                    attempt=attempt,
+                    base_delay=retry_config.base_delay,
+                    max_delay=retry_config.max_delay,
+                    error=error,
+                )
+                logger.warning(
+                    "LLM judge transient error (%s). Retrying in %.2fs (attempt %d/%d)...",
+                    status_label,
+                    sleep_duration,
+                    attempt + 1,
+                    retry_config.max_retries,
+                )
+                time.sleep(sleep_duration)
+                attempt += 1
+
         content = "".join(
             str(block.get("text", ""))
             for block in response.get("output", {}).get("message", {}).get("content", [])
@@ -1881,7 +2041,7 @@ def _call_public_llm_with_provenance(
             if not api_key:
                 return None, f"No API key configured for {provider}", provenance
             request_url = _resolve_url(provider)
-            target_key = (provider, request_url, candidate_model)
+            target_key = SchemaTargetKey(provider=provider, base_url=request_url, model=candidate_model)
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
 
             def _build_oai_request(
@@ -7447,6 +7607,7 @@ _JUDGE_RETRY_REMINDER = (
 
 
 def _call_validated_json_judge(prompt, validate, call, extract, **call_kwargs):
+    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
     call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
 
     def invoke(call_prompt):
@@ -7485,6 +7646,7 @@ _ACCURACY_CRITERIA_KEYS = frozenset(
 
 
 def _valid_accuracy_criteria(value):
+    """Return True when value is a complete 5-criterion boolean mapping."""
     return (
         isinstance(value, dict)
         and value.keys() == _ACCURACY_CRITERIA_KEYS
@@ -7493,6 +7655,7 @@ def _valid_accuracy_criteria(value):
 
 
 def _accuracy_payload_error(parsed):
+    """Validate a parsed accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     if "reason" in parsed and not isinstance(parsed["reason"], str):
@@ -7507,6 +7670,7 @@ def _accuracy_payload_error(parsed):
 
 
 def _goal_payload_error(parsed):
+    """Validate a parsed goal-accuracy judge payload and return an error message if malformed."""
     if not isinstance(parsed, dict):
         return "Judge response was not a valid JSON object"
     for field in ("reason", "user_goal", "end_state"):
@@ -7701,7 +7865,10 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     loop = asyncio.new_event_loop()
     try:
         result = loop.run_until_complete(
-            asyncio.wait_for(metric.ascore(sample), timeout=_remaining_judge_timeout(_JUDGE_WALL_TIME_BUDGET_SEC))
+            asyncio.wait_for(
+                metric.ascore(sample),
+                timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
+            )
         )
     finally:
         loop.close()
@@ -7928,8 +8095,9 @@ def _normalize_required_judge_result(metric, result):
 
 
 def _call_required_judge(metric, judge, *args, **kwargs):
+    """Run a required LLM judge under a bounded wall-time deadline and normalize its result."""
     previous_deadline = _ACTIVE_JUDGE_DEADLINE.get()
-    own_deadline = time.monotonic() + _JUDGE_WALL_TIME_BUDGET_SEC
+    own_deadline = time.monotonic() + _resolve_judge_wall_time_budget()
     deadline = min(previous_deadline, own_deadline) if previous_deadline is not None else own_deadline
     token = _ACTIVE_JUDGE_DEADLINE.set(deadline)
     alarm_armed = False
@@ -8138,7 +8306,7 @@ def main():
             details[_m]["omitted"] = _b["omitted"]
 
     # ── Write results ────────────────────────────────────────────────────
-    result = {
+    result: dict[str, Any] = {
         "security": security_score,
         "skill_execution": se_score,
         "skill_efficiency": sef_score,

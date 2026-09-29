@@ -39,6 +39,7 @@ _CUSTOM_RUNNER_TEMPLATE = (
 
 
 def _load_verifier(tmp_path: Path) -> ModuleType:
+    """Load and initialize the Harbor verifier template module in a temporary workspace."""
     module_name = f"harbor_eval_failure_artifacts_{tmp_path.name}"
     spec = importlib.util.spec_from_file_location(module_name, _EVAL_TEMPLATE)
     assert spec and spec.loader
@@ -96,6 +97,7 @@ def test_verifier_main_fails_closed_after_collecting_every_required_judge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify verifier main fails closed with exit code 1 after collecting every required judge error."""
     verifier = _load_verifier(tmp_path)
     credential = "dummy-secret-credential-DO-NOT-RETAIN"
     monkeypatch.setenv("ANTHROPIC_API_KEY", credential)
@@ -164,7 +166,7 @@ def test_verifier_main_fails_closed_after_collecting_every_required_judge(
 def test_verifier_retries_leave_time_to_write_failure_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Slow transient calls must finish before Harbor's verifier timeout kills artifact writes."""
+    """Ensure slow transient calls finish before Harbor verifier timeout kills artifact writes."""
     verifier = _load_verifier(tmp_path)
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
@@ -177,6 +179,8 @@ def test_verifier_retries_leave_time_to_write_failure_artifacts(
     elapsed = [0.0]
 
     class FakeTime:
+        """Simulate time progression for slow network timeouts."""
+
         def monotonic(self) -> float:
             return elapsed[0]
 
@@ -209,13 +213,15 @@ def test_verifier_retries_leave_time_to_write_failure_artifacts(
 def test_required_judge_deadline_interrupts_a_stalled_response_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A provider that trickles a response must not keep the verifier alive indefinitely."""
+    """Interrupt stalled provider response body when required judge deadline expires."""
     if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
         pytest.skip("free POSIX interval timer required")
     verifier = _load_verifier(tmp_path)
     monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.05)
 
     class SlowResponse:
+        """Simulate a trickling or stalled response body."""
+
         def __enter__(self):
             return self
 
@@ -241,6 +247,7 @@ def test_required_judge_deadline_interrupts_a_stalled_response_body(
 def test_required_judge_restores_alarm_handler_after_teardown_interrupt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Restore previous SIGALRM handler when judge deadline teardown is interrupted."""
     if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
         pytest.skip("free POSIX interval timer required")
     verifier = _load_verifier(tmp_path)
@@ -262,7 +269,7 @@ def test_required_judge_restores_alarm_handler_after_teardown_interrupt(
 
 
 def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default OpenAI goal scorer must return before its Harbor budget expires."""
+    """Ensure Ragas goal scorer returns before its Harbor budget expires."""
     verifier = _load_verifier(tmp_path)
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
@@ -272,10 +279,14 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, m
     monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
 
     class FakeMessage:
+        """Mock message object for Ragas sample input."""
+
         def __init__(self, content: str):
             self.content = content
 
     class FakeMetric:
+        """Mock metric object for Ragas async evaluation."""
+
         def __init__(self, llm):
             self.llm = llm
 
@@ -324,6 +335,7 @@ def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Retain genuine zero-score verdicts from successful judge evaluations as scoreable metrics."""
     verifier = _load_verifier(tmp_path)
     calls: list[str] = []
 
@@ -361,6 +373,7 @@ def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Recover malformed accuracy and goal judge responses on retry and record overall score."""
     verifier = _load_verifier(tmp_path)
     monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: False)
     pair_calls: list[tuple[str, dict]] = []
@@ -425,6 +438,7 @@ def test_verifier_retries_non_string_judge_text_before_collector_and_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Retry non-string judge text payloads before collector and report generation."""
     verifier = _load_verifier(tmp_path)
     monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: False)
     accuracy_calls: list[str] = []
@@ -515,6 +529,7 @@ def test_report_coerces_and_bounds_non_string_reasons_from_existing_artifacts(
     score: float,
     detail: dict,
 ) -> None:
+    """Coerce and bound non-string reason fields from legacy judge artifacts."""
     reward = {
         "entry_id": "legacy-judge-artifact",
         metric: score,
@@ -530,6 +545,7 @@ def test_report_coerces_and_bounds_non_string_reasons_from_existing_artifacts(
 
 
 def test_report_redacts_configured_secret_before_bounding_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redact configured secrets before truncating long judge reason strings in report."""
     credential = "SECRET-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789"
     prefix = "x" * 490
     monkeypatch.setenv("OPENAI_API_KEY", credential)
@@ -551,6 +567,7 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Keep accuracy metric fail-closed when verifier retries are exhausted."""
     verifier = _load_verifier(tmp_path)
     credential = "dummy-verifier-retry-secret-DO-NOT-RETAIN"
     monkeypatch.setenv("NVIDIA_API_KEY", credential)
@@ -602,6 +619,7 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
 def test_verifier_main_keeps_documented_neutral_judge_skips_scoreable(
     tmp_path: Path,
 ) -> None:
+    """Keep documented neutral judge skips scoreable with default passing scores."""
     verifier = _load_verifier(tmp_path)
     entry = json.loads(verifier.ENTRY_PATH.read_text(encoding="utf-8"))
     entry["ground_truth"] = ""
@@ -627,6 +645,7 @@ def test_verifier_main_normalizes_malformed_or_raised_judge_failures_and_continu
     monkeypatch: pytest.MonkeyPatch,
     failure_kind: str,
 ) -> None:
+    """Normalize malformed or raised judge failures and continue evaluating remaining judges."""
     verifier = _load_verifier(tmp_path)
     calls: list[str] = []
 
@@ -666,6 +685,7 @@ def test_verifier_main_normalizes_malformed_or_raised_judge_failures_and_continu
 
 
 def test_numeric_reward_payload_excludes_boolean_and_non_finite_values(tmp_path: Path) -> None:
+    """Exclude boolean, non-finite, and infinite values from numeric reward payloads."""
     verifier = _load_verifier(tmp_path)
 
     payload = verifier._numeric_reward_payload(
@@ -686,6 +706,7 @@ def test_numeric_reward_payload_excludes_boolean_and_non_finite_values(tmp_path:
 
 
 def test_evaluation_failure_fields_are_reserved_metadata() -> None:
+    """Confirm evaluation failure fields are reserved metadata in custom grader runner."""
     expected = {"evaluation_status", "evaluation_errors"}
 
     assert expected <= RESERVED_METRIC_NAMES
@@ -698,6 +719,7 @@ def test_evaluation_failure_fields_are_reserved_metadata() -> None:
 
 
 def _run_generated_test_sh(task_dir: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Execute the generated test.sh script with the specified environment variables."""
     return subprocess.run(
         ["bash", str(task_dir / "tests" / "test.sh")],
         check=False,
@@ -712,6 +734,7 @@ def test_generated_standard_grading_scripts_stop_after_evaluator_failure(
     tmp_path: Path,
     grading_mode: str,
 ) -> None:
+    """Halt generated grading scripts immediately when standard evaluator fails."""
     task_dir = tmp_path / grading_mode
     _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=grading_mode == "default_plus_custom")
     tests_dir = task_dir / "tests"
@@ -729,6 +752,7 @@ def test_generated_standard_grading_scripts_stop_after_evaluator_failure(
 
 
 def test_generated_custom_only_script_accepts_overall_only_custom_reward(tmp_path: Path) -> None:
+    """Accept overall-only reward payloads from custom grading scripts."""
     task_dir = tmp_path / "custom-only"
     _write_test_sh(task_dir, grading_mode="custom_only", custom_grader=True)
     tests_dir = task_dir / "tests"

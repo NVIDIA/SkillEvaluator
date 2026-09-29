@@ -24,11 +24,11 @@ import os
 import re
 import urllib.error
 from dataclasses import replace
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_MODEL, LLM_VERIFY_TEMPERATURE
-from skillevaluator.inference.retry import resolve_retry_config, retry_call_with_backoff
+from skillevaluator.inference.retry import RetryConfig, resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientError
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import (
@@ -108,7 +108,15 @@ def _temperature_kwargs(model: str, temperature: float | None) -> dict[str, floa
     return {"temperature": temperature}
 
 
-_SCHEMA_UNSUPPORTED_TARGETS: set[tuple[str, str, str]] = set()
+class SchemaTargetKey(NamedTuple):
+    """Identify a provider, base URL, and model target for schema capability memoization."""
+
+    provider: str
+    base_url: str
+    model: str
+
+
+_SCHEMA_UNSUPPORTED_TARGETS: set[SchemaTargetKey | tuple[str, str, str]] = set()
 
 
 def _build_openai_response_format(schema: dict[str, Any], schema_name: str = "judge_response") -> dict[str, Any]:
@@ -233,7 +241,7 @@ def _call_with_schema_fallback(
     call_kwargs: dict[str, Any],
     *,
     schema_key: str,
-    target_key: tuple[str, str, str],
+    target_key: SchemaTargetKey,
     use_schema: bool,
 ) -> Any:
     """Invoke call_fn and downgrade to prompt-only on confirmed HTTP 400/422 schema errors."""
@@ -244,8 +252,8 @@ def _call_with_schema_fallback(
             logger.warning(
                 "Structured output schema unsupported by provider=%s model=%s; "
                 "downgrading to prompt-only JSON and memoizing target.",
-                target_key[0],
-                target_key[2],
+                target_key.provider,
+                target_key.model,
             )
             fallback_kwargs = dict(call_kwargs)
             fallback_kwargs.pop(schema_key, None)
@@ -304,9 +312,11 @@ class LLMClient:
         self._max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         self._temperature = temperature if temperature is not None else self.default_temperature
         retry_cfg = resolve_retry_config()
-        self._max_retries = max_retries if max_retries is not None else retry_cfg.max_retries
-        self._retry_base_delay = retry_base_delay if retry_base_delay is not None else retry_cfg.base_delay
-        self._retry_max_delay = retry_max_delay if retry_max_delay is not None else retry_cfg.max_delay
+        self._retry_config = RetryConfig(
+            max_retries=max_retries if max_retries is not None else retry_cfg.max_retries,
+            base_delay=retry_base_delay if retry_base_delay is not None else retry_cfg.base_delay,
+            max_delay=retry_max_delay if retry_max_delay is not None else retry_cfg.max_delay,
+        )
         self._http_client = http_client
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
@@ -332,17 +342,17 @@ class LLMClient:
     @property
     def max_retries(self) -> int:
         """Return the maximum number of retry attempts for transient errors."""
-        return self._max_retries
+        return self._retry_config.max_retries
 
     @property
     def retry_base_delay(self) -> float:
         """Return the initial base backoff delay in seconds."""
-        return self._retry_base_delay
+        return self._retry_config.base_delay
 
     @property
     def retry_max_delay(self) -> float:
         """Return the maximum delay ceiling in seconds for a retry backoff."""
-        return self._retry_max_delay
+        return self._retry_config.max_delay
 
     # -- client management ------------------------------------------------
 
@@ -444,7 +454,7 @@ class LLMClient:
         """
         config = self._resolved_config()
         client = self._get_client()
-        target_key = (config.provider, config.base_url or "", config.model)
+        target_key = SchemaTargetKey(config.provider, config.base_url or "", config.model)
 
         def _invoke_provider() -> str:
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
@@ -517,12 +527,7 @@ class LLMClient:
                 raise EmptyLLMResponseError("LLM returned empty response content")
             return content
 
-        return retry_call_with_backoff(
-            _invoke_provider,
-            max_retries=self._max_retries,
-            base_delay=self._retry_base_delay,
-            max_delay=self._retry_max_delay,
-        )
+        return retry_call_with_backoff(_invoke_provider, config=self._retry_config)
 
     def extract_json_from_response(self, system_prompt: str, user_prompt: str) -> dict:
         """Send a completion and parse JSON from the response."""

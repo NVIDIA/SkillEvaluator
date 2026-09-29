@@ -12,13 +12,26 @@ env -- plus public-compatible shape checks for contained provider-only entries.
 
 Nothing here launches a process or opens a socket: declarations are inspected
 purely as data. Runtime MCP connectivity is a separate Tier 3 concern.
+
+Beyond the blocking shape checks, each declaration is also classified for
+supply-chain pinning (:func:`classify_mcp_pinning`), checked for agent-CLI
+permission-bypass flags and dangerous environment overrides, and its URL host
+is checked against a network-free endpoint policy
+(:func:`classify_endpoint_host`). The endpoint policy inspects IP literals and
+well-known names only: DNS resolution and HTTP redirects are never evaluated.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import re
-from typing import Any
+import unicodedata
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlparse
+
+import idna
 
 from skillevaluator.models.plugin import MCP_NAME_PATTERN
 from skillevaluator.models.result import Finding, Severity
@@ -91,6 +104,8 @@ def _finding(
         message=(f"mcpServers['{name}']: {message}" if name else message),
         file_path=file_path,
         suggestion=suggestion,
+        # Machine-readable server attribution for the plugin component inventory.
+        metadata=({"mcp_server": name} if isinstance(name, str) else {}),
     )
 
 
@@ -316,7 +331,13 @@ def _validate_command(name: str, config: dict[str, Any], file_path: str, finding
         )
 
 
-def _validate_url(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+def _validate_url(
+    name: str,
+    config: dict[str, Any],
+    file_path: str,
+    findings: list[Finding],
+    allowed_private_hosts: Iterable[str] = (),
+) -> None:
     url = config.get("url")
     if not isinstance(url, str) or not url.strip():
         findings.append(
@@ -366,7 +387,15 @@ def _validate_url(name: str, config: dict[str, Any], file_path: str, findings: l
                     name=name,
                 )
             )
+        _validate_endpoint(name, url, host, file_path, findings, allowed_private_hosts)
         return
+    if scheme in _INSECURE_URL_SCHEMES:
+        # Plaintext endpoints are blocked below; still report where they point.
+        try:
+            insecure_host = parsed.hostname
+        except ValueError:
+            insecure_host = None
+        _validate_endpoint(name, url, insecure_host, file_path, findings, allowed_private_hosts)
     if scheme in _DANGEROUS_URL_SCHEMES or scheme == "":
         findings.append(
             _finding(
@@ -557,8 +586,838 @@ def _validate_insecure_tls_config(name: str, config: dict[str, Any], file_path: 
             )
 
 
-def validate_mcp_server_declaration(name: Any, config: Any, file_path: str) -> list[Finding]:
-    """Statically validate one contained ``mcpServers`` entry (``name`` -> config)."""
+# --------------------------------------------------------------------------- #
+# Supply-chain pinning                                                        #
+# --------------------------------------------------------------------------- #
+PinStatus = Literal["pinned", "unpinned", "not_applicable"]
+
+_EXACT_SEMVER_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+_PEP440_EXACT_RE = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*(?:===\s*\S+|==\s*[0-9][0-9A-Za-z.!+_-]*)$"
+)
+_GIT_SHA_RE = re.compile(r"(?:#|@)[0-9a-fA-F]{40}(?:$|[&#])")
+_DOCKER_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}$")
+_VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+._][0-9A-Za-z.]+)*$")
+_PLUGIN_PATH_REFS: tuple[str, ...] = ("${CLAUDE_PLUGIN_ROOT}", "${CLAUDE_PLUGIN_DATA}", "${CLAUDE_PROJECT_DIR}")
+_LOCAL_SPEC_PREFIXES: tuple[str, ...] = (".", "/", "~", "file:", *_PLUGIN_PATH_REFS)
+_REMOTE_SPEC_PREFIXES: tuple[str, ...] = ("git+", "git:", "github:", "gitlab:", "bitbucket:", "http://", "https://")
+
+# Value-taking flags per package runner, so a flag's value is never mistaken for
+# the package spec. Unknown flags are treated as boolean.
+_NPX_VALUE_FLAGS = frozenset(
+    {"-p", "--package", "-c", "--call", "--registry", "--cache", "--userconfig", "--prefix", "-w", "--workspace"}
+)
+_DLX_VALUE_FLAGS = frozenset({"-p", "--package", "--registry", "--allow-build"})
+_UVX_VALUE_FLAGS = frozenset(
+    {
+        "--from",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-p",
+        "--python",
+        "--index",
+        "--default-index",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "-f",
+        "--find-links",
+        "-c",
+        "--constraints",
+        "--overrides",
+        "--build-constraints",
+        "--env-file",
+        "--directory",
+        "--project",
+        "--config-file",
+        "--cache-dir",
+        "--color",
+        "--python-preference",
+        "--keyring-provider",
+        "--index-strategy",
+        "--resolution",
+        "--prerelease",
+        "--exclude-newer",
+        "--link-mode",
+        "-P",
+        "--upgrade-package",
+        "--reinstall-package",
+        "--refresh-package",
+    }
+)
+_PIPX_VALUE_FLAGS = frozenset({"--spec", "--python", "--pip-args", "--index-url", "--fetch-python"})
+_DENO_VALUE_FLAGS = frozenset({"-c", "--config", "--import-map", "--lock", "--cert", "--location", "--seed"})
+_DOCKER_VALUE_FLAGS = frozenset(
+    {
+        "-a",
+        "--attach",
+        "--add-host",
+        "--annotation",
+        "--blkio-weight",
+        "--blkio-weight-device",
+        "--cap-add",
+        "--cap-drop",
+        "--cgroup-parent",
+        "--cgroupns",
+        "--cidfile",
+        "--cpu-period",
+        "--cpu-quota",
+        "--cpu-rt-period",
+        "--cpu-rt-runtime",
+        "-c",
+        "--cpu-shares",
+        "--cpus",
+        "--cpuset-cpus",
+        "--cpuset-mems",
+        "--detach-keys",
+        "--device",
+        "--device-cgroup-rule",
+        "--device-read-bps",
+        "--device-read-iops",
+        "--device-write-bps",
+        "--device-write-iops",
+        "--dns",
+        "--dns-option",
+        "--dns-search",
+        "--domainname",
+        "--entrypoint",
+        "-e",
+        "--env",
+        "--env-file",
+        "--expose",
+        "--gpus",
+        "--group-add",
+        "--health-cmd",
+        "--health-interval",
+        "--health-retries",
+        "--health-start-interval",
+        "--health-start-period",
+        "--health-timeout",
+        "-h",
+        "--hostname",
+        "--ip",
+        "--ip6",
+        "--ipc",
+        "--isolation",
+        "--kernel-memory",
+        "-l",
+        "--label",
+        "--label-file",
+        "--link",
+        "--link-local-ip",
+        "--log-driver",
+        "--log-opt",
+        "--mac-address",
+        "-m",
+        "--memory",
+        "--memory-reservation",
+        "--memory-swap",
+        "--memory-swappiness",
+        "--mount",
+        "--name",
+        "--net",
+        "--network",
+        "--network-alias",
+        "--oom-score-adj",
+        "--pid",
+        "--pids-limit",
+        "--platform",
+        "-p",
+        "--publish",
+        "--pull",
+        "--restart",
+        "--runtime",
+        "--security-opt",
+        "--shm-size",
+        "--stop-signal",
+        "--stop-timeout",
+        "--storage-opt",
+        "--sysctl",
+        "--tmpfs",
+        "--ulimit",
+        "-u",
+        "--user",
+        "--userns",
+        "--uts",
+        "-v",
+        "--volume",
+        "--volume-driver",
+        "--volumes-from",
+        "-w",
+        "--workdir",
+    }
+)
+_CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
+
+
+@dataclass(frozen=True)
+class McpPinning:
+    """Static supply-chain pinning classification of one MCP declaration."""
+
+    status: PinStatus
+    detail: str
+
+    @property
+    def pinned(self) -> bool | None:
+        """``True``/``False`` for package runners; ``None`` when not applicable."""
+        if self.status == "not_applicable":
+            return None
+        return self.status == "pinned"
+
+
+def _command_basename(command: str) -> str:
+    base = command.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for suffix in (".exe", ".cmd", ".bat", ".ps1"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
+
+
+def _positionals(tokens: list[str], value_flags: frozenset[str]) -> Iterator[tuple[int, str]]:
+    """Yield ``(index, token)`` for positional arguments, skipping flags and their values."""
+    index = 0
+    after_separator = False
+    while index < len(tokens):
+        token = tokens[index]
+        if after_separator:
+            yield index, token
+        elif token == "--":
+            after_separator = True
+        elif token.startswith("-") and len(token) > 1:
+            if "=" not in token and token in value_flags:
+                index += 1  # skip the flag's value
+        else:
+            yield index, token
+        index += 1
+
+
+def _flag_values(tokens: list[str], names: Iterable[str]) -> list[str]:
+    """Return every value passed to one of ``names`` (``--flag v`` or ``--flag=v``)."""
+    wanted = frozenset(names)
+    values: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            break
+        flag, sep, inline = token.partition("=")
+        if flag in wanted:
+            if sep:
+                values.append(inline)
+            elif index + 1 < len(tokens):
+                values.append(tokens[index + 1])
+                index += 1
+        index += 1
+    return values
+
+
+def _first_positional(tokens: list[str], value_flags: frozenset[str]) -> str | None:
+    return next((token for _index, token in _positionals(tokens, value_flags)), None)
+
+
+def _is_local_spec(spec: str) -> bool:
+    return spec.startswith(_LOCAL_SPEC_PREFIXES)
+
+
+def _classify_npm_spec(spec: str) -> McpPinning:
+    """Classify an npm package spec (``pkg``, ``@scope/pkg@1.2.3``, git/URL, local path)."""
+    if _is_local_spec(spec):
+        return McpPinning("not_applicable", f"local package path {spec!r}")
+    if spec.startswith(_REMOTE_SPEC_PREFIXES) or (not spec.startswith("@") and "/" in spec):
+        if _GIT_SHA_RE.search(spec):
+            return McpPinning("pinned", f"git/URL spec pinned to a commit: {spec!r}")
+        return McpPinning("unpinned", f"git/URL/GitHub spec without a commit SHA: {spec!r}")
+    at = spec.find("@", 1) if spec.startswith("@") else spec.find("@")
+    if at <= 0:
+        return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
+    version = spec[at + 1 :]
+    if _EXACT_SEMVER_RE.match(version):
+        return McpPinning("pinned", f"exact version {spec!r}")
+    return McpPinning("unpinned", f"package {spec!r} uses a version range or dist-tag, not an exact version")
+
+
+def _classify_python_spec(spec: str) -> McpPinning:
+    """Classify a PyPI requirement spec as used by ``uvx`` / ``pipx run``."""
+    if _is_local_spec(spec):
+        return McpPinning("not_applicable", f"local package path {spec!r}")
+    if spec.startswith(_REMOTE_SPEC_PREFIXES) or "@ git+" in spec or "@git+" in spec:
+        if _GIT_SHA_RE.search(spec) or "#sha256=" in spec:
+            return McpPinning("pinned", f"git/URL spec pinned to a commit or hash: {spec!r}")
+        return McpPinning("unpinned", f"git/URL spec without a commit SHA or hash: {spec!r}")
+    if _PEP440_EXACT_RE.match(spec):
+        return McpPinning("pinned", f"exact version {spec!r}")
+    name, sep, version = spec.partition("@")
+    if sep and name and _EXACT_SEMVER_RE.match(version.strip()):
+        return McpPinning("pinned", f"exact version {spec!r}")
+    if any(marker in spec for marker in ("<", ">", "~", "!", "*", ",", "=", "@")):
+        return McpPinning("unpinned", f"requirement {spec!r} is a range or tag, not an exact '==' version")
+    return McpPinning("unpinned", f"package {spec!r} has no version (resolves to the latest release)")
+
+
+def _classify_image(image: str) -> McpPinning:
+    """Classify a container image reference."""
+    if _DOCKER_DIGEST_RE.search(image):
+        return McpPinning("pinned", f"image pinned by digest {image!r}")
+    if "${" in image or image.startswith("$"):
+        return McpPinning("unpinned", f"image {image!r} is taken from an environment reference")
+    last = image.rsplit("/", 1)[-1]
+    tag = last.split(":", 1)[1] if ":" in last else None
+    if tag is None:
+        return McpPinning("unpinned", f"image {image!r} has no tag or digest (implicit ':latest')")
+    if tag.lower() == "latest":
+        return McpPinning("unpinned", f"image {image!r} uses the mutable 'latest' tag")
+    if _VERSION_TAG_RE.match(tag):
+        return McpPinning("pinned", f"image {image!r} uses a version tag (tags are mutable; a digest is stronger)")
+    return McpPinning("unpinned", f"image {image!r} uses the non-version tag {tag!r}")
+
+
+def _classify_spec_list(specs: list[str], classify: Any) -> McpPinning:
+    results = [classify(spec) for spec in specs]
+    unpinned = [result for result in results if result.status == "unpinned"]
+    if unpinned:
+        return unpinned[0]
+    pinned = [result for result in results if result.status == "pinned"]
+    if pinned:
+        return pinned[0]
+    return results[0]
+
+
+def classify_mcp_pinning(config: Any) -> McpPinning:
+    """Classify whether one MCP declaration runs an exactly-pinned package.
+
+    Package runners (``npx``, ``bunx``, ``pnpm dlx``, ``yarn dlx``, ``npm exec``,
+    ``uvx``, ``uv tool run``, ``pipx run``, ``deno run`` of a registry spec, and
+    ``docker|podman run``) are ``pinned`` only with an exact version
+    (``pkg@1.2.3``, ``pkg==1.2.3``, ``--from pkg==1.2.3``, ``image:1.2.3``,
+    ``image@sha256:...``); otherwise they are ``unpinned``. Local interpreters and
+    scripts (``node ./server.js``, ``python -m local_module``, ``./bin/server``),
+    URL servers, and provider-only entries are ``not_applicable``.
+    """
+    if not isinstance(config, dict):
+        return McpPinning("not_applicable", "declaration is not an object")
+    command = config.get("command")
+    if not isinstance(command, str) or not command.strip():
+        if isinstance(config.get("url"), str):
+            return McpPinning("not_applicable", "remote url server (no package is installed)")
+        return McpPinning("not_applicable", "provider-only or non-runnable declaration")
+    raw_args = config.get("args")
+    args = [str(arg) for arg in raw_args] if isinstance(raw_args, list) else []
+    command_parts = command.split()
+    if len(command_parts) > 1:
+        # A whole command line in 'command' ("npx -y pkg"): classify it argv-style.
+        command, args = command_parts[0], [*command_parts[1:], *args]
+    base = _command_basename(command)
+
+    if base in {"npx", "bunx", "pnpx"} or (base in {"pnpm", "yarn"} and args[:1] == ["dlx"]):
+        rest = args[1:] if base in {"pnpm", "yarn"} else args
+        value_flags = _NPX_VALUE_FLAGS if base == "npx" else _DLX_VALUE_FLAGS
+        runner = f"{base} dlx" if base in {"pnpm", "yarn"} else base
+        return _classify_npm_runner(runner, rest, value_flags)
+    if base == "npm" and args[:1] in (["exec"], ["x"]):
+        return _classify_npm_runner("npm exec", args[1:], _NPX_VALUE_FLAGS)
+    if base == "uvx" or (base == "uv" and args[:2] in (["tool", "run"], ["tool", "x"])):
+        rest = args if base == "uvx" else args[2:]
+        from_values = _flag_values(rest, ("--from",))
+        spec = from_values[0] if from_values else _first_positional(rest, _UVX_VALUE_FLAGS)
+        if spec is None:
+            return McpPinning("unpinned", "uvx invocation without a package spec")
+        return _prefixed(f"{base if base == 'uvx' else 'uv tool run'}: ", _classify_python_spec(spec))
+    if base == "pipx" and args[:1] == ["run"]:
+        rest = args[1:]
+        spec_values = _flag_values(rest, ("--spec",))
+        spec = spec_values[0] if spec_values else _first_positional(rest, _PIPX_VALUE_FLAGS)
+        if spec is None:
+            return McpPinning("unpinned", "pipx run invocation without a package spec")
+        return _prefixed("pipx run: ", _classify_python_spec(spec))
+    if base == "deno" and args[:1] == ["run"]:
+        spec = _first_positional(args[1:], _DENO_VALUE_FLAGS)
+        if spec and spec.startswith(("npm:", "jsr:")):
+            return _prefixed("deno run: ", _classify_npm_spec(spec.split(":", 1)[1]))
+        if spec and spec.startswith(("http://", "https://")):
+            if re.search(r"@v?\d+\.\d+\.\d+(?:[/?#]|$)", spec):
+                return McpPinning("pinned", f"deno run: remote module pinned to an exact version: {spec!r}")
+            return McpPinning("unpinned", f"deno run: remote module without an exact version: {spec!r}")
+        return McpPinning("not_applicable", "deno run of a local script")
+    if base in _CONTAINER_RUNTIMES:
+        if args[:1] == ["run"]:
+            rest = args[1:]
+        elif args[:2] == ["container", "run"]:
+            rest = args[2:]
+        else:
+            return McpPinning("not_applicable", f"{base} invocation is not 'run'")
+        image = _first_positional(rest, _DOCKER_VALUE_FLAGS)
+        if image is None:
+            return McpPinning("unpinned", f"{base} run invocation without an image")
+        return _prefixed(f"{base} run: ", _classify_image(image))
+    return McpPinning("not_applicable", f"local interpreter, script, or binary ({base!r})")
+
+
+def _classify_npm_runner(runner: str, tokens: list[str], value_flags: frozenset[str]) -> McpPinning:
+    packages = _flag_values(tokens, ("-p", "--package"))
+    if packages:
+        return _prefixed(f"{runner}: ", _classify_spec_list(packages, _classify_npm_spec))
+    spec = _first_positional(tokens, value_flags)
+    if spec is None:
+        return McpPinning("not_applicable", f"{runner} invocation without a package spec")
+    return _prefixed(f"{runner}: ", _classify_npm_spec(spec))
+
+
+def _prefixed(prefix: str, pin: McpPinning) -> McpPinning:
+    return McpPinning(pin.status, f"{prefix}{pin.detail}")
+
+
+# --------------------------------------------------------------------------- #
+# Network-free endpoint policy                                                #
+# --------------------------------------------------------------------------- #
+EndpointKind = Literal["metadata", "private"]
+
+_METADATA_HOSTNAMES = frozenset({"metadata.google.internal", "metadata"})
+_METADATA_ADDRESSES = frozenset(
+    {
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("fd00:ec2::254"),
+        ipaddress.ip_address("100.100.100.200"),
+    }
+)
+_LOOPBACK_HOSTNAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
+_PRIVATE_NETWORKS: tuple[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, str], ...] = (
+    (ipaddress.ip_network("127.0.0.0/8"), "loopback"),
+    (ipaddress.ip_network("0.0.0.0/8"), "unspecified / this-network"),
+    (ipaddress.ip_network("10.0.0.0/8"), "private (RFC 1918)"),
+    (ipaddress.ip_network("172.16.0.0/12"), "private (RFC 1918)"),
+    (ipaddress.ip_network("192.168.0.0/16"), "private (RFC 1918)"),
+    (ipaddress.ip_network("100.64.0.0/10"), "carrier-grade NAT (100.64.0.0/10)"),
+    (ipaddress.ip_network("169.254.0.0/16"), "link-local"),
+    (ipaddress.ip_network("::1/128"), "loopback"),
+    (ipaddress.ip_network("::/128"), "unspecified"),
+    (ipaddress.ip_network("fc00::/7"), "unique local (fc00::/7)"),
+    (ipaddress.ip_network("fe80::/10"), "link-local"),
+    (ipaddress.ip_network("fec0::/10"), "site-local (deprecated)"),
+)
+_NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+# Ideographic / fullwidth / halfwidth full stops that UTS #46 maps to '.'.
+_DOT_LOOKALIKES = str.maketrans({chr(0x3002): ".", chr(0xFF0E): ".", chr(0xFF61): "."})
+_ENDPOINT_STATIC_NOTE = "static check only: DNS resolution and HTTP redirects are not evaluated"
+
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+@dataclass(frozen=True)
+class EndpointClass:
+    """A non-public MCP endpoint host found without any network access."""
+
+    kind: EndpointKind
+    reason: str
+    host: str
+    address: IPAddress | None = None
+    encoded: bool = False
+
+
+def _normalize_host(host: str) -> str:
+    text = host.strip().split("%", 1)[0].translate(_DOT_LOOKALIKES).rstrip(".").lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    if not text.isascii():
+        try:
+            text = idna.encode(text, uts46=True).decode("ascii").lower()
+        except idna.IDNAError:
+            text = unicodedata.normalize("NFKC", text).lower()
+    return text
+
+
+def _parse_legacy_ipv4(text: str) -> ipaddress.IPv4Address | None:
+    """Parse inet_aton-style IPv4 (decimal/hex/octal parts, 1-4 components)."""
+    parts = text.split(".")
+    if not 1 <= len(parts) <= 4 or any(not part for part in parts):
+        return None
+    numbers: list[int] = []
+    for part in parts:
+        lowered = part.lower()
+        try:
+            if lowered.startswith("0x"):
+                if len(lowered) == 2:
+                    return None
+                numbers.append(int(lowered, 0))
+            elif len(lowered) > 1 and lowered.startswith("0"):
+                numbers.append(int(lowered, 8))
+            elif lowered.isdigit():
+                numbers.append(int(lowered, 10))
+            else:
+                return None
+        except ValueError:
+            return None
+    *head, last = numbers
+    if any(number > 0xFF for number in head) or last >= 1 << (8 * (4 - len(head))):
+        return None
+    value = 0
+    for number in head:
+        value = (value << 8) | number
+    value = (value << (8 * (4 - len(head)))) | last
+    return ipaddress.IPv4Address(value)
+
+
+def _parse_host_address(host: str) -> tuple[IPAddress | None, bool]:
+    """Return ``(address, encoded)`` for an IP-literal host (``None`` for names)."""
+    try:
+        return ipaddress.ip_address(host), False
+    except ValueError:
+        pass
+    legacy = _parse_legacy_ipv4(host)
+    if legacy is not None:
+        return legacy, str(legacy) != host
+    return None, False
+
+
+def _embedded_ipv4(address: IPAddress) -> ipaddress.IPv4Address | None:
+    """Return an IPv4 address embedded in an IPv6 literal (mapped/6to4/Teredo/NAT64/compat)."""
+    if not isinstance(address, ipaddress.IPv6Address):
+        return None
+    if address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    if address.sixtofour is not None:
+        return address.sixtofour
+    if address.teredo is not None:
+        return address.teredo[1]
+    if address in _NAT64_NETWORK:
+        return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    value = int(address)
+    if value >> 32 == 0 and value > 1:  # deprecated IPv4-compatible ::a.b.c.d
+        return ipaddress.IPv4Address(value)
+    return None
+
+
+def _address_class(address: IPAddress) -> tuple[EndpointKind, str] | None:
+    if address in _METADATA_ADDRESSES:
+        return "metadata", "cloud instance-metadata"
+    for network, reason in _PRIVATE_NETWORKS:
+        if address.version == network.version and address in network:
+            return "private", reason
+    return None
+
+
+def classify_endpoint_host(host: str) -> EndpointClass | None:
+    """Classify an MCP URL host as a metadata or private endpoint, network-free.
+
+    Only IP literals (including IPv4-mapped/embedded IPv6 and decimal, hex, or
+    octal IPv4 encodings) and well-known names are recognized. A public-looking
+    hostname returns ``None``: DNS resolution and redirect targets are not checked
+    statically, so a public name may still resolve to a private address.
+    """
+    normalized = _normalize_host(host)
+    if not normalized:
+        return None
+    if normalized in _METADATA_HOSTNAMES:
+        return EndpointClass("metadata", "cloud instance-metadata", normalized)
+    if normalized in _LOOPBACK_HOSTNAMES or normalized.endswith(".localhost"):
+        return EndpointClass("private", "loopback", normalized)
+    address, encoded = _parse_host_address(normalized)
+    if address is None:
+        return None
+    # Fullwidth digits, lookalike dots, or IDNA forms that normalize to an IP literal.
+    encoded = encoded or normalized != host.strip().split("%", 1)[0].strip("[]").rstrip(".").lower()
+    found = _address_class(address)
+    if found is None:
+        inner = _embedded_ipv4(address)
+        if inner is not None:
+            found = _address_class(inner)
+            encoded = True
+    if found is None:
+        return None
+    kind, reason = found
+    return EndpointClass(kind, reason, normalized, address, encoded)
+
+
+def host_is_allowlisted(endpoint: EndpointClass, allowed_hosts: Iterable[str]) -> bool:
+    """True when a policy entry allows this private host.
+
+    Entries are exact host names, ``*.suffix`` wildcards, IP literals, or CIDR
+    networks (e.g. ``10.0.0.0/8``). Cloud metadata endpoints are never allowlisted.
+    """
+    if endpoint.kind == "metadata":
+        return False
+    candidates: list[IPAddress] = []
+    if endpoint.address is not None:
+        candidates.append(endpoint.address)
+        inner = _embedded_ipv4(endpoint.address)
+        if inner is not None:
+            candidates.append(inner)
+    for raw in allowed_hosts:
+        if not isinstance(raw, str):
+            continue
+        entry = _normalize_host(raw)
+        if not entry:
+            continue
+        if entry.startswith("*.") and endpoint.host.endswith(entry[1:]):
+            return True
+        if entry == endpoint.host:
+            return True
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            continue
+        if any(candidate.version == network.version and candidate in network for candidate in candidates):
+            return True
+    return False
+
+
+def _validate_endpoint(
+    name: str,
+    url: str,
+    host: str | None,
+    file_path: str,
+    findings: list[Finding],
+    allowed_private_hosts: Iterable[str],
+) -> None:
+    if not host:
+        return
+    endpoint = classify_endpoint_host(host)
+    if endpoint is None:
+        return
+    encoded = f" (encoded as {host!r})" if endpoint.encoded else ""
+    if endpoint.kind == "metadata":
+        findings.append(
+            _finding(
+                Severity.HIGH,
+                "mcp_endpoint_metadata",
+                f"url targets a {endpoint.reason} endpoint{encoded}: {url!r}; an MCP client pointed here "
+                f"can expose instance credentials ({_ENDPOINT_STATIC_NOTE})",
+                file_path,
+                "Remove the instance-metadata endpoint; MCP servers must never target cloud metadata services.",
+                name=name,
+            )
+        )
+        return
+    if host_is_allowlisted(endpoint, allowed_private_hosts):
+        return
+    findings.append(
+        _finding(
+            Severity.MEDIUM,
+            "mcp_endpoint_private",
+            f"url host is a {endpoint.reason} address{encoded}: {url!r}; the endpoint is not publicly "
+            f"reachable and may target local services ({_ENDPOINT_STATIC_NOTE})",
+            file_path,
+            "Use a public HTTPS endpoint, or allow this intended private host through the validation policy "
+            "(mcp.allowed_private_hosts).",
+            name=name,
+        )
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Permission-bypass flags and dangerous overrides                             #
+# --------------------------------------------------------------------------- #
+PERMISSION_BYPASS_FLAGS: tuple[str, ...] = (
+    "--dangerously-skip-permissions",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--allow-dangerously-skip-permissions",
+    "--yolo",
+)
+_BYPASS_FLAG_RE = re.compile(
+    r"(?<![\w-])(" + "|".join(re.escape(flag) for flag in PERMISSION_BYPASS_FLAGS) + r")(?![\w-])",
+    re.IGNORECASE,
+)
+# Keys whose values are prose, never executed config -- documentation mentions of
+# a flag are not flagged.
+_DOC_KEYS = frozenset({"description", "title", "summary", "notes", "note", "comment", "comments", "help"})
+_MAX_SCAN_NODES = 4_096
+_CODE_INJECTION_ENV = frozenset({"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES"})
+_NODE_OPTIONS_INJECTION_RE = re.compile(
+    r"(?:^|\s)(--require|-r|--import|--loader|--experimental-loader)(?:=|\s|$)", re.IGNORECASE
+)
+_TRAFFIC_REDIRECT_ENV = frozenset(
+    {
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+        "AZURE_OPENAI_ENDPOINT",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "CURL_CA_BUNDLE",
+    }
+)
+_LLM_PROVIDER_BASE_URL_RE = re.compile(
+    r"^(?:ANTHROPIC|CLAUDE|OPENAI|AZURE_OPENAI|AZURE_AI|GOOGLE|GEMINI|VERTEX|VERTEX_AI|MISTRAL|COHERE|GROQ|"
+    r"TOGETHER|OPENROUTER|DEEPSEEK|XAI|HF|HUGGINGFACE|OLLAMA|BEDROCK|LITELLM|PERPLEXITY|FIREWORKS)"
+    r"(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)$"
+)
+_AUTO_APPROVE_KEYS = frozenset({"autoapprove", "alwaysallow", "autoapprovetools", "alwaysallowtools"})
+
+
+@dataclass(frozen=True)
+class OverrideIssue:
+    """A dangerous flag/env/config override, independent of where it was declared."""
+
+    concept: Literal["permission_bypass_flag", "env_code_injection", "env_traffic_redirect", "auto_approve"]
+    severity: Severity
+    message: str
+    suggestion: str
+
+
+def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[tuple[str, str]]:
+    """Yield ``(json_path, string)`` for string leaves of a config value (bounded, iterative)."""
+    stack: list[tuple[str, Any]] = [("", value)]
+    seen = 0
+    while stack and seen < _MAX_SCAN_NODES:
+        path, node = stack.pop()
+        seen += 1
+        if isinstance(node, str):
+            yield path, node
+        elif isinstance(node, dict):
+            for key, child in node.items():
+                if skip_doc_keys and str(key).lower() in _DOC_KEYS:
+                    continue
+                stack.append((f"{path}.{key}" if path else str(key), child))
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                stack.append((f"{path}[{index}]", child))
+
+
+def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
+    """Find agent-CLI permission-bypass flags in any config/command string."""
+    issues: list[OverrideIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for path, text in iter_config_strings(value):
+        for match in _BYPASS_FLAG_RE.finditer(text):
+            flag = match.group(1).lower()
+            if (path, flag) in seen:
+                continue
+            seen.add((path, flag))
+            where = f" in '{path}'" if path else ""
+            issues.append(
+                OverrideIssue(
+                    "permission_bypass_flag",
+                    Severity.HIGH,
+                    f"agent-CLI permission-bypass flag {flag!r}{where} disables tool-approval prompts or sandboxing",
+                    "Remove the permission-bypass flag; plugins must not disable the host agent's approvals or sandbox.",
+                )
+            )
+    return issues
+
+
+def _is_passthrough(key: str, value: str) -> bool:
+    """True for an unset value or a pure ``${KEY}`` passthrough of the same variable."""
+    stripped = value.strip()
+    if not stripped:
+        return True
+    return stripped in {f"${{{key}}}", f"${key}"}
+
+
+def env_override_issues(env: Any) -> list[OverrideIssue]:
+    """Find env overrides that inject code or redirect model/API traffic (values are never echoed)."""
+    if not isinstance(env, dict):
+        return []
+    issues: list[OverrideIssue] = []
+    for raw_key, raw_value in env.items():
+        key = str(raw_key).strip()
+        upper = key.upper()
+        value = raw_value if isinstance(raw_value, str) else ("" if raw_value is None else str(raw_value))
+        if _is_passthrough(key, value):
+            continue
+        if upper in _CODE_INJECTION_ENV:
+            issues.append(
+                OverrideIssue(
+                    "env_code_injection",
+                    Severity.HIGH,
+                    f"env '{key}' preloads a shared library into the launched process (code injection)",
+                    f"Remove '{key}'; plugins must not inject libraries into the processes they launch.",
+                )
+            )
+        elif upper == "NODE_OPTIONS" and (match := _NODE_OPTIONS_INJECTION_RE.search(value)):
+            issues.append(
+                OverrideIssue(
+                    "env_code_injection",
+                    Severity.HIGH,
+                    f"env 'NODE_OPTIONS' uses {match.group(1)!r} to load extra code into every Node.js process",
+                    "Remove --require/--import/--loader from NODE_OPTIONS; load code explicitly from the server.",
+                )
+            )
+        elif upper in _TRAFFIC_REDIRECT_ENV or _LLM_PROVIDER_BASE_URL_RE.match(upper):
+            issues.append(
+                OverrideIssue(
+                    "env_traffic_redirect",
+                    Severity.MEDIUM,
+                    f"env '{key}' overrides model/API endpoints, proxies, or trusted CA certificates, which can "
+                    "redirect or intercept traffic",
+                    f"Remove '{key}' or pass the user's own value through as \"${{{key}}}\"; do not ship "
+                    "endpoint, proxy, or CA overrides.",
+                )
+            )
+    return issues
+
+
+def auto_approve_issues(config: Any) -> list[OverrideIssue]:
+    """Find MCP-entry keys that auto-approve tool calls without a user prompt."""
+    if not isinstance(config, dict):
+        return []
+    issues: list[OverrideIssue] = []
+    for raw_key, value in config.items():
+        key = str(raw_key)
+        normalized = key.lower().replace("_", "").replace("-", "")
+        flagged = (normalized in _AUTO_APPROVE_KEYS and bool(value)) or (normalized == "trust" and value is True)
+        if flagged:
+            issues.append(
+                OverrideIssue(
+                    "auto_approve",
+                    Severity.MEDIUM,
+                    f"'{key}' auto-approves MCP tool calls without a user prompt",
+                    f"Remove '{key}'; let the host agent prompt for tool approval.",
+                )
+            )
+    return issues
+
+
+def _append_override_findings(name: str, issues: list[OverrideIssue], file_path: str, findings: list[Finding]) -> None:
+    for issue in issues:
+        check = "mcp_auto_approve" if issue.concept == "auto_approve" else f"mcp_{issue.concept}"
+        findings.append(_finding(issue.severity, check, issue.message, file_path, issue.suggestion, name=name))
+
+
+def _validate_overrides(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+    """Permission-bypass flags anywhere in the entry, dangerous env, and auto-approve keys."""
+    _append_override_findings(name, permission_bypass_issues(config), file_path, findings)
+    _append_override_findings(name, env_override_issues(config.get("env")), file_path, findings)
+    _append_override_findings(name, auto_approve_issues(config), file_path, findings)
+
+
+def _validate_pinning(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
+    pin = classify_mcp_pinning(config)
+    if pin.status != "unpinned":
+        return
+    # A floating marker (@latest, :latest, ...) already raised the blocking
+    # mcp_command_floating_version finding for this entry; do not double-report.
+    if any(f.check_name == "mcp_command_floating_version" and f.metadata.get("mcp_server") == name for f in findings):
+        return
+    findings.append(
+        _finding(
+            Severity.MEDIUM,
+            "mcp_unpinned_package",
+            f"package runner is not pinned to an exact version ({pin.detail}); each launch may fetch different code",
+            file_path,
+            "Pin an exact version (pkg@1.2.3, pkg==1.2.3, --from pkg==1.2.3, image:1.2.3 or image@sha256:...).",
+            name=name,
+        )
+    )
+
+
+def validate_mcp_server_declaration(
+    name: Any,
+    config: Any,
+    file_path: str,
+    *,
+    allowed_private_hosts: Iterable[str] = (),
+) -> list[Finding]:
+    """Statically validate one contained ``mcpServers`` entry (``name`` -> config).
+
+    ``allowed_private_hosts`` comes from the validation policy
+    (``mcp.allowed_private_hosts``) and suppresses ``mcp_endpoint_private`` for
+    intended private hosts; cloud metadata endpoints are never allowlisted.
+    """
     findings: list[Finding] = []
 
     if not isinstance(name, str) or not _MCP_NAME_RE.match(name.strip()):
@@ -619,11 +1478,13 @@ def validate_mcp_server_declaration(name: Any, config: Any, file_path: str) -> l
     _validate_transport(name, config, file_path, findings)
     _validate_insecure_tls_config(name, config, file_path, findings)
     _validate_env_and_headers(name, config, file_path, findings)
+    _validate_overrides(name, config, file_path, findings)
 
     if has_command:
         _validate_command(name, config, file_path, findings)
+        _validate_pinning(name, config, file_path, findings)
     if has_url:
-        _validate_url(name, config, file_path, findings)
+        _validate_url(name, config, file_path, findings, allowed_private_hosts)
     if has_provider and not (has_command or has_url):
         provider = config.get("provider")
         if not isinstance(provider, str) or not provider.strip():
@@ -641,25 +1502,61 @@ def validate_mcp_server_declaration(name: Any, config: Any, file_path: str) -> l
     return findings
 
 
-def validate_contained_mcp_servers(mcp_servers: Any, file_path: str) -> list[Finding]:
-    """Statically validate a contained ``.claude-plugin/plugin.json`` ``mcpServers`` map.
+def validate_contained_mcp_servers(
+    mcp_servers: Any,
+    file_path: str,
+    *,
+    allowed_private_hosts: Iterable[str] = (),
+) -> list[Finding]:
+    """Statically validate an in-memory ``.claude-plugin/plugin.json`` ``mcpServers`` value.
 
-    Returns a (possibly empty) list of blocking :class:`Finding` objects. An
-    absent or empty map yields no findings.
+    Accepts every documented Claude Code form without touching the filesystem:
+    an inline server map, a path string, or an array mixing both. Inline maps
+    (top-level or array elements) are validated here; path strings name JSON
+    config files that :func:`skillevaluator.plugin_components.collect_mcp_declarations`
+    reads through the bounded, no-follow plugin-root reader. Returns a (possibly
+    empty) list of findings; an absent or empty value yields none.
     """
     if mcp_servers is None:
         return []
+    if isinstance(mcp_servers, str):
+        return []
+    if isinstance(mcp_servers, list):
+        findings: list[Finding] = []
+        for index, entry in enumerate(mcp_servers):
+            if isinstance(entry, str):
+                continue
+            if isinstance(entry, dict):
+                findings.extend(
+                    validate_contained_mcp_servers(entry, file_path, allowed_private_hosts=allowed_private_hosts)
+                )
+                continue
+            findings.append(
+                _finding(
+                    Severity.HIGH,
+                    "mcp_servers_entry_invalid",
+                    f"mcpServers[{index}] must be a config-file path string or an inline server map "
+                    f"(got {type(entry).__name__})",
+                    file_path,
+                    'Use "./path/to/servers.json" or {"<name>": {"command"|"url": ...}} for each array entry.',
+                )
+            )
+        return findings
     if not isinstance(mcp_servers, dict):
         return [
             _finding(
                 Severity.HIGH,
                 "mcp_servers_not_object",
-                "'mcpServers' must be a JSON object mapping server names to their config",
+                "'mcpServers' must be an inline server map, a config-file path string, or an array of those "
+                f"(got {type(mcp_servers).__name__})",
                 file_path,
-                'Express mcpServers as an object: {"<name>": {"command"|"url"|"provider": ...}}.',
+                'Express mcpServers as {"<name>": {"command"|"url"|"provider": ...}}, "./.mcp.json", '
+                "or an array mixing both.",
             )
         ]
-    findings: list[Finding] = []
+    findings = []
     for name, config in mcp_servers.items():
-        findings.extend(validate_mcp_server_declaration(name, config, file_path))
+        findings.extend(
+            validate_mcp_server_declaration(name, config, file_path, allowed_private_hosts=allowed_private_hosts)
+        )
     return findings

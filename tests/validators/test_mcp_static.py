@@ -76,8 +76,14 @@ def test_command_insecure_tls_flag_blocked() -> None:
 
 
 def test_clean_stdio_command_passes() -> None:
-    config = {"command": "npx", "args": ["-y", "@scope/server-filesystem", "/data"], "transport": "stdio"}
+    config = {"command": "npx", "args": ["-y", "@scope/server-filesystem@1.2.3", "/data"], "transport": "stdio"}
     assert validate_contained_mcp_servers({"fs": config}, "p.json") == []
+
+
+def test_unpinned_stdio_package_is_advisory_medium() -> None:
+    config = {"command": "npx", "args": ["-y", "@scope/server-filesystem", "/data"], "transport": "stdio"}
+    findings = validate_contained_mcp_servers({"fs": config}, "p.json")
+    assert [(f.check_name, f.severity.value) for f in findings] == [("mcp_unpinned_package", "medium")]
 
 
 def test_empty_command_blocked() -> None:
@@ -267,8 +273,18 @@ def test_config_not_object_blocked() -> None:
     assert "mcp_config_not_object" in _checks(validate_contained_mcp_servers({"s": "nope"}, "p.json"))
 
 
-def test_mcp_servers_not_object_blocked() -> None:
-    assert "mcp_servers_not_object" in _checks(validate_contained_mcp_servers([], "p.json"))
+@pytest.mark.parametrize("value", [42, True, 1.5])
+def test_mcp_servers_scalar_is_not_object(value) -> None:
+    assert "mcp_servers_not_object" in _checks(validate_contained_mcp_servers(value, "p.json"))
+
+
+def test_mcp_servers_path_and_array_forms_are_accepted_in_memory() -> None:
+    # String paths are resolved by the plugin-root collector; inline array maps validate here.
+    assert validate_contained_mcp_servers("./.mcp.json", "p.json") == []
+    assert validate_contained_mcp_servers([], "p.json") == []
+    findings = validate_contained_mcp_servers(["./a.json", {"s": {"command": "sh", "args": ["-c", "x"]}}], "p.json")
+    assert "mcp_command_dangerous_form" in _checks(findings)
+    assert "mcp_servers_entry_invalid" in _checks(validate_contained_mcp_servers([7], "p.json"))
 
 
 def test_absent_and_empty_mcp_servers_yield_no_findings() -> None:

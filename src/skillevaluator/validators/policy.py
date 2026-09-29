@@ -63,6 +63,10 @@ class ValidationPolicy:
             severity that the validator would otherwise emit.
         source: Path to the YAML file the policy was loaded from (for
             diagnostics). ``None`` for programmatically constructed policies.
+        mcp_allowed_private_hosts: Intended private MCP endpoint hosts
+            (``mcp.allowed_private_hosts`` in YAML). Exact names, ``*.suffix``
+            wildcards, IP literals, or CIDR networks. Matching hosts do not raise
+            ``mcp_endpoint_private``; cloud metadata endpoints are never allowed.
     """
 
     profile: str = DEFAULT_PROFILE_NAME
@@ -70,16 +74,20 @@ class ValidationPolicy:
     author_email_regex: re.Pattern[str] | None = None
     severity_overrides: dict[str, Severity] = field(default_factory=dict)
     source: Path | None = None
+    mcp_allowed_private_hosts: tuple[str, ...] = ()
 
     @property
     def digest(self) -> str:
         """Return a stable digest for the effective, source-independent policy."""
-        payload = {
+        payload: dict[str, Any] = {
             "profile": self.profile,
             "audience": self.audience,
             "author_email_regex": self.author_email_regex.pattern if self.author_email_regex else None,
             "severity_overrides": {key: value.value for key, value in sorted(self.severity_overrides.items())},
         }
+        if self.mcp_allowed_private_hosts:
+            # Only present when configured, so existing policy digests are unchanged.
+            payload["mcp_allowed_private_hosts"] = sorted(self.mcp_allowed_private_hosts)
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
@@ -114,7 +122,7 @@ class ValidationPolicy:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for inclusion in reports (read-only summary)."""
-        return {
+        summary: dict[str, Any] = {
             "profile": self.profile,
             "audience": self.audience,
             "digest": self.digest,
@@ -122,6 +130,9 @@ class ValidationPolicy:
             "severity_overrides": {k: v.value for k, v in self.severity_overrides.items()},
             "source": str(self.source) if self.source else None,
         }
+        if self.mcp_allowed_private_hosts:
+            summary["mcp_allowed_private_hosts"] = list(self.mcp_allowed_private_hosts)
+        return summary
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +168,41 @@ def _coerce_email_regex(value: Any, source: str) -> re.Pattern[str] | None:
         return None
 
 
-_KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides"}
+_KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides", "mcp"}
 _KNOWN_IDENTITY_KEYS = {"author_email_regex"}
+_KNOWN_MCP_KEYS = {"allowed_private_hosts"}
+MAX_MCP_ALLOWED_PRIVATE_HOSTS = 256
+
+
+def _coerce_allowed_private_hosts(value: Any, source: str) -> tuple[str, ...]:
+    """Normalize ``mcp.allowed_private_hosts`` to a bounded tuple of non-empty strings."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        logger.warning("Ignoring non-list 'mcp.allowed_private_hosts' in %s.", source)
+        return ()
+    hosts: list[str] = []
+    for entry in value[:MAX_MCP_ALLOWED_PRIVATE_HOSTS]:
+        if isinstance(entry, str) and entry.strip() and len(entry) <= 255:
+            hosts.append(entry.strip())
+        else:
+            logger.warning("Ignoring invalid 'mcp.allowed_private_hosts' entry %r in %s.", entry, source)
+    if len(value) > MAX_MCP_ALLOWED_PRIVATE_HOSTS:
+        logger.warning(
+            "Ignoring 'mcp.allowed_private_hosts' entries beyond the first %d in %s.",
+            MAX_MCP_ALLOWED_PRIVATE_HOSTS,
+            source,
+        )
+    return tuple(dict.fromkeys(hosts))
+
+
+def _mcp_block(data: dict[str, Any], source: str) -> dict[str, Any]:
+    block = data.get("mcp") or {}
+    if not isinstance(block, dict):
+        logger.warning("Ignoring non-mapping 'mcp' block in %s.", source)
+        return {}
+    _warn_unknown_keys(block, _KNOWN_MCP_KEYS, "mcp", source)
+    return block
 
 
 def _load_policy_yaml(path: Path) -> Any:
@@ -220,12 +264,14 @@ def _policy_from_data(
             if sev is not None:
                 severity_overrides[key] = sev
 
+    mcp_block = _mcp_block(data, source_str)
     return ValidationPolicy(
         profile=profile_name,
         audience="external",
         author_email_regex=author_email_regex,
         severity_overrides=severity_overrides,
         source=source,
+        mcp_allowed_private_hosts=_coerce_allowed_private_hosts(mcp_block.get("allowed_private_hosts"), source_str),
     )
 
 
@@ -273,6 +319,10 @@ def load_policy_file(
     if not isinstance(identity_block, dict):
         identity_block = {}
     overlay_sets_email_regex = "author_email_regex" in identity_block
+    # Like author_email_regex, the overlay replaces the base allowlist only when
+    # it sets the key (an explicit empty list clears it).
+    mcp_block = custom_data.get("mcp") if isinstance(custom_data, dict) else None
+    overlay_sets_private_hosts = isinstance(mcp_block, dict) and "allowed_private_hosts" in mcp_block
 
     return ValidationPolicy(
         profile=custom.profile,
@@ -280,6 +330,9 @@ def load_policy_file(
         author_email_regex=(custom.author_email_regex if overlay_sets_email_regex else base.author_email_regex),
         severity_overrides=merged_overrides,
         source=path,
+        mcp_allowed_private_hosts=(
+            custom.mcp_allowed_private_hosts if overlay_sets_private_hosts else base.mcp_allowed_private_hosts
+        ),
     )
 
 

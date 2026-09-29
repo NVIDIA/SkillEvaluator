@@ -85,6 +85,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Plugin Tier 2 compares bundled skills and the plugin with a local catalog
   (`tier2 PLUGIN --catalog FILE`; optional `--llm` verdict); save plugin catalogs
   with `similarity-check PLUGINS --type plugin --save-catalog FILE`.
+- Tier 1 classifies each plugin skill/rule reference offline as provided,
+  referenced, missing, external, or unresolved, and blocks on a missing
+  same-repository dependency; `validate --repo-root` sets the repository root.
 
 ### Changed
 

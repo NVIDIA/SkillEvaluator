@@ -627,6 +627,7 @@ def _run_agent_eval_or_skip(
     progress_reporter=None,
     kind: str = "skill",
     lift_mode: str = "effectiveness",
+    repo_root: Path | None = None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
 
@@ -657,6 +658,7 @@ def _run_agent_eval_or_skip(
             agent_runtime_preflight=agent_runtime_preflight,
             progress_reporter=progress_reporter,
             lift_mode=lift_mode,
+            repo_root=repo_root,
         )
 
     if validate_source:
@@ -806,6 +808,7 @@ def _run_plugin_agent_eval(
     agent_runtime_preflight: bool | None = None,
     progress_reporter=None,
     lift_mode: str = "effectiveness",
+    repo_root: Path | None = None,
 ) -> ValidationResult:
     """Stage and evaluate a public plugin without fetching remote components."""
     import tempfile
@@ -828,6 +831,7 @@ def _run_plugin_agent_eval(
                 plugin_dir,
                 stage_root=Path(temp_dir),
                 include_skills=include_skills,
+                repo_root=repo_root,
             )
             if prepared.skipped or prepared.package_path is None:
                 return _skipped(
@@ -1631,6 +1635,17 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "Values above 1 run skills in parallel processes and disable the per-skill pipeline view.",
 )
 @click.option(
+    "--repo-root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Plugin only: repository root (git top-level) used to resolve same-repository skill/rule "
+    "references in Tier 1 and Tier 3. Default: the git top-level containing the plugin. The "
+    "missing-dependency gate also requires that root to have a git 'origin' remote; otherwise "
+    "references stay unresolved (advisory).",
+)
+@click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
     "dedup",
@@ -1852,6 +1867,7 @@ def validate(
     profile: str | None,
     external: bool,
     policy_path: Path | None,
+    repo_root: Path | None,
     dedup: bool,
     block_on_dedup: bool | None,
     agent_eval: bool | None,
@@ -2097,6 +2113,7 @@ def validate(
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        repo_root=repo_root,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -2218,6 +2235,7 @@ def validate(
             progress_reporter=reporter,
             kind=resolved_type,
             lift_mode=lift_mode,
+            repo_root=repo_root,
         )
         results.append(tier3_result)
         tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)

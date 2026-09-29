@@ -45,7 +45,6 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
 import yaml
 
@@ -61,11 +60,32 @@ from skillevaluator.constants import (
 )
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Severity
+
+# Network-free reference, identity, and bound helpers shared with Tier 1
+# (``skillevaluator.plugin_dependencies`` must stay importable without Tier 3
+# extras). Private aliases keep this module's historical names.
+from skillevaluator.plugin_dependencies import CONTENT_ROOTS as _CONTENT_ROOTS
+from skillevaluator.plugin_dependencies import (
+    DEPENDENCY_STATES,
+    MAX_PLUGIN_MANIFEST_ITEMS,
+    MAX_PLUGIN_MANIFEST_TEXT_CHARS,
+    dependency_status_counts_for_manifest,
+)
+from skillevaluator.plugin_dependencies import REMOTE_REF_SOURCES as _REMOTE_REF_SOURCES
+from skillevaluator.plugin_dependencies import find_repo_root as _find_repo_root
+from skillevaluator.plugin_dependencies import is_within as _is_within
+from skillevaluator.plugin_dependencies import iter_raw_refs as _iter_raw_refs
+from skillevaluator.plugin_dependencies import local_repo_slug as _local_repo_slug
+from skillevaluator.plugin_dependencies import parse_canonical_ref as _parse_canonical_ref
+from skillevaluator.plugin_dependencies import ref_label as _ref_label
+from skillevaluator.plugin_dependencies import ref_name as _ref_name
+from skillevaluator.plugin_dependencies import ref_source as _ref_source
+from skillevaluator.plugin_dependencies import slug_from_remote_url as _slug_from_remote_url  # noqa: F401
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
-from skillevaluator.utils.helpers import find_bundled_plugin_skills, resolve_git_remote_url
+from skillevaluator.utils.helpers import find_bundled_plugin_skills
 from skillevaluator.utils.secure_fs import (
     SecurePathError,
     SecureRoot,
@@ -88,27 +108,10 @@ if TYPE_CHECKING:
 # dataset accepted/staged here is resolvable downstream (MR !29 review 59316232).
 _EVAL_DATASET_NAMES = tuple(f"evals{extension}" for extension in DATASET_EXTENSIONS)
 
-# Canonical dependency-ref sources that Phase 1 cannot resolve offline. These
-# mirror ``PluginSelector.source`` in :mod:`skillevaluator.models.plugin`.
-_REMOTE_REF_SOURCES = frozenset({"github", "git"})
-
-# Repo-root content dirs a canonical ref's <kind> segment may name, per resolution
-# kind. normalize_ref uses the ref's FIRST path segment as <kind>, so real
-# bundle-reference layouts carry ref_kind "team-skills"/"team-rules" (e.g.
-# team-skills/<team>/<plugin>/<skill>), while the simplified fixture layout carries
-# "skills"/"rules". Resolution and containment use the ref's OWN content root, so a
-# ref can only reach a recognized content dir -- never .git/, secrets/, or a sibling.
-_CONTENT_ROOTS: dict[str, tuple[str, ...]] = {
-    "skills": ("skills", "team-skills"),
-    "rules": ("rules", "team-rules"),
-}
-
 # Filename for the plugin's own runnable MCP servers. Kept distinct from the
 # task-environment ``mcp_servers.toml`` so the adapter can stage it for the
 # with-plugin arm only (see ``adapter.generate_harbor_tasks``).
 PLUGIN_MCP_SERVERS_FILENAME = "plugin_mcp_servers.toml"
-MAX_PLUGIN_MANIFEST_ITEMS = 256
-MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,7 @@ class PluginEvalPackage:
     mcp_unsupported_config: tuple[str, ...] = ()
     dataset_case_count: int = 0
     cross_component_case_count: int = 0
+    dependency_status_counts: tuple[tuple[str, int], ...] = ()
     skipped: bool = False
     skip_reason: str | None = None
 
@@ -160,6 +164,11 @@ class PluginEvalPackage:
             "cross_component_case_count": self.cross_component_case_count,
             "integration_evidence_ready": self.cross_component_case_count > 0,
             "partial": bool(unresolved_skill or unresolved_rule or provider_only_mcp or mcp_unsupported_config),
+            # Offline classification of declared skill/rule refs (same classifier as Tier 1).
+            "dependency_status_counts": {
+                **dict.fromkeys(DEPENDENCY_STATES, 0),
+                **dict(self.dependency_status_counts),
+            },
         }
 
     def integration_evidence_error(self) -> str | None:
@@ -250,6 +259,9 @@ def prepare_plugin_eval_package(
     # plugin's own clone are resolved to real dirs/files under the clone root
     # (widened, slug-verified containment); everything else stays unresolved.
     resolver = _make_intra_repo_resolver(plugin_dir, plugin_root, repo_root, stage_root)
+    dependency_status_counts = (
+        () if contained_form else tuple(dependency_status_counts_for_manifest(manifest, plugin_dir, repo_root).items())
+    )
 
     # Contained skills: symlink-safe discovery shared with Tier 1/2, plus any
     # caller-supplied local skills, plus intra-repo-resolved bundle skill refs.
@@ -322,6 +334,7 @@ def prepare_plugin_eval_package(
             unresolved_skill_refs=unresolved_skill_refs,
             unresolved_rule_refs=unresolved_rule_refs,
             mcp_unsupported_config=tuple(mcp_unsupported_config),
+            dependency_status_counts=dependency_status_counts,
             skipped=True,
             skip_reason=_skip_reason(unresolved_skill_refs, unresolved_rule_refs, provider_mcp),
         )
@@ -380,6 +393,7 @@ def prepare_plugin_eval_package(
         unresolved_rule_refs=unresolved_rule_refs,
         dataset_case_count=len(dataset_cases),
         cross_component_case_count=cross_component_case_count,
+        dependency_status_counts=dependency_status_counts,
     )
 
 
@@ -470,72 +484,6 @@ def _plugin_description(manifest: dict[str, Any], plugin_name: str) -> str:
         "Plugin manifest description",
         max_chars=DESCRIPTION_MAX_LENGTH,
     ).strip()
-
-
-def _find_repo_root(plugin_dir: Path) -> Path:
-    for parent in [plugin_dir, *plugin_dir.parents]:
-        if (parent / "plugins").exists() and any((parent / child).exists() for child in ("skills", "team-skills")):
-            return parent
-    if plugin_dir.parent.name == "plugins":
-        return plugin_dir.parent.parent
-    return plugin_dir
-
-
-def _parse_canonical_ref(ref: Any) -> tuple[str, str, str, str] | None:
-    """Parse a canonical ref into ``(source, repo, kind, name)`` or ``None``.
-
-    Reuses the canonical-string producer :func:`normalize_ref` and splits it back
-    into its four segments, so parsing never diverges from the producer and the
-    :func:`~skillevaluator.models.plugin._validate_canonical_ref` validator. A ref
-    that is not a confidently-parseable 4-segment canonical ID returns ``None``.
-    """
-    canonical = normalize_ref(ref)
-    if not canonical:
-        return None
-    segments = canonical.split("::")
-    if len(segments) != 4:
-        return None
-    source, repo, kind, name = (segment.strip() for segment in segments)
-    if not (source and repo and kind and name):
-        return None
-    return source, repo, kind, name
-
-
-def _slug_from_remote_url(url: str) -> str | None:
-    """Extract the ``<group>/<repo>`` slug from a git-remote URL.
-
-    The sole caller (:func:`_local_repo_slug`) passes a URL that
-    :func:`~skillevaluator.utils.helpers.resolve_git_remote_url` has already
-    normalized to HTTPS -- SSH ``ssh://`` and SCP-style (``git@host:group/repo``)
-    remotes are converted by ``_ssh_to_https`` first -- so in practice this
-    receives an ``https://host/group/repo[/-/tree/...]`` URL. The SCP and
-    ``ssh://`` forms are nonetheless handled directly here as defense-in-depth,
-    so the slug is correct no matter how the URL reaches this function (a
-    standard URI would otherwise dump an SCP string verbatim into ``path``).
-    """
-    text = url.strip()
-    if "://" in text:
-        path = urlparse(text).path
-    else:
-        # SCP-style SSH shorthand ([user@]host:group/repo(.git)) is not a URI, so
-        # take the segment after the first ':' when the string looks like one.
-        scp = re.match(r"^[^/@]+@[^/:]+:(?P<path>.+)$", text)
-        path = scp.group("path") if scp else text
-    path = path.strip("/")
-    if "/-/" in path:  # strip GitLab web suffixes like '/-/tree/main'
-        path = path.split("/-/", 1)[0]
-    path = path.removesuffix(".git")
-    slug = path.strip("/")
-    # Canonical plugin refs are normalized to lowercase. Git hosting treats the
-    # owner/repository portion case-insensitively, so normalize the remote slug
-    # the same way before comparing identities.
-    return slug.lower() or None
-
-
-def _local_repo_slug(clone_root: Path) -> str | None:
-    """Best-effort ``<group>/<repo>`` slug of the clone's git origin, or ``None``."""
-    url = resolve_git_remote_url(clone_root)
-    return _slug_from_remote_url(url) if url else None
 
 
 @dataclass(frozen=True)
@@ -682,71 +630,6 @@ def _make_intra_repo_resolver(
     )
 
 
-def _iter_raw_refs(section: Any) -> list[Any]:
-    """Return the raw ref entries (str or mapping) for a dependency section."""
-    if not section:
-        return []
-    refs = section.get("refs", section) if isinstance(section, dict) else section
-    if refs is None:
-        return []
-    if not isinstance(refs, list):
-        raise ValueError("Plugin manifest refs must be a list")
-    if len(refs) > MAX_PLUGIN_MANIFEST_ITEMS:
-        raise ValueError(f"Plugin manifest refs exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-item limit")
-    return refs
-
-
-def _ref_source(ref: Any) -> str | None:
-    """Return the source system of a dependency ref, or ``None``."""
-    if isinstance(ref, str):
-        segments = ref.split("::")
-        return segments[0].strip() if len(segments) >= 2 else None
-    if isinstance(ref, dict):
-        source = ref.get("source")
-        if source is None:
-            return None
-        return (
-            require_bounded_string(
-                source,
-                "Plugin reference source",
-                max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-            ).strip()
-            or None
-        )
-    return None
-
-
-def _ref_name(ref: Any) -> str | None:
-    """Return the trailing resource name of a dependency ref, or ``None``."""
-    if isinstance(ref, str):
-        tail = ref.split("::")[-1] if "::" in ref else ref
-        name = tail.strip().split("/")[-1].strip()
-        return name or None
-    if isinstance(ref, dict):
-        raw_path = ref.get("path")
-        if raw_path is None:
-            return None
-        path = require_bounded_string(
-            raw_path,
-            "Plugin reference path",
-            max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
-        ).strip()
-        if path:
-            return path.split("/")[-1].strip() or None
-    return None
-
-
-def _ref_label(ref: Any) -> str:
-    """Return a stable, human-readable label for reporting an unresolved ref."""
-    canonical = normalize_ref(ref)
-    if canonical:
-        return canonical
-    name = _ref_name(ref)
-    if name:
-        return name
-    raise ValueError("Plugin reference must be a canonical string or scalar selector object")
-
-
 def _unresolved_refs(
     section: Any,
     *,
@@ -843,13 +726,6 @@ def _resolve_contained_file(ref: Any, plugin_dir: Path, plugin_root: Path) -> Pa
         if resolved.is_file() and _is_within(resolved, plugin_root):
             return resolved
     return None
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        return path.resolve().is_relative_to(root)
-    except OSError:
-        return False
 
 
 def _load_rule_path(path: Path) -> _StagedRule:

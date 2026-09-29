@@ -14,7 +14,10 @@ Two plugin models are recognized:
 For either model, skills under ``<plugin-root>/skills/`` are discovered and
 validated with :class:`~skillevaluator.validators.schema.SchemaValidator`.
 Reporting metadata identifies the selected manifest model and summarizes
-declared dependencies without resolving or fetching them.
+declared dependencies. For a valid bundle-reference manifest every declared
+skill/rule ref is classified offline (never fetched) by
+:mod:`skillevaluator.plugin_dependencies`; a same-repository ref whose target
+does not exist is the only blocking outcome (``plugin_dependency_missing``).
 """
 
 from __future__ import annotations
@@ -58,8 +61,10 @@ MAX_PLUGIN_SCHEMA_FINDINGS = 100
 class PluginSchemaValidator(ValidatorBase):
     """Validate a plugin manifest and any skills bundled by the plugin."""
 
-    def __init__(self, policy: ValidationPolicy | None = None) -> None:
+    def __init__(self, policy: ValidationPolicy | None = None, repo_root: Path | None = None) -> None:
         self.policy = policy
+        # Optional ``--repo-root``: repository root for same-repository ref resolution.
+        self.repo_root = repo_root
 
     @property
     def name(self) -> str:
@@ -129,13 +134,16 @@ class PluginSchemaValidator(ValidatorBase):
         root = located.root
         self._stamp_manifest_metadata(located.manifest_filename, root, manifest_type, result)
 
+        validated_manifest: dict[str, Any] | None = None
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
             self._validate_contained_manifest(located, result)
         else:
-            self._validate_bundle_manifest(located, result)
+            validated_manifest = self._validate_bundle_manifest(located, result)
 
         # A manifest error must not hide problems in skills bundled alongside it.
         self._validate_in_plugin_skills(root, result)
+        if validated_manifest is not None:
+            self._resolve_dependencies(located, validated_manifest, result)
         return result
 
     @staticmethod
@@ -158,18 +166,24 @@ class PluginSchemaValidator(ValidatorBase):
             "root": str(root),
         }
 
-    def _validate_bundle_manifest(self, location: PluginManifestLocation, result: ValidationResult) -> None:
-        """Validate a bundle-reference manifest against ``PluginManifest``."""
+    def _validate_bundle_manifest(
+        self, location: PluginManifestLocation, result: ValidationResult
+    ) -> dict[str, Any] | None:
+        """Validate a bundle-reference manifest against ``PluginManifest``.
+
+        Returns the raw manifest mapping when it satisfies the schema, so its
+        refs can be classified, else ``None``.
+        """
         manifest_path = location.path
         data = self._load_yaml(location, result)
         if data is None:
-            return
+            return None
 
         try:
             manifest = PluginManifest(**data)
         except ValidationError as exc:
             self._add_validation_findings(exc, manifest_path, result)
-            return
+            return None
 
         result.add_message(f"Plugin name: {manifest.name}")
         result.add_message(f"Author: {manifest.author.email}")
@@ -184,6 +198,80 @@ class PluginSchemaValidator(ValidatorBase):
             "rules": len(manifest.rules.refs) if manifest.rules and manifest.rules.refs else 0,
             "mcp": len(manifest.mcp) if manifest.mcp else 0,
         }
+        return data
+
+    def _resolve_dependencies(
+        self,
+        location: PluginManifestLocation,
+        data: dict[str, Any],
+        result: ValidationResult,
+    ) -> None:
+        """Classify declared skill/rule refs and gate on missing same-repo targets.
+
+        States are ``provided``/``referenced``/``missing``/``external``/
+        ``unresolved`` (see :mod:`skillevaluator.plugin_dependencies`). Only
+        ``missing`` blocks. Repository identity fails closed: without a verified
+        git ``origin`` slug every ref is ``unresolved`` (advisory), never
+        ``referenced`` or ``missing``.
+        """
+        from skillevaluator.plugin_dependencies import classify_plugin_dependencies, resolve_repository_identity
+
+        plugin_meta = result.metadata.setdefault("plugin", {})
+        identity = resolve_repository_identity(location.root, self.repo_root)
+        if identity.repo_root_ignored:
+            result.add_message("--repo-root ignored for plugin dependency resolution: it does not contain the plugin")
+        try:
+            resolution = classify_plugin_dependencies(
+                data,
+                location.root,
+                identity,
+                bundled_skills=plugin_meta.get("bundled_skills") or (),
+            )
+        except ValueError as exc:
+            result.add_warning(f"Plugin dependency resolution skipped: {exc}")
+            return
+
+        manifest_path = str(location.path)
+        for section, rows in (("skills", resolution.skills), ("rules", resolution.rules)):
+            for row in rows:
+                if row.state == "missing":
+                    result.add_finding(
+                        Finding(
+                            category="PLUGIN_SCHEMA",
+                            severity=Severity.HIGH,
+                            check_name="plugin_dependency_missing",
+                            message=f"Declared {section} dependency '{row.ref}' is missing: {row.reason}.",
+                            file_path=manifest_path,
+                            suggestion=(
+                                "Add the referenced component at its repository path, or correct the "
+                                "reference (source::owner/repo::kind::name)."
+                            ),
+                            metadata={"ref": row.ref, "state": row.state, "section": section},
+                        )
+                    )
+                else:
+                    location_note = f" at {row.path}" if row.path else ""
+                    result.add_message(
+                        f"Plugin {section} dependency '{row.ref}': {row.state}{location_note} ({row.reason})"
+                    )
+
+        counts = resolution.status_counts()
+        if resolution.rows and not counts["missing"]:
+            summary = ", ".join(f"{counts[state]} {state}" for state in counts if counts[state])
+            advisory = ""
+            if counts["unresolved"]:
+                advisory = (
+                    f"; {counts['unresolved']} unresolved ref(s) are advisory only -- the missing-dependency "
+                    "gate could not be evaluated for them (validate from the plugin's git clone with an "
+                    "'origin' remote, or pass --repo-root)"
+                )
+            result.add_success(
+                check_name="plugin_dependencies",
+                message=f"Declared dependencies: {summary}{advisory}",
+                **counts,
+            )
+        plugin_meta["dependency_resolution"] = resolution.to_metadata()
+        plugin_meta["dependency_status_counts"] = counts
 
     def _load_yaml(self, location: PluginManifestLocation, result: ValidationResult) -> dict | None:
         """Parse manifest YAML, recording a finding on failure."""
@@ -419,14 +507,14 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
-        if not skill_manifests:
-            return
-
         skill_names = [manifest.relative_path.parent.as_posix() for manifest in skill_manifests]
         skill_dirs = [skills_dir / manifest.relative_path.parent for manifest in skill_manifests]
         plugin_meta = result.metadata.setdefault("plugin", {})
         plugin_meta["in_plugin_skills"] = len(skill_dirs)
-        plugin_meta["bundled_skills"] = skill_names
+        # Plugin-root-relative ids (``skills/<name>``).
+        plugin_meta["bundled_skills"] = [f"skills/{name}" for name in skill_names]
+        if not skill_manifests:
+            return
         validator = SchemaValidator(policy=self.policy)
 
         for skill_dir, skill_name, manifest in zip(skill_dirs, skill_names, skill_manifests, strict=True):

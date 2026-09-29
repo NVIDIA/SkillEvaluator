@@ -255,7 +255,8 @@ skills:
         result = PluginSchemaValidator().validate(tmp_path)
 
         assert not result.passed
-        assert result.metadata["plugin"]["bundled_skills"] == ["broken-skill"]
+        assert result.metadata["plugin"]["bundled_skills"] == ["skills/broken-skill"]
+        assert result.metadata["plugin"]["in_plugin_skills"] == 1
         assert any("[broken-skill]" in finding.file_path for finding in result.findings)
 
     def test_contained_plugin_with_valid_bundled_skill_passes(self, tmp_path: Path):

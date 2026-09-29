@@ -105,19 +105,23 @@ def _enabled_checks(checks: str | None) -> set[str]:
     return enabled
 
 
-def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | None):
+def _schema_validator_for(
+    content_type: str | None,
+    policy: ValidationPolicy | None,
+    repo_root: Path | None = None,
+):
     """Return the schema validator matching the (forced or detected) content type.
 
     Rules, workflows, and plugins use their dedicated schema validators; skill
     and unknown content fall back to the skill :class:`SchemaValidator` (the
-    historical default).
+    historical default). *repo_root* only affects plugin dependency resolution.
     """
     if content_type == CONTENT_TYPE_RULES:
         return RulesSchemaValidator()
     if content_type == CONTENT_TYPE_WORKFLOWS:
         return WorkflowsSchemaValidator()
     if content_type == CONTENT_TYPE_PLUGIN:
-        return PluginSchemaValidator(policy=policy)
+        return PluginSchemaValidator(policy=policy, repo_root=repo_root)
     return SchemaValidator(policy=policy)
 
 
@@ -145,6 +149,7 @@ def run_validation(
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
+    repo_root: Path | None = None,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
 
@@ -163,6 +168,9 @@ def run_validation(
     When *policy* is provided, the schema validator applies the policy's
     audience-aware author rules; finalized severities for all validators are
     applied centrally in :func:`emit_reports` via the policy.
+
+    *repo_root* (``--repo-root``) optionally names the repository root used to
+    resolve a bundle-reference plugin's same-repository skill/rule refs.
     """
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
@@ -175,7 +183,7 @@ def run_validation(
             find_bundled_plugin_skills(target_path)
         except ValueError as exc:
             if "schema" in enabled:
-                validator = PluginSchemaValidator(policy=policy)
+                validator = PluginSchemaValidator(policy=policy, repo_root=repo_root)
                 return [_as_result(validator.name, validator.description, validator.validate, target_path)]
             security_result = ValidationResult(
                 validator_name="Plugin Bundle Security",
@@ -196,7 +204,7 @@ def run_validation(
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
 
     def _schema_results() -> list[ValidationResult]:
-        v = _schema_validator_for(content_type, policy)
+        v = _schema_validator_for(content_type, policy, repo_root)
         return [_as_result(v.name, v.description, v.validate, target_path)]
 
     def _security_results() -> list[ValidationResult]:

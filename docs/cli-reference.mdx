@@ -193,6 +193,7 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `external` | Validation profile: `external` or a custom name. |
 | `--external` | — | Shortcut for `--profile external` (validate for public publication). |
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
+| `--repo-root DIRECTORY` | git top-level of the plugin | Plugin only: repository root used to resolve same-repository skill and rule references in Tier 1 and Tier 3. The missing-dependency gate also requires this root to have a git `origin` remote; otherwise references stay `unresolved` (advisory). |
 
 Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
 

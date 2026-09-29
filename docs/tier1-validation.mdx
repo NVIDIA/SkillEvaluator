@@ -104,6 +104,8 @@ Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, 
 
 Plugins are validated against their public contract; the `quality`, `lint`, and `version` checks are skill-only and are skipped for plugins, rules, and workflows.
 
+For a bundle-reference plugin, each `skills.refs` and `rules.refs` entry is classified offline, without fetching anything: `provided` (bundled inside the plugin root), `referenced` (elsewhere in the same repository), `missing` (names the same repository, but nothing exists at that path), `external` (another repository; not verified), or `unresolved` (the repository cannot be identified, or the target is reachable only through a link). Only `missing` blocks, as a HIGH `plugin_dependency_missing` finding. A ref counts as same-repository only when the repository root is the git top-level and its `origin` remote matches the ref's `<owner>/<repo>`; otherwise every ref stays `unresolved` and advisory. The repository root defaults to the git top-level that contains the plugin; override it with `--repo-root`.
+
 For collections, pass a folder containing skills under `skills/` or `team-skills/`. Folder-level validation discovers each live `SKILL.md` below the target while excluding configured names such as `evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and `__pycache__`.
 
 ```bash title="Validate a skill or a collection"

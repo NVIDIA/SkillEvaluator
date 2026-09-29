@@ -3572,6 +3572,14 @@
           "type": "integer range"
         },
         {
+          "name": "repo_root",
+          "opts": [
+            "--repo-root"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
           "default": "True",
           "is_flag": true,
           "name": "dedup",

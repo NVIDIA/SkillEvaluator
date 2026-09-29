@@ -10,9 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from skillevaluator.constants import (
-    CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     CONTENT_DEDUP_MAX_FILE_BYTES,
-    CONTENT_DEDUP_MAX_FILES,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     CONTENT_TYPE_RULES,
     CONTENT_TYPE_SKILL,
@@ -21,10 +19,13 @@ from skillevaluator.constants import (
     NAME_MAX_LENGTH,
     RULES_FILE_EXTENSION,
     SCAN_EXCLUDED_DIRS,
+    SIMILARITY_DEFAULT_MAX_ENTRIES,
+    SIMILARITY_MAX_DISCOVERED_PATHS,
     SKILL_MANIFEST_VARIANTS,
     TITLE_MAX_LENGTH,
     WORKFLOWS_MANIFEST_FILE,
 )
+from skillevaluator.embedding.limits import validate_max_entries
 from skillevaluator.logging_config import get_logger
 from skillevaluator.utils.secure_fs import SecureFile, SecureRoot, discover_secure_files
 from skillevaluator.utils.structured_data import (
@@ -38,10 +39,9 @@ from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 logger = get_logger(__name__)
 
-MAX_COLLECTION_ENTRIES = CONTENT_DEDUP_MAX_FILES
 MAX_MANIFEST_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
 MAX_COLLECTION_BYTES = CONTENT_DEDUP_MAX_TOTAL_BYTES
-MAX_DISCOVERED_PATHS = CONTENT_DEDUP_MAX_DISCOVERED_PATHS
+MAX_DISCOVERED_PATHS = SIMILARITY_MAX_DISCOVERED_PATHS
 DISCOVERY_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS
 
 
@@ -62,13 +62,19 @@ class ContentEntry:
 
 @dataclass
 class _ExtractionBudget:
+    """Tracks collection bounds before any embedding request is made."""
+
+    max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES
     entry_count: int = 0
     total_bytes: int = 0
 
     def reserve(self, file: SecureFile) -> None:
         self.entry_count += 1
-        if self.entry_count > MAX_COLLECTION_ENTRIES:
-            raise ValueError(f"Collection entry limit exceeded ({MAX_COLLECTION_ENTRIES}) before embedding")
+        if self.entry_count > self.max_entries:
+            raise ValueError(
+                f"Collection entry limit exceeded ({self.max_entries}) before embedding; "
+                "increase --max-entries within its supported range to scan the complete collection"
+            )
         declared_bytes = file.metadata.st_size
         if declared_bytes > MAX_MANIFEST_BYTES:
             raise ValueError(f"Manifest exceeds the Tier 2 per-file byte limit ({MAX_MANIFEST_BYTES}): {file.rel_path}")
@@ -227,8 +233,14 @@ def extract_from_workflow(workflow_dir: Path) -> ContentEntry | None:
         )
 
 
-def discover_and_extract(root: Path, content_type: str) -> list[ContentEntry]:
-    """Discover and extract one bounded content collection before embedding."""
+def discover_and_extract(
+    root: Path, content_type: str, *, max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES
+) -> list[ContentEntry]:
+    """Discover and extract one bounded content collection before embedding.
+
+    ``max_entries`` bounds the selected manifests, including those with invalid frontmatter.
+    """
+    validate_max_entries(max_entries)
     selectors: dict[str, Callable[[Path], bool]] = {
         CONTENT_TYPE_SKILL: lambda relative: relative.name in SKILL_MANIFEST_VARIANTS,
         CONTENT_TYPE_RULES: lambda relative: (
@@ -251,7 +263,7 @@ def discover_and_extract(root: Path, content_type: str) -> list[ContentEntry]:
             for _directory, variants in sorted(grouped.items(), key=lambda item: item[0].as_posix())
         ]
 
-    budget = _ExtractionBudget()
+    budget = _ExtractionBudget(max_entries=max_entries)
     entries: list[ContentEntry] = []
     with SecureRoot(root) as secure_root:
         for file in files:

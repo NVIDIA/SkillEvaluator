@@ -431,6 +431,27 @@ class TestExtractorSecurityContract:
 
         assert [entry.name for entry in discover_and_extract(tmp_path, "skill")] == ["test-skill"]
 
+    @pytest.mark.parametrize("content_type", ["skill", "rules", "workflows"])
+    def test_discovery_path_budget_counts_directories_and_unselected_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content_type: str
+    ) -> None:
+        monkeypatch.setattr(extractor_module, "MAX_DISCOVERED_PATHS", 4)
+        manifest_name, manifest_text = {
+            "skill": ("SKILL.md", VALID_SKILL_MD),
+            "rules": ("rule.mdc", VALID_RULE_MDC),
+            "workflows": ("workflow-rules.mdc", VALID_WORKFLOW_MDC),
+        }[content_type]
+        item_dir = tmp_path / "nested" / "item"
+        item_dir.mkdir(parents=True)
+        (item_dir / manifest_name).write_text(manifest_text)
+        (item_dir / "a.bin").write_bytes(b"x")
+
+        assert len(discover_and_extract(tmp_path, content_type, max_entries=5_000)) == 1
+
+        (item_dir / "b.bin").write_bytes(b"x")
+        with pytest.raises(ValueError, match=r"path limit of 4 entries"):
+            discover_and_extract(tmp_path, content_type, max_entries=5_000)
+
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable on this platform")
     def test_rejects_special_selected_rule(self, tmp_path: Path) -> None:
         fifo = tmp_path / "special.mdc"

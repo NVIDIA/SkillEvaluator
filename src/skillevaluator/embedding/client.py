@@ -22,13 +22,18 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MODEL,
 )
 from skillevaluator.logging_config import get_logger
-from skillevaluator.provider_config import ProviderConfig, ProviderConfigurationError, resolve_embedding_provider
+from skillevaluator.provider_config import (
+    EMBEDDING_DEFAULT_NVIDIA,
+    ProviderConfig,
+    ProviderConfigurationError,
+    resolve_embedding_provider,
+)
 
 logger = get_logger(__name__)
 
 
 class SimilarityConfigError(Exception):
-    """Raised when embedding configuration is missing or invalid."""
+    """Raised when configuration or provider failures prevent embedding comparison."""
 
 
 MAX_EMBEDDING_VECTOR_DIMENSION = 65_536
@@ -61,6 +66,45 @@ def validate_similarity_threshold(value: object, *, context: str = "Similarity")
     if not math.isfinite(numeric) or not 0.0 <= numeric <= 1.0:
         raise ValueError(f"{context} threshold must be finite and within [0, 1]")
     return numeric
+
+
+def normalize_embedding_vector(
+    vector: object,
+    expected_dimension: int | None = None,
+    *,
+    context: str = "Embedding provider",
+    allow_zero: bool = False,
+) -> list[float]:
+    """Validate a vector and return a unit-vector copy for repeated comparisons.
+
+    Zero vectors remain zero when ``allow_zero`` is enabled, matching
+    :meth:`EmbeddingClient.cosine_similarity`.
+    """
+    values, norm = _validated_vector_values(
+        vector,
+        expected_dimension,
+        context=context,
+        allow_zero=allow_zero,
+    )
+    if norm == 0.0:
+        return values
+    return [value / norm for value in values]
+
+
+def unit_vector_similarity(left: list[float], right: list[float]) -> float:
+    """Return the cosine similarity of two same-width normalized vectors.
+
+    Pairwise scans normalize each vector once with :func:`normalize_embedding_vector`
+    instead of revalidating and renormalizing both vectors for every pair.
+    Equal nonzero vectors score exactly 1.0 so rounding cannot hide exact
+    duplicates at ``--threshold 1``; zero vectors still score 0.0.
+    """
+    if left == right:
+        return 1.0 if any(left) else 0.0
+    score = math.sumprod(left, right)
+    if not math.isfinite(score):
+        raise SimilarityConfigError("Cosine similarity produced a non-finite result.")
+    return max(-1.0, min(1.0, score))
 
 
 class EmbeddingClient:
@@ -142,11 +186,45 @@ class EmbeddingClient:
             return []
 
         client = self._get_client()
-        response = client.embeddings.create(
-            model=self.model,
-            input=texts,
-            encoding_format="float",
-        )
+        from openai import APIConnectionError, APIStatusError
+
+        config = self._resolved_config()
+        kwargs: dict[str, Any] = {}
+        if (
+            config.provider == "nv_build"
+            or self.model == EMBEDDING_DEFAULT_NVIDIA
+            or self.model.endswith("/" + EMBEDDING_DEFAULT_NVIDIA)
+        ):
+            # Deduplication compares documents symmetrically, not queries to documents.
+            kwargs["extra_body"] = {"input_type": "passage"}
+        try:
+            response = client.embeddings.create(
+                model=self.model,
+                input=texts,
+                encoding_format="float",
+                **kwargs,
+            )
+        except APIStatusError as exc:
+            # Provider responses can echo input text, credentials, or private URLs.
+            # Preserve the status and recovery action without forwarding the body.
+            status = exc.status_code
+            if status in (404, 410):
+                action = (
+                    "The embedding model or endpoint is unavailable. "
+                    "Check SKILL_EVAL_EMBEDDING_MODEL against your provider's active models "
+                    "and verify the configured endpoint."
+                )
+            elif status in (401, 403):
+                action = "Check the embedding provider's API key and access to the configured model."
+            elif status == 429:
+                action = "The embedding provider is rate-limiting requests. Check your quota and retry later."
+            else:
+                action = "Check the embedding provider's availability and model configuration before retrying."
+            raise SimilarityConfigError(f"Embedding request failed (HTTP {status}). {action}") from exc
+        except APIConnectionError as exc:
+            raise SimilarityConfigError(
+                "Embedding connection failed. Check the configured endpoint and network, then retry."
+            ) from exc
         data = list(response.data)
         if len(data) != len(texts):
             raise SimilarityConfigError(
@@ -158,7 +236,7 @@ class EmbeddingClient:
         for item in data:
             index = getattr(item, "index", None)
             if type(index) is not int or not 0 <= index < len(texts):
-                raise SimilarityConfigError(f"Embedding response index is invalid: {index!r}.")
+                raise SimilarityConfigError("Embedding response index must be an integer within the input range.")
             if ordered[index] is not None:
                 raise SimilarityConfigError(f"Embedding response contains duplicate index {index}.")
             vector = getattr(item, "embedding", None)
@@ -220,24 +298,19 @@ class EmbeddingClient:
                 "This usually means the embeddings were produced by different models "
                 "or a stale cache is being used."
             )
-        values_a, norm_a = _validated_vector_values(
+        unit_a = normalize_embedding_vector(
             vec_a,
             len(vec_a),
             context="First similarity",
             allow_zero=True,
         )
-        values_b, norm_b = _validated_vector_values(
+        unit_b = normalize_embedding_vector(
             vec_b,
             len(vec_a),
             context="Second similarity",
             allow_zero=True,
         )
-        if norm_a == 0.0 or norm_b == 0.0:
-            return 0.0
-        score = math.fsum((a / norm_a) * (b / norm_b) for a, b in zip(values_a, values_b, strict=True))
-        if not math.isfinite(score):
-            raise SimilarityConfigError("Cosine similarity produced a non-finite result.")
-        return max(-1.0, min(1.0, score))
+        return unit_vector_similarity(unit_a, unit_b)
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +336,16 @@ def _split_into_chunks(
        fixed-size overlapping windows.
     3. Guarantee at least one chunk is returned.
     """
-    if type(chunk_size) is not int or chunk_size <= 0:
-        raise SimilarityConfigError("chunk_size must be a positive integer")
-    if type(overlap) is not int or overlap < 0 or overlap >= chunk_size:
-        raise SimilarityConfigError("overlap must be an integer in the range [0, chunk_size)")
+    if type(chunk_size) is not int:
+        raise SimilarityConfigError("Embedding chunk size must be an integer.")
+    if type(overlap) is not int:
+        raise SimilarityConfigError("Embedding chunk overlap must be an integer.")
+    if chunk_size <= 0:
+        raise SimilarityConfigError("Embedding chunk size must be greater than zero.")
+    if overlap < 0:
+        raise SimilarityConfigError("Embedding chunk overlap must not be negative.")
+    if overlap >= chunk_size:
+        raise SimilarityConfigError("Embedding chunk overlap must be smaller than the chunk size.")
 
     max_chars = chunk_size * _CHARS_PER_TOKEN
     overlap_chars = overlap * _CHARS_PER_TOKEN

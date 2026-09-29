@@ -103,7 +103,7 @@ class TestBuildFromDirectory:
         collection = tmp_path / "nested" / "external-skills"
         collection.mkdir(parents=True)
         debug = MagicMock()
-        monkeypatch.setattr(registry_module, "discover_and_extract", lambda *_args: [])
+        monkeypatch.setattr(registry_module, "discover_and_extract", lambda *_args, **_kwargs: [])
         monkeypatch.setattr(registry_module.logger, "debug", debug)
 
         count = EmbeddingRegistry(_make_mock_client([])).build_from_directory(collection, "skill")
@@ -170,14 +170,13 @@ class TestBuildFromDirectory:
         assert {entry.name for entry in registry._entries.values()} == {"shared-name"}
         assert {entry.path for entry in registry._entries.values()} == {"team-a", "team-b"}
 
-    def test_entry_limit_is_enforced_before_embedding(self, tmp_path: Path, write_skill, monkeypatch) -> None:
+    def test_entry_limit_is_enforced_before_embedding(self, tmp_path: Path, write_skill) -> None:
         write_skill(tmp_path, "skill-a", "First skill")
         write_skill(tmp_path, "skill-b", "Second skill")
-        monkeypatch.setattr(extractor_module, "MAX_COLLECTION_ENTRIES", 1, raising=False)
         client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
 
         with pytest.raises(ValueError, match="entry limit"):
-            EmbeddingRegistry(client).build_from_directory(tmp_path, "skill")
+            EmbeddingRegistry(client, max_entries=1).build_from_directory(tmp_path, "skill")
 
         client.embed.assert_not_called()
 
@@ -238,9 +237,9 @@ class TestBuildFromDirectory:
 
 class TestFindDuplicates:
     def _build_registry_with_entries(
-        self, client: EmbeddingClient, entries: dict[str, list[float]]
+        self, client: EmbeddingClient, entries: dict[str, list[float]], **limits: int
     ) -> EmbeddingRegistry:
-        registry = EmbeddingRegistry(client)
+        registry = EmbeddingRegistry(client, **limits)
         for name, embedding in entries.items():
             registry._entries[name] = RegistryEntry(
                 name=name,
@@ -321,16 +320,33 @@ class TestFindDuplicates:
         scores = [m.score for m in matches]
         assert scores == sorted(scores, reverse=True)
 
+    def test_pairwise_scan_normalizes_each_vector_once(self, monkeypatch) -> None:
+        vectors = {"a": [1.0, 0.0, 2.0], "b": [3.0, 0.5, 1.0], "c": [2.0, 1.0, 4.0], "d": [0.2, 3.0, 1.0]}
+        registry = self._build_registry_with_entries(_make_mock_client([]), vectors)
+        normalize = MagicMock(wraps=registry_module.normalize_embedding_vector)
+        monkeypatch.setattr(registry_module, "normalize_embedding_vector", normalize)
+
+        matches = registry.find_duplicates(threshold=0.0)
+
+        assert normalize.call_count == len(vectors)
+        assert len(matches) == 6
+        for match in matches:
+            expected = EmbeddingClient.cosine_similarity(vectors[match.entry_a], vectors[match.entry_b])
+            assert match.score == pytest.approx(expected, abs=1e-15)
+
     def test_pairwise_comparison_limit_fails_before_comparing(self, monkeypatch) -> None:
         client = _make_mock_client([])
         registry = self._build_registry_with_entries(
             client,
             {"a": [1.0, 0.0], "b": [1.0, 0.0], "c": [1.0, 0.0]},
+            max_entries=2,
         )
-        monkeypatch.setattr(registry_module, "MAX_PAIRWISE_COMPARISONS", 2, raising=False)
+        cosine = MagicMock(side_effect=AssertionError("limit must fail before cosine"))
+        monkeypatch.setattr(registry_module, "unit_vector_similarity", cosine)
 
         with pytest.raises(ValueError, match="comparison limit"):
             registry.find_duplicates(0.75)
+        cosine.assert_not_called()
 
     def test_pairwise_match_limit_fails_closed(self, monkeypatch) -> None:
         client = _make_mock_client([])
@@ -338,7 +354,6 @@ class TestFindDuplicates:
             client,
             {"a": [1.0, 0.0], "b": [1.0, 0.0], "c": [1.0, 0.0]},
         )
-        monkeypatch.setattr(registry_module, "MAX_PAIRWISE_COMPARISONS", 10, raising=False)
         monkeypatch.setattr(registry_module, "MAX_SIMILARITY_MATCHES", 1, raising=False)
 
         with pytest.raises(ValueError, match="match limit"):
@@ -349,11 +364,17 @@ class TestFindDuplicates:
         registry = self._build_registry_with_entries(
             client,
             {"a": [1.0, 0.0], "b": [1.0, 0.0]},
+            max_scalar_comparisons=1,
         )
-        monkeypatch.setattr(registry_module, "MAX_SCALAR_COMPARISONS", 1, raising=False)
+        cosine = MagicMock(side_effect=AssertionError("limit must fail before cosine"))
+        monkeypatch.setattr(registry_module, "unit_vector_similarity", cosine)
+        normalize = MagicMock(side_effect=AssertionError("limit must fail before normalizing vectors"))
+        monkeypatch.setattr(registry_module, "normalize_embedding_vector", normalize)
 
         with pytest.raises(ValueError, match=r"scalar.*limit|work limit"):
             registry.find_duplicates(0.75)
+        cosine.assert_not_called()
+        normalize.assert_not_called()
 
 
 class TestCachePersistence:

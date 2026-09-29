@@ -148,7 +148,7 @@ def test_pinned_openclaw_alias_succeeds_through_similarity_and_context_clis(
     assert "Context Deduplication" in context_output
     assert "[PASS] All validations passed" in context_output
     assert "symlink or reparse point" not in context_output
-    assert len(endpoint.inputs) == 40
+    assert len(endpoint.inputs) == 33
     agents_text = (_FIXTURE / "AGENTS.md").read_text(encoding="utf-8").strip()
     assert sum(text.strip() == agents_text for text in endpoint.inputs) == 1
     assert endpoint.requests

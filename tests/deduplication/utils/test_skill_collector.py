@@ -270,6 +270,19 @@ class TestCollectFilesSecurityContract:
         with pytest.raises(ValueError, match=r"LICENSE|symlink|reparse|unsafe"):
             collect_files(skill_root)
 
+    def test_per_skill_path_budget_remains_4096(self, skill_root: Path) -> None:
+        for index in range(4_096):
+            (skill_root / f"irrelevant-{index}.bin").write_bytes(b"x")
+
+        assert collect_files(skill_root) == []
+
+        (skill_root / "overflow.bin").write_bytes(b"x")
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "path_count_limit"
+        assert exc_info.value.metadata == {"actual": 4_097, "limit": 4_096}
+
     def test_deduplicates_contained_claude_agents_compatibility_alias(self, skill_root: Path) -> None:
         agents = skill_root / "AGENTS.md"
         agents.write_text("# Shared agent context")

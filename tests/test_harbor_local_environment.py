@@ -6,9 +6,41 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import subprocess
+import sys
+import venv
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.tier3.harbor.local_environment import SkillEvaluatorLocalEnvironment
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+def test_verifier_python_keeps_virtualenv_dependencies(monkeypatch, tmp_path: Path) -> None:
+    """Resolving the interpreter symlink loses the venv's installed dependencies."""
+    runtime = tmp_path / "evaluator venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime)
+    python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
+    site_dir = subprocess.check_output(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True
+    ).strip()
+    (Path(site_dir) / "verifier_dependency.py").write_text("VALUE = 'available'\n")
+    environment = SkillEvaluatorLocalEnvironment.__new__(SkillEvaluatorLocalEnvironment)
+    environment._runtime_root = tmp_path / "agents"
+    environment._runtime_agent = "codex"
+    monkeypatch.setattr(sys, "executable", str(python))
+
+    env = {**os.environ, "PATH": environment._path_with_evaluator_python(os.defpath)}
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        ["python3", "-c", "import verifier_dependency; print(verifier_dependency.VALUE)"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "available"
 
 
 def test_local_environment_rewrites_read_only_uploaded_script_once(tmp_path: Path) -> None:

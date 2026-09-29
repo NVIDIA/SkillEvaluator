@@ -13,6 +13,8 @@ from pathlib import Path
 
 from skillevaluator.constants import (
     CONTENT_TYPE_UNKNOWN,
+    SIMILARITY_DEFAULT_MAX_ENTRIES,
+    SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.embedding.client import (
@@ -21,6 +23,7 @@ from skillevaluator.embedding.client import (
     validate_similarity_threshold,
 )
 from skillevaluator.embedding.extractor import extract_from_skill
+from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.embedding.registry import EmbeddingRegistry, SimilarityMatch
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding
@@ -47,7 +50,11 @@ class SimilarityValidator(ValidatorBase):
         save_cache_path: Path | None = None,
         content_type: str | None = None,
         full_body: bool = False,
+        max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES,
+        max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     ) -> None:
+        validate_max_entries(max_entries)
+        validate_max_scalar_comparisons(max_scalar_comparisons)
         threshold = validate_similarity_threshold(threshold, context="Similarity")
         if catalog_path and cache_path and catalog_path != cache_path:
             raise ValueError("--catalog and deprecated --cache cannot be used together")
@@ -65,6 +72,8 @@ class SimilarityValidator(ValidatorBase):
         self._save_catalog_path = resolved_save_catalog
         self._content_type = content_type
         self._full_body = full_body
+        self._max_entries = max_entries
+        self._max_scalar_comparisons = max_scalar_comparisons
 
     @property
     def name(self) -> str:
@@ -103,7 +112,12 @@ class SimilarityValidator(ValidatorBase):
             return result
 
         client = EmbeddingClient(model=self._model)
-        registry = EmbeddingRegistry(client, full_body=self._full_body)
+        registry = EmbeddingRegistry(
+            client,
+            full_body=self._full_body,
+            max_entries=self._max_entries,
+            max_scalar_comparisons=self._max_scalar_comparisons,
+        )
 
         try:
             if self._catalog_path:
@@ -136,6 +150,7 @@ class SimilarityValidator(ValidatorBase):
                     skill_path,
                     content_type,
                     minimum_entries=minimum_entries,
+                    for_pairwise_scan=True,
                 )
                 if count == 0:
                     if self._save_catalog_path:
@@ -156,7 +171,16 @@ class SimilarityValidator(ValidatorBase):
                         "catalog_saved",
                         f"Saved local catalog to {self._catalog_display_name(self._save_catalog_path)}",
                     )
-        except (SimilarityConfigError, ValueError, OSError) as exc:
+        except SimilarityConfigError as exc:
+            result.mark_scan_incomplete("embedding-provider")
+            result.add_error(
+                sanitize_path_text(
+                    f"Embedding provider error: {exc}",
+                    (skill_path, self._catalog_path, self._save_catalog_path),
+                )
+            )
+            return result
+        except (ValueError, OSError) as exc:
             result.add_error(
                 sanitize_path_text(
                     str(exc),

@@ -279,6 +279,7 @@ class LLMClient:
             return str(content).strip()
         call_kwargs: dict[str, Any] = {
             "model": config.model,
+            "stream": False,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

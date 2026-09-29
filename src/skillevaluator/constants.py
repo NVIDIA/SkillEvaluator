@@ -179,6 +179,12 @@ SCAN_EXCLUDED_DIRS = frozenset(
     }
 )
 
+# Whole-plugin Tier 1 scans first walk the entire plugin tree without following
+# links. The walk prunes the directories scanners never enter, but keeps the
+# bytecode cache directory because SkillSpector inspects shipped bytecode.
+PLUGIN_TREE_PRUNED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
+PLUGIN_TREE_MAX_DISCOVERED_PATHS = 20_000
+
 # Generated publishing/signing artifacts that may live in a skill root after
 # NVSkills CI runs. They are derived from the author-owned skill content, so
 # Tier 1 should not scan them as independent source files.

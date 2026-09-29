@@ -17,6 +17,7 @@ from skillevaluator.constants import (
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
+    PLUGIN_TREE_MAX_DISCOVERED_PATHS,
 )
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
@@ -28,6 +29,7 @@ from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
+from skillevaluator.validators.plugin_tree import plugin_tree_scope
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.quality_score import QualityScoreValidator
 from skillevaluator.validators.rubric_eval import RubricEvalValidator
@@ -66,6 +68,10 @@ OPTIONAL_CHECKS = ("dependency",)
 # Every canonical check name ``run_validation`` understands after alias
 # resolution (the default run plus the opt-in checks).
 RECOGNIZED_CHECKS = frozenset(DEFAULT_CHECKS) | frozenset(OPTIONAL_CHECKS)
+# Whole-content checks. For a plugin they scan the entire plugin tree exactly
+# once: each bundled skill, then root-owned content with the bundled-skill
+# subtrees excluded (see ``validators.plugin_tree``).
+PLUGIN_TREE_CHECKS = frozenset({"security", "pii", "license", "code-integrity", "dependency", "unicode"})
 REPORTERS = {
     "json": JSONReporter,
     "html": HTMLReporter,
@@ -136,6 +142,47 @@ def enabled_check_lineup(checks: str | None) -> list[str]:
     return ordered + sorted(enabled - set(ordered))
 
 
+def _unsafe_plugin_tree_results(
+    target_path: Path,
+    exc: ValueError,
+    *,
+    include_schema: bool,
+    policy: ValidationPolicy | None,
+    repo_root: Path | None,
+) -> list[ValidationResult]:
+    """Return the fail-closed results for a plugin tree that cannot be scanned safely."""
+    results: list[ValidationResult] = []
+    if include_schema:
+        validator = PluginSchemaValidator(policy=policy, repo_root=repo_root)
+        results.append(_as_result(validator.name, validator.description, validator.validate, target_path))
+    code = getattr(exc, "code", None)
+    relative_path = getattr(exc, "relative_path", None)
+    if code == "path_count_limit":
+        reason = f"the plugin tree exceeds the {PLUGIN_TREE_MAX_DISCOVERED_PATHS}-entry limit for whole-plugin scans"
+    else:
+        reason = str(exc)
+    tree_result = ValidationResult(
+        validator_name="Plugin Tree Security",
+        validator_description="Verify the whole plugin tree is regular, contained, and link-free before scanning it",
+    )
+    tree_result.add_finding(
+        Finding(
+            category="PLUGIN_SCHEMA",
+            severity=Severity.HIGH,
+            check_name="unsafe_plugin_filesystem",
+            message=f"Refusing to scan the plugin tree: {reason}",
+            file_path=relative_path if relative_path and relative_path != "." else "<plugin-root>",
+            suggestion=(
+                "Replace linked, hard-linked, reparse-point, or special plugin paths with regular files and "
+                "directories contained by the plugin root."
+            ),
+        )
+    )
+    tree_result.metadata["security_failure"] = True
+    results.append(tree_result)
+    return results
+
+
 def _with_component_attribution(results: list[ValidationResult], content_type: str | None) -> list[ValidationResult]:
     """Recount plugin component ``findings`` across every Tier 1 validator's results."""
     if content_type == CONTENT_TYPE_PLUGIN:
@@ -171,10 +218,15 @@ def run_validation(
     checks. ``version``, ``quality``, and ``lint`` run for skills and for each
     skill bundled under a plugin's ``skills/`` directory (findings are
     attributed to that skill); they are skipped for rules, workflows, and
-    plugins without bundled skills. When *fail_fast* is set, the
-    run stops after the first failing check. *continue_on_failure* overrides
-    *fail_fast* and also keeps batch folder validation scanning every skill past
-    a CRITICAL finding (parity with SkillEvaluator ``--continue-on-failure``).
+    plugins without bundled skills. For plugins, the whole-content checks
+    (:data:`PLUGIN_TREE_CHECKS`) scan the entire plugin tree exactly once:
+    each bundled skill, then root-owned content with the bundled-skill
+    subtrees excluded. The tree is first verified without following links,
+    and any linked, hard-linked, or special entry fails the run closed.
+    When *fail_fast* is set, the run stops after the first failing check.
+    *continue_on_failure* overrides *fail_fast* and also keeps batch folder
+    validation scanning every skill past a CRITICAL finding (parity with
+    SkillEvaluator ``--continue-on-failure``).
 
     When *policy* is provided, the schema validator applies the policy's
     audience-aware author rules; finalized severities for all validators are
@@ -188,7 +240,7 @@ def run_validation(
     bundled_skill_dirs: list[Path] = []
     if content_type == CONTENT_TYPE_PLUGIN:
         from skillevaluator.cli_core import resolve_plugin_path
-        from skillevaluator.utils.helpers import find_bundled_plugin_skills
+        from skillevaluator.utils.helpers import find_bundled_plugin_skills, verify_plugin_tree
 
         target_path = resolve_plugin_path(target_path)
         try:
@@ -215,6 +267,23 @@ def run_validation(
             )
             security_result.metadata["security_failure"] = True
             return [security_result]
+        if enabled & PLUGIN_TREE_CHECKS:
+            # Whole-plugin scanners also read root-owned content (scripts/,
+            # hooks/, .mcp.json, ...), so the entire tree must pass the same
+            # no-follow verification before any of them runs.
+            try:
+                verify_plugin_tree(target_path)
+            except ValueError as exc:
+                return _with_component_attribution(
+                    _unsafe_plugin_tree_results(
+                        target_path,
+                        exc,
+                        include_schema="schema" in enabled,
+                        policy=policy,
+                        repo_root=repo_root,
+                    ),
+                    content_type,
+                )
     # Skill-scoped checks (version/quality/lint) also run for plugins that
     # bundle skills. They target ``<plugin>/skills`` only, so the folder walker
     # validates each bundled skill once and prefixes its findings with the
@@ -293,7 +362,11 @@ def run_validation(
             else:
                 progress_console.print(f"[{step_number}/{len(active)}] {check_name} ...", markup=False, highlight=False)
             started = time.monotonic()
-            step_results = builder()
+            if content_type == CONTENT_TYPE_PLUGIN and check_name in PLUGIN_TREE_CHECKS:
+                with plugin_tree_scope(target_path, bundled_skill_dirs):
+                    step_results = builder()
+            else:
+                step_results = builder()
             results.extend(step_results)
 
             if any(result.metadata.get("security_failure") for result in step_results):

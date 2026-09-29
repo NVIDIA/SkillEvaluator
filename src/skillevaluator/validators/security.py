@@ -49,6 +49,7 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_scannable_files,
 )
+from skillevaluator.validators.plugin_tree import plugin_tree_exclusions
 
 logger = get_logger(__name__)
 
@@ -435,6 +436,25 @@ def _ignore_artifact_dirs(dirpath: str, names: list[str]) -> set[str]:
     return {n for n in names if n in _SKILLSPECTOR_SCAN_EXCLUDED_DIRS and Path(dirpath, n).is_dir()}
 
 
+def _staging_ignore(source: Path, owned_subtrees: frozenset[tuple[str, ...]]):
+    """Return the SkillSpector staging ignore hook for *source*.
+
+    Artifact directories are always dropped. Inside a plugin tree scope the
+    subtrees owned by bundled skills are dropped too, because each bundled
+    skill is scanned by its own pass.
+    """
+    if not owned_subtrees:
+        return _ignore_artifact_dirs
+
+    def ignore(dirpath: str, names: list[str]) -> set[str]:
+        relative = Path(dirpath).relative_to(source).parts
+        dropped = _ignore_artifact_dirs(dirpath, names)
+        dropped.update(name for name in names if (*relative, name) in owned_subtrees)
+        return dropped
+
+    return ignore
+
+
 def _rewrite_path_prefix(value, old: str, new: str):
     """Recursively rewrite ``old`` path prefixes in a parsed JSON structure."""
     if isinstance(value, str):
@@ -715,16 +735,25 @@ class SecurityValidator(ValidatorBase):
         original_root = skill_path.resolve()
         scan_root = original_root
         staged: tempfile.TemporaryDirectory | None = None
-        if skill_path.is_dir() and _tree_contains_artifact_dirs(skill_path):
+        staging_warning: str | None = None
+        # Inside a plugin tree scope the plugin root excludes bundled-skill
+        # subtrees; they are scanned by their own per-skill pass.
+        owned_subtrees = plugin_tree_exclusions(skill_path)
+        if skill_path.is_dir() and (owned_subtrees or _tree_contains_artifact_dirs(skill_path)):
             staged = tempfile.TemporaryDirectory(prefix="skillspector-scan-")
             try:
                 copy_root = Path(staged.name) / original_root.name
-                shutil.copytree(original_root, copy_root, symlinks=True, ignore=_ignore_artifact_dirs)
+                shutil.copytree(
+                    original_root,
+                    copy_root,
+                    symlinks=True,
+                    ignore=_staging_ignore(original_root, owned_subtrees),
+                )
                 scan_root = copy_root
             except (OSError, shutil.Error) as exc:
                 staged.cleanup()
                 staged = None
-                result.add_warning(f"Could not stage artifact-free skill copy ({exc}); scanning in place.")
+                staging_warning = f"Could not stage artifact-free skill copy ({exc}); scanning in place."
 
         try:
             # The deterministic stage is authoritative and always runs, even
@@ -735,6 +764,8 @@ class SecurityValidator(ValidatorBase):
                 original_root=original_root if staged is not None else None,
                 use_llm=False,
             )
+            if staging_warning:
+                result.add_warning(staging_warning)
             if self.use_llm and not result.is_incomplete:
                 enrichment = self._run_skillspector_once(
                     scan_root,

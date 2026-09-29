@@ -20,7 +20,7 @@ import contextvars
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES, SKILL_MANIFEST_VARIANTS
 
@@ -31,6 +31,13 @@ from skillevaluator.models.result import (
     SuccessDetail,
     ValidationResult,
     ValidationSummary,
+)
+from skillevaluator.validators.plugin_tree import (
+    PluginTree,
+    active_plugin_tree,
+    plugin_relative_dir,
+    plugin_tree_exclusions,
+    rebase_relative_finding_paths,
 )
 
 # Re-export for backward compatibility
@@ -90,6 +97,9 @@ def iter_scannable_files(
     one of ``extensions`` and its basename is not excluded (no directory walk
     performed).
 
+    Inside a plugin tree scope, subtrees owned by bundled skills below
+    ``root`` are pruned too: each bundled skill is scanned by its own pass.
+
     Args:
         root: Directory or file path to scan.
         extensions: Iterable of file extensions including the leading dot
@@ -125,9 +135,13 @@ def iter_scannable_files(
     # enumerate-then-filter walk still descends into all of them —
     # once per extension. One pruned walk covers every extension.
     suffixes = tuple(ext_set)
+    owned_subtrees = plugin_tree_exclusions(root)
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in excluded]
+        if owned_subtrees:
+            relative = Path(dirpath).relative_to(root).parts
+            dirnames[:] = [d for d in dirnames if (*relative, d) not in owned_subtrees]
         for name in filenames:
             if not name.endswith(suffixes):
                 continue
@@ -229,6 +243,9 @@ class ValidatorBase(ABC):
 
         Eliminates duplicated folder detection logic across validators.
 
+        Inside a plugin tree scope, the plugin root is validated as the whole
+        plugin tree instead (see :meth:`_validate_plugin_tree`).
+
         Args:
             skill_path: Path to validate
             single_skill_validator: Function to validate a single skill
@@ -238,6 +255,10 @@ class ValidatorBase(ABC):
         Returns:
             Aggregated ValidationResult for all skills
         """
+        plugin_tree = active_plugin_tree()
+        if plugin_tree is not None and plugin_relative_dir(skill_path) == PurePosixPath():
+            return self._validate_plugin_tree(plugin_tree, single_skill_validator, action_description)
+
         if self._is_skill_directory(skill_path):
             return single_skill_validator(skill_path)
 
@@ -260,35 +281,77 @@ class ValidatorBase(ABC):
 
         for skill_dir in skill_dirs:
             skill_result = single_skill_validator(skill_dir)
-            skill_name = skill_dir.name
-
-            if skill_result.passed:
-                # Collect detailed check information from the skill result
-                check_details = [
-                    {
-                        "name": detail.check_name,
-                        "description": detail.message,
-                        "metadata": detail.metadata,
-                    }
-                    for detail in skill_result.success_details
-                ]
-
-                result.add_success(
-                    check_name=skill_name,
-                    message="All checks passed",
-                    checks=check_details,
-                    total_checks=len(check_details),
-                )
-            else:
-                result.merge_with_prefix(skill_result, skill_name)
-
-            # Fail fast on CRITICAL findings (e.g., missing API keys). These are
-            # typically configuration errors that affect all skills, so by
-            # default we stop early. --continue-on-failure suppresses this so
-            # every skill is still scanned and recorded.
-            critical_findings = [f for f in skill_result.findings if f.severity == Severity.CRITICAL]
-            if critical_findings and not _CONTINUE_ON_FAILURE.get():
+            if self._merge_skill_result(result, skill_result, skill_dir.name):
                 # Return early with just this critical finding
                 return result
 
         return result
+
+    def _validate_plugin_tree(
+        self,
+        plugin_tree: PluginTree,
+        single_skill_validator: Callable[[Path], ValidationResult],
+        action_description: str,
+    ) -> ValidationResult:
+        """Validate every bundled skill, then the plugin root, each exactly once.
+
+        Bundled skills keep the folder walker's per-skill handling and
+        ``[<skill>]`` prefix; their relative finding paths are rebased onto
+        the plugin root so findings stay attributable to the skill. The plugin
+        root is then validated once while file walkers and staged scanner
+        views exclude every bundled-skill subtree, so root-owned content
+        (``scripts/``, ``hooks/``, ``.mcp.json``, ...) is covered without
+        scanning a skill's files twice. The root pass always runs, even after
+        a CRITICAL skill finding stops the skill loop.
+        """
+        result = ValidationResult()
+        skill_dirs = plugin_tree.skill_dirs
+        if skill_dirs:
+            result.add_success(
+                check_name="skill_discovery",
+                message=f"{action_description} {len(skill_dirs)} bundled skill(s) and the plugin root",
+                skill_count=len(skill_dirs),
+            )
+        for skill_dir in skill_dirs:
+            skill_result = single_skill_validator(skill_dir)
+            relative_dir = plugin_relative_dir(skill_dir)
+            if relative_dir is not None:
+                rebase_relative_finding_paths(skill_result, relative_dir)
+            if self._merge_skill_result(result, skill_result, skill_dir.name):
+                break
+
+        result.merge(single_skill_validator(plugin_tree.root))
+        return result
+
+    @staticmethod
+    def _merge_skill_result(result: ValidationResult, skill_result: ValidationResult, skill_name: str) -> bool:
+        """Merge one skill's result into a folder result.
+
+        Returns True when a CRITICAL finding should stop the folder walk.
+        """
+        if skill_result.passed:
+            # Collect detailed check information from the skill result
+            check_details = [
+                {
+                    "name": detail.check_name,
+                    "description": detail.message,
+                    "metadata": detail.metadata,
+                }
+                for detail in skill_result.success_details
+            ]
+
+            result.add_success(
+                check_name=skill_name,
+                message="All checks passed",
+                checks=check_details,
+                total_checks=len(check_details),
+            )
+        else:
+            result.merge_with_prefix(skill_result, skill_name)
+
+        # Fail fast on CRITICAL findings (e.g., missing API keys). These are
+        # typically configuration errors that affect all skills, so by
+        # default we stop early. --continue-on-failure suppresses this so
+        # every skill is still scanned and recorded.
+        critical_findings = [f for f in skill_result.findings if f.severity == Severity.CRITICAL]
+        return bool(critical_findings) and not _CONTINUE_ON_FAILURE.get()

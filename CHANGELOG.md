@@ -149,6 +149,10 @@ All notable changes to SkillEvaluator are documented in this file.
   flags, library-preload and traffic-redirect environment overrides, auto-approve
   keys, metadata and private MCP endpoints, bypass settings, shipped `.env` files,
   and missing or escaping declared component paths.
+- Tier 1 security, PII, license, code-integrity, Unicode, and dependency scans of
+  a plugin that bundles skills now also cover the plugin's root content
+  (`scripts/`, `hooks/`, `.mcp.json`, ...), scanning each file once; a linked,
+  hard-linked, or special entry anywhere in the plugin tree fails closed.
 
 ## 0.3.0 - 2026-09-17
 

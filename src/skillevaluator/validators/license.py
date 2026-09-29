@@ -27,6 +27,7 @@ from skillevaluator.constants import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, iter_scannable_files
 from skillevaluator.validators.frontmatter_parser import parse_frontmatter
+from skillevaluator.validators.plugin_tree import is_plugin_tree_root
 
 logger = get_logger(__name__)
 
@@ -132,7 +133,9 @@ class LicenseValidator(ValidatorBase):
 
     def validate(self, asset_path: Path) -> ValidationResult:
         """Run license compliance validation on asset(s) at path."""
-        if asset_path.is_dir() and not self._is_asset_directory(asset_path):
+        # A plugin root is a folder of bundled skills plus root-owned content,
+        # even when it also carries its own SKILL.md or root-level rules.
+        if is_plugin_tree_root(asset_path) or (asset_path.is_dir() and not self._is_asset_directory(asset_path)):
             return self._validate_folder_or_skill(
                 asset_path,
                 self._validate_single_asset,

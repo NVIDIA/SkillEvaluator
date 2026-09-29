@@ -15,6 +15,11 @@ from skillevaluator.config import CONFIG_DIR
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES
 from skillevaluator.utils.tool_runner import Severity, Tools, parse_json_output
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, iter_scannable_files
+from skillevaluator.validators.plugin_tree import (
+    plugin_tree_exclusions,
+    plugin_tree_scan_view,
+    rewrite_finding_path_prefix,
+)
 
 
 def _semgrep_file_excludes() -> list[str]:
@@ -82,11 +87,23 @@ class CodeRiskValidator(ValidatorBase):
             f"{file_counts['js']} JavaScript/TypeScript files"
         )
 
-        if file_counts["py"]:
-            result.merge(self._run_bandit(skill_path))
+        # Inside a plugin tree scope, the plugin root is scanned through a
+        # staged view without bundled-skill subtrees: those are scanned by
+        # their own per-skill pass, and neither scanner takes an exact,
+        # anchored path exclude.
+        with plugin_tree_scan_view(skill_path, excluded_dir_names=SCAN_EXCLUDED_DIRS) as view:
+            if view is None and plugin_tree_exclusions(skill_path):
+                result.add_warning("Could not stage the plugin root without bundled skills; scanning in place")
+            scan_path = view if view is not None else skill_path
+            scanned = ValidationResult()
+            if file_counts["py"]:
+                scanned.merge(self._run_bandit(scan_path))
 
-        if self.use_semgrep:
-            result.merge(self._run_semgrep(skill_path))
+            if self.use_semgrep:
+                scanned.merge(self._run_semgrep(scan_path))
+            if view is not None:
+                rewrite_finding_path_prefix(scanned, str(view.resolve()), str(skill_path.resolve()))
+        result.merge(scanned)
 
         return result
 

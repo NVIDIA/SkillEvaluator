@@ -12,6 +12,8 @@ from pathlib import Path
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
+    PLUGIN_TREE_MAX_DISCOVERED_PATHS,
+    PLUGIN_TREE_PRUNED_DIRS,
     SCAN_EXCLUDED_DIRS,
     SKILL_MANIFEST_VARIANTS,
 )
@@ -103,6 +105,38 @@ def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
     return [
         skills_root / manifest.relative_path.parent for manifest in find_bundled_plugin_skill_manifests(plugin_root)
     ]
+
+
+def verify_plugin_tree(plugin_root: Path) -> int:
+    """Walk the whole plugin tree without following links; fail closed on unsafe entries.
+
+    Whole-plugin Tier 1 scanners read root-owned plugin content as well as
+    bundled skills, so every entry they can reach must be a regular,
+    single-link file or a real directory contained by the plugin root.
+    Symlinks, junctions and other reparse points, hard links, and special
+    files raise :class:`~skillevaluator.utils.secure_fs.SecurePathError` (a
+    ``ValueError``) before any scanner reads content. Only the recognized
+    contained ``CLAUDE.md -> AGENTS.md`` alias is tolerated. Directories that
+    scanners never enter are pruned. Returns the number of verified files.
+    """
+
+    def is_non_directory(relative: Path) -> bool:
+        # Secure discovery re-checks every entry from its own no-follow
+        # metadata; this only keeps real directories unselected so they are
+        # descended rather than rejected. An entry that cannot be inspected
+        # stays selected and therefore fails closed.
+        try:
+            return not stat.S_ISDIR((plugin_root / relative).lstat().st_mode)
+        except OSError:
+            return True
+
+    files = discover_secure_files(
+        plugin_root,
+        selected=is_non_directory,
+        excluded_dirs=PLUGIN_TREE_PRUNED_DIRS,
+        max_paths=PLUGIN_TREE_MAX_DISCOVERED_PATHS,
+    )
+    return len(files)
 
 
 def resolve_git_root(local_path: Path) -> Path | None:

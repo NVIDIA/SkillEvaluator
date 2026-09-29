@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from itertools import islice
@@ -41,6 +42,8 @@ from skillevaluator.constants import (
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
+
+logger = logging.getLogger(__name__)
 
 # Verdict labels mirror SkillEvaluator's AGENT_EVAL_VERDICT_* values so the ported
 # reporters classify the overall outcome identically.
@@ -455,7 +458,13 @@ def agent_eval_result_from_directory(
     evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
 ) -> ValidationResult | None:
-    """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run."""
+    """Build the canonical ``AGENT_EVAL`` result for one explicit Harbor run.
+
+    When the caller passes no ``plugin_provenance``, the run-dir
+    ``plugin_provenance.json`` sidecar is read instead, so re-rendering a plugin
+    run (``view`` / ``render_agent_eval_html_report``) keeps its provenance and
+    INCOMPLETE status instead of degrading to a skill-shaped report.
+    """
     # Imported lazily so base-only Tier 1 workflows do not load Tier 3 helpers.
     from skillevaluator.tier3.harbor.report_data import (
         load_agent_data,
@@ -473,6 +482,9 @@ def agent_eval_result_from_directory(
     )
     if not agents:
         return None
+
+    if plugin_provenance is None:
+        plugin_provenance = _read_plugin_provenance(run_dir) or None
 
     run_truth = _run_truth_metadata(run_dir, engine_result, load_dataset_snapshot(run_dir))
     dataset = (
@@ -3027,6 +3039,110 @@ def _read_comparison(run_dir: Path) -> dict[str, Any]:
             if isinstance(loaded, dict):
                 return loaded
     return {}
+
+
+_PLUGIN_PROVENANCE_SIDECAR = "plugin_provenance.json"
+_MAX_PLUGIN_PROVENANCE_BYTES = 1024 * 1024
+_MAX_PLUGIN_PROVENANCE_LIST_ITEMS = 4096
+_PLUGIN_PROVENANCE_TEXT_FIELDS = frozenset(
+    {
+        "plugin_name",
+        "requested_lift_mode",
+        "effective_lift_mode",
+        "integration_skip_reason",
+        "lift_mode_requested",
+        "lift_mode_effective",
+    }
+)
+_PLUGIN_PROVENANCE_DEFERRAL_FIELDS = (
+    "unresolved_skill_refs",
+    "unresolved_rule_refs",
+    "provider_only_mcp_servers",
+    "mcp_unsupported_config",
+)
+_PLUGIN_PROVENANCE_LIST_FIELDS = frozenset(
+    {"evaluated_member_skills", "staged_rules", "runnable_mcp_servers", *_PLUGIN_PROVENANCE_DEFERRAL_FIELDS}
+)
+_PLUGIN_PROVENANCE_COUNT_FIELDS = frozenset({"dataset_case_count", "cross_component_case_count"})
+_PLUGIN_PROVENANCE_FLAG_FIELDS = frozenset({"integration_evidence_ready", "partial"})
+_PLUGIN_PROVENANCE_MAPPING_FIELDS = frozenset(
+    {"component_coverage", "context_cost", "mcp_pinning", "dependency_status_counts"}
+)
+
+
+def _read_plugin_provenance(run_dir: Path) -> dict[str, Any]:
+    """Read the durable ``plugin_provenance.json`` sidecar written by the CLI.
+
+    Plugin CLI paths pass provenance in-process, but re-rendering an on-disk run
+    (``view``, ``render_agent_eval_html_report``) has no such caller, and the
+    sidecar is the only surviving record once the temporary staging directory
+    is gone. The read is descriptor-anchored under the run directory, refuses
+    symlinks, hard links, and non-regular files, is bounded in size, and only
+    accepts a JSON object. Known fields are type-checked; the partial flag
+    fails closed, so a damaged sidecar can never turn an INCOMPLETE run into a
+    complete one.
+    """
+    from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
+
+    sidecar = Path(_PLUGIN_PROVENANCE_SIDECAR)
+    try:
+        metadata = (run_dir / sidecar).lstat()
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        logger.debug("Plugin provenance sidecar could not be inspected", exc_info=True)
+        return {}
+    if stat_is_link_or_reparse(metadata):
+        logger.warning("Ignoring plugin provenance sidecar that is a symlink or reparse point: %s", run_dir.name)
+        return {}
+    try:
+        with SecureRoot(run_dir) as secure_root:
+            raw, _opened = secure_root.read_bytes(sidecar, _MAX_PLUGIN_PROVENANCE_BYTES)
+        loaded = json.loads(raw.decode("utf-8"))
+    except (OSError, SecurePathError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+        logger.warning("Ignoring unreadable plugin provenance sidecar in %s: %s", run_dir.name, type(exc).__name__)
+        return {}
+    if not isinstance(loaded, dict):
+        logger.warning("Ignoring plugin provenance sidecar that is not a JSON object in %s", run_dir.name)
+        return {}
+    return _typed_plugin_provenance(loaded)
+
+
+def _typed_plugin_provenance(loaded: dict[str, Any]) -> dict[str, Any]:
+    """Drop mistyped known fields while keeping the partial verdict fail-closed."""
+    provenance: dict[str, Any] = {}
+    damaged_deferral = False
+    for key, value in loaded.items():
+        if not isinstance(key, str):
+            continue
+        if key in _PLUGIN_PROVENANCE_TEXT_FIELDS:
+            if isinstance(value, str):
+                provenance[key] = value
+        elif key in _PLUGIN_PROVENANCE_LIST_FIELDS:
+            if isinstance(value, list):
+                provenance[key] = [item for item in value if isinstance(item, str)][:_MAX_PLUGIN_PROVENANCE_LIST_ITEMS]
+                damaged_deferral |= key in _PLUGIN_PROVENANCE_DEFERRAL_FIELDS and len(provenance[key]) != len(value)
+            else:
+                damaged_deferral |= key in _PLUGIN_PROVENANCE_DEFERRAL_FIELDS
+        elif key in _PLUGIN_PROVENANCE_COUNT_FIELDS:
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                provenance[key] = value
+        elif key in _PLUGIN_PROVENANCE_FLAG_FIELDS:
+            if isinstance(value, bool):
+                provenance[key] = value
+            elif key == "partial":
+                damaged_deferral = True
+        elif key in _PLUGIN_PROVENANCE_MAPPING_FIELDS:
+            if isinstance(value, dict):
+                provenance[key] = _sanitize_json_numbers(value)
+        else:
+            provenance[key] = _sanitize_json_numbers(value)
+    deferred = any(provenance.get(key) for key in _PLUGIN_PROVENANCE_DEFERRAL_FIELDS)
+    if provenance.get("partial") is True or deferred or damaged_deferral:
+        provenance["partial"] = True
+    elif provenance:
+        provenance["partial"] = bool(provenance.get("partial", False))
+    return provenance
 
 
 def _run_truth_metadata(

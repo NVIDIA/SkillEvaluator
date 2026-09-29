@@ -53,6 +53,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - The dependency audit now checks the dependencies declared in `pyproject.toml`
   instead of SkillEvaluator's own environment, and reports unpinned
   declarations as INFO `dependency-version-unverified`.
+- Re-rendered plugin Tier 3 reports (`view` and standalone renders) keep plugin
+  provenance and INCOMPLETE status by reading the bounded, no-follow
+  `plugin_provenance.json` sidecar.
 
 ### Added
 

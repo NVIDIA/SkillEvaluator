@@ -284,6 +284,14 @@ Lift, comparisons, and best-agent selection. Standard artifacts identify it as
 attempt policy. Older metric sets and partial historical artifacts keep their
 legacy policy rather than being rescored as current data.
 
+Overall comparisons require both the same scoring policy and the same metric
+set. A shared policy name alone does not make five-metric and six-metric means
+comparable. When two conditions use different metric sets under the same
+policy, their individual scores and shared per-metric deltas remain available,
+but overall Skill Lift and the pass@k comparison are omitted. Reports containing
+agents scored on different metric sets retain their individual scores and mark
+the overall comparison as incomplete, without selecting a best agent.
+
 ### Skill Lift
 
 Skill Lift is `with-skill overall score - without-skill overall score`. It uses

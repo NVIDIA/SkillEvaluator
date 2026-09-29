@@ -92,17 +92,18 @@ def _pick_best_agent(
     """Select the agent with the highest overall with-skill score."""
     best_agent = ""
     best_score = -1.0
+    scored_metric_sets: set[frozenset[str]] = set()
     for agent, data in agents_data.items():
         if not _findings_eligible(data):
             continue
         with_scores = data.get("with_skill", {})
         if not with_scores:
             continue
-        metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores) or DISPLAY_METRICS
+        metrics = tuple(report_data.metrics_for_condition(data, "with_skill"))
         if data.get("score_policy_with_skill") == LEGACY_SCORE_POLICY:
             overall = overall_score(
                 {
-                    "metric_set": DEFAULT_METRIC_SET if "security" in with_scores else LEGACY_METRIC_SET,
+                    "metric_set": DEFAULT_METRIC_SET if "security" in metrics else LEGACY_METRIC_SET,
                     "score_policy": LEGACY_SCORE_POLICY,
                     **with_scores,
                 }
@@ -111,6 +112,9 @@ def _pick_best_agent(
             overall = overall_score_from_metrics(with_scores, metrics)
         if overall is None:
             continue
+        scored_metric_sets.add(frozenset(metrics))
+        if len(scored_metric_sets) > 1:
+            return ""
         if overall > best_score:
             best_score = overall
             best_agent = agent

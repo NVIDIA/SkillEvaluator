@@ -20,7 +20,13 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_ONLY_METRIC_SET,
+    DEFAULT_METRIC_SET,
+    DEFAULT_METRICS,
+    LEGACY_METRIC_SET,
+    LEGACY_METRICS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,7 @@ __all__ = (
     "load_staged_harbor_dataset",
     "logical_trial_reward_groups",
     "metrics_for_agents",
+    "metrics_for_condition",
     "summarize_dataset_entries",
 )
 
@@ -421,14 +428,22 @@ def _metrics_for_rewards(rewards: list[dict[str, Any]]) -> list[str]:
     return []
 
 
-def _skill_evaluator_metrics_for_agent(agent_info: dict[str, Any]) -> list[str]:
-    configured = agent_info.get("metrics_with_skill")
+def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[str]:
+    """Use one condition's recorded metrics, inferring only for older artifacts."""
+    configured = agent_info.get(f"metrics_{condition}")
     if isinstance(configured, list):
-        return [str(metric) for metric in configured]
-    scores = agent_info.get("with_skill", {})
-    if isinstance(scores, dict) and "security" in scores:
+        return list(dict.fromkeys(str(metric) for metric in configured))
+    recorded_set = agent_info.get(f"metric_set_{condition}")
+    if recorded_set == DEFAULT_METRIC_SET:
         return list(DEFAULT_METRICS)
-    rewards = agent_info.get("rewards", [])
+    if recorded_set == LEGACY_METRIC_SET:
+        return list(LEGACY_METRICS)
+    if recorded_set == CUSTOM_ONLY_METRIC_SET:
+        return []
+    scores = agent_info.get(condition, {})
+    if isinstance(scores, dict) and scores:
+        return [metric for metric in DEFAULT_METRICS if metric in scores]
+    rewards = agent_info.get("rewards" if condition == "with_skill" else "rewards_baseline", [])
     return _metrics_for_rewards(rewards) if isinstance(rewards, list) else []
 
 
@@ -436,7 +451,7 @@ def metrics_for_agents(agents: dict[str, dict[str, Any]]) -> list[str]:
     """Return the canonical default or legacy metric set represented by agents."""
     saw_metrics = False
     for info in agents.values():
-        metrics = _skill_evaluator_metrics_for_agent(info)
+        metrics = metrics_for_condition(info, "with_skill")
         if metrics:
             saw_metrics = True
         if "security" in metrics:
@@ -522,7 +537,10 @@ def load_agent_data(
                     key = "with_skill" if variant == "with-skill" else "without_skill"
                     agent_info[key] = scores
                     metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
-                    agent_info[metric_key] = data.get("metrics", [])
+                    if isinstance(data.get("metrics"), list):
+                        agent_info[metric_key] = data["metrics"]
+                    if isinstance(data.get("metric_set"), str):
+                        agent_info[f"metric_set_{key}"] = data["metric_set"]
                     custom_key = "custom_with_skill" if variant == "with-skill" else "custom_without_skill"
                     if "custom_scores" in data:
                         agent_info[custom_key] = data.get("custom_scores", {})

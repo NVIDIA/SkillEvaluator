@@ -639,7 +639,15 @@ def build_agent_eval_payload(
     if not agent_payloads:
         return None
 
-    best_agent = "" if conflicting_policies else _pick_best_agent(agent_payloads)
+    scored_metric_sets = {
+        frozenset(agent["metrics_with_skill"])
+        for agent in agent_payloads.values()
+        if agent["execution_status"] == "succeeded" and agent["with_skill"] is not None
+    }
+    conflicting_metric_sets = len(scored_metric_sets) > 1
+    if conflicting_metric_sets and not conflicting_policies:
+        policy["score_definition"] = "overall unavailable: incomparable metric sets across agents"
+    best_agent = "" if conflicting_policies or conflicting_metric_sets else _pick_best_agent(agent_payloads)
     detail_priority = ([best_agent] if best_agent else []) + [name for name in agent_payloads if name != best_agent]
     for name in detail_priority:
         _attach_agent_report_details(
@@ -668,6 +676,9 @@ def build_agent_eval_payload(
         execution_errors.append(
             "Conflicting score policies across scored conditions: " + ", ".join(sorted(recorded_policies))
         )
+    elif conflicting_metric_sets:
+        execution_status = "failed"
+        execution_errors.append("Incomparable metric sets across scored agents; overall ranking is unavailable")
     elif policy["score_policy"] not in SUPPORTED_SCORE_POLICIES and any(
         agent.get("execution_status") == "succeeded" and agent.get("with_skill") is None
         for agent in agent_payloads.values()
@@ -1318,9 +1329,17 @@ def _build_agent(
         PARTIAL_SCORE_POLICY,
         overall_score_from_metrics,
     )
+    from skillevaluator.tier3.harbor.report_data import metrics_for_condition
 
     with_scores = info.get("with_skill") or {}
     without_scores = info.get("without_skill") or {}
+    with_metrics = metrics_for_condition(info, "with_skill")
+    without_metrics = metrics_for_condition(info, "without_skill")
+    condition_policies = {
+        value.strip() if isinstance(value, str) and value.strip() else score_policy
+        for value in (info.get("score_policy_with_skill"), info.get("score_policy_without_skill"))
+    }
+    comparable_scores = set(with_metrics) == set(without_metrics) and len(condition_policies) == 1
     lift_data = info.get("lift") or {}
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
@@ -1341,8 +1360,8 @@ def _build_agent(
     overall_ws = None
     overall_bl = None
     if score_policy == LEGACY_SCORE_POLICY:
-        overall_ws = _complete_metric_mean(with_scores, metrics) if with_quality_available else None
-        overall_bl = _complete_metric_mean(without_scores, metrics) if baseline_quality_available else None
+        overall_ws = _complete_metric_mean(with_scores, with_metrics) if with_quality_available else None
+        overall_bl = _complete_metric_mean(without_scores, without_metrics) if baseline_quality_available else None
         if overall_ws is None and not with_scores and with_quality_available:
             overall_ws = _unit_interval_score(info.get("overall_with_skill"))
         if overall_bl is None and not without_scores and baseline_quality_available:
@@ -1351,10 +1370,9 @@ def _build_agent(
         overall_ws = overall_score_from_metrics(with_scores, DEFAULT_METRICS) if with_quality_available else None
         overall_bl = overall_score_from_metrics(without_scores, DEFAULT_METRICS) if baseline_quality_available else None
     elif score_policy == PARTIAL_SCORE_POLICY:
-        selected_metrics = tuple(metrics)
-        overall_ws = overall_score_from_metrics(with_scores, selected_metrics) if with_quality_available else None
+        overall_ws = overall_score_from_metrics(with_scores, tuple(with_metrics)) if with_quality_available else None
         overall_bl = (
-            overall_score_from_metrics(without_scores, selected_metrics) if baseline_quality_available else None
+            overall_score_from_metrics(without_scores, tuple(without_metrics)) if baseline_quality_available else None
         )
         if overall_ws is None:
             overall_ws = _mean(with_dimension_values)
@@ -1375,21 +1393,25 @@ def _build_agent(
         overall_bl = _unit_interval_score(info.get("overall_without_skill"))
         if overall_bl is None and info.get("rewards_baseline_complete") is not False:
             overall_bl = _logical_reward_mean(info.get("rewards_baseline"), "overall")
-    overall_lift = round(overall_ws - overall_bl, 4) if overall_ws is not None and overall_bl is not None else None
-    if score_policy == LEGACY_SCORE_POLICY and overall_lift is not None and metrics:
-        with_values = tuple(_unit_interval_score(with_scores.get(metric)) for metric in metrics)
-        baseline_values = tuple(_unit_interval_score(without_scores.get(metric)) for metric in metrics)
+    overall_lift = (
+        round(overall_ws - overall_bl, 4)
+        if comparable_scores and overall_ws is not None and overall_bl is not None
+        else None
+    )
+    if score_policy == LEGACY_SCORE_POLICY and overall_lift is not None and with_metrics:
+        with_values = tuple(_unit_interval_score(with_scores.get(metric)) for metric in with_metrics)
+        baseline_values = tuple(_unit_interval_score(without_scores.get(metric)) for metric in with_metrics)
         if all(value is not None for value in (*with_values, *baseline_values)):
             # Historical lift subtracted the unrounded metric means. Recompute
             # that value from trusted metrics instead of a mutable lift artifact.
             overall_lift = round(
-                sum(w - b for w, b in zip(with_values, baseline_values, strict=True)) / len(metrics),
+                sum(w - b for w, b in zip(with_values, baseline_values, strict=True)) / len(with_metrics),
                 4,
             )
 
     trials = _normalize_trials(info.get("rewards") or [], metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], metrics)
-    _attach_baseline_pairs(trials, baseline_trials, metrics)
+    _attach_baseline_pairs(trials, baseline_trials, metrics, comparable_overall=comparable_scores)
 
     return {
         "name": name,
@@ -1411,6 +1433,8 @@ def _build_agent(
         "with_skill": overall_ws,
         "baseline": overall_bl,
         "lift": overall_lift,
+        "metrics_with_skill": with_metrics,
+        "metrics_without_skill": without_metrics,
         "num_trials": int(info.get("num_trials", 0) or 0),
         "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
@@ -1418,7 +1442,7 @@ def _build_agent(
         "pass_at_k": {
             "with_skill": info.get("pass_with_skill") or {},
             "without_skill": info.get("pass_without_skill") or {},
-            "lift": info.get("pass_lift") or {},
+            "lift": (info.get("pass_lift") or {}) if comparable_scores else {},
         },
         "cases": _cases(info),
     }
@@ -2016,6 +2040,8 @@ def _attach_baseline_pairs(
     trials: list[dict[str, Any]],
     baseline_trials: list[dict[str, Any]],
     metrics: list[str],
+    *,
+    comparable_overall: bool = True,
 ) -> None:
     """Pair with-skill trials to their baseline counterparts by ``entry_id``.
 
@@ -2037,7 +2063,8 @@ def _attach_baseline_pairs(
         if not matches:
             continue
         baseline = matches.pop(0)
-        trial["baseline_overall"] = baseline.get("overall")
+        if comparable_overall:
+            trial["baseline_overall"] = baseline.get("overall")
         trial["baseline_scores"] = baseline.get("scores") or {}
         lift_scores: dict[str, float] = {}
         scores = trial.get("scores") or {}

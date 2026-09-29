@@ -3152,6 +3152,7 @@ def collect_harbor_results(
         with_overall_score: float | None = None
         with_policy = DEFAULT_SCORE_POLICY
         with_policy_ambiguous = False
+        with_metrics: tuple[str, ...] = ()
 
         if with_job_dir:
             with_job_ok, with_job_failure = validate_harbor_job_result(
@@ -3321,6 +3322,7 @@ def collect_harbor_results(
         without_overall_score: float | None = None
         without_policy = DEFAULT_SCORE_POLICY
         without_policy_ambiguous = False
+        without_metrics: tuple[str, ...] = ()
         without_job_dir: Path | None = None
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
@@ -3498,6 +3500,7 @@ def collect_harbor_results(
             and with_execution.get("execution_status") == "succeeded"
             and without_execution.get("execution_status") == "succeeded"
             and with_policy != without_policy
+            and set(with_metrics) == set(without_metrics)
         ):
             if with_policy_ambiguous and not without_policy_ambiguous:
                 with_policy = without_policy
@@ -3547,10 +3550,14 @@ def collect_harbor_results(
         )
         if paired_execution_succeeded and with_scores and without_scores:
             lift = _compute_lift(with_scores, without_scores)
-            # A score policy must be known for both arms before an overall lift
-            # can be published; per-metric deltas remain useful independently.
+            # The policy and scored metric set must match before comparing
+            # overall scores; shared per-metric deltas remain useful separately.
             lift.pop("overall", None)
-            if with_overall_score is not None and without_overall_score is not None:
+            if (
+                set(with_metrics) == set(without_metrics)
+                and with_overall_score is not None
+                and without_overall_score is not None
+            ):
                 lift["overall"] = {
                     "with_skill": with_overall_score,
                     "without_skill": without_overall_score,
@@ -3576,7 +3583,7 @@ def collect_harbor_results(
                 (agent_dir / "custom_lift.json").write_text(json.dumps(custom_lift, indent=2), encoding="utf-8")
 
         pass_lift: dict[str, Any] = {}
-        if paired_execution_succeeded and with_pass and without_pass:
+        if paired_execution_succeeded and set(with_metrics) == set(without_metrics) and with_pass and without_pass:
             pass_lift = {
                 "with_skill": with_pass.get("rate", 0.0),
                 "without_skill": without_pass.get("rate", 0.0),
@@ -3624,6 +3631,8 @@ def collect_harbor_results(
             "without_skill": without_scores,
             "overall_with_skill": with_overall_score,
             "overall_without_skill": without_overall_score,
+            "metrics_with_skill": list(with_metrics),
+            "metrics_without_skill": list(without_metrics),
             "score_policy_with_skill": with_policy,
             "score_policy_without_skill": without_policy if not skip_baseline else None,
             "custom_with_skill": with_custom_scores,

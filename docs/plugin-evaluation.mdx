@@ -1170,7 +1170,20 @@ and `reason`:
 is not `staged`. Coverage is report-only and does not change the `INCOMPLETE`
 rule.
 
-{/* TODO(integrator): reporting workstream. Name the exact coverage section in the JSON, Markdown, HTML, and SARIF reports once it merges, and whether the report shows component_coverage, dependency_status_counts, context_cost, and mcp_pinning together. */}
+The HTML report shows coverage in the Tier 3 overview as
+**Plugin Component Coverage — N components not evaluated**. That section holds:
+
+- the per-component state table;
+- the "Files staged ≠ components loaded ≠ behavior verified" rule;
+- a "Not evaluated by this run" list;
+- the MCP pinning ratio and the static context-cost estimate;
+- when the with-plugin arm ran, which components were observed.
+
+Dependency status counts appear next to it under
+**Plugin Dependency Completeness**. The Markdown report has the same content
+under `### Plugin Component Coverage`. The CLI summary prints the
+not-evaluated count and list. The JSON report keeps the raw
+`plugin_provenance` block in the Tier 3 payload.
 
 ### Where results are recorded
 
@@ -1204,18 +1217,48 @@ In the `validate` JSON report, the Tier 3 payload (the `tier3` key) carries:
 The HTML report renders the Integration block as an advisory, report-only
 "Integration (Plugin Composition)" section.
 
-{/* TODO(integrator): reporting workstream. List the plugin sections that land in the JSON, Markdown, HTML, and SARIF reports (Tier 1 C1 plugin metadata: dependency_resolution, component_inventory, mcp, context_cost; C3 plugin signals; C4 statistics; C5 integration block), with their exact headings and keys. */}
+Plugin sections by report format:
 
-{/* TODO(integrator): reporting workstream. Describe how report rebuilds (view, compare, re-rendering from a run directory) re-read plugin_provenance.json so that INCOMPLETE and coverage survive. */}
+| Format | Tier 1 and Tier 2 plugin content | Tier 3 plugin content |
+| --- | --- | --- |
+| JSON | Top-level `plugin` object, merged across validator results: `dependency_resolution`, `dependency_status_counts`, `component_inventory`, `mcp`, `context_cost`, `catalog_skill_similarity`, `inter_plugin_similarity` | `tier3.plugin_provenance`, `tier3.integration`, the statistics blocks, and `plugin_signals_summary` per agent |
+| Markdown | `## Plugin` with `### Dependency resolution`, `### Component inventory`, `### MCP pinning`, `### Context cost`, and the Tier 2 catalog similarity subsections | `### Plugin Component Coverage` plus a compact Integration and statistics summary |
+| HTML | A plugin card in the Tier 1 tab: overview, dependency resolution, component inventory, unsupported types, MCP pinning, context cost, and catalog similarity | The Tier 3 overview adds these sections: INCOMPLETE callout, **Plugin Component Coverage**, **Plugin Dependency Completeness**, **Integration (Plugin Composition)** with lift modes or an explicit **INCONCLUSIVE — Integration was not measured** block, **Plugin Statistics**, and **Plugin Signals** (advisory) |
+| SARIF | `runs[0].properties.plugin` holds the plugin summary. Each result whose path maps to an inventoried component gets `properties.pluginComponent` | — |
+| CLI | Plugin summary lines | Coverage, Integration with its interval, statistics, and signal summaries |
+
+In the plugin sections, a ratio shows as "n/a" when it has no denominator. A
+grader section with `status: not_applicable` shows as "not configured for this
+dataset".
+
+Report rebuilds keep the plugin context. When a report is rebuilt from a run
+directory (the standalone Tier 3 HTML render, or a result rebuilt from the
+latest on-disk run) and the payload has no provenance, SkillEvaluator reads `plugin_provenance.json` from
+the run directory. The read is bounded, never follows links, accepts only a
+regular file, and must parse as a JSON object. Known fields are type-checked,
+and `partial` fails closed: a malformed field or any deferral marks the run
+partial. After a plugin run writes the sidecar, SkillEvaluator also refreshes
+the run's `report.html`. The HTML report delivered for a plugin run therefore
+always carries coverage and `INCOMPLETE` status.
 
 ### Plugin BENCHMARK.md
 
-{/* TODO(integrator): reporting workstream. Replace this section with the plugin BENCHMARK.md card once it merges: when it is written, its filename, its verdict rules (including INCOMPLETE for partial plugin runs and how Integration is shown), and its sections. Also update the "When the target is a skill" sentence in reports.mdx. */}
+`validate` writes a `BENCHMARK.md` card for plugins as well as skills, in the
+same output directory. The plugin card has the title `# Plugin Benchmark: <name>`.
+It uses the skill card's fail-closed rules and adds the following sections:
 
-A plugin `BENCHMARK.md` publication card is planned. It follows the skill card's
-fail-closed rules: a partial plugin run cannot produce a publication
-recommendation. Until it lands, `validate` writes `BENCHMARK.md` for skills
-only. For plugins, use the JSON and HTML reports and `plugin_provenance.json`.
+- **Effectiveness and Integration:** lift with its paired-bootstrap 95% CI in
+  percentage points, or `INCONCLUSIVE` with the reason.
+- **Component Coverage:** per-component states and the list of components that
+  were not evaluated.
+- **Provenance and Excluded Behavior:** what the run did not demonstrate. This
+  covers unresolved refs, provider-only MCP servers, and component types that
+  were only inventoried.
+
+A partial plugin run marks the card, and its Tier 3 row, `INCOMPLETE` unless
+another tier already failed. An `INCOMPLETE` card never carries a
+Publication Recommendation. The public benchmark gate
+(`scripts/ci/check_public_benchmarks.py`) accepts both card titles.
 
 ## Limitations and not-yet-supported items
 

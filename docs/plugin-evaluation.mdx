@@ -494,15 +494,35 @@ ratio is `null` when no server runs a package.
 
 ### Whole-tree security scans
 
-{/* TODO(integrator): root-scan workstream. Confirm the exact scanner list and scope once it merges (SkillSpector security, pii, code-integrity with Bandit, Semgrep, Gitleaks, and hygiene, unicode, license, and dependency), and whether findings outside skills/ are attributed to their inventory component. */}
+The Tier 1 scanners cover the whole plugin tree, not only the bundled skills:
+security (SkillSpector), PII, license, code integrity and risk (Bandit,
+Semgrep, Gitleaks), hygiene, unicode, and the dependency audit.
 
-The Tier 1 security scanners cover the whole plugin tree, not only the bundled
-skills. Files outside `skills/`, such as MCP config files, hook commands,
-scripts, and rules, are scanned the same way as skill content, and each
-finding is attributed to the component that owns the file in the component
-inventory. Scanner requirements and the `INCOMPLETE` rule for missing scanner
-evidence are the same as for skills; see
-[Scanner setup](tier1-validation.mdx#scanner-setup).
+Each file is scanned exactly once, in two passes:
+
+1. **Bundled skills.** Each skill under `skills/` is scanned as a skill.
+   Findings keep the `[<skill>]` prefix and a plugin-relative path, for example
+   `[foo] skills/foo/config.py`.
+2. **Plugin root.** The rest of the tree is scanned once, with the bundled skill
+   folders excluded. That includes scripts, hooks, commands, agents, MCP config
+   files, rules, and loose files under `skills/` that belong to no skill.
+   External tools (SkillSpector, Bandit, Semgrep, Gitleaks) scan a temporary
+   copy of the root that leaves out the skill folders, links, and special
+   files. Their finding paths are mapped back to the real plugin paths. The
+   root pass still runs when a critical finding stopped the skill pass.
+
+Before either pass reads plugin content, the whole tree is walked without
+following links. A symlink, reparse point, hard link, or special file anywhere
+in the tree stops validation with a HIGH `unsafe_plugin_filesystem` finding
+that names the plugin-relative path.
+
+The component inventory counts each finding toward the component whose path
+contains the file. Findings in files that belong to no component, such as
+`scripts/`, count toward the plugin root. Scanner requirements and the
+`INCOMPLETE` rule for missing scanner evidence are the same as for skills; see
+[Scanner setup](tier1-validation.mdx#scanner-setup). The standalone
+`security-scan` and `pii-scan` commands are not plugin-aware, so use `validate`
+for plugins.
 
 ### Static context-cost estimate
 
@@ -534,7 +554,8 @@ The opt-in `dependency` check audits Python dependencies declared in
 skillevaluator validate ./my-plugin --tiers 1 --checks schema,dependency
 ```
 
-{/* TODO(integrator): root-scan workstream. Confirm which directories of a plugin the dependency audit reads (every manifest in the plugin tree, or only bundled skills and the root). */}
+The audit reads the `requirements*.txt` and `pyproject.toml` files at the plugin
+root and in each bundled skill directory.
 
 Only exact `name==version` pins are audited. They are copied into a temporary
 requirements file and checked with `pip-audit --no-deps --disable-pip`, so

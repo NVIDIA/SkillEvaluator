@@ -95,6 +95,12 @@ by default, so a missing, skipped, or incomplete live evaluation produces
 explicitly persist `benchmark_policy.tier3_required = false`; the card
 discloses that exception instead of implying that Tier 3 ran.
 
+{/* TODO(integrator): reporting workstream. Update this paragraph when the plugin BENCHMARK.md card lands. */}
+
+Plugin runs are covered in
+[Plugin Evaluation](plugin-evaluation.mdx#reports-and-verdicts), including the
+plugin verdicts and what makes a plugin run `INCOMPLETE`.
+
 ### Evaluated source provenance
 
 The Evaluation Metadata section distinguishes the source tree that was evaluated
@@ -217,6 +223,11 @@ completed run directly:
   intervals for the lift, pass^k, tokens and reported USD cost per passed
   case, token efficiency, the measured first-turn context delta, and per-case
   Integration completeness. None of these change a score or verdict.
+- **`plugin_provenance.json`** — plugin runs only: which member skills,
+  rules, and MCP servers were evaluated, what stayed unresolved, per-component
+  coverage, the static context-cost estimate, MCP pinning, and the requested
+  and effective lift modes. See
+  [Plugin Evaluation](plugin-evaluation.mdx#where-results-are-recorded).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
   per-trial artifacts.

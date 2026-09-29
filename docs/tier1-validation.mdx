@@ -102,7 +102,9 @@ Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, 
 | Workflows | `workflows` | `workflow-rules.mdc` in a workflow directory |
 | Plugin | `plugin` | A bundle-reference `agent_plugin.yaml`/`.yml` manifest, or a contained `.claude-plugin/plugin.json` manifest |
 
-Plugins are validated against their public contract. The `quality`, `lint`, and `version` checks are skill checks: for a plugin they run on each skill bundled under the plugin's `skills/` directory, with findings attributed to that skill, and they are skipped for plugins without bundled skills, rules, and workflows.
+Validate a plugin with `skillevaluator validate ./my-plugin --tiers 1`; the direct `tier1 PATH` workflow takes a skill directory only. [Plugin Evaluation](plugin-evaluation.mdx#tier-1-static-validation) is the full plugin reference, including every MCP and component check name and severity.
+
+Plugins are validated against their public contract. The manifest, dependency, component, and MCP checks run as part of the `schema` check. The `quality`, `lint`, and `version` checks are skill checks: for a plugin they run on each skill bundled under the plugin's `skills/` directory, with findings attributed to that skill, and they are skipped for plugins without bundled skills, rules, and workflows.
 
 For a bundle-reference plugin, each `skills.refs` and `rules.refs` entry is classified offline, without fetching anything: `provided` (bundled inside the plugin root), `referenced` (elsewhere in the same repository), `missing` (names the same repository, but nothing exists at that path), `external` (another repository; not verified), or `unresolved` (the repository cannot be identified, or the target is reachable only through a link). Only `missing` blocks, as a HIGH `plugin_dependency_missing` finding. A ref counts as same-repository only when the repository root is the git top-level and its `origin` remote matches the ref's `<owner>/<repo>`; otherwise every ref stays `unresolved` and advisory. The repository root defaults to the git top-level that contains the plugin; override it with `--repo-root`.
 

@@ -361,7 +361,13 @@ scope. See the [CLI Reference](cli-reference.mdx) for the full group.
 
 ## Plugin evaluation
 
-Run all three tiers for a plugin with the same validation entry point:
+This section summarizes plugin Tier 3. [Plugin Evaluation](plugin-evaluation.mdx)
+is the full reference: what each arm stages, the Integration evidence gate and
+verdicts, report-only statistics and component signals, the plugin dataset
+fields, and current limitations.
+
+Run all three tiers for a plugin with the same validation entry point. Plugin
+Tier 3 runs only when requested with `--tier3`:
 
 ```bash title="Validate a plugin through Tier 3"
 skillevaluator validate ./my-plugin --type plugin --tier3
@@ -430,6 +436,13 @@ versions, disabled TLS verification, agent permission-bypass flags,
 library-preload environment variables, cloud metadata endpoints, and escaping,
 linked, missing, or oversized MCP config files are rejected.
 
+Each scored trial of a plugin run also records report-only component signals:
+which member skills, MCP servers, subagents, and commands the agent activated,
+and, when the dataset declares the optional plugin fields, tool selection,
+argument, order, handoff, and conflict checks. They never change a score or
+verdict. See [Plugin component signals](plugin-evaluation.mdx#plugin-component-signals)
+and the [plugin dataset fields](plugin-evaluation.mdx#dataset-fields-for-plugins).
+
 ## Plan for cost
 
 Tier 3 performs live model and agent calls, so it can incur provider charges
@@ -440,7 +453,8 @@ the trial volume is:
 eval cases × agents × attempts × arms
 ```
 
-A standard comparison has two arms (with-skill and without-skill). Each trial
+A standard comparison has two arms (with-skill and without-skill); a plugin run
+with `--lift-mode both` adds a third, member-skills arm. Each trial
 can make multiple agent-model requests, standard grading adds evaluator-model
 calls, dataset generation can add more, and the optional runtime preflight adds
 one extra agent execution per agent. Actual charges therefore depend on the selected

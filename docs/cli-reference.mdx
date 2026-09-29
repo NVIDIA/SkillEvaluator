@@ -87,10 +87,17 @@ named `validate`; `tier1 validate ./my-skill` invokes the Tier 1 workflow.
 
 Direct Tier 1 can run keyless, but marks its LLM stages as skipped. Missing
 required scanner evidence remains incomplete. Direct Tier 2 needs both chat and
-embedding access and takes one skill, not a collection. Create its catalog with
-`similarity-check ./skills --save-catalog ./skill-catalog.json`. Direct Tier 3
+embedding access and takes one skill or one plugin root, not a collection.
+Create its catalog with
+`similarity-check ./skills --save-catalog ./skill-catalog.json` (add
+`--type plugin` for a plugin catalog). Direct Tier 3
 preserves valid existing sources and rejects invalid ones; it does not overwrite
 a dataset to repair it.
+
+Direct `tier1 PATH` and `tier3 PATH` take a skill directory. For a plugin, run
+Tier 1 with `validate PLUGIN --tiers 1` and Tier 3 with
+[tier3 evaluate-plugin](#tier3-evaluate-plugin); see
+[Plugin Evaluation](plugin-evaluation.mdx#cli-quick-reference).
 
 `validate PATH` runs all three tiers for skills by default, including Tier 3
 autopilot. It is separate from these tier-only workflows.
@@ -195,7 +202,7 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
 | `--repo-root DIRECTORY` | git top-level of the plugin | Plugin only: repository root used to resolve same-repository skill and rule references in Tier 1 and Tier 3. The missing-dependency gate also requires this root to have a git `origin` remote; otherwise references stay `unresolved` (advisory). |
 
-Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks run on each skill bundled under the plugin's `skills/` directory.
+Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks run on each skill bundled under the plugin's `skills/` directory. Plugins run Tiers 1 and 2 by default; request plugin Tier 3 with `--tier3`. See [Plugin Evaluation](plugin-evaluation.mdx).
 
 `validate` also takes the standard `-r/--report` and `-o/--output-dir` options described under [Global conventions](#global-conventions).
 
@@ -245,7 +252,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
 | `--grading-mode [default\|default_plus_custom\|custom_only]` | unset | Reward/grading mode for live eval. |
 | `--results-dir DIRECTORY` | unset | Directory for Harbor live-eval results. |
-| `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode, set via `skill_workspace.mode: group` in `evals/config.yml`. |
+| `--include-skills PATH` | none | Additional skill(s) to mount into the eval environment (repeatable; paths must exist). Requires group workspace mode, set via `skill_workspace.mode: group` in `evals/config.yml`. For a plugin, the paths are staged as extra member skills; plugin evaluation always uses a group workspace. |
 | `--copy-repo` | off | Copy the surrounding repo into the eval environment. |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor step timeouts. |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
@@ -466,10 +473,14 @@ skillevaluator tier3 evaluate-plugin ./my-plugin --lift-mode both \
 
 Integration requires at least one dataset case with `cross_component: true`
 and two or more distinct `expected_skills`. An explicit `integration` run is
-inconclusive without that evidence; `both` still runs the valid effectiveness
-comparison and records why Integration was skipped. See [Plugin
-evaluation](tier3-live-evaluation.mdx#plugin-evaluation) for component support,
-security restrictions, and result semantics.
+inconclusive without that evidence and exits 1 before any agent runs; `both`
+still runs the valid effectiveness comparison and records why Integration was
+skipped. A plugin with nothing locally evaluable is skipped with exit 0. A
+partial run (unresolved refs, provider-only MCP servers, or MCP `env` or
+`headers` the runtime cannot apply) writes its results and then exits 1 as
+`INCOMPLETE`. [Plugin Evaluation](plugin-evaluation.mdx#tier-3-live-evaluation)
+covers what each arm stages, component support, security restrictions, the
+plugin dataset fields, and result semantics.
 
 ## create-eval-dataset
 

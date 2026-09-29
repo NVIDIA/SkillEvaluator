@@ -108,6 +108,8 @@ All notable changes to SkillEvaluator are documented in this file.
   plugin signals.
 - `validate` writes a plugin `BENCHMARK.md` card with component coverage,
   Effectiveness and Integration results, and the behavior the run excluded.
+- Added a Plugin Evaluation docs page covering all three tiers, the plugin
+  dataset fields, verdicts, and current limitations.
 
 ### Changed
 

@@ -117,6 +117,30 @@ outside the directory are rejected before the trial is staged.
   </Accordion>
 </AccordionGroup>
 
+### Plugin datasets
+
+A plugin keeps its dataset in its own `evals/` directory, in this same format.
+`tier3 evaluate-plugin --evals-source` can point at another dataset. Without
+either, Tier 3 combines the member skills' datasets. `create-eval-dataset` and
+autopilot need a `SKILL.md`, so they do not generate plugin datasets. Plugin
+cases may add these optional fields:
+
+| Field | Purpose |
+| --- | --- |
+| `cross_component` | `true` marks a case that needs several member skills together |
+| `expected_skills` | The member skills the case should combine. A case with `cross_component: true` and at least two distinct names here is the evidence that Integration (`--lift-mode integration` or `both`) requires |
+| `expected_tools`, `acceptable_tools`, `decoy_tools` | Tool and component refs (such as `Skill:release-notes`, `MCP:tracker`, or `mcp__tracker__*`) for the report-only tool-selection signal |
+| `tool_arguments` | Argument rules for matching calls: `required`, a small JSON Schema subset, `equals`, `contains`, and `pattern` |
+| `expected_order` | `[before, after]` precedence edges between components or tools |
+| `handoffs` | A value or artifact that must pass from a producer to a consumer |
+| `conflict_probes` | A component that must be used, and one that must not be used |
+
+The component-signal fields are advisory and never change a score.
+`tier3 validate` type-checks and size-bounds them, and plugin evaluation stops
+before any agent runs when one is malformed. The exact schema, limits, and a
+worked example are in
+[Dataset fields for plugins](plugin-evaluation.mdx#dataset-fields-for-plugins).
+
 ## Generate a dataset
 
 `create-eval-dataset` writes `evals/evals.json` for you, grounded in your

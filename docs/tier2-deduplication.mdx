@@ -270,7 +270,11 @@ fail the run. It runs four checks:
 | B — plugin vs catalog plugins | The plugin's name and description with every catalog plugin entry, plus member-skill overlap | A local catalog with plugin entries and an embeddings provider |
 
 `validate` runs Checks A and C-intra for a plugin and records C-inter and B as
-skipped, because it takes no catalog:
+skipped, because it takes no catalog. Inside `validate`, Check A needs no
+provider, and C-intra is skipped with a reason when no embeddings provider is
+configured. Direct `tier2 PLUGIN` requires the embeddings and chat providers
+before it starts. [Plugin Evaluation](plugin-evaluation.mdx) covers plugin
+evaluation across all three tiers.
 
 ```bash title="Run offline and contextual checks for a plugin"
 skillevaluator validate ./my-plugin --type plugin

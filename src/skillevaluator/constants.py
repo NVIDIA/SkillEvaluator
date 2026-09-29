@@ -524,6 +524,18 @@ AGENT_EVAL_VERDICT_FAIL = "fail"
 TIER3_LIFT_PASS_THRESHOLD = 0.05
 TIER3_LIFT_FAIL_THRESHOLD = -0.10
 
+# Report-only lift uncertainty: a paired, case-clustered percentile bootstrap.
+# Attempts are averaged within each case first, cases are paired by id, and
+# whole cases are resampled with replacement. The seed is fixed so the same
+# run always reports the same interval.
+LIFT_BOOTSTRAP_RESAMPLES = 2000
+LIFT_BOOTSTRAP_SEED = 0
+LIFT_BOOTSTRAP_CONFIDENCE = 0.95
+# Fewer paired cases than this makes the interval ``insufficient``.
+LIFT_CI_MIN_PAIRED_CASES = 5
+# A wider interval than this (in score units) is reported as ``low`` precision.
+LIFT_CI_LOW_PRECISION_WIDTH = 0.20
+
 AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
     "id",
     "question",

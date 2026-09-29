@@ -27,6 +27,10 @@ def test_integration_report_is_plugin_only_and_reconciles_operands() -> None:
     assert report is not None
     assert report["integration_lift"] == 0.15
     assert report["verdict"] == "real_integration"
+    assert report["point_verdict"] == "real_integration"
+    assert report["measured"] is True
+    assert report["reason"] is None
+    assert report["lift_mode_effective"] == "both"
     assert report["report_only"] is True
 
     assert _build_integration_report(best, {**config, "eval_target": {"kind": "skill"}}) is None
@@ -42,7 +46,9 @@ def test_incomplete_sum_of_parts_never_claims_integration() -> None:
     )
     assert report is not None
     assert report["verdict"] == "inconclusive"
+    assert report["point_verdict"] == "real_integration"
     assert report["complete"] is False
+    assert "did not cover the same expected cases" in report["reason"]
 
 
 def test_custom_only_sum_of_parts_produces_integration_lift() -> None:

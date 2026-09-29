@@ -206,6 +206,10 @@ completed run directly:
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
   (a `--skip-baseline` run has neither).
+- **`<agent>/statistics.json`** — report-only statistics: 95% bootstrap
+  intervals for the lift, pass^k, tokens and reported USD cost per passed
+  case, token efficiency, the measured first-turn context delta, and per-case
+  Integration completeness. None of these change a score or verdict.
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
   per-trial artifacts.

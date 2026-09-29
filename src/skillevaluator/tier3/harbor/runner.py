@@ -1839,6 +1839,8 @@ def _run_harbor_eval_impl(
     workspace_skills_baseline: bool = True,
     sum_of_parts_arm: bool = False,
     eval_target_kind: str = "skill",
+    lift_mode_requested: str | None = None,
+    integration_skip_reason: str | None = None,
     copy_repo: bool = False,
     grading_mode: str | None = None,
     reference_skills_dir: Path | None = None,
@@ -2228,6 +2230,20 @@ def _run_harbor_eval_impl(
         "baseline_includes_workspace_skills": workspace_skills_baseline,
         "sum_of_parts_arm": run_sum_of_parts,
     }
+    if eval_target_kind == "plugin" and lift_mode_requested:
+        # Record what the operator asked for next to what actually ran, so a
+        # report can explain an Integration comparison that was not measured.
+        if run_sum_of_parts:
+            effective_lift_mode = "both"
+        elif workspace_skills_baseline and workspace_skills and not skip_baseline:
+            effective_lift_mode = "integration"
+        else:
+            effective_lift_mode = "effectiveness"
+        run_config["lift_mode"] = {
+            "requested": lift_mode_requested,
+            "effective": effective_lift_mode,
+            "integration_skip_reason": integration_skip_reason,
+        }
 
     root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
     try:

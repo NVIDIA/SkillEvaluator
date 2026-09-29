@@ -72,6 +72,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Added public plugin evaluation across all tiers: static schema and MCP checks,
   advisory offline dependency/context deduplication, and Harbor-backed live
   evaluation with effectiveness and optional sum-of-parts Integration arms.
+- Tier 3 reports paired case-bootstrap 95% intervals for Skill and Integration
+  lift, pass^k, cost per passed case, token efficiency, and measured context
+  cost as report-only statistics. Integration becomes inconclusive when its
+  interval includes zero, too few cases pair, or per-case coverage is incomplete.
 
 ### Changed
 

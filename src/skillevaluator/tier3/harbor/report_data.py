@@ -37,6 +37,14 @@ _MAX_STAGED_PATHS_SCANNED = 32_768
 _MAX_DATASET_RECORDS = 4096
 _MAX_DIAGNOSTIC_REASONS = 8
 _INVALID_JSON = object()
+_STATISTICS_KEYS = (
+    "lift_uncertainty",
+    "reliability",
+    "cost",
+    "token_efficiency",
+    "context_cost_measured",
+    "integration_completeness",
+)
 
 __all__ = (
     "DATASET_SNAPSHOT_DIGEST_ALGORITHM",
@@ -594,6 +602,16 @@ def load_agent_data(
             custom_lift = _load_bounded_json(custom_lift_file, agent_diagnostics, artifact="custom_lift")
             if custom_lift is not _INVALID_JSON:
                 agent_info["custom_lift"] = custom_lift
+
+        # Report-only statistics (lift CIs, pass^k, cost, token efficiency,
+        # measured context cost and per-case Integration completeness).
+        statistics_file = agent_dir / "statistics.json"
+        if statistics_file.exists():
+            statistics = _load_bounded_json(statistics_file, agent_diagnostics, artifact="statistics")
+            if isinstance(statistics, dict):
+                for key in _STATISTICS_KEYS:
+                    if isinstance(statistics.get(key), dict):
+                        agent_info[key] = statistics[key]
 
         for variant_key, variant_dir_name in (
             ("rewards", "with-skill"),

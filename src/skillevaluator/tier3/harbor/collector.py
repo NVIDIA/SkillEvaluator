@@ -37,6 +37,7 @@ from skillevaluator.tier3.harbor.metrics import (
     overall_score,
     score_definition,
 )
+from skillevaluator.tier3.harbor.stats import ArmObservations, TrialObservation, build_agent_statistics
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_data, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
@@ -67,6 +68,7 @@ GENERATED_AGENT_ARTIFACTS = (
     "pass_at_k_lift.json",
     "security_attribution.json",
     "findings.json",
+    "statistics.json",
 )
 GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
@@ -2849,6 +2851,156 @@ def _summarize_trajectory(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _read_job_json(job_dir: Path, relative_path: Path) -> Any:
+    """Read one bounded JSON file anchored at the Harbor job root without following links."""
+    try:
+        with SecureRoot(job_dir) as secure_root:
+            raw, _metadata = secure_root.read_bytes(relative_path, DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES)
+        return json.loads(raw)
+    except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
+        return None
+
+
+def _usage_counter(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) and numeric >= 0 else None
+
+
+def _sum_usage_counters(values: list[float | None]) -> float | None:
+    """Sum a counter only when every contributing record reports it."""
+    if not values or any(value is None for value in values):
+        return None
+    return math.fsum(value for value in values if value is not None)
+
+
+def _first_turn_prompt_tokens(trajectory: dict[str, Any]) -> float | None:
+    """Return the prompt tokens of the first LLM turn when the step reports them."""
+    steps = trajectory.get("steps")
+    if not isinstance(steps, list):
+        return None
+    for step in steps:
+        if not isinstance(step, dict) or step.get("source") != "agent" or step.get("llm_call_count") == 0:
+            continue
+        metrics = step.get("metrics")
+        return _usage_counter(metrics.get("prompt_tokens")) if isinstance(metrics, dict) else None
+    return None
+
+
+def _trial_usage(job_dir: Path | None, reward: dict[str, Any]) -> dict[str, float]:
+    """Collect report-only token and cost counters for one logical Harbor trial.
+
+    Counters come from the trial's ATIF trajectory ``final_metrics`` (summed
+    over native multi-step fragments) and fall back to Harbor's
+    ``result.json`` ``agent_result``. Reads are bounded, no-follow and anchored
+    at the job root. Missing counters are left out rather than guessed.
+    """
+    trial_root_name = str(reward.get("_trial_root_name") or "")
+    if job_dir is None or not trial_root_name or Path(trial_root_name).name != trial_root_name:
+        return {}
+    if trial_root_name in {".", ".."}:
+        return {}
+
+    trajectories: list[dict[str, Any]] = []
+    root_trajectory = _read_job_json(job_dir, Path(trial_root_name, "agent", "trajectory.json"))
+    if isinstance(root_trajectory, dict):
+        trajectories.append(root_trajectory)
+    else:
+        for step_path in _ordered_step_trajectory_paths(job_dir / trial_root_name):
+            try:
+                relative = step_path.relative_to(job_dir)
+            except ValueError:
+                continue
+            step_trajectory = _read_job_json(job_dir, relative)
+            if isinstance(step_trajectory, dict):
+                trajectories.append(step_trajectory)
+
+    usage: dict[str, float] = {}
+    final_metrics = [
+        metrics for trajectory in trajectories if isinstance(metrics := trajectory.get("final_metrics"), dict)
+    ]
+    if final_metrics and len(final_metrics) == len(trajectories):
+        prompt = _sum_usage_counters([_usage_counter(metrics.get("total_prompt_tokens")) for metrics in final_metrics])
+        completion = _sum_usage_counters(
+            [_usage_counter(metrics.get("total_completion_tokens")) for metrics in final_metrics]
+        )
+        if prompt is not None and completion is not None:
+            usage["prompt_tokens"] = prompt
+            usage["completion_tokens"] = completion
+            usage["cached_tokens"] = math.fsum(
+                _usage_counter(metrics.get("total_cached_tokens")) or 0.0 for metrics in final_metrics
+            )
+        cost = _sum_usage_counters([_usage_counter(metrics.get("total_cost_usd")) for metrics in final_metrics])
+        if cost is not None:
+            usage["cost_usd"] = cost
+    if trajectories and (first_turn := _first_turn_prompt_tokens(trajectories[0])) is not None:
+        usage["first_turn_prompt_tokens"] = first_turn
+
+    if "prompt_tokens" in usage and "cost_usd" in usage:
+        return usage
+    result = _read_job_json(job_dir, Path(trial_root_name, "result.json"))
+    if not isinstance(result, dict):
+        return usage
+    contexts: list[dict[str, Any]] = []
+    if isinstance(result.get("agent_result"), dict):
+        contexts.append(result["agent_result"])
+    elif isinstance(result.get("step_results"), list):
+        contexts.extend(
+            step["agent_result"]
+            for step in result["step_results"]
+            if isinstance(step, dict) and isinstance(step.get("agent_result"), dict)
+        )
+    if not contexts:
+        return usage
+    if "prompt_tokens" not in usage:
+        prompt = _sum_usage_counters([_usage_counter(context.get("n_input_tokens")) for context in contexts])
+        completion = _sum_usage_counters([_usage_counter(context.get("n_output_tokens")) for context in contexts])
+        if prompt is not None and completion is not None:
+            usage["prompt_tokens"] = prompt
+            usage["completion_tokens"] = completion
+            usage["cached_tokens"] = math.fsum(
+                _usage_counter(context.get("n_cache_tokens")) or 0.0 for context in contexts
+            )
+    if "cost_usd" not in usage:
+        cost = _sum_usage_counters([_usage_counter(context.get("cost_usd")) for context in contexts])
+        if cost is not None:
+            usage["cost_usd"] = cost
+    return usage
+
+
+def _arm_observations(
+    logical_rewards: list[dict[str, Any]],
+    job_dir: Path | None,
+    *,
+    execution: dict[str, Any],
+    pass_summary: dict[str, Any],
+    expected_case_ids: list[str] | None,
+    job_failure: str = "",
+) -> ArmObservations:
+    """Pair each logical attempt with its case id and usage for report-only statistics.
+
+    Usage counters are only read for arms that completed, because statistics
+    are never published for a failed arm.
+    """
+    execution_status = str(execution.get("execution_status") or "unknown")
+    expected_ids = [str(case_id) for case_id in (expected_case_ids or []) if str(case_id)]
+    expected_set = set(expected_ids) or None
+    trials: list[TrialObservation] = []
+    for reward in sorted(logical_rewards, key=_attempt_sort_key):
+        case_id = _entry_id(reward, expected_set)
+        if expected_set is not None and case_id not in expected_set:
+            continue
+        usage = _trial_usage(job_dir, reward) if execution_status == "succeeded" else {}
+        trials.append(TrialObservation(case_id=case_id, reward=reward, usage=usage))
+    return ArmObservations(
+        execution_status=execution_status,
+        trials=tuple(trials),
+        pass_summary=pass_summary or {},
+        job_failure=job_failure,
+    )
+
+
 def _condition_execution_summary(
     rewards: list[dict[str, Any]],
     *,
@@ -3129,6 +3281,14 @@ def _collect_report_only_condition(
         "trial_failures": trial_failures,
         "job_failure": job_failure,
         "num_trials": len(rewards),
+        "observations": _arm_observations(
+            logical_rewards,
+            job_dir,
+            execution=execution,
+            pass_summary=pass_summary,
+            expected_case_ids=expected_case_ids,
+            job_failure=job_failure,
+        ),
     }
 
 
@@ -3537,15 +3697,44 @@ def collect_harbor_results(
         if with_scores and sum_of_parts["scores"]:
             integration_lift = _compute_lift(with_scores, sum_of_parts["scores"])
             (agent_dir / "integration_lift.json").write_text(json.dumps(integration_lift, indent=2), encoding="utf-8")
+        arm_observations = {
+            "with_skill": _arm_observations(
+                with_logical_rewards,
+                with_job_dir,
+                execution=with_execution,
+                pass_summary=with_pass,
+                expected_case_ids=expected_case_ids,
+                job_failure=with_job_failure,
+            ),
+        }
+        if not skip_baseline:
+            arm_observations["without_skill"] = _arm_observations(
+                without_logical_rewards,
+                without_job_dir,
+                execution=without_execution,
+                pass_summary=without_pass,
+                expected_case_ids=expected_case_ids,
+                job_failure=without_job_failure,
+            )
+        if sum_of_parts_arm and isinstance(sum_of_parts.get("observations"), ArmObservations):
+            arm_observations["sum_of_parts"] = sum_of_parts["observations"]
+        statistics = build_agent_statistics(
+            arm_observations,
+            expected_case_ids=expected_case_ids,
+            n_attempts=n_attempts,
+            stop_on_pass=stop_on_pass,
+            pass_threshold=pass_threshold,
+            sum_of_parts_requested=sum_of_parts_arm,
+        )
+        # Keep the legacy per-arm execution snapshots next to the per-case
+        # completeness verdict so earlier consumers still find them.
         integration_completeness = {
             "with_plugin": with_execution,
             "sum_of_parts": sum_of_parts["execution"],
-            "complete": bool(
-                sum_of_parts_arm
-                and with_execution.get("execution_status") == "succeeded"
-                and sum_of_parts["execution"].get("execution_status") == "succeeded"
-            ),
+            **statistics.pop("integration_completeness"),
         }
+        statistics["integration_completeness"] = integration_completeness
+        (agent_dir / "statistics.json").write_text(json.dumps(statistics, indent=2), encoding="utf-8")
 
         lift: dict[str, Any] = {}
         paired_execution_succeeded = (
@@ -3631,6 +3820,11 @@ def collect_harbor_results(
             "lift": lift,
             "integration_lift": integration_lift,
             "integration_completeness": integration_completeness,
+            "lift_uncertainty": statistics["lift_uncertainty"],
+            "reliability": statistics["reliability"],
+            "cost": statistics["cost"],
+            "token_efficiency": statistics["token_efficiency"],
+            "context_cost_measured": statistics["context_cost_measured"],
             "custom_lift": custom_lift,
             "pass_at_k": {
                 "with_skill": with_pass,

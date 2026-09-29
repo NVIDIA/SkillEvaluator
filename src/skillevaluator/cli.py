@@ -769,14 +769,19 @@ def _plugin_lift_fallback_metadata(
     effective_lift_mode: str,
     integration_skip_reason: str | None,
 ) -> dict[str, str]:
-    """Describe an Integration-to-effectiveness fallback."""
-    if integration_skip_reason is None:
-        return {}
-    return {
+    """Record the requested and effective plugin lift modes for reports and provenance.
+
+    Always emitted, not only on a fallback: a report must know that
+    ``--lift-mode integration|both`` was asked for to explain an Integration
+    comparison that was not measured instead of silently omitting it.
+    """
+    metadata = {
         "requested_lift_mode": requested_lift_mode,
         "effective_lift_mode": effective_lift_mode,
-        "integration_skip_reason": integration_skip_reason,
     }
+    if integration_skip_reason is not None:
+        metadata["integration_skip_reason"] = integration_skip_reason
+    return metadata
 
 
 def _run_plugin_agent_eval(
@@ -858,6 +863,8 @@ def _run_plugin_agent_eval(
                 workspace_skills_baseline=effective_lift_mode == "integration",
                 sum_of_parts_arm=effective_lift_mode == "both",
                 eval_target_kind="plugin",
+                lift_mode_requested=lift_mode,
+                integration_skip_reason=integration_skip_reason,
                 results_dir=results_dir,
                 resolved_results_root=resolve_results_root(plugin_dir, results_dir),
                 copy_repo=copy_repo,
@@ -3033,6 +3040,8 @@ def evaluate_plugin(
                 workspace_skills_baseline=effective_lift_mode == "integration",
                 sum_of_parts_arm=effective_lift_mode == "both",
                 eval_target_kind="plugin",
+                lift_mode_requested=lift_mode,
+                integration_skip_reason=integration_skip_reason,
                 copy_repo=copy_repo,
                 grading_mode=grading_mode,
                 results_dir=results_dir,

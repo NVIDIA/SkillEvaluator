@@ -364,6 +364,18 @@ class CLIReporter(ReporterBase):
             lift = integration.get("integration_lift")
             lift_text = f"{lift:+.2f}" if isinstance(lift, int | float) else "N/A"
             console.print(f"  [bold]Integration:[/bold] {verdict} (lift {lift_text}) [dim](advisory)[/dim]")
+            uncertainty = integration.get("lift_uncertainty")
+            if isinstance(uncertainty, dict) and all(
+                isinstance(uncertainty.get(key), int | float) for key in ("ci_low", "ci_high")
+            ):
+                ci_text = (
+                    f"95% CI [{uncertainty['ci_low']:+.2f}, {uncertainty['ci_high']:+.2f}], "
+                    f"precision {uncertainty.get('precision') or 'unknown'}"
+                )
+                console.print(f"    [dim]{rich_escape(ci_text)}[/dim]")
+            reason = str(integration.get("reason") or "").strip()
+            if reason:
+                console.print(f"    [dim]{rich_escape(reason)}[/dim]", soft_wrap=True)
             components = integration.get("components") or []
             if components:
                 console.print(f"    [dim]components: {', '.join(str(component) for component in components)}[/dim]")

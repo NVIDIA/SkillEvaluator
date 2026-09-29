@@ -404,6 +404,15 @@ that Integration was skipped. Integration modes require the baseline and cannot
 be combined with `--skip-baseline`. Native Harbor-only sources remain valid for
 effectiveness but do not establish composition evidence by themselves.
 
+The Integration verdict classifies the plugin-minus-member-skills lift with
+±0.05 bands and records that band as `point_verdict`. It reports
+`inconclusive`, with a `reason`, when the two arms do not cover the same cases
+with the configured attempts, when fewer than five cases pair up, or when the
+paired case bootstrap 95% interval for the lift includes zero. When Integration
+was requested but not measured, for example after a `both` fallback, the
+report carries an explicit `inconclusive` block with `measured: false` rather
+than omitting it.
+
 The Integration result is advisory and never changes the main Tier 3 score,
 verdict, or validation exit code. MCP declarations are statically checked before
 staging; inline credentials, shell command forms, insecure URLs, floating
@@ -535,11 +544,15 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 Skill Lift is the signed difference between the with-skill result and the
 without-skill baseline. Its independent band is **PASS** at +0.05 or above,
 **NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. Lift is
-diagnostic evidence and does not override the every-dimension gate.
+diagnostic evidence and does not override the every-dimension gate. A
+report-only 95% interval from a paired, case-clustered bootstrap accompanies
+the lift; when that interval includes zero the report adds a warning, but the
+band is unchanged.
 
 With multiple attempts, pass@k shows whether at least one attempt per case met
 `--pass-threshold` — reliability context alongside Skill Lift, not a
-replacement for the dimensions. In `custom_only` mode, pass@k uses the custom
+replacement for the dimensions. pass^k, reported next to it, counts a case only
+when every one of its k attempts passed. In `custom_only` mode, pass@k uses the custom
 overall reward; the dimension rows stay visible but read **NO SCORE**, and
 custom metrics are never re-labeled as standard dimensions.
 

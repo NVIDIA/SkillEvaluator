@@ -34,6 +34,7 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    LIFT_CI_MIN_PAIRED_CASES,
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
@@ -67,8 +68,16 @@ _INTEGRATION_INTERPRETATION = {
     INTEGRATION_VERDICT_REAL: "The coordinated plugin measurably outperforms its member components alone.",
     INTEGRATION_VERDICT_COSMETIC: "The plugin performs about the same as its member components alone.",
     INTEGRATION_VERDICT_NEGATIVE: "The plugin underperforms its member components alone; inspect coordination overhead.",
-    INTEGRATION_VERDICT_INCONCLUSIVE: "The sum-of-parts comparison did not produce complete comparable evidence.",
+    INTEGRATION_VERDICT_INCONCLUSIVE: "The sum-of-parts comparison did not produce complete, conclusive evidence.",
 }
+_LIFT_MODES = ("effectiveness", "integration", "both")
+_INTEGRATION_LIFT_MODES = ("integration", "both")
+_INTEGRATION_REASON_NO_WORKSPACE = "The run recorded no plugin workspace, so no member-skills arm could be compared."
+_INTEGRATION_REASON_NO_COMPONENTS = "The run staged no member components, so no member-skills arm could be compared."
+_INTEGRATION_REASON_NO_ARM = "The member-skills (sum-of-parts) arm was not run, so Integration was not measured."
+_INTEGRATION_REASON_NO_SCORE = "The member-skills (sum-of-parts) arm produced no comparable score."
+# Report-only statistics produced by the collector (shared C4 contract).
+_STATISTICS_FIELDS = ("lift_uncertainty", "reliability", "cost", "token_efficiency", "context_cost_measured")
 
 # Canonical reports are self-contained HTML/JSON artifacts, so untrusted custom
 # grader cardinality must not multiply metric-by-trial detail without bound. The
@@ -735,6 +744,9 @@ def build_agent_eval_payload(
             agent_payloads, best_dimensions, pass_threshold=_pass_threshold_from_policy(policy)
         )
         deterministic_suggestions = _suggestions_for_dimensions(best_dimensions)
+        lift_uncertainty_warning = _effectiveness_uncertainty_conclusion(best)
+        if lift_uncertainty_warning is not None:
+            deterministic_conclusions.append(lift_uncertainty_warning)
     if plugin_provenance and plugin_provenance.get("partial"):
         deterministic_conclusions = [
             _plugin_incompleteness_conclusion(plugin_provenance),
@@ -809,7 +821,14 @@ def build_agent_eval_payload(
     if plugin_provenance:
         payload["plugin_provenance"] = plugin_provenance
         summary["plugin_provenance"] = plugin_provenance
-    integration = _build_integration_report(best, run_config)
+    for field_name in _STATISTICS_FIELDS:
+        if isinstance(best.get(field_name), dict):
+            payload[field_name] = best[field_name]
+    if _is_plugin_target(run_config) or plugin_provenance:
+        lift_modes = _plugin_lift_modes(run_config, plugin_provenance)
+        payload["lift_mode_requested"] = lift_modes["requested"]
+        payload["lift_mode_effective"] = lift_modes["effective"]
+    integration = _build_integration_report(best, run_config, plugin_provenance)
     if integration is not None:
         payload["integration"] = integration
 
@@ -1303,6 +1322,7 @@ def _build_agent(
         "sum_of_parts": sum_of_parts_overall,
         "integration_lift": integration_lift,
         "integration_completeness": info.get("integration_completeness") or {},
+        **{field: info[field] for field in _STATISTICS_FIELDS if isinstance(info.get(field), dict)},
         "num_trials": int(info.get("num_trials", 0) or 0),
         "num_trials_baseline": int(info.get("num_trials_baseline", len(baseline_trials)) or 0),
         "trials": trials,
@@ -2578,42 +2598,131 @@ def _integration_verdict(lift: float | None, *, complete: bool) -> str:
     return INTEGRATION_VERDICT_COSMETIC
 
 
-def _build_integration_report(
-    best: dict[str, Any],
-    run_config: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Build the plugin-only, report-only compositional-lift result."""
+def _is_plugin_target(run_config: dict[str, Any] | None) -> bool:
+    """Return whether ``run_config`` marks a plugin evaluation."""
     if not isinstance(run_config, dict):
-        return None
+        return False
     target = run_config.get("eval_target")
-    if not isinstance(target, dict) or target.get("kind") != "plugin":
-        return None
-    workspace = run_config.get("skill_workspace")
-    if not isinstance(workspace, dict):
-        return None
-    raw_components = workspace.get("staged_skills") or workspace.get("include") or []
-    components = [Path(str(component)).name for component in raw_components if str(component).strip()]
-    if not components:
-        return None
+    return isinstance(target, dict) and target.get("kind") == "plugin"
 
-    if workspace.get("sum_of_parts_arm"):
-        sum_of_parts = _finite_float(best.get("sum_of_parts"))
-        completeness = best.get("integration_completeness")
-        complete = bool(isinstance(completeness, dict) and completeness.get("complete"))
-    elif workspace.get("baseline_includes_workspace_skills"):
-        sum_of_parts = _finite_float(best.get("baseline"))
-        completeness = None
-        complete = sum_of_parts is not None and _finite_float(best.get("with_skill")) is not None
-    else:
-        return None
 
-    with_plugin = _finite_float(best.get("with_skill"))
-    lift = round(with_plugin - sum_of_parts, 4) if with_plugin is not None and sum_of_parts is not None else None
-    verdict = _integration_verdict(lift, complete=complete)
+def _lift_mode_value(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if text in _LIFT_MODES else None
+
+
+def _plugin_lift_modes(
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None,
+) -> dict[str, str | None]:
+    """Resolve the requested and effective plugin lift modes.
+
+    The CLI records both in the plugin provenance and the runner records them in
+    ``run_config["lift_mode"]``. The runner's effective mode wins because it
+    reflects the arms that actually ran. Older runs carry neither, so the
+    effective mode falls back to the configured arms. A measured Integration
+    mode was necessarily requested; an effectiveness run with no record leaves
+    the request unknown (``None``).
+    """
+    provenance = plugin_provenance if isinstance(plugin_provenance, dict) else {}
+    config = run_config if isinstance(run_config, dict) else {}
+    recorded = config.get("lift_mode") if isinstance(config.get("lift_mode"), dict) else {}
+    effective = _lift_mode_value(recorded.get("effective")) or _lift_mode_value(provenance.get("effective_lift_mode"))
+    if effective is None and _is_plugin_target(config):
+        workspace = config.get("skill_workspace") if isinstance(config.get("skill_workspace"), dict) else {}
+        if workspace.get("sum_of_parts_arm"):
+            effective = "both"
+        elif workspace.get("baseline_includes_workspace_skills"):
+            effective = "integration"
+        else:
+            effective = "effectiveness"
+    requested = _lift_mode_value(provenance.get("requested_lift_mode")) or _lift_mode_value(recorded.get("requested"))
+    if requested is None and effective in _INTEGRATION_LIFT_MODES:
+        requested = effective
+    skip_reason = str(provenance.get("integration_skip_reason") or recorded.get("integration_skip_reason") or "")
+    return {"requested": requested, "effective": effective, "integration_skip_reason": skip_reason.strip() or None}
+
+
+def _lift_uncertainty_entry(agent: dict[str, Any], comparison: str) -> dict[str, Any] | None:
+    uncertainty = agent.get("lift_uncertainty")
+    entry = uncertainty.get(comparison) if isinstance(uncertainty, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
+def _ci_text(entry: dict[str, Any]) -> str | None:
+    low = _finite_float(entry.get("ci_low"))
+    high = _finite_float(entry.get("ci_high"))
+    if low is None or high is None:
+        return None
+    confidence = _finite_float(entry.get("confidence")) or 0.95
+    return f"{confidence:.0%} CI [{low:+.2f}, {high:+.2f}]"
+
+
+def _effectiveness_uncertainty_conclusion(best: dict[str, Any]) -> dict[str, str] | None:
+    """Warn when the Skill Lift interval cannot rule out zero (gating is unchanged)."""
+    entry = _lift_uncertainty_entry(best, "effectiveness")
+    if entry is None or entry.get("ci_includes_zero") is not True:
+        return None
+    ci_text = _ci_text(entry)
+    if ci_text is None:
+        return None
+    precision = str(entry.get("precision") or "unknown")
+    n_cases = _as_nonnegative_int(entry.get("n_cases"))
+    return {
+        "severity": "warn",
+        "title": "Skill Lift not distinguishable from zero",
+        "message": (
+            f"The paired case bootstrap {ci_text} for Skill Lift includes zero "
+            f"({n_cases} paired case(s), precision {precision}). The lift band is unchanged; "
+            "add cases or attempts before relying on the direction of the lift."
+        ),
+    }
+
+
+def _integration_completeness_reason(completeness: dict[str, Any] | None) -> str:
+    """Explain why the per-case Integration completeness check failed."""
+    base = "The plugin and member-skills arms did not cover the same expected cases with the configured attempts"
+    if not isinstance(completeness, dict):
+        return base + "."
+    details: list[str] = []
+    failed_arms = [str(arm) for arm in completeness.get("failed_arms") or []]
+    if failed_arms:
+        details.append("failed arm(s): " + ", ".join(failed_arms[:4]))
+    missing = [str(case) for case in completeness.get("missing_cases") or []]
+    if missing:
+        suffix = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+        details.append("missing case(s): " + ", ".join(missing[:5]) + suffix)
+    shortfall = [row for row in completeness.get("attempt_shortfall") or [] if isinstance(row, dict)]
+    if shortfall:
+        rows = [
+            f"{row.get('case')} {row.get('arm') or ''} {row.get('observed')}/{row.get('expected')}".replace("  ", " ")
+            for row in shortfall[:5]
+        ]
+        suffix = f" (+{len(shortfall) - 5} more)" if len(shortfall) > 5 else ""
+        details.append("attempt shortfall: " + ", ".join(rows) + suffix)
+    return base + (": " + "; ".join(details) + "." if details else ".")
+
+
+def _integration_block(
+    *,
+    components: list[str],
+    with_plugin: float | None,
+    sum_of_parts: float | None,
+    lift: float | None,
+    verdict: str,
+    point_verdict: str | None,
+    complete: bool,
+    completeness: dict[str, Any] | None,
+    reason: str | None,
+    uncertainty: dict[str, Any] | None,
+    lift_modes: dict[str, str | None],
+) -> dict[str, Any]:
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "advisory": True,
         "report_only": True,
+        # False when the block explains why no measurement exists.
+        "measured": lift is not None,
         "basis": "compositional-lift-ablation",
         "baseline": "sum-of-parts",
         "components": list(dict.fromkeys(components)),
@@ -2621,10 +2730,116 @@ def _build_integration_report(
         "sum_of_parts": round(sum_of_parts, 4) if sum_of_parts is not None else None,
         "integration_lift": lift,
         "verdict": verdict,
+        # The +/-0.05 band classification before any uncertainty or
+        # completeness downgrade; None when no lift was measured.
+        "point_verdict": point_verdict,
         "complete": complete,
         "completeness": completeness if isinstance(completeness, dict) else None,
+        "lift_uncertainty": uncertainty,
         "interpretation": _INTEGRATION_INTERPRETATION[verdict],
+        # Set whenever the verdict is inconclusive.
+        "reason": reason,
+        "lift_mode_requested": lift_modes.get("requested"),
+        "lift_mode_effective": lift_modes.get("effective"),
     }
+
+
+def _build_integration_report(
+    best: dict[str, Any],
+    run_config: dict[str, Any] | None,
+    plugin_provenance: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Build the plugin-only, report-only compositional-lift result.
+
+    Returns ``None`` only when Integration was neither measured nor requested.
+    When ``--lift-mode integration|both`` was requested but no member-skills
+    comparison exists (for example a ``both`` run that fell back to
+    effectiveness for lack of cross-component evidence), an explicit
+    ``inconclusive`` block with ``measured=False`` and a ``reason`` is returned
+    instead of silently omitting the section.
+
+    A measured lift is classified by the +/-0.05 bands (``point_verdict``). The
+    advisory ``verdict`` is downgraded to ``inconclusive`` when the per-case
+    completeness check fails, when fewer than the minimum paired cases exist,
+    or when the paired case bootstrap interval includes zero.
+    """
+    if not isinstance(run_config, dict) or not _is_plugin_target(run_config):
+        return None
+    lift_modes = _plugin_lift_modes(run_config, plugin_provenance)
+    requested = lift_modes["requested"] in _INTEGRATION_LIFT_MODES
+
+    def _unmeasured(reason: str, components: list[str]) -> dict[str, Any] | None:
+        if not requested:
+            return None
+        return _integration_block(
+            components=components,
+            with_plugin=None,
+            sum_of_parts=None,
+            lift=None,
+            verdict=INTEGRATION_VERDICT_INCONCLUSIVE,
+            point_verdict=None,
+            complete=False,
+            completeness=None,
+            reason=lift_modes["integration_skip_reason"] or reason,
+            uncertainty=None,
+            lift_modes=lift_modes,
+        )
+
+    workspace = run_config.get("skill_workspace")
+    if not isinstance(workspace, dict):
+        return _unmeasured(_INTEGRATION_REASON_NO_WORKSPACE, [])
+    raw_components = workspace.get("staged_skills") or workspace.get("include") or []
+    components = [Path(str(component)).name for component in raw_components if str(component).strip()]
+    if not components:
+        return _unmeasured(_INTEGRATION_REASON_NO_COMPONENTS, [])
+
+    with_plugin = _finite_float(best.get("with_skill"))
+    if workspace.get("sum_of_parts_arm"):
+        sum_of_parts = _finite_float(best.get("sum_of_parts"))
+        completeness = best.get("integration_completeness")
+        complete = bool(isinstance(completeness, dict) and completeness.get("complete"))
+        uncertainty = _lift_uncertainty_entry(best, "integration")
+    elif workspace.get("baseline_includes_workspace_skills"):
+        # Legacy two-arm Integration: the single baseline is the member-skills arm.
+        sum_of_parts = _finite_float(best.get("baseline"))
+        completeness = None
+        complete = sum_of_parts is not None and with_plugin is not None
+        uncertainty = _lift_uncertainty_entry(best, "effectiveness")
+    else:
+        return _unmeasured(_INTEGRATION_REASON_NO_ARM, components)
+
+    lift = round(with_plugin - sum_of_parts, 4) if with_plugin is not None and sum_of_parts is not None else None
+    point_verdict = _integration_verdict(lift, complete=True) if lift is not None else None
+    verdict = point_verdict or INTEGRATION_VERDICT_INCONCLUSIVE
+    reason: str | None = None
+    if lift is None:
+        reason = _INTEGRATION_REASON_NO_SCORE
+    elif not complete:
+        reason = _integration_completeness_reason(completeness if isinstance(completeness, dict) else None)
+    elif uncertainty is not None and uncertainty.get("precision") == "insufficient":
+        reason = (
+            f"Only {_as_nonnegative_int(uncertainty.get('n_cases'))} paired case(s); at least "
+            f"{LIFT_CI_MIN_PAIRED_CASES} are needed for a usable interval on the Integration lift."
+        )
+    elif uncertainty is not None and uncertainty.get("ci_includes_zero") is True:
+        reason = (
+            f"The paired case bootstrap {_ci_text(uncertainty) or 'interval'} for the Integration lift includes zero."
+        )
+    if reason is not None:
+        verdict = INTEGRATION_VERDICT_INCONCLUSIVE
+    return _integration_block(
+        components=components,
+        with_plugin=with_plugin,
+        sum_of_parts=sum_of_parts,
+        lift=lift,
+        verdict=verdict,
+        point_verdict=point_verdict,
+        complete=complete,
+        completeness=completeness if isinstance(completeness, dict) else None,
+        reason=reason,
+        uncertainty=uncertainty,
+        lift_modes=lift_modes,
+    )
 
 
 def _agent_quality_verdict(agent: dict[str, Any]) -> str:

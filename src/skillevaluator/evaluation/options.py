@@ -40,6 +40,8 @@ class EvaluationOptions:
     workspace_skills_baseline: bool = True
     sum_of_parts_arm: bool = False
     eval_target_kind: str = "skill"
+    lift_mode_requested: str | None = None
+    integration_skip_reason: str | None = None
     copy_repo: bool = False
     grading_mode: str | None = None
     results_dir: Path | None = None

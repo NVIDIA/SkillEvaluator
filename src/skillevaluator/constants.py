@@ -268,6 +268,14 @@ CONTENT_DEDUP_MAX_TOTAL_BYTES = 8 * 1024 * 1024
 CONTENT_DEDUP_MAX_CHUNKS = 512
 CONTENT_DEDUP_MAX_LLM_CLUSTERS = 50
 
+# Collection-wide similarity budgets are independent of a single skill's file limit.
+SIMILARITY_DEFAULT_MAX_ENTRIES = 1_024
+SIMILARITY_MAX_ENTRIES = 5_000
+# Allow directories, manifests, and supporting paths at the maximum entry count,
+# without raising the independent per-skill content-deduplication path ceiling.
+SIMILARITY_MAX_DISCOVERED_PATHS = 4 * SIMILARITY_MAX_ENTRIES
+SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS = 128_000_000
+
 CONTENT_DEDUP_LLM_DEFAULT_MODEL = "azure/anthropic/claude-opus-4-8"
 CONTENT_DEDUP_LLM_TEMPERATURE = 0.1
 

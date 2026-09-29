@@ -76,6 +76,9 @@ All notable changes to SkillEvaluator are documented in this file.
   lift, pass^k, cost per passed case, token efficiency, and measured context
   cost as report-only statistics. Integration becomes inconclusive when its
   interval includes zero, too few cases pair, or per-case coverage is incomplete.
+- Plugin Tier 3 runs record report-only per-trial and per-arm component signals
+  (activations, tool selection, arguments, MCP outcomes, order, handoffs,
+  conflicts, coverage), driven by optional advisory dataset fields.
 
 ### Changed
 

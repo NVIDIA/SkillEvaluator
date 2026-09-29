@@ -23,6 +23,11 @@ from typing import Any
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
+from skillevaluator.tier3.eval_core.plugin_signals import (
+    PluginSignalsContext,
+    compute_plugin_signals,
+    summarize_plugin_signals,
+)
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
@@ -2826,6 +2831,52 @@ def _restore_custom_metric_scores(source_reward: dict[str, Any], safe_reward: di
         safe_reward["token_efficiency"] = token_efficiency
 
 
+def _plugin_signal_trajectory(trial_root: Path) -> dict[str, Any] | None:
+    """Whole-trial ATIF for plugin signals: the root trajectory, else merged steps."""
+    trajectory = _read_json(trial_root / "agent" / "trajectory.json")
+    if isinstance(trajectory, dict):
+        return trajectory
+    return _merged_step_trajectory(trial_root)
+
+
+def _attach_plugin_signals(
+    rewards: list[dict[str, Any]],
+    job_dir: Path | None,
+    context: PluginSignalsContext | None,
+    *,
+    arm: str,
+    expected_case_ids: list[str] | None,
+) -> dict[str, Any] | None:
+    """Attach report-only ``plugin_signals`` to scored rewards and return the arm summary.
+
+    Signals are computed once per logical trial from the whole-trial trajectory
+    and shared by that trial's reward rows. They never feed a score, pass/fail
+    result, or verdict. Returns ``None`` for non-plugin runs and arms that do
+    not stage plugin components.
+    """
+    if context is None or job_dir is None or not context.arm_enabled(arm):
+        return None
+    case_ids = set(expected_case_ids or [])
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for reward in rewards:
+        root = _safe_trial_path_component(reward.get("_trial_root_name"))
+        if root:
+            groups.setdefault(root, []).append(reward)
+    per_trial: list[dict[str, Any] | None] = []
+    for root, rows in groups.items():
+        signals = compute_plugin_signals(
+            _plugin_signal_trajectory(job_dir / root),
+            context.case_spec(_entry_id(rows[0], case_ids)),
+            declared=context.declared_for(arm),
+            wrapper_skills=context.wrapper_skills,
+        )
+        per_trial.append(signals)
+        if signals is not None:
+            for row in rows:
+                row["plugin_signals"] = signals
+    return summarize_plugin_signals(per_trial)
+
+
 def _save_trials(
     rewards: list[dict[str, Any]],
     trials_dir: Path,
@@ -3280,6 +3331,7 @@ def _collect_report_only_condition(
     expected_trials: int | None,
     agent_model: str | None,
     agent_model_source: str | None,
+    plugin_signals: PluginSignalsContext | None = None,
 ) -> dict[str, Any]:
     """Collect one advisory comparison arm without affecting run validity."""
     job_name = f"{skill_name}-{agent}-{variant}"
@@ -3331,6 +3383,13 @@ def _collect_report_only_condition(
         pass_summary = {}
         overall_score = None
     condition_dir = output_dir / agent / directory_name
+    plugin_signals_summary = _attach_plugin_signals(
+        rewards,
+        job_dir,
+        plugin_signals,
+        arm=directory_name.replace("-", "_"),
+        expected_case_ids=expected_case_ids,
+    )
     if job_dir is not None:
         _save_trials(
             rewards,
@@ -3366,6 +3425,7 @@ def _collect_report_only_condition(
                 **execution,
                 "job_failure": job_failure,
                 "trial_failures": trial_failures,
+                **({"plugin_signals_summary": plugin_signals_summary} if plugin_signals_summary is not None else {}),
             },
             indent=2,
         ),
@@ -3391,6 +3451,7 @@ def _collect_report_only_condition(
             expected_case_ids=expected_case_ids,
             job_failure=job_failure,
         ),
+        "plugin_signals_summary": plugin_signals_summary,
     }
 
 
@@ -3412,10 +3473,13 @@ def collect_harbor_results(
     env_mode: str | None = None,
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
+    plugin_signals: PluginSignalsContext | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
     Returns a dict with per-agent scores, lift, and a cross-agent comparison.
+    ``plugin_signals`` is set only for plugin evaluations; it adds report-only
+    per-trial ``plugin_signals`` and per-arm ``plugin_signals_summary``.
     """
     if expected_trials is not None and expected_total_trials is not None and expected_trials != expected_total_trials:
         raise ValueError("Conflicting expected trial counts were provided")
@@ -3456,6 +3520,7 @@ def collect_harbor_results(
         with_trial_failures: list[dict[str, str]] = []
         with_job_failure = ""
         with_execution: dict[str, Any] = {}
+        with_plugin_signals: dict[str, Any] | None = None
 
         if with_job_dir:
             with_job_ok, with_job_failure = validate_harbor_job_result(
@@ -3502,6 +3567,9 @@ def collect_harbor_results(
             with_overall_score = (
                 _average_overall(with_logical_rewards) if with_execution["execution_status"] == "succeeded" else None
             )
+            with_plugin_signals = _attach_plugin_signals(
+                with_rewards, with_job_dir, plugin_signals, arm="with_skill", expected_case_ids=expected_case_ids
+            )
             _save_trials(
                 with_collected_rewards,
                 agent_dir / "with-skill" / "trials",
@@ -3535,6 +3603,7 @@ def collect_harbor_results(
                         **with_execution,
                         "job_failure": with_job_failure,
                         "trial_failures": with_trial_failures,
+                        **({"plugin_signals_summary": with_plugin_signals} if with_plugin_signals is not None else {}),
                     },
                     indent=2,
                 ),
@@ -3621,6 +3690,7 @@ def collect_harbor_results(
         without_job_failure = ""
         without_execution: dict[str, Any] = {}
         without_job_dir: Path | None = None
+        without_plugin_signals: dict[str, Any] | None = None
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
             without_job_dir = _find_job_dir(jobs_dir, without_job_name)
@@ -3671,6 +3741,13 @@ def collect_harbor_results(
                     if without_execution["execution_status"] == "succeeded"
                     else None
                 )
+                without_plugin_signals = _attach_plugin_signals(
+                    without_rewards,
+                    without_job_dir,
+                    plugin_signals,
+                    arm="without_skill",
+                    expected_case_ids=expected_case_ids,
+                )
                 _save_trials(
                     without_collected_rewards,
                     agent_dir / "without-skill" / "trials",
@@ -3704,6 +3781,11 @@ def collect_harbor_results(
                             **without_execution,
                             "job_failure": without_job_failure,
                             "trial_failures": without_trial_failures,
+                            **(
+                                {"plugin_signals_summary": without_plugin_signals}
+                                if without_plugin_signals is not None
+                                else {}
+                            ),
                         },
                         indent=2,
                     ),
@@ -3813,6 +3895,7 @@ def collect_harbor_results(
                 expected_trials=expected_trials,
                 agent_model=agent_model,
                 agent_model_source=agent_model_source,
+                plugin_signals=plugin_signals,
             )
         integration_lift: dict[str, Any] = {}
         if with_scores and sum_of_parts["scores"]:
@@ -3995,6 +4078,17 @@ def collect_harbor_results(
             "num_trials_sum_of_parts": sum_of_parts["num_trials"],
             "output_dir": str(agent_dir.resolve()),
         }
+        if plugin_signals is not None:
+            # Report-only plugin component signals; never part of a score or verdict.
+            all_results["agents"][agent]["plugin_signals_summary"] = {
+                arm: summary
+                for arm, summary in (
+                    ("with_skill", with_plugin_signals),
+                    ("without_skill", without_plugin_signals),
+                    ("sum_of_parts", sum_of_parts.get("plugin_signals_summary")),
+                )
+                if summary is not None
+            }
 
     _write_generated_root_json(output_dir / "attempt_policy.json", output_dir, all_results["attempt_policy"])
 

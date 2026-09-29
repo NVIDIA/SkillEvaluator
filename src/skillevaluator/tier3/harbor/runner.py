@@ -40,9 +40,11 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
+from skillevaluator.tier3.eval_core.plugin_signals import PluginSignalsContext, build_plugin_signals_context
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor.adapter import (
     _VERIFIER_JUDGE_MODEL_ENV_VARS,
+    _load_mcp_servers,
     _prevalidate_baseline_skill_candidates,
     build_eval_base_image,
     find_evals_file,
@@ -113,6 +115,45 @@ def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> di
         os.fsync(handle.fileno())
     temporary.replace(target)
     return snapshot
+
+
+def _plugin_signals_context(
+    *,
+    skill_path: Path,
+    evaluator_skill_path: Path,
+    workspace_skills: list[Path],
+    run_dir: Path,
+    baseline_has_members: bool,
+) -> PluginSignalsContext:
+    """Declared plugin components and staged case fields for report-only plugin signals.
+
+    Member skills are the workspace skills staged beside the generated wrapper;
+    runnable MCP servers come from the package's with-plugin-only MCP file,
+    read through the adapter's bounded no-follow loader; case fields come from
+    the staged task entries.
+    """
+    from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME
+
+    try:
+        servers = _load_mcp_servers(evaluator_skill_path, PLUGIN_MCP_SERVERS_FILENAME)
+    except (OSError, ValueError) as exc:
+        logger.warning("Plugin signals: could not read runnable MCP servers: %s", exc)
+        servers = []
+    try:
+        entries = load_staged_harbor_dataset(run_dir)
+    except (OSError, ValueError) as exc:
+        logger.warning("Plugin signals: could not read staged case entries: %s", exc)
+        entries = []
+    # The generated package directory is ``<plugin>-plugin-eval`` and its wrapper
+    # SKILL.md is named after the plugin; neither is a member-skill selection.
+    wrapper_names = [skill_path.name, skill_path.name.removesuffix("-plugin-eval")]
+    return build_plugin_signals_context(
+        member_skills=[path.name for path in workspace_skills],
+        mcp_servers=[server.get("name") for server in servers],
+        wrapper_skills=wrapper_names,
+        entries=entries,
+        baseline_has_members=baseline_has_members,
+    )
 
 
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
@@ -2629,6 +2670,17 @@ def _run_harbor_eval_impl(
         raise unexpected_worker_error
 
     reporter.emit(ProgressEvent(stage="collection", state="running"))
+    plugin_signals = (
+        _plugin_signals_context(
+            skill_path=skill_path,
+            evaluator_skill_path=evaluator_skill_path,
+            workspace_skills=workspace_skills,
+            run_dir=run_dir,
+            baseline_has_members=bool(workspace_skills_baseline and not skip_baseline),
+        )
+        if (eval_target_kind or "skill") == "plugin"
+        else None
+    )
     try:
         results = collect_harbor_results(
             skill_name=skill_path.name,
@@ -2648,6 +2700,7 @@ def _run_harbor_eval_impl(
             env_mode=env_mode,
             agent_models=model_resolution,
             launch_errors=errors,
+            plugin_signals=plugin_signals,
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))

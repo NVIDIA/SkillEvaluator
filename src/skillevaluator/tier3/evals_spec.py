@@ -75,6 +75,7 @@ EVALS_SPEC: list[EntrySpec] = [
             "Legacy entries must have at least: id, question.",
             "Legacy recommended fields: expected_skill, ground_truth, expected_behavior.",
             "Use acceptable_skills (or legacy alias acceptable_alternates) when a closely related skill should receive partial routing credit.",
+            "Plugin datasets may add advisory, report-only component-signal fields: expected_tools, acceptable_tools, decoy_tools, tool_arguments, expected_order, handoffs, and conflict_probes. They are type-checked and size-bounded but never change scores.",
         ],
         example="""\
 {
@@ -620,6 +621,7 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
 def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
     """Validate the contents of a dataset file."""
     from .dataset_utils import load_dataset_entries_with_format
+    from .eval_core.plugin_signals import validate_plugin_case_fields
 
     try:
         entries, dataset_format = load_dataset_entries_with_format(path)
@@ -680,6 +682,8 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
                     f"Missing recommended fields: {', '.join(sorted(missing_recommended))}",
                 )
             )
+        for problem in validate_plugin_case_fields(entry):
+            results.append(CheckResult(f"entry {entry_id}", "error", f"Invalid plugin signal field {problem}"))
         if dataset_format == "legacy" and "expected_script" not in entry and skill_has_scripts:
             results.append(
                 CheckResult(

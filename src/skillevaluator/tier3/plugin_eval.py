@@ -62,6 +62,7 @@ from skillevaluator.constants import (
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Severity
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries, normalize_dataset_entries
+from skillevaluator.tier3.eval_core.plugin_signals import validate_plugin_case_fields
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
 from skillevaluator.utils.helpers import find_bundled_plugin_skills, resolve_git_remote_url
@@ -356,6 +357,7 @@ def prepare_plugin_eval_package(
     # Native Harbor sources can be valid for effectiveness without carrying the
     # structured composition metadata required for an Integration claim.
     dataset_cases = load_dataset_entries(dataset_path) if dataset_path is not None else []
+    _reject_invalid_plugin_signal_fields(dataset_cases)
     cross_component_case_count = sum(
         1
         for case in dataset_cases
@@ -379,6 +381,19 @@ def prepare_plugin_eval_package(
         dataset_case_count=len(dataset_cases),
         cross_component_case_count=cross_component_case_count,
     )
+
+
+def _reject_invalid_plugin_signal_fields(dataset_cases: list[dict[str, Any]]) -> None:
+    """Fail fast on malformed advisory plugin-signal case fields before any agent runs."""
+    problems = [
+        f"case {str(case.get('id') or index)[:128]!r}: {problem}"
+        for index, case in enumerate(dataset_cases)
+        for problem in validate_plugin_case_fields(case)
+    ]
+    if problems:
+        shown = "; ".join(problems[:5])
+        more = f" (+{len(problems) - 5} more)" if len(problems) > 5 else ""
+        raise ValueError(f"Invalid plugin signal fields in the evaluation dataset: {shown}{more}")
 
 
 def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path | None:

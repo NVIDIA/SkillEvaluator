@@ -159,8 +159,10 @@ def run_validation(
 
     *content_type* (``skill`` | ``rules`` | ``workflows`` | ``plugin`` |
     ``unknown`` | ``None``) selects the schema validator and gates skill-only
-    checks (``quality`` and ``lint`` are skipped for rules, workflows, and
-    plugins). When *fail_fast* is set, the
+    checks. ``version``, ``quality``, and ``lint`` run for skills and for each
+    skill bundled under a plugin's ``skills/`` directory (findings are
+    attributed to that skill); they are skipped for rules, workflows, and
+    plugins without bundled skills. When *fail_fast* is set, the
     run stops after the first failing check. *continue_on_failure* overrides
     *fail_fast* and also keeps batch folder validation scanning every skill past
     a CRITICAL finding (parity with SkillEvaluator ``--continue-on-failure``).
@@ -174,13 +176,16 @@ def run_validation(
     """
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
+    bundled_skill_dirs: list[Path] = []
     if content_type == CONTENT_TYPE_PLUGIN:
         from skillevaluator.cli_core import resolve_plugin_path
         from skillevaluator.utils.helpers import find_bundled_plugin_skills
 
         target_path = resolve_plugin_path(target_path)
         try:
-            find_bundled_plugin_skills(target_path)
+            # Secure, no-follow discovery: any linked or special entry under
+            # ``skills/`` fails here before a skill-scoped validator reads it.
+            bundled_skill_dirs = find_bundled_plugin_skills(target_path)
         except ValueError as exc:
             if "schema" in enabled:
                 validator = PluginSchemaValidator(policy=policy, repo_root=repo_root)
@@ -201,7 +206,13 @@ def run_validation(
             )
             security_result.metadata["security_failure"] = True
             return [security_result]
-    skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
+    # Skill-scoped checks (version/quality/lint) also run for plugins that
+    # bundle skills. They target ``<plugin>/skills`` only, so the folder walker
+    # validates each bundled skill once and prefixes its findings with the
+    # skill's name; root-owned plugin content is not a skill and is never
+    # scored or linted as one, so the two scopes cannot double-report.
+    skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN) or bool(bundled_skill_dirs)
+    skill_target = target_path / "skills" if content_type == CONTENT_TYPE_PLUGIN else target_path
 
     def _schema_results() -> list[ValidationResult]:
         v = _schema_validator_for(content_type, policy, repo_root)
@@ -227,15 +238,15 @@ def run_validation(
 
     def _quality_results() -> list[ValidationResult]:
         v = QualityScoreValidator(min_score=min_score)
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_as_result(v.name, v.description, v.validate, skill_target)]
 
     def _lint_results() -> list[ValidationResult]:
         v = ScriptLintValidator()
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_as_result(v.name, v.description, v.validate, skill_target)]
 
     def _version_results() -> list[ValidationResult]:
         v = VersionValidator(previous_version=previous_version)
-        return [_as_result(v.name, v.description, v.validate, target_path)]
+        return [_as_result(v.name, v.description, v.validate, skill_target)]
 
     def _license_results() -> list[ValidationResult]:
         v = LicenseValidator()
@@ -245,8 +256,9 @@ def run_validation(
         v = DependencySecurityValidator()
         return [_as_result(v.name, v.description, v.validate, target_path)]
 
-    # (check name, builder, applies-to-this-content-type). Quality scoring and
-    # script linting are skill-oriented and skipped for rules/workflows. Finding
+    # (check name, builder, applies-to-this-content-type). Version, quality
+    # scoring, and script linting are skill-oriented: they run for skills and
+    # for plugins' bundled skills, and are skipped for rules/workflows. Finding
     # severities (incl. the LICENSE.* / CVE findings added below) are normalized
     # centrally by the active policy in emit_reports, so they honor the
     # selected validation profile.

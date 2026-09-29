@@ -1911,8 +1911,8 @@ def validate(
 
     A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest or a
     contained ``.claude-plugin/plugin.json`` manifest) is auto-detected and
-    validated against its public contract. Quality/lint/version checks are
-    skill-only and skipped for plugins.
+    validated against its public contract; quality/lint/version checks run on
+    each skill bundled under the plugin's ``skills/`` directory.
     """
     _record_validate_json_report(None)
     evaluated_source = _evaluated_source_from_options(

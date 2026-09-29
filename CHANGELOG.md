@@ -88,6 +88,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 1 classifies each plugin skill/rule reference offline as provided,
   referenced, missing, external, or unresolved, and blocks on a missing
   same-repository dependency; `validate --repo-root` sets the repository root.
+- Tier 1 runs the version, quality, and lint checks on each skill bundled in a
+  plugin, attributing findings to that skill.
 
 ### Changed
 

@@ -202,7 +202,8 @@ skills:
     def test_contained_plugin_with_name_passes(self, tmp_path: Path):
         manifest = tmp_path / ".claude-plugin" / "plugin.json"
         manifest.parent.mkdir()
-        manifest.write_text('{"name": "contained-plugin", "skills": ["demo"]}', encoding="utf-8")
+        manifest.write_text('{"name": "contained-plugin", "skills": ["./demo"]}', encoding="utf-8")
+        (tmp_path / "demo").mkdir()
 
         result = PluginSchemaValidator().validate(tmp_path)
 

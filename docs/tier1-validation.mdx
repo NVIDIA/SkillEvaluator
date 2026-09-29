@@ -106,6 +106,8 @@ Plugins are validated against their public contract. The `quality`, `lint`, and 
 
 For a bundle-reference plugin, each `skills.refs` and `rules.refs` entry is classified offline, without fetching anything: `provided` (bundled inside the plugin root), `referenced` (elsewhere in the same repository), `missing` (names the same repository, but nothing exists at that path), `external` (another repository; not verified), or `unresolved` (the repository cannot be identified, or the target is reachable only through a link). Only `missing` blocks, as a HIGH `plugin_dependency_missing` finding. A ref counts as same-repository only when the repository root is the git top-level and its `origin` remote matches the ref's `<owner>/<repo>`; otherwise every ref stays `unresolved` and advisory. The repository root defaults to the git top-level that contains the plugin; override it with `--repo-root`.
 
+Plugin validation also inventories every declared and packaged component and checks MCP servers from every `mcpServers` form and the root `.mcp.json`. Declared component paths must exist inside the plugin root. MCP endpoint checks inspect IP literals and well-known host names only; DNS resolution and redirects are not evaluated.
+
 For collections, pass a folder containing skills under `skills/` or `team-skills/`. Folder-level validation discovers each live `SKILL.md` below the target while excluding configured names such as `evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and `__pycache__`.
 
 ```bash title="Validate a skill or a collection"
@@ -128,7 +130,7 @@ SKILLEVALUATOR_PROFILE=external skillevaluator validate ./my-skill
 Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALUATOR_PROFILE` environment variable, then the bundled `external` default.
 
 <Accordion title="Write a custom policy overlay">
-  A custom policy overlays the external profile. It can narrow the accepted author domain and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
+  A custom policy overlays the external profile. It can narrow the accepted author domain, change severities by `CATEGORY.check_name` or `CATEGORY.*`, and allow intended private MCP endpoint hosts:
 
   ```yaml title="policy.yaml"
   profile: community-strict
@@ -137,6 +139,10 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
   severity_overrides:
     SCHEMA.author_missing: critical
     LICENSE.*: critical
+  mcp:
+    # Exact names, *.suffix wildcards, IP literals, or CIDR networks.
+    # Cloud metadata endpoints are never allowed.
+    allowed_private_hosts: ["mcp.internal.localhost", "10.0.0.0/8"]
   ```
 </Accordion>
 

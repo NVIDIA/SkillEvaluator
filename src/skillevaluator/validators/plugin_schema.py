@@ -18,6 +18,13 @@ declared dependencies. For a valid bundle-reference manifest every declared
 skill/rule ref is classified offline (never fetched) by
 :mod:`skillevaluator.plugin_dependencies`; a same-repository ref whose target
 does not exist is the only blocking outcome (``plugin_dependency_missing``).
+
+Every declared and packaged component is also inventoried statically
+(:mod:`skillevaluator.plugin_components`): MCP servers from every documented
+``mcpServers`` form and the root ``.mcp.json`` get blocking static checks,
+declared component paths must exist inside the plugin root, shipped settings
+and ``.env`` files are checked, and ``metadata['plugin']`` gains
+``component_inventory``, ``mcp``, and ``context_cost``.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ from skillevaluator.utils.structured_data import (
     require_bounded_string,
 )
 from skillevaluator.validators.base import ValidatorBase
-from skillevaluator.validators.mcp_static import validate_contained_mcp_servers
+from skillevaluator.validators.mcp_static import CATEGORY as MCP_CATEGORY
 
 if TYPE_CHECKING:
     from skillevaluator.validators.policy import ValidationPolicy
@@ -135,8 +142,9 @@ class PluginSchemaValidator(ValidatorBase):
         self._stamp_manifest_metadata(located.manifest_filename, root, manifest_type, result)
 
         validated_manifest: dict[str, Any] | None = None
+        contained_data: dict[str, Any] | None = None
         if manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE:
-            self._validate_contained_manifest(located, result)
+            contained_data = self._validate_contained_manifest(located, result)
         else:
             validated_manifest = self._validate_bundle_manifest(located, result)
 
@@ -144,7 +152,82 @@ class PluginSchemaValidator(ValidatorBase):
         self._validate_in_plugin_skills(root, result)
         if validated_manifest is not None:
             self._resolve_dependencies(located, validated_manifest, result)
+        self._inventory_components(located, contained_data, result)
         return result
+
+    def _inventory_components(
+        self,
+        location: PluginManifestLocation,
+        contained_data: dict[str, Any] | None,
+        result: ValidationResult,
+    ) -> None:
+        """Inventory declared + packaged components and run the static component checks.
+
+        Adds the MCP (all ``mcpServers`` forms and the root ``.mcp.json``),
+        component-path, shipped-settings, and ``.env`` findings, then stamps
+        ``component_inventory`` / ``mcp`` / ``context_cost`` into
+        ``metadata['plugin']``. Plugin-controlled paths are classified without
+        following links and read through bounded, root-anchored reads.
+        """
+        # Imported lazily: plugin_components imports validators.mcp_static, and the
+        # validators package imports this module at package-import time.
+        from skillevaluator.plugin_components import attribute_findings, build_plugin_inventory, manifest_rel_for
+
+        contained = location.manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE
+        manifest = contained_data if contained else self._bundle_manifest_data(location)
+        root = location.secure_file.root
+        allowed_hosts = self.policy.mcp_allowed_private_hosts if self.policy is not None else ()
+        inventory = build_plugin_inventory(
+            root,
+            manifest,
+            contained=contained,
+            manifest_rel=manifest_rel_for(location.path, location.root),
+            allowed_private_hosts=allowed_hosts,
+        )
+        findings = inventory.findings
+        for finding in findings[:MAX_PLUGIN_SCHEMA_FINDINGS]:
+            result.add_finding(finding)
+        if len(findings) > MAX_PLUGIN_SCHEMA_FINDINGS:
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="schema_errors_truncated",
+                    message=(
+                        f"Plugin component validation produced {len(findings)} findings; only the first "
+                        f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported."
+                    ),
+                    file_path=str(location.path),
+                    suggestion="Fix the reported plugin component and MCP declaration errors, then rerun validation.",
+                    metadata={"actual": len(findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
+                )
+            )
+        if contained and contained_data is not None:
+            blocking_mcp = [
+                finding
+                for finding in findings
+                if finding.category == MCP_CATEGORY and finding.severity in (Severity.CRITICAL, Severity.HIGH)
+            ]
+            if not blocking_mcp:
+                name = result.metadata.get("plugin", {}).get("name", "")
+                result.add_success(
+                    check_name="plugin_manifest",
+                    message=(
+                        f"Contained plugin manifest '{name}' is valid (name present; full Claude-plugin schema "
+                        "deferred)"
+                    ),
+                )
+        attribute_findings(inventory.components, result.findings, root)
+        result.metadata.setdefault("plugin", {}).update(inventory.metadata())
+
+    @staticmethod
+    def _bundle_manifest_data(location: PluginManifestLocation) -> dict[str, Any] | None:
+        """Best-effort bounded re-parse of ``agent_plugin.yaml`` for the inventory."""
+        try:
+            data = load_bounded_yaml(location.read_text())
+        except (PluginManifestPathError, StructuredDataLimitError, StructuredDataSyntaxError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
 
     @staticmethod
     def _stamp_manifest_metadata(
@@ -375,8 +458,14 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
 
-    def _validate_contained_manifest(self, location: PluginManifestLocation, result: ValidationResult) -> None:
-        """Shallow-validate a contained ``.claude-plugin/plugin.json`` file."""
+    def _validate_contained_manifest(
+        self, location: PluginManifestLocation, result: ValidationResult
+    ) -> dict[str, Any] | None:
+        """Shallow-validate a contained ``.claude-plugin/plugin.json`` file.
+
+        Returns the parsed manifest when it is a JSON object with a valid name, for
+        the component inventory; ``None`` after any blocking manifest error.
+        """
         manifest_path = location.path
         try:
             raw = location.read_text(encoding="utf-8-sig")
@@ -392,7 +481,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Replace links/hardlinks/special manifests with one regular file inside the plugin root.",
                 )
             )
-            return
+            return None
 
         try:
             data: Any = load_bounded_json(raw)
@@ -407,7 +496,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Reduce JSON nesting or collection sizes in plugin.json.",
                 )
             )
-            return
+            return None
         except StructuredDataSyntaxError as exc:
             result.add_finding(
                 Finding(
@@ -419,7 +508,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Fix the JSON syntax in .claude-plugin/plugin.json.",
                 )
             )
-            return
+            return None
 
         if not isinstance(data, dict) or not data:
             result.add_finding(
@@ -432,7 +521,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Populate plugin.json with at least a non-empty 'name'.",
                 )
             )
-            return
+            return None
 
         try:
             name = require_bounded_string(data.get("name"), "Contained plugin name", max_chars=NAME_MAX_LENGTH)
@@ -447,44 +536,18 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Add a 'name' string to .claude-plugin/plugin.json.",
                 )
             )
-            return
+            return None
 
-        # Runnable MCP servers declared in a contained manifest get blocking,
-        # network-free static security validation (command/url/transport/env).
-        # Provider MCP entries in agent_plugin.yaml are validated by the Pydantic
-        # model instead; runnable entries only exist in the contained form.
-        mcp_findings = validate_contained_mcp_servers(data.get("mcpServers"), str(manifest_path))
-        for finding in mcp_findings[:MAX_PLUGIN_SCHEMA_FINDINGS]:
-            result.add_finding(finding)
-        if len(mcp_findings) > MAX_PLUGIN_SCHEMA_FINDINGS:
-            result.add_finding(
-                Finding(
-                    category="PLUGIN_SCHEMA",
-                    severity=Severity.HIGH,
-                    check_name="schema_errors_truncated",
-                    message=(
-                        f"Contained MCP validation produced {len(mcp_findings)} findings; only the first "
-                        f"{MAX_PLUGIN_SCHEMA_FINDINGS} are reported."
-                    ),
-                    file_path=str(manifest_path),
-                    suggestion="Fix the reported MCP declaration errors, then rerun validation.",
-                    metadata={"actual": len(mcp_findings), "reported": MAX_PLUGIN_SCHEMA_FINDINGS},
-                )
-            )
-
+        # Runnable MCP servers (every mcpServers form plus the root .mcp.json) get
+        # blocking, network-free static validation in _inventory_components, which
+        # also emits the manifest success row once no blocking MCP finding exists.
         result.add_message(f"Plugin name: {name}")
-        if not mcp_findings:
-            result.add_success(
-                check_name="plugin_manifest",
-                message=(
-                    f"Contained plugin manifest '{name}' is valid (name present; full Claude-plugin schema deferred)"
-                ),
-            )
         plugin_meta = result.metadata.setdefault("plugin", {})
         plugin_meta["name"] = name
         declared = {key: len(value) for key, value in data.items() if isinstance(value, list)}
         if declared:
             plugin_meta["declared_dependencies"] = declared
+        return data
 
     def _validate_in_plugin_skills(self, root: Path, result: ValidationResult) -> None:
         """Validate skills bundled under ``<root>/skills/``."""

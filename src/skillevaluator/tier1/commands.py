@@ -136,6 +136,15 @@ def enabled_check_lineup(checks: str | None) -> list[str]:
     return ordered + sorted(enabled - set(ordered))
 
 
+def _with_component_attribution(results: list[ValidationResult], content_type: str | None) -> list[ValidationResult]:
+    """Recount plugin component ``findings`` across every Tier 1 validator's results."""
+    if content_type == CONTENT_TYPE_PLUGIN:
+        from skillevaluator.plugin_components import refresh_component_finding_counts
+
+        refresh_component_finding_counts(results)
+    return results
+
+
 def run_validation(
     target_path: Path,
     *,
@@ -288,7 +297,7 @@ def run_validation(
             results.extend(step_results)
 
             if any(result.metadata.get("security_failure") for result in step_results):
-                return results
+                return _with_component_attribution(results, content_type)
 
             error_count = sum(r.summary.errors for r in step_results)
             warning_count = sum(r.summary.warnings for r in step_results)
@@ -307,7 +316,7 @@ def run_validation(
                 )
 
             if fail_fast and not continue_on_failure and any(not r.passed for r in results):
-                return results
+                return _with_component_attribution(results, content_type)
 
     unknown = enabled - RECOGNIZED_CHECKS
     if unknown:
@@ -318,7 +327,7 @@ def run_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         results.insert(0, result)
 
-    return results
+    return _with_component_attribution(results, content_type)
 
 
 def run_quality_check(target_path: Path, *, min_score: int = 70) -> list[ValidationResult]:

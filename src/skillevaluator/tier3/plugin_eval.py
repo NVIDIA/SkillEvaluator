@@ -26,7 +26,17 @@ What Phase 1 *can* evaluate locally, without any network:
 * **Runnable MCP servers** declared with a ``command``/``url`` (a documented
   local-testing extension). These are staged **with-plugin-only** via
   ``plugin_mcp_servers.toml`` so they never leak into the without-plugin
-  baseline (which would invalidate lift).
+  baseline (which would invalidate lift). Contained plugins may declare them in
+  any documented ``mcpServers`` form (inline map, ``.json`` path, or an array
+  of both) and in the root ``.mcp.json``; every source is read through the
+  bounded, no-follow plugin-root reader and passes the Tier 1 static checks
+  (fail closed) before anything is staged.
+
+Every declared and packaged component is also reported in
+``provenance()['component_coverage']`` (staged / not_staged / unsupported /
+unavailable / invalid) with a static ``context_cost`` estimate and the MCP
+``mcp_pinning`` summary. Coverage is report-only: it does not change the
+``partial`` (INCOMPLETE) semantics.
 
 Anything that only resolves remotely is recorded as *unresolved* and named in the
 report rather than silently mis-resolved to a local path or scored as a pass. If
@@ -43,7 +53,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -60,6 +70,17 @@ from skillevaluator.constants import (
 )
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Severity
+from skillevaluator.plugin_components import (
+    CostRow,
+    PluginInventory,
+    build_plugin_inventory,
+    coverage_row,
+    manifest_rel_for,
+    mcp_pinning_summary,
+    parse_markdown,
+    problem_reason,
+    summarize_coverage,
+)
 
 # Network-free reference, identity, and bound helpers shared with Tier 1
 # (``skillevaluator.plugin_dependencies`` must stay importable without Tier 3
@@ -137,6 +158,11 @@ class PluginEvalPackage:
     dependency_status_counts: tuple[tuple[str, int], ...] = ()
     skipped: bool = False
     skip_reason: str | None = None
+    # Report-only static inventory outputs (C2). ``None`` for packages built
+    # without an inventory (e.g. constructed directly in tests).
+    component_coverage: dict[str, Any] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    context_cost: dict[str, Any] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    mcp_pinning: dict[str, Any] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
 
     def provenance(self) -> dict[str, Any]:
         """Durable record of what a plugin run did and did NOT evaluate.
@@ -151,7 +177,7 @@ class PluginEvalPackage:
         unresolved_rule = list(self.unresolved_rule_refs)
         provider_only_mcp = list(self.unresolved_mcp_servers)
         mcp_unsupported_config = list(self.mcp_unsupported_config)
-        return {
+        provenance: dict[str, Any] = {
             "plugin_name": self.plugin_name,
             "evaluated_member_skills": [path.name for path in self.include_skills],
             "staged_rules": list(self.staged_rules),
@@ -170,6 +196,14 @@ class PluginEvalPackage:
                 **dict(self.dependency_status_counts),
             },
         }
+        # Report-only: unsupported component types are listed here, never gated.
+        if self.component_coverage is not None:
+            provenance["component_coverage"] = self.component_coverage
+        if self.context_cost is not None:
+            provenance["context_cost"] = self.context_cost
+        if self.mcp_pinning is not None:
+            provenance["mcp_pinning"] = self.mcp_pinning
+        return provenance
 
     def integration_evidence_error(self) -> str | None:
         """Explain why an Integration arm would not test composition."""
@@ -319,11 +353,34 @@ def prepare_plugin_eval_package(
         staged_rules, unresolved_rule_refs, all_rule_refs = _resolve_rules(
             rules_section, plugin_dir, plugin_root, resolver
         )
-    runnable_mcp, provider_mcp, mcp_unsupported_config = _split_mcp_servers(manifest)
+    # Static inventory of every declared/packaged component: supplies the MCP
+    # declarations from all mcpServers forms (+ root .mcp.json) for staging and
+    # the report-only coverage / context-cost / pinning provenance.
+    inventory = build_plugin_inventory(
+        plugin_root,
+        manifest,
+        contained=contained_form,
+        manifest_rel=manifest_rel_for(manifest_path, plugin_dir),
+    )
+    runnable_mcp, provider_mcp, mcp_unsupported_config = _split_mcp_servers(manifest, inventory, contained_form)
+    skipped = not (member_skills or staged_rules or runnable_mcp)
+    report_only = _inventory_provenance(
+        inventory,
+        plugin_root=plugin_root,
+        contained=contained_form,
+        member_skills=member_skills,
+        staged_rule_names=tuple(rule.name for rule in staged_rules),
+        unresolved_skill_refs=unresolved_skill_refs,
+        unresolved_rule_refs=unresolved_rule_refs,
+        runnable_names=tuple(server["name"] for server in runnable_mcp),
+        provider_names=tuple(server["name"] for server in provider_mcp),
+        unsupported_config=tuple(mcp_unsupported_config),
+        skipped=skipped,
+    )
 
     # Optional-skip: nothing to evaluate locally in Phase 1. Honest skip rather
     # than a with-plugin run identical to baseline (a meaningless zero lift).
-    if not (member_skills or staged_rules or runnable_mcp):
+    if skipped:
         return PluginEvalPackage(
             plugin_name=plugin_name,
             package_path=None,
@@ -337,6 +394,7 @@ def prepare_plugin_eval_package(
             dependency_status_counts=dependency_status_counts,
             skipped=True,
             skip_reason=_skip_reason(unresolved_skill_refs, unresolved_rule_refs, provider_mcp),
+            **report_only,
         )
 
     package_path = _fresh_package_dir(stage_root, plugin_name)
@@ -394,6 +452,7 @@ def prepare_plugin_eval_package(
         dataset_case_count=len(dataset_cases),
         cross_component_case_count=cross_component_case_count,
         dependency_status_counts=dependency_status_counts,
+        **report_only,
     )
 
 
@@ -408,6 +467,155 @@ def _reject_invalid_plugin_signal_fields(dataset_cases: list[dict[str, Any]]) ->
         shown = "; ".join(problems[:5])
         more = f" (+{len(problems) - 5} more)" if len(problems) > 5 else ""
         raise ValueError(f"Invalid plugin signal fields in the evaluation dataset: {shown}{more}")
+
+
+
+_TIER3_COVERAGE_NOTE = (
+    "Tier 3 wrapper: plugin rules are embedded in the generated wrapper SKILL.md and load on demand with it."
+)
+
+
+def _inventory_provenance(
+    inventory: PluginInventory,
+    *,
+    plugin_root: Path,
+    contained: bool,
+    member_skills: tuple[Path, ...],
+    staged_rule_names: tuple[str, ...],
+    unresolved_skill_refs: tuple[str, ...],
+    unresolved_rule_refs: tuple[str, ...],
+    runnable_names: tuple[str, ...],
+    provider_names: tuple[str, ...],
+    unsupported_config: tuple[str, ...],
+    skipped: bool,
+) -> dict[str, Any]:
+    """Build the report-only C2 ``component_coverage`` / ``context_cost`` / ``mcp_pinning``."""
+    member_resolved = {path.resolve() for path in member_skills}
+    staged_rules = set(staged_rule_names)
+    rows: list[dict[str, Any]] = []
+    skip_note = "the plugin package was skipped (nothing locally evaluable)"
+    for component in inventory.components:
+        if component.problem is not None:
+            rows.append(coverage_row(component, "invalid", problem_reason(component)))
+            continue
+        if component.type == "skill":
+            if component.path is None:
+                if component.name in unresolved_skill_refs:
+                    rows.append(
+                        coverage_row(component, "unavailable", "remote skill reference is not resolvable offline")
+                    )
+                elif skipped:
+                    rows.append(coverage_row(component, "not_staged", skip_note))
+                else:
+                    rows.append(coverage_row(component, "staged", "skill reference resolved to a local member skill"))
+            elif (plugin_root / component.path).resolve() in member_resolved:
+                rows.append(coverage_row(component, "staged", "bundled skill staged as a plugin member skill"))
+            else:
+                rows.append(
+                    coverage_row(
+                        component,
+                        "not_staged",
+                        skip_note
+                        if skipped
+                        else "only skills under skills/ are staged by Tier 3; this declared "
+                        "skill directory is inventoried only",
+                    )
+                )
+        elif component.type == "rule":
+            if component.path is None:
+                if component.name in unresolved_rule_refs:
+                    rows.append(
+                        coverage_row(component, "unavailable", "remote rule reference is not resolvable offline")
+                    )
+                elif skipped:
+                    rows.append(coverage_row(component, "not_staged", skip_note))
+                else:
+                    rows.append(
+                        coverage_row(component, "staged", "rule reference resolved and embedded in the wrapper")
+                    )
+            elif {
+                component.name,
+                PurePosixPath(component.path).name,
+                component.path.removeprefix("rules/"),
+            } & staged_rules:
+                rows.append(coverage_row(component, "staged", "rule embedded in the generated wrapper SKILL.md"))
+            else:
+                rows.append(
+                    coverage_row(
+                        component,
+                        "not_staged",
+                        skip_note if skipped else "rule file is inventoried but was not staged by Tier 3",
+                    )
+                )
+        elif component.type == "mcp":
+            rows.append(_mcp_coverage_row(component, contained, runnable_names, provider_names, unsupported_config))
+        else:
+            rows.append(
+                coverage_row(
+                    component,
+                    "unsupported",
+                    f"SkillEvaluator does not stage {component.type} components yet (inventoried only)",
+                )
+            )
+    return {
+        "component_coverage": summarize_coverage(rows),
+        "context_cost": inventory.context_cost(
+            extra_rows=_external_member_skill_costs(member_skills, plugin_root),
+            extra_notes=(_TIER3_COVERAGE_NOTE,),
+        ),
+        "mcp_pinning": mcp_pinning_summary(inventory.mcp.effective),
+    }
+
+
+def _mcp_coverage_row(
+    component: Any,
+    contained: bool,
+    runnable_names: tuple[str, ...],
+    provider_names: tuple[str, ...],
+    unsupported_config: tuple[str, ...],
+) -> dict[str, Any]:
+    if component.bundle:
+        return coverage_row(component, "unsupported", "MCP bundles (.mcpb/.dxt) are not unpacked or staged")
+    declaration = component.mcp
+    if declaration is not None and declaration.source == "mcp_json" and not contained:
+        return coverage_row(
+            component, "not_staged", "agent_plugin.yaml plugins stage MCP servers from their 'mcp' list only"
+        )
+    if component.name in runnable_names:
+        reason = "runnable MCP server staged for the with-plugin arm only"
+        if component.name in unsupported_config:
+            reason += "; its env/headers are not applied by the runtime (run reported INCOMPLETE)"
+        return coverage_row(component, "staged", reason)
+    if component.name in provider_names:
+        return coverage_row(component, "unavailable", "provider-only MCP server is not runnable offline")
+    return coverage_row(component, "not_staged", "MCP server was not staged")
+
+
+def _external_member_skill_costs(member_skills: tuple[Path, ...], plugin_root: Path) -> list[CostRow]:
+    """Context-cost rows for member skills staged from outside the plugin root."""
+    root = plugin_root.resolve()
+    rows: list[CostRow] = []
+    for skill_dir in member_skills:
+        if skill_dir.resolve().is_relative_to(root):
+            continue
+        for variant in ("SKILL.md", "skill.md"):
+            try:
+                text = secure_read_path_text(skill_dir / variant, CONTENT_DEDUP_MAX_FILE_BYTES)
+            except (SecurePathError, OSError):
+                continue
+            parsed = parse_markdown(text)
+            rows.append(
+                CostRow(
+                    "skill",
+                    skill_dir.name,
+                    len(parsed.name or "") + len(parsed.description or ""),
+                    len(parsed.body),
+                    "member skill staged from outside the plugin root; always-on: name + description; "
+                    "on-demand: SKILL.md body",
+                )
+            )
+            break
+    return rows
 
 
 def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path | None:
@@ -846,16 +1054,20 @@ def _reject_unsafe_mcp_declaration(name: Any, config: dict[str, Any]) -> None:
         )
 
 
-def _normalize_mcp_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """Normalize both manifest MCP forms into the bundle-reference list shape.
+def _normalize_mcp_entries(
+    manifest: dict[str, Any], inventory: PluginInventory, contained_form: bool
+) -> list[dict[str, Any]]:
+    """Normalize every manifest MCP form into the bundle-reference list shape.
 
     Bundle-reference ``agent_plugin.yaml`` uses a top-level ``mcp`` *list* of
-    ``{name, provider}`` / ``{name, command|url, transport}`` objects. A standard
-    contained ``.claude-plugin/plugin.json`` uses a top-level ``mcpServers`` *map*
-    (name -> config). Both are flattened to the list shape that
-    :func:`_split_mcp_servers` (and ``_write_plugin_mcp_servers_toml``) expect, so a
-    contained MCP-only plugin is recognized instead of silently optional-skipped.
-    MR !52 review.
+    ``{name, provider}`` / ``{name, command|url, transport}`` objects. A contained
+    ``.claude-plugin/plugin.json`` declares servers in any documented Claude Code
+    form -- an inline ``mcpServers`` map, a ``.json`` path, or an array mixing
+    both -- merged over the root ``.mcp.json`` (a later same-name server replaces
+    an earlier one). The inventory collected those declarations through the
+    bounded, no-follow plugin-root reader; here every declaration (including a
+    shadowed one) must pass the blocking static checks before the effective
+    servers are flattened to the list shape :func:`_split_mcp_servers` expects.
     """
     raw_servers = manifest.get("mcp")
     if raw_servers:
@@ -872,23 +1084,38 @@ def _normalize_mcp_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             normalized_entries.append(entry)
         return normalized_entries
 
-    mcp_servers = manifest.get("mcpServers")
-    if not mcp_servers:
-        return []
-    if not isinstance(mcp_servers, dict):
-        raise ValueError("Plugin manifest mcpServers must be an object")
-    if len(mcp_servers) > MAX_PLUGIN_MANIFEST_ITEMS:
-        raise ValueError(f"Plugin manifest mcpServers exceeds the {MAX_PLUGIN_MANIFEST_ITEMS}-item limit")
+    collection = inventory.mcp
+    # Fail closed on config-source problems: escapes, absolute paths, symlinks,
+    # missing/oversize/invalid config files, and malformed mcpServers values.
+    blocking = collection.blocking_source_findings
+    if blocking:
+        first = blocking[0]
+        raise ValueError(
+            f"Plugin MCP configuration failed blocking static validation ({first.check_name}): {first.message}"
+        )
 
-    normalized: list[dict[str, Any]] = []
-    for name, config in mcp_servers.items():
-        if not isinstance(config, dict):
-            raise ValueError(f"Plugin manifest mcpServers[{name!r}] must be an object")
+    def _stageable(source: str) -> bool:
+        # agent_plugin.yaml plugins stage from their 'mcp' list only; a root
+        # .mcp.json is inventoried and statically validated but not staged.
+        return source in {"inline", "path_ref"} or (source == "mcp_json" and contained_form)
+
+    declarations = [decl for decl in collection.declarations if _stageable(decl.source)]
+    if len(declarations) > MAX_PLUGIN_MANIFEST_ITEMS:
+        raise ValueError(f"Plugin MCP declarations exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-item limit")
+    for declaration in declarations:
+        if not isinstance(declaration.config, dict):
+            raise ValueError(f"Plugin manifest mcpServers[{declaration.name!r}] must be an object")
         # Fail closed: a raw inline credential must never be flattened into the
         # persisted toml (only ${ENV} references may reach the artifact).
-        _reject_unsafe_mcp_declaration(name, config)
+        _reject_unsafe_mcp_declaration(declaration.name, declaration.config)
+
+    normalized: list[dict[str, Any]] = []
+    for declaration in collection.effective:
+        if not _stageable(declaration.source):
+            continue
+        config = declaration.config
         safe_name = require_bounded_string(
-            name,
+            declaration.name,
             "Plugin MCP server name",
             max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
         ).strip()
@@ -924,7 +1151,9 @@ def _normalize_mcp_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized
 
 
-def _split_mcp_servers(manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[str]]:
+def _split_mcp_servers(
+    manifest: dict[str, Any], inventory: PluginInventory, contained_form: bool
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[str]]:
     """Split MCP entries into runnable (command/url) vs provider-only.
 
     Canonical ``PluginMcpEntry`` entries carry ``name`` + ``provider`` and are
@@ -932,7 +1161,7 @@ def _split_mcp_servers(manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], 
     the run). Entries with a ``command``/``url`` are a documented local-testing
     extension and are staged with-plugin-only.
     """
-    raw_servers = _normalize_mcp_entries(manifest)
+    raw_servers = _normalize_mcp_entries(manifest, inventory, contained_form)
 
     runnable: list[dict[str, Any]] = []
     provider_only: list[dict[str, str]] = []
@@ -1199,9 +1428,7 @@ def _load_member_eval_dataset(
             if not stat.S_ISREG(metadata.st_mode) or getattr(metadata, "st_nlink", 1) != 1:
                 raise ValueError(f"Refusing non-regular member dataset: {candidate}")
             if metadata.st_size > CONTENT_DEDUP_MAX_FILE_BYTES:
-                raise ValueError(
-                    f"Member dataset exceeds the {CONTENT_DEDUP_MAX_FILE_BYTES}-byte limit: {candidate}"
-                )
+                raise ValueError(f"Member dataset exceeds the {CONTENT_DEDUP_MAX_FILE_BYTES}-byte limit: {candidate}")
 
             snapshot = snapshot_dir / f"member-{snapshot_index}{extension}"
             try:

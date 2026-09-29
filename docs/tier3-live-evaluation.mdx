@@ -382,11 +382,21 @@ engine. It evaluates locally available components only:
 - bundled skills under `skills/` and same-repository `github` or `git` refs;
 - contained rule files; and
 - contained command or secure URL MCP servers, staged only in the plugin arm.
+  Contained plugins may declare them in any `mcpServers` form (an inline map, a
+  `./`-relative `.json` path, or an array of both) and in the root `.mcp.json`;
+  a later same-name declaration replaces an earlier one, as in Claude Code.
 
 Remote components are never fetched. Unresolved refs and provider-only MCP
 servers are recorded in plugin provenance. A partial run is reported as
 `INCOMPLETE`, never as a full pass; a plugin with nothing locally evaluable is
 reported as an honest advisory skip.
+
+Plugin provenance also lists every declared and packaged component in
+`component_coverage` with a `staged`, `not_staged`, `unsupported`,
+`unavailable`, or `invalid` state. Hooks, agents, commands, LSP servers, output
+styles, monitors, and settings are inventoried but not staged. It also carries
+a static `context_cost` estimate and the MCP `mcp_pinning` summary. These fields
+are report-only and do not change the `INCOMPLETE` rule.
 
 Plugin baselines are controlled with `--lift-mode`:
 
@@ -416,7 +426,9 @@ than omitting it.
 The Integration result is advisory and never changes the main Tier 3 score,
 verdict, or validation exit code. MCP declarations are statically checked before
 staging; inline credentials, shell command forms, insecure URLs, floating
-versions, and disabled TLS verification are rejected.
+versions, disabled TLS verification, agent permission-bypass flags,
+library-preload environment variables, cloud metadata endpoints, and escaping,
+linked, missing, or oversized MCP config files are rejected.
 
 ## Plan for cost
 

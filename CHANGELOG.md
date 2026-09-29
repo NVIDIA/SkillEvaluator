@@ -90,6 +90,12 @@ All notable changes to SkillEvaluator are documented in this file.
   same-repository dependency; `validate --repo-root` sets the repository root.
 - Tier 1 runs the version, quality, and lint checks on each skill bundled in a
   plugin, attributing findings to that skill.
+- Plugin MCP servers are accepted in every `mcpServers` form (inline map, `.json`
+  path, or array) and from the root `.mcp.json`, in Tier 1 and Tier 3 staging.
+- Plugin validation reports a component inventory, MCP pinning, and a static
+  context-cost estimate; Tier 3 provenance adds report-only component coverage.
+- Validation policies accept `mcp.allowed_private_hosts` for intended private
+  MCP endpoints.
 
 ### Changed
 
@@ -125,6 +131,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - The dependency audit no longer lets pip-audit install or build the audited
   requirements: it audits only exact pins with `--no-deps --disable-pip` and
   ignores pip options in the audited files.
+- Plugin static checks flag unpinned MCP package runners, agent permission-bypass
+  flags, library-preload and traffic-redirect environment overrides, auto-approve
+  keys, metadata and private MCP endpoints, bypass settings, shipped `.env` files,
+  and missing or escaping declared component paths.
 
 ## 0.3.0 - 2026-09-17
 

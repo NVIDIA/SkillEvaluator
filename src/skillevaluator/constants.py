@@ -141,6 +141,11 @@ PLUGIN_MANIFEST_TYPE = "agent_bundle_yaml"
 PLUGIN_MODE = "bundle_reference"
 PLUGIN_CONTAINED_MANIFEST_TYPE = "claude_plugin_json"
 PLUGIN_CONTAINED_MODE = "contained"
+# Static plugin component inventory bounds (Tier 1 and Tier 3 coverage).
+PLUGIN_COMPONENT_MAX_ITEMS = 256
+# Byte cap for plugin JSON config files (.mcp.json, referenced MCP configs,
+# hooks/LSP/monitor configs, shipped settings). Larger files are findings.
+PLUGIN_CONFIG_MAX_BYTES = 256 * 1024
 
 # Note: allowed MCP providers, selector sources, and top-level fields are
 # enforced directly by the Pydantic model in ``skillevaluator.models.plugin``

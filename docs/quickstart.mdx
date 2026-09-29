@@ -137,7 +137,9 @@ claim those stages passed.
 | Check repeated and overlapping guidance | `tier2 ./my-skill --catalog ./skill-catalog.json` | [Tier 2: Deduplication](tier2-deduplication.mdx) |
 | Measure a skill's effect on an agent | `tier3 ./my-skill` | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) |
 | Run the combined pipeline | `validate ./my-skill` | [CLI Reference](cli-reference.mdx#validate) |
+| Evaluate an agent plugin | `validate ./my-plugin --type plugin` | [Plugin Evaluation](plugin-evaluation.mdx) |
 | Gate changes in CI | `validate` with explicit gates | [Gate Your CI](ci-integration.mdx) |
 
 For rules, workflows, and plugins, `validate` runs their applicable validation
-stages without automatically enabling live skill evaluation.
+stages without automatically enabling live skill evaluation. Plugin live evaluation runs
+with `--tier3` or `tier3 evaluate-plugin`; see [Plugin Evaluation](plugin-evaluation.mdx).

@@ -19,6 +19,11 @@ import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.constants import (
+    SIMILARITY_DEFAULT_MAX_ENTRIES,
+    SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    SIMILARITY_MAX_ENTRIES,
+)
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.reporting.console_ui import (
@@ -2127,6 +2132,20 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
 @click.option(
+    "--max-entries",
+    type=click.IntRange(1, SIMILARITY_MAX_ENTRIES),
+    default=SIMILARITY_DEFAULT_MAX_ENTRIES,
+    show_default=True,
+    help="Maximum selected manifests for a fresh collection scan.",
+)
+@click.option(
+    "--max-scalar-comparisons",
+    type=click.IntRange(min=1),
+    default=SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    show_default=True,
+    help="Maximum comparisons multiplied by embedding dimensions.",
+)
+@click.option(
     "--catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
@@ -2147,6 +2166,8 @@ def similarity_check(
     threshold: float,
     full_body: bool,
     model: str | None,
+    max_entries: int,
+    max_scalar_comparisons: int,
     catalog: Path | None,
     save_catalog: Path | None,
     cache: Path | None,
@@ -2187,6 +2208,8 @@ def similarity_check(
         threshold=threshold,
         full_body=full_body,
         model=model,
+        max_entries=max_entries,
+        max_scalar_comparisons=max_scalar_comparisons,
         catalog=resolved_catalog,
         save_catalog=resolved_save_catalog,
     )

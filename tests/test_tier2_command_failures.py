@@ -18,16 +18,44 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier2 import commands
 
 
+@pytest.mark.parametrize("option", ["max_entries", "max_scalar_comparisons"])
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "private-input", None])
+def test_similarity_check_rejects_invalid_limit_options_before_construction(
+    tmp_path: Path, monkeypatch, option: str, value: object
+) -> None:
+    def unexpected_construction(**_kwargs):
+        pytest.fail("Invalid limit options must be rejected before constructing the validator")
+
+    monkeypatch.setattr(commands, "SimilarityValidator", unexpected_construction)
+
+    with pytest.raises(ValueError, match=option) as failure:
+        commands.run_similarity_check(tmp_path, **{option: value})
+
+    assert f"--{option.replace('_', '-')}" in str(failure.value)
+    assert "private-input" not in str(failure.value)
+    assert "provider" not in str(failure.value)
+
+
+def test_similarity_check_rejects_entry_limit_above_hard_cap(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=r"max_entries.*--max-entries"):
+        commands.run_similarity_check(tmp_path, max_entries=5_001)
+
+
+@pytest.mark.parametrize("during_construction", [False, True])
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
 def test_similarity_check_wraps_unexpected_validator_exceptions(
     tmp_path: Path,
     monkeypatch,
+    during_construction: bool,
+    error_type: type[Exception],
 ) -> None:
     class BrokenSimilarityValidator:
         def __init__(self, **_kwargs):
-            pass
+            if during_construction:
+                raise error_type("provider body contains private-token")
 
         def validate(self, _content_path: Path):
-            raise RuntimeError("provider body contains private-token")
+            raise error_type("provider body contains private-token")
 
     monkeypatch.setattr(commands, "SimilarityValidator", BrokenSimilarityValidator)
 

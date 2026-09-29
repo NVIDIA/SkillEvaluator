@@ -110,6 +110,7 @@ def test_template_glued_id_or_hash_tokens_are_not_secrets(token):
 _SHARED_SECURITY_CONSTANTS = [
     "_SECRET_PATTERNS",
     "_DESTRUCTIVE_PATTERNS",
+    "_HOME_ANCHOR_RE",
     "_UNAUTHORIZED_PATHS",
     "_SENSITIVE_WRITE_PATHS",
     "_PROMPT_INJECTION_PATTERNS",

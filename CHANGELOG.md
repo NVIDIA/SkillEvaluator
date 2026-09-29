@@ -105,6 +105,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Hardened plugin input handling with descriptor-anchored, no-follow discovery
   and reads so linked, hard-linked, reparse-point, escaping, and special files
   are rejected before provider calls or sandbox staging.
+- Tier 3 security scoring now normalizes home-directory spellings (`/home/<user>`,
+  `/Users/<user>`, `/root`, `$HOME`, `${HOME}`, `~user`) and covers more credential
+  stores and protected shell, SSH, sudoers, and agent-control files.
 
 ## 0.3.0 - 2026-09-17
 

@@ -289,7 +289,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 
   <Accordion title="dependency — CVE audit (opt-in)">
-    Scans `requirements*.txt` for known Python package vulnerabilities. When `pyproject.toml` is present, `pip-audit --local` audits the active Python environment rather than resolving the dependencies declared in that file. `pip-audit` is the primary scanner; Safety supplies secondary coverage for requirements files when installed separately. The audit may use network-backed vulnerability databases.
+    Audits the Python dependencies declared in `requirements*.txt` and in `pyproject.toml` (`[project].dependencies`, `[project.optional-dependencies]`, and Poetry's `[tool.poetry.dependencies]`) for known vulnerabilities. Only exact `name==version` pins are audited: they are copied into a temporary requirements file and checked with `pip-audit --no-deps --disable-pip`, so nothing is installed or built, and pip options in the audited files (such as `--index-url` or `-e`) are never used. Each unpinned, ranged, or URL declaration gets an INFO `dependency-version-unverified` finding because a floating version cannot be audited. Transitive dependencies are not resolved; audit a fully pinned lockfile to cover them. `pip-audit` is the primary scanner; Safety supplies secondary coverage for the same pins when installed separately. The audit may use network-backed vulnerability databases.
 
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency

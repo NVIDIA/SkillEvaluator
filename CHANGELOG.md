@@ -50,6 +50,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Plugin manifest discovery is now root-bounded across all tiers, and Integration
   evaluation requires explicit cross-component dataset evidence instead of
   reporting unsupported composition claims.
+- The dependency audit now checks the dependencies declared in `pyproject.toml`
+  instead of SkillEvaluator's own environment, and reports unpinned
+  declarations as INFO `dependency-version-unverified`.
 
 ### Added
 
@@ -114,6 +117,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 security scoring now normalizes home-directory spellings (`/home/<user>`,
   `/Users/<user>`, `/root`, `$HOME`, `${HOME}`, `~user`) and covers more credential
   stores and protected shell, SSH, sudoers, and agent-control files.
+- The dependency audit no longer lets pip-audit install or build the audited
+  requirements: it audits only exact pins with `--no-deps --disable-pip` and
+  ignores pip options in the audited files.
 
 ## 0.3.0 - 2026-09-17
 

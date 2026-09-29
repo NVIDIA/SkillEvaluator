@@ -247,7 +247,7 @@ description: Test
 ---
 # Test
 """)
-        (skill_dir / "requirements.txt").write_text("requests>=2.28.0\n")
+        (skill_dir / "requirements.txt").write_text("requests==2.28.0\n")
 
         validator = DependencySecurityValidator()
 

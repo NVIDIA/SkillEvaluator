@@ -690,6 +690,9 @@ def test_absent_and_null_fields_are_fine() -> None:
         ("handoffs", [{"producer": "a", "consumer": "b"}], "value or an artifact"),
         ("handoffs", [{"producer": "a", "consumer": "b", "value": ""}], "non-empty string"),
         ("conflict_probes", [{"id": "p", "must_use": "a"}], "must_not_use"),
+        ("conflict_probes", [{"id": "p", "must_use": "a", "must_not_use": "b", "description": 3}], "description"),
+        ("handoffs", [{"producer": "a", "consumer": "b", "value": "v", "description": ["x"]}], "description"),
+        ("tool_arguments", [{"tool": "x", "required": ["a"], "description": "d" * 2000}], "description"),
         (
             "conflict_probes",
             [{"id": "p", "must_use": "a", "must_not_use": "b"}, {"id": "p", "must_use": "a", "must_not_use": "b"}],

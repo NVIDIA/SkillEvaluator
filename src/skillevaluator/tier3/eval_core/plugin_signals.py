@@ -307,6 +307,14 @@ class _FieldErrors:
         self.messages.append(f"{where}: {problem}")
 
 
+def _check_description(raw: Mapping[str, Any], where: str, errors: _FieldErrors) -> bool:
+    description = raw.get("description")
+    if description is not None and (not isinstance(description, str) or len(description) > MAX_DESCRIPTION_CHARS):
+        errors.add(f"{where}.description", f"must be a string of at most {MAX_DESCRIPTION_CHARS} characters")
+        return False
+    return True
+
+
 def _check_ref_string(value: Any, where: str, errors: _FieldErrors) -> str | None:
     if not isinstance(value, str) or not value.strip():
         errors.add(where, "must be a non-empty string")
@@ -509,7 +517,7 @@ def _parse_tool_arguments(value: Any, errors: _FieldErrors) -> list[dict[str, An
             errors.add(rule_where, f"unsupported keys: {', '.join(unknown)}")
             return None
         tool = _check_ref_string(raw.get("tool"), f"{rule_where}.tool", errors)
-        if tool is None:
+        if tool is None or not _check_description(raw, rule_where, errors):
             return None
         rule: dict[str, Any] = {"tool": tool}
         if "required" in raw:
@@ -604,6 +612,8 @@ def _parse_handoffs(value: Any, errors: _FieldErrors) -> list[dict[str, Any]] | 
         if literal is None and artifact is None:
             errors.add(item_where, "must declare a value or an artifact as handoff evidence")
             return None
+        if not _check_description(raw, item_where, errors):
+            return None
         handoff: dict[str, Any] = {"producer": producer, "consumer": consumer}
         if literal is not None:
             handoff["value"] = literal
@@ -644,10 +654,9 @@ def _parse_conflict_probes(value: Any, errors: _FieldErrors) -> list[dict[str, A
         must_not_use = _check_ref_alternatives(raw.get("must_not_use"), f"{item_where}.must_not_use", errors)
         if must_use is None or must_not_use is None:
             return None
-        description = raw.get("description")
-        if description is not None and (not isinstance(description, str) or len(description) > MAX_DESCRIPTION_CHARS):
-            errors.add(f"{item_where}.description", f"must be a string of at most {MAX_DESCRIPTION_CHARS} characters")
+        if not _check_description(raw, item_where, errors):
             return None
+        description = raw.get("description")
         probes.append(
             {
                 "id": probe_id.strip(),

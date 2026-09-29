@@ -19,6 +19,7 @@ import secrets
 import stat
 import tempfile
 import unicodedata
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,9 +28,15 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from skillevaluator.constants import (
+    CONTENT_TYPE_PLUGIN,
     CONTENT_TYPE_RULES,
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_WORKFLOWS,
+    PLUGIN_CATALOG_MAX_MEMBER_CHARS,
+    PLUGIN_CATALOG_MAX_MEMBERS,
+    PLUGIN_CONTAINED_MANIFEST_DIR,
+    PLUGIN_CONTAINED_MANIFEST_FILE,
+    PLUGIN_MANIFEST_FILES,
     SIMILARITY_CRITICAL_THRESHOLD,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
@@ -59,7 +66,13 @@ from skillevaluator.utils.tier2_paths import safe_path_label
 
 logger = get_logger(__name__)
 
-CATALOG_SCHEMA_VERSION = 1
+# Version 1 catalogs hold skill/rules/workflows entries only. Version 2 adds a
+# ``plugins`` list for plugin entries. Skill-only catalogs are still written as
+# version 1 so older readers keep loading them; both versions load here.
+SKILL_CATALOG_SCHEMA_VERSION = 1
+PLUGIN_CATALOG_SCHEMA_VERSION = 2
+CATALOG_SCHEMA_VERSION = PLUGIN_CATALOG_SCHEMA_VERSION
+SUPPORTED_CATALOG_SCHEMA_VERSIONS = frozenset({SKILL_CATALOG_SCHEMA_VERSION, PLUGIN_CATALOG_SCHEMA_VERSION})
 MAX_CATALOG_BYTES = 32 * 1024 * 1024
 MAX_CATALOG_ENTRIES = SIMILARITY_MAX_ENTRIES
 MAX_VECTOR_DIMENSION = 65_536
@@ -99,6 +112,25 @@ _CATALOG_ENTRY_FIELDS = frozenset(
         "embedding",
     }
 )
+_CATALOG_ROOT_FIELDS_V2 = _CATALOG_ROOT_FIELDS | {"plugins"}
+_CATALOG_PLUGIN_FIELDS = frozenset(
+    {
+        "id",
+        "name",
+        "description",
+        "path",
+        "manifest",
+        "source_fingerprint",
+        "members",
+        "embedding",
+    }
+)
+MAX_CATALOG_PLUGIN_MEMBERS = PLUGIN_CATALOG_MAX_MEMBERS
+MAX_CATALOG_PLUGIN_MEMBER_CHARS = PLUGIN_CATALOG_MAX_MEMBER_CHARS
+MAX_CATALOG_MEMBER_NAMES = 262_144
+_PLUGIN_CATALOG_MANIFESTS = frozenset(
+    {*PLUGIN_MANIFEST_FILES, f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}"}
+)
 
 
 @dataclass
@@ -112,6 +144,34 @@ class RegistryEntry:
     embedding: list[float] = field(default_factory=list)
     entry_id: str = ""
     content_fingerprint: str = ""
+
+
+@dataclass
+class PluginRegistryEntry:
+    """One plugin in a version 2 local catalog.
+
+    ``source_fingerprint`` is the SHA-256 of the plugin manifest bytes: a
+    credential-free source identity used to exclude the plugin under test.
+    ``members`` holds casefolded member skill names for overlap scoring.
+    """
+
+    name: str
+    description: str
+    path: str
+    manifest: str
+    source_fingerprint: str
+    members: list[str] = field(default_factory=list)
+    embedding: list[float] = field(default_factory=list)
+    entry_id: str = ""
+
+
+@dataclass
+class PluginCatalogBuild:
+    """Counts from :meth:`EmbeddingRegistry.build_plugin_catalog`."""
+
+    plugins: int = 0
+    skills: int = 0
+    skipped_plugins: list[str] = field(default_factory=list)
 
 
 def classify(score: float) -> tuple[str, Severity]:
@@ -194,11 +254,185 @@ class EmbeddingRegistry:
         self._max_pairwise_comparisons = max_entries * (max_entries - 1) // 2
         self._max_scalar_comparisons = max_scalar_comparisons
         self._entries: dict[str, RegistryEntry] = {}
+        self._plugin_entries: dict[str, PluginRegistryEntry] = {}
         self._vector_dimension: int | None = None
 
     @property
     def size(self) -> int:
         return len(self._entries)
+
+    @property
+    def plugin_size(self) -> int:
+        """Number of plugin entries (version 2 catalogs only)."""
+        return len(self._plugin_entries)
+
+    @property
+    def skill_entries(self) -> tuple[RegistryEntry, ...]:
+        return tuple(entry for entry in self._entries.values() if entry.content_type == CONTENT_TYPE_SKILL)
+
+    @property
+    def plugin_entries(self) -> tuple[PluginRegistryEntry, ...]:
+        return tuple(self._plugin_entries.values())
+
+    def build_plugin_catalog(self, root: Path) -> PluginCatalogBuild:
+        """Index plugins at or below ``root`` plus their bundled skills.
+
+        Each plugin with a description contributes one plugin entry (name and
+        description embedding, member skill names, manifest source fingerprint).
+        Every bundled ``skills/**/SKILL.md`` whose frontmatter has a name and
+        description contributes one skill entry. Discovery, manifest reads, and
+        skill reads use the secure bounded helpers; ``max_entries`` bounds the
+        selected plugin and skill manifests, and one aggregate byte budget
+        bounds everything read before any embedding request.
+        """
+        from skillevaluator.deduplication.plugin.profile import (
+            PluginSkillLimitError,
+            ProfileByteBudget,
+            discover_plugin_roots,
+            load_plugin_profile,
+        )
+
+        if self._full_body:
+            raise ValueError("Plugin catalogs use description embeddings; --full-body is not supported for plugins")
+        limit = min(self._max_entries, MAX_CATALOG_ENTRIES)
+        plugin_roots = discover_plugin_roots(root, max_plugins=limit)
+        build = PluginCatalogBuild()
+        if not plugin_roots:
+            return build
+        root_absolute = Path(os.path.abspath(os.fspath(root)))  # noqa: PTH100 - lexical, no-follow
+        budget = ProfileByteBudget()
+        pending_skills: list[tuple[RegistryEntry, str]] = []
+        pending_plugins: list[tuple[PluginRegistryEntry, str]] = []
+        selected = 0
+        for plugin_root in plugin_roots:
+            selected += 1
+            try:
+                profile = load_plugin_profile(plugin_root, max_skills=max(0, limit - selected), budget=budget)
+            except PluginSkillLimitError as exc:
+                raise ValueError(
+                    f"Collection entry limit exceeded ({limit}) before embedding; "
+                    "increase --max-entries within its supported range to scan the complete collection"
+                ) from exc
+            selected += len(profile.bundled_skills)
+            plugin_absolute = Path(os.path.abspath(os.fspath(plugin_root)))  # noqa: PTH100
+            try:
+                plugin_path = plugin_absolute.relative_to(root_absolute).as_posix() or "."
+            except ValueError as exc:
+                raise ValueError(f"Discovered plugin path escapes scan root: {plugin_root.name}") from exc
+            if profile.description is None:
+                build.skipped_plugins.append(profile.name)
+            else:
+                pending_plugins.append(
+                    (
+                        PluginRegistryEntry(
+                            entry_id=f"{CONTENT_TYPE_PLUGIN}:{plugin_path}",
+                            name=profile.name,
+                            description=profile.description,
+                            path=plugin_path,
+                            manifest=profile.manifest,
+                            source_fingerprint=profile.source_fingerprint,
+                            members=list(profile.members),
+                        ),
+                        profile.embedding_text,
+                    )
+                )
+            for skill in profile.bundled_skills:
+                if skill.entry is None:
+                    continue
+                skill_path = (PurePosixPath(plugin_path) / "skills" / skill.rel).as_posix()
+                pending_skills.append(
+                    (
+                        RegistryEntry(
+                            entry_id=f"{CONTENT_TYPE_SKILL}:{skill_path}",
+                            name=skill.entry.name,
+                            description=skill.entry.description,
+                            path=skill_path,
+                            content_type=CONTENT_TYPE_SKILL,
+                            content_fingerprint=_fingerprint(skill.entry.embedding_text),
+                        ),
+                        skill.entry.embedding_text,
+                    )
+                )
+
+        texts = [text for _entry, text in pending_skills] + [text for _entry, text in pending_plugins]
+        for text in texts:
+            _validate_embedding_text(text, full_body=False)
+        vectors = self._embed_texts(texts)
+        for (entry, _text), vector in zip(pending_skills, vectors[: len(pending_skills)], strict=True):
+            entry.embedding = vector
+        for (plugin, _text), vector in zip(pending_plugins, vectors[len(pending_skills) :], strict=True):
+            plugin.embedding = vector
+        self._entries.update((entry.entry_id, entry) for entry, _text in pending_skills)
+        self._plugin_entries.update((plugin.entry_id, plugin) for plugin, _text in pending_plugins)
+        build.plugins = len(pending_plugins)
+        build.skills = len(pending_skills)
+        logger.debug(
+            "Indexed %d plugin and %d bundled skill entries from %s",
+            build.plugins,
+            build.skills,
+            safe_path_label(root),
+        )
+        return build
+
+    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed description texts in bounded batches, validating each vector."""
+        vector_dimension = self._vector_dimension
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+            batch = texts[start : start + EMBEDDING_BATCH_SIZE]
+            batch_vectors = self._client.embed(batch)
+            if len(batch_vectors) != len(batch):
+                raise ValueError(
+                    f"Embedding provider returned {len(batch_vectors)} vectors for {len(batch)} entries in batch"
+                )
+            for vector in batch_vectors:
+                vector_dimension = _validate_vector(vector, vector_dimension)
+                vectors.append(vector)
+        self._vector_dimension = vector_dimension
+        return vectors
+
+    def score_plugin_text(self, text: str) -> list[tuple[PluginRegistryEntry, float]]:
+        """Embed one plugin description text and score it against every catalog plugin entry.
+
+        The comparison work (catalog plugins x dimensions) is bounded by
+        ``max_scalar_comparisons``. Callers apply thresholds and self-exclusion.
+        """
+        entries = list(self._plugin_entries.values())
+        if not entries:
+            return []
+        vector_dimension = _registry_vector_dimension(entries, self._vector_dimension)
+        _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
+        unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
+        _validate_embedding_text(text, full_body=False)
+        query_vector = _normalized_vector(self._client.embed_single(text), vector_dimension or None)
+        return [
+            (entry, unit_vector_similarity(query_vector, unit_vector))
+            for entry, unit_vector in zip(entries, unit_vectors, strict=True)
+        ]
+
+    def score_skill_entries(self, targets: list[ContentEntry]) -> list[list[tuple[RegistryEntry, float]]]:
+        """Batch-embed target skills and score each against every catalog skill entry.
+
+        Each target is one catalog query, so the per-query work bound
+        (catalog skills x dimensions) matches :meth:`query_entry`.
+        """
+        catalog_entries = list(self.skill_entries)
+        if not targets or not catalog_entries:
+            return [[] for _target in targets]
+        vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
+        _validate_scalar_work(len(catalog_entries), vector_dimension, self._max_scalar_comparisons)
+        unit_vectors = _normalized_registry_vectors(catalog_entries, vector_dimension)
+        texts = [target.embedding_text for target in targets]
+        for text in texts:
+            _validate_embedding_text(text, full_body=False)
+        query_vectors = [_normalized_vector(vector, vector_dimension or None) for vector in self._embed_texts(texts)]
+        return [
+            [
+                (catalog_entry, unit_vector_similarity(query_vector, unit_vector))
+                for catalog_entry, unit_vector in zip(catalog_entries, unit_vectors, strict=True)
+            ]
+            for query_vector in query_vectors
+        ]
 
     def build_from_directory(
         self,
@@ -382,10 +616,14 @@ class EmbeddingRegistry:
     # ------------------------------------------------------------------
 
     def save_catalog(self, catalog_path: Path) -> None:
-        """Persist a validated, versioned local embedding catalog."""
-        if not self._entries:
+        """Persist a validated, versioned local embedding catalog.
+
+        Catalogs without plugin entries keep schema version 1 so older readers
+        still load them; catalogs with plugin entries use schema version 2.
+        """
+        if not self._entries and not self._plugin_entries:
             raise ValueError("Cannot save an empty catalog")
-        if len(self._entries) > MAX_CATALOG_ENTRIES:
+        if len(self._entries) + len(self._plugin_entries) > MAX_CATALOG_ENTRIES:
             raise ValueError(f"Catalog entry limit exceeded ({MAX_CATALOG_ENTRIES})")
 
         entries: list[dict[str, object]] = []
@@ -410,12 +648,42 @@ class EmbeddingRegistry:
                 }
             )
 
+        plugins: list[dict[str, object]] = []
+        member_names = 0
+        for key, plugin in sorted(self._plugin_entries.items()):
+            vector_dimension = _validate_vector(plugin.embedding, vector_dimension)
+            entry_id = plugin.entry_id or key
+            members = _validate_plugin_entry_fields(
+                entry_id,
+                path=plugin.path,
+                name=plugin.name,
+                description=plugin.description,
+                manifest=plugin.manifest,
+                source_fingerprint=plugin.source_fingerprint,
+                members=plugin.members,
+            )
+            member_names += len(members)
+            plugins.append(
+                {
+                    "id": entry_id,
+                    "name": plugin.name,
+                    "description": plugin.description,
+                    "path": plugin.path,
+                    "manifest": plugin.manifest,
+                    "source_fingerprint": plugin.source_fingerprint,
+                    "members": members,
+                    "embedding": plugin.embedding,
+                }
+            )
+        if member_names > MAX_CATALOG_MEMBER_NAMES:
+            raise ValueError(f"Catalog plugin member name limit exceeded ({MAX_CATALOG_MEMBER_NAMES})")
+
         if vector_dimension is None:
             raise ValueError("Cannot save a catalog without embedding vectors")
-        if len(entries) * vector_dimension > MAX_CATALOG_VECTOR_VALUES:
+        if (len(entries) + len(plugins)) * vector_dimension > MAX_CATALOG_VECTOR_VALUES:
             raise ValueError(f"Catalog vector scalar limit exceeded ({MAX_CATALOG_VECTOR_VALUES})")
-        data = {
-            "schema_version": CATALOG_SCHEMA_VERSION,
+        data: dict[str, object] = {
+            "schema_version": PLUGIN_CATALOG_SCHEMA_VERSION if plugins else SKILL_CATALOG_SCHEMA_VERSION,
             "provider": _client_provider(self._client),
             "model": self._client.model,
             "mode": "full-body" if self._full_body else "description",
@@ -424,24 +692,38 @@ class EmbeddingRegistry:
             "created_at": datetime.now(tz=UTC).isoformat(),
             "entries": entries,
         }
+        if plugins:
+            data["plugins"] = plugins
         serialized = json.dumps(data, indent=2, allow_nan=False) + "\n"
         if len(serialized.encode("utf-8")) > MAX_CATALOG_BYTES:
             raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)")
         _write_catalog_atomically(catalog_path, serialized.encode("utf-8"))
-        logger.debug("Saved local catalog to %s (%d entries)", safe_path_label(catalog_path), len(self._entries))
+        logger.debug(
+            "Saved local catalog to %s (%d entries, %d plugins)",
+            safe_path_label(catalog_path),
+            len(self._entries),
+            len(self._plugin_entries),
+        )
 
     def load_catalog(self, catalog_path: Path) -> None:
-        """Load and validate a versioned local embedding catalog."""
+        """Load and validate a versioned local embedding catalog.
+
+        Schema version 1 (skill/rules/workflows entries only) and version 2
+        (adds a ``plugins`` list) are both accepted.
+        """
         try:
             serialized = _read_catalog_text(catalog_path)
             preflight_json_structure(
                 serialized,
                 max_depth=100,
-                max_tokens=(MAX_CATALOG_VECTOR_VALUES * 2) + (MAX_CATALOG_ENTRIES * 20),
+                max_tokens=(MAX_CATALOG_VECTOR_VALUES * 2)
+                + (MAX_CATALOG_ENTRIES * 20)
+                + (MAX_CATALOG_MEMBER_NAMES * 2),
                 max_collection_items=MAX_VECTOR_DIMENSION,
                 # Leave room for duplicate/unknown keys so the schema layer can
                 # report them precisely while still bounding object materialization.
-                max_mapping_items=2 * max(len(_CATALOG_ROOT_FIELDS), len(_CATALOG_ENTRY_FIELDS)),
+                max_mapping_items=2
+                * max(len(_CATALOG_ROOT_FIELDS_V2), len(_CATALOG_ENTRY_FIELDS), len(_CATALOG_PLUGIN_FIELDS)),
                 max_string_chars=MAX_CATALOG_TEXT_LENGTH,
             )
             raw = json.loads(
@@ -455,13 +737,16 @@ class EmbeddingRegistry:
             raise ValueError(f"Malformed catalog JSON: {exc}") from exc
         if not isinstance(raw, dict):
             raise ValueError("Catalog root must be a JSON object")
-        _validate_exact_fields(raw, _CATALOG_ROOT_FIELDS, "Catalog root")
 
         schema_version = raw.get("schema_version")
-        if type(schema_version) is not int or schema_version != CATALOG_SCHEMA_VERSION:
-            raise ValueError(
-                f"Unsupported catalog schema version: {schema_version!r}; expected {CATALOG_SCHEMA_VERSION}"
-            )
+        if type(schema_version) is not int or schema_version not in SUPPORTED_CATALOG_SCHEMA_VERSIONS:
+            supported = ", ".join(str(version) for version in sorted(SUPPORTED_CATALOG_SCHEMA_VERSIONS))
+            raise ValueError(f"Unsupported catalog schema version: {schema_version!r}; expected one of {supported}")
+        root_fields = (
+            _CATALOG_ROOT_FIELDS_V2 if schema_version >= PLUGIN_CATALOG_SCHEMA_VERSION else _CATALOG_ROOT_FIELDS
+        )
+        _validate_exact_fields(raw, root_fields, "Catalog root")
+
         provider = _validate_catalog_string(raw.get("provider"), "Catalog provider")
         expected_provider = _client_provider(self._client)
         if provider != expected_provider:
@@ -494,11 +779,19 @@ class EmbeddingRegistry:
         if type(vector_dimension) is not int or vector_dimension <= 0 or vector_dimension > MAX_VECTOR_DIMENSION:
             raise ValueError(f"Invalid catalog vector dimension: {vector_dimension!r}")
         raw_entries = raw.get("entries")
-        if not isinstance(raw_entries, list) or not raw_entries:
+        raw_plugins = raw.get("plugins", [])
+        if not isinstance(raw_entries, list):
+            raise ValueError("Catalog entries must be a list")
+        if not isinstance(raw_plugins, list):
+            raise ValueError("Catalog plugins must be a list")
+        if schema_version == SKILL_CATALOG_SCHEMA_VERSION and not raw_entries:
             raise ValueError("Catalog entries must be a non-empty list")
-        if len(raw_entries) > MAX_CATALOG_ENTRIES:
+        if not raw_entries and not raw_plugins:
+            raise ValueError("Catalog must contain at least one entry or plugin")
+        total_entries = len(raw_entries) + len(raw_plugins)
+        if total_entries > MAX_CATALOG_ENTRIES:
             raise ValueError(f"Catalog entry limit exceeded ({MAX_CATALOG_ENTRIES})")
-        if len(raw_entries) * vector_dimension > MAX_CATALOG_VECTOR_VALUES:
+        if total_entries * vector_dimension > MAX_CATALOG_VECTOR_VALUES:
             raise ValueError(f"Catalog vector scalar limit exceeded ({MAX_CATALOG_VECTOR_VALUES})")
 
         loaded: dict[str, RegistryEntry] = {}
@@ -530,9 +823,49 @@ class EmbeddingRegistry:
                 embedding=embedding,
             )
 
+        loaded_plugins: dict[str, PluginRegistryEntry] = {}
+        member_names = 0
+        for index, plugin_data in enumerate(raw_plugins):
+            if not isinstance(plugin_data, dict):
+                raise ValueError(f"Catalog plugin {index} must be an object")
+            _validate_exact_fields(plugin_data, _CATALOG_PLUGIN_FIELDS, f"Catalog plugin {index}")
+            entry_id = plugin_data["id"]
+            members = _validate_plugin_entry_fields(
+                entry_id,
+                path=plugin_data["path"],
+                name=plugin_data["name"],
+                description=plugin_data["description"],
+                manifest=plugin_data["manifest"],
+                source_fingerprint=plugin_data["source_fingerprint"],
+                members=plugin_data["members"],
+            )
+            member_names += len(members)
+            if member_names > MAX_CATALOG_MEMBER_NAMES:
+                raise ValueError(f"Catalog plugin member name limit exceeded ({MAX_CATALOG_MEMBER_NAMES})")
+            embedding = plugin_data["embedding"]
+            _validate_vector(embedding, vector_dimension)
+            if entry_id in loaded_plugins:
+                raise ValueError(f"Catalog contains duplicate plugin id: {entry_id}")
+            loaded_plugins[entry_id] = PluginRegistryEntry(
+                entry_id=entry_id,
+                name=plugin_data["name"],
+                description=plugin_data["description"],
+                path=plugin_data["path"],
+                manifest=plugin_data["manifest"],
+                source_fingerprint=plugin_data["source_fingerprint"],
+                members=members,
+                embedding=embedding,
+            )
+
         self._entries = loaded
+        self._plugin_entries = loaded_plugins
         self._vector_dimension = vector_dimension
-        logger.debug("Loaded %d entries from local catalog %s", len(self._entries), safe_path_label(catalog_path))
+        logger.debug(
+            "Loaded %d entries and %d plugins from local catalog %s",
+            len(self._entries),
+            len(self._plugin_entries),
+            safe_path_label(catalog_path),
+        )
 
     def save_cache(self, cache_path: Path) -> None:
         """Deprecated compatibility alias for :meth:`save_catalog`."""
@@ -636,14 +969,20 @@ def _normalized_vector(vector: object, expected_dimension: int | None) -> list[f
         raise ValueError(str(exc)) from exc
 
 
-def _registry_vector_dimension(entries: list[RegistryEntry], expected_dimension: int | None) -> int:
+def _registry_vector_dimension(
+    entries: Sequence[RegistryEntry | PluginRegistryEntry],
+    expected_dimension: int | None,
+) -> int:
     """Return the width for work-budget checks without retaining normalized copies."""
     if expected_dimension is not None or not entries:
         return expected_dimension or 0
     return _validate_vector(entries[0].embedding, None)
 
 
-def _normalized_registry_vectors(entries: list[RegistryEntry], dimension: int) -> list[list[float]]:
+def _normalized_registry_vectors(
+    entries: Sequence[RegistryEntry | PluginRegistryEntry],
+    dimension: int,
+) -> list[list[float]]:
     """Validate every vector against the registry width and normalize each once."""
     return [_normalized_vector(entry.embedding, dimension or None) for entry in entries]
 
@@ -657,20 +996,61 @@ def _validate_scalar_work(comparison_count: int, vector_dimension: int, max_scal
         )
 
 
-def _validate_catalog_identity(entry_id: object, path: object, content_type: object) -> None:
+def _validate_catalog_relative_path(path: object) -> str:
     path = _validate_catalog_string(path, "Catalog path")
-    content_type = _validate_catalog_string(content_type, "Catalog content type")
-    entry_id = _validate_catalog_string(entry_id, "Catalog entry id")
     if "\\" in path or path.startswith("/") or re.match(r"^[A-Za-z]:", path):
         raise ValueError(f"Catalog path must be relative: {path!r}")
     pure_path = PurePosixPath(path)
     if pure_path.is_absolute() or ".." in pure_path.parts or pure_path.as_posix() != path:
         raise ValueError(f"Catalog path must be relative and normalized: {path!r}")
+    return path
+
+
+def _validate_catalog_identity(entry_id: object, path: object, content_type: object) -> None:
+    path = _validate_catalog_relative_path(path)
+    content_type = _validate_catalog_string(content_type, "Catalog content type")
+    entry_id = _validate_catalog_string(entry_id, "Catalog entry id")
     if content_type not in _CATALOG_CONTENT_TYPES:
         raise ValueError(f"Catalog content type is unsupported: {content_type!r}")
     expected_id = f"{content_type}:{path}"
     if entry_id != expected_id:
         raise ValueError(f"Catalog entry id must match its relative path: expected {expected_id!r}")
+
+
+def _validate_plugin_entry_fields(
+    entry_id: object,
+    *,
+    path: object,
+    name: object,
+    description: object,
+    manifest: object,
+    source_fingerprint: object,
+    members: object,
+) -> list[str]:
+    """Validate one version 2 plugin entry and return its canonical member list."""
+    entry_id = _validate_catalog_string(entry_id, "Catalog plugin id")
+    path = _validate_catalog_relative_path(path)
+    expected_id = f"{CONTENT_TYPE_PLUGIN}:{path}"
+    if entry_id != expected_id:
+        raise ValueError(f"Catalog plugin id must match its relative path: expected {expected_id!r}")
+    _validate_text_fields(entry_id, name, description)
+    if manifest not in _PLUGIN_CATALOG_MANIFESTS:
+        raise ValueError(f"Catalog plugin '{entry_id}' has an unsupported manifest: {manifest!r}")
+    if not isinstance(source_fingerprint, str) or not _SHA256_PATTERN.fullmatch(source_fingerprint):
+        raise ValueError(f"Catalog plugin '{entry_id}' has an invalid source fingerprint")
+    if type(members) is not list:
+        raise ValueError(f"Catalog plugin '{entry_id}' members must be a list")
+    if len(members) > MAX_CATALOG_PLUGIN_MEMBERS:
+        raise ValueError(f"Catalog plugin '{entry_id}' members exceed the {MAX_CATALOG_PLUGIN_MEMBERS}-item limit")
+    validated: list[str] = []
+    for member in members:
+        value = _validate_catalog_string(member, f"Catalog plugin '{entry_id}' member")
+        if len(value) > MAX_CATALOG_PLUGIN_MEMBER_CHARS or value != value.strip().casefold():
+            raise ValueError(f"Catalog plugin '{entry_id}' members must be bounded, trimmed, casefolded names")
+        validated.append(value)
+    if validated != sorted(set(validated)):
+        raise ValueError(f"Catalog plugin '{entry_id}' members must be unique and sorted")
+    return validated
 
 
 def _validate_text_fields(entry_id: str, name: object, description: object) -> None:

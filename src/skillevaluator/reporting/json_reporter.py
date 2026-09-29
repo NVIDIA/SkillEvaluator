@@ -18,7 +18,12 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
+from skillevaluator.reporting.base import (
+    PLUGIN_CATALOG_SIMILARITY_KEYS,
+    ReporterBase,
+    is_advisory_agent_eval_skip,
+    passes_required_gate,
+)
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -245,6 +250,17 @@ class JSONReporter(ReporterBase):
         llm_analysis = result.metadata.get("llm_analysis")
         if isinstance(llm_analysis, dict):
             data["llm_analysis"] = llm_analysis
+
+        # Plugin Tier 2 local-catalog comparisons (Check C-inter and Check B).
+        plugin_meta = result.metadata.get("plugin")
+        if isinstance(plugin_meta, dict):
+            catalog_similarity = {
+                key: plugin_meta[key]
+                for key in PLUGIN_CATALOG_SIMILARITY_KEYS
+                if isinstance(plugin_meta.get(key), dict)
+            }
+            if catalog_similarity:
+                data["plugin"] = catalog_similarity
 
         return data
 

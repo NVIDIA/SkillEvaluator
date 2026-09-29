@@ -254,6 +254,18 @@ TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS = 8_192
 MAX_PLUGIN_DEDUP_SKILLS = 32
 MAX_PLUGIN_DEDUP_LLM_CALLS = TIER2_LLM_MAX_CALLS
 
+# Advisory local-catalog plugin checks (Check B: plugin vs catalog plugins;
+# Check C-inter: bundled skills vs catalog skills). Plugin catalog entries store
+# bounded, casefolded member skill names for Jaccard overlap scoring.
+PLUGIN_CATALOG_MAX_MEMBERS = TIER2_LLM_MAX_REFERENCE_ITEMS
+PLUGIN_CATALOG_MAX_MEMBER_CHARS = 256
+# Public result-metadata keys under ``metadata["plugin"]`` for the two checks.
+PLUGIN_CATALOG_SKILL_SIMILARITY_KEY = "catalog_skill_similarity"
+PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY = "inter_plugin_similarity"
+INTER_PLUGIN_MEMBER_OVERLAP_THRESHOLD = 0.5
+INTER_PLUGIN_TOP_K = 10
+INTER_SKILL_CATALOG_TOP_K = 10
+
 
 # =============================================================================
 # CONTEXT DEDUPLICATION CONSTANTS (Phase 1)

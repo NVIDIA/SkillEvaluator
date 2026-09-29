@@ -27,7 +27,12 @@ from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
 )
-from skillevaluator.reporting.base import ReporterBase, additional_errors, passes_required_gate
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    additional_errors,
+    passes_required_gate,
+    plugin_catalog_similarity_summary,
+)
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -576,7 +581,10 @@ class CLIReporter(ReporterBase):
                 if counts:
                     details += f" ({', '.join(counts)})"
             elif result.passed:
-                if result.metadata.get("skipped"):
+                catalog_summary = plugin_catalog_similarity_summary(result)
+                if catalog_summary:
+                    details = rich_escape(catalog_summary)
+                elif result.metadata.get("skipped"):
                     details = "Skipped (see warnings)"
                 elif static_test_evidence:
                     details = rich_escape(static_test_evidence)

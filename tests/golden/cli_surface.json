@@ -1310,6 +1310,7 @@
             "skill",
             "rules",
             "workflows",
+            "plugin",
             "auto"
           ],
           "default": "auto",
@@ -1999,6 +2000,7 @@
                 "skill",
                 "rules",
                 "workflows",
+                "plugin",
                 "auto"
               ],
               "default": "auto",
@@ -2161,6 +2163,19 @@
               "--full-body"
             ],
             "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "llm",
+            "opts": [
+              "--llm"
+            ],
+            "param_type": "option",
+            "secondary_opts": [
+              "--no-llm"
+            ],
             "type": "boolean"
           },
           {

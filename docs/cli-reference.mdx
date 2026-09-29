@@ -82,7 +82,7 @@ named `validate`; `tier1 validate ./my-skill` invokes the Tier 1 workflow.
 | Workflow | Default scope | Scope controls |
 | --- | --- | --- |
 | `tier1 PATH` | All static checks including dependencies; rubric, LLM security, and finding verification when a provider is configured | `--no-llm` skips LLM stages; `--llm` requires provider access; `--checks` selects static checks |
-| `tier2 PATH` | Intra-skill analysis | `--catalog FILE` adds inter-skill comparison against a saved JSON catalog; without it, inter-skill is explicitly not run |
+| `tier2 PATH` | Intra-skill analysis; for a plugin root, plugin Checks A and C-intra | `--catalog FILE` adds inter-skill comparison (and, for plugins, inter-plugin comparison) against a saved JSON catalog; without it, catalog comparison is explicitly not run |
 | `tier3 PATH` | One missing starter case is generated, then the provider-native agent runs in Docker with and without the skill | Accepts the [tier3 evaluate](#tier3-evaluate) options; missing-source generation is implicit |
 
 Direct Tier 1 can run keyless, but marks its LLM stages as skipped. Missing
@@ -111,10 +111,11 @@ Also accepts `-r/--report` and `-o/--output-dir` described above.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--catalog FILE` | unset | Saved JSON catalog for inter-skill comparison |
+| `--catalog FILE` | unset | Saved JSON catalog for inter-skill comparison; for plugins, also inter-plugin comparison |
 | `--threshold FLOAT` | `0.80` | Intra-skill candidate similarity threshold |
-| `--similarity-threshold FLOAT` | `0.75` | Inter-skill reporting threshold |
-| `--full-body` | off | Compare the full `SKILL.md` against a catalog created in full-body mode |
+| `--similarity-threshold FLOAT` | `0.75` | Inter-skill and inter-plugin reporting threshold |
+| `--full-body` | off | Compare the full `SKILL.md` against a catalog created in full-body mode (skills only) |
+| `--llm / --no-llm` | off | Plugins only: add an advisory LLM verdict to inter-plugin catalog matches; requires `--catalog` |
 
 Both thresholds accept values from 0 to 1. Also accepts `-r/--report` and
 `-o/--output-dir`. Direct Tier 3 accepts the options in
@@ -360,12 +361,12 @@ skillevaluator similarity-check ./skills
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--type [skill\|rules\|workflows\|auto]` | `auto` | Content type of the target. |
+| `--type [skill\|rules\|workflows\|plugin\|auto]` | `auto` | Content type of the target. `plugin` builds a local catalog of plugins and their bundled skills and requires `--save-catalog`. |
 | `--threshold FLOAT` | `0.75` | Minimum similarity to report. |
 | `--full-body` | off | Embed full file bodies instead of descriptions. |
 | `--model TEXT` | provider default | Embedding model override. |
 | `--catalog FILE` | none | Compare exactly one skill against a local catalog. |
-| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. |
+| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection (skills, or plugins with bundled skills). |
 | `--max-entries INTEGER` | `1024` | Maximum selected manifests for a fresh collection; range `1`–`5000`. Does not restrict loaded catalog queries. |
 | `--max-scalar-comparisons INTEGER` | `128000000` | Maximum comparisons multiplied by embedding dimensions; must be positive. Applies to pairwise scans and catalog queries. |
 

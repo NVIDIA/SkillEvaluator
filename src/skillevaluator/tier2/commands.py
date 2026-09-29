@@ -12,6 +12,7 @@ from skillevaluator.constants import (
     MAX_PLUGIN_DEDUP_SKILLS,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
 from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError
@@ -139,11 +140,16 @@ def _make_advisory(result: ValidationResult) -> ValidationResult:
     return result
 
 
-def _unsafe_plugin_result(reason: Exception | str) -> ValidationResult:
+def _unsafe_plugin_result(
+    reason: Exception | str,
+    *,
+    name: str = "Context Deduplication",
+    description: str = "Detect redundant content within each bundled plugin skill",
+) -> ValidationResult:
     """Return a blocking result when plugin content cannot be read safely."""
     result = ValidationResult(
-        validator_name="Context Deduplication",
-        validator_description="Detect redundant content within each bundled plugin skill",
+        validator_name=name,
+        validator_description=description,
     )
     result.add_finding(
         Finding(
@@ -264,6 +270,155 @@ def run_plugin_skill_context_dedup(
     return [aggregate]
 
 
+_NO_CATALOG_REASON = (
+    "No local catalog supplied; run `skillevaluator tier2 PLUGIN --catalog FILE` to compare this plugin "
+    "and its bundled skills with a saved local catalog."
+)
+
+
+def _catalog_check_skips(reason: str, **metadata: object) -> list[ValidationResult]:
+    from skillevaluator.deduplication.plugin.catalog_checks import (
+        INTER_PLUGIN_DESCRIPTION,
+        INTER_PLUGIN_KEY,
+        INTER_PLUGIN_NAME,
+        INTER_SKILL_DESCRIPTION,
+        INTER_SKILL_KEY,
+        INTER_SKILL_NAME,
+        skipped_result,
+    )
+
+    results = [
+        skipped_result(INTER_SKILL_NAME, INTER_SKILL_DESCRIPTION, INTER_SKILL_KEY, reason),
+        skipped_result(INTER_PLUGIN_NAME, INTER_PLUGIN_DESCRIPTION, INTER_PLUGIN_KEY, reason),
+    ]
+    for result in results:
+        result.metadata.update(metadata)
+    return results
+
+
+def _finalize_catalog_result(result: ValidationResult) -> ValidationResult:
+    """Keep local catalog results advisory without discarding non-finding warnings."""
+    if result.metadata.get("security_failure"):
+        return _make_advisory(result)
+    for error in list(result.errors):
+        if error not in result.warnings:
+            result.warnings.append(error)
+            result.summary.warnings += 1
+    result.errors.clear()
+    result.summary.errors = 0
+    result.passed = True
+    result.metadata["advisory_tier2"] = True
+    return result
+
+
+def run_plugin_catalog_checks(
+    plugin_root: Path,
+    *,
+    catalog: Path | None,
+    threshold: float = SIMILARITY_DEFAULT_THRESHOLD,
+    model: str | None = None,
+    llm_verdict: bool = False,
+    llm_model: str | None = None,
+    max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+) -> list[ValidationResult]:
+    """Run advisory Check C-inter and Check B against a local JSON catalog.
+
+    Without a catalog both checks are recorded as skipped, not failed. The
+    catalog is read with the bounded no-follow loader; plugin and bundled skill
+    reads use the secure plugin helpers. Only the configured embedding provider
+    (and the chat LLM when ``llm_verdict`` is set) is contacted.
+    """
+    from skillevaluator.deduplication.plugin.catalog_checks import (
+        INTER_PLUGIN_DESCRIPTION,
+        INTER_PLUGIN_KEY,
+        INTER_PLUGIN_NAME,
+        INTER_SKILL_DESCRIPTION,
+        INTER_SKILL_KEY,
+        INTER_SKILL_NAME,
+        check_catalog_plugins,
+        check_catalog_skills,
+        skipped_result,
+    )
+    from skillevaluator.deduplication.plugin.profile import (
+        PluginProfileError,
+        PluginSkillLimitError,
+        load_plugin_profile,
+    )
+    from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_similarity_threshold
+    from skillevaluator.embedding.registry import EmbeddingRegistry
+    from skillevaluator.utils.tier2_paths import sanitize_path_text
+
+    threshold = validate_similarity_threshold(threshold, context="Plugin catalog similarity")
+    validate_max_scalar_comparisons(max_scalar_comparisons)
+    if catalog is None:
+        return _catalog_check_skips(_NO_CATALOG_REASON)
+
+    try:
+        profile = load_plugin_profile(plugin_root, max_skills=MAX_PLUGIN_DEDUP_SKILLS)
+    except PluginSkillLimitError:
+        from skillevaluator.utils.helpers import find_bundled_plugin_skills
+
+        actual = len(find_bundled_plugin_skills(plugin_root))
+        reason = (
+            f"Plugin bundles {actual} skills, exceeding the automatic Tier 2 limit of "
+            f"{MAX_PLUGIN_DEDUP_SKILLS}; no embedding, catalog, or LLM calls were made."
+        )
+        return _catalog_check_skips(
+            reason,
+            work_limit_exceeded=True,
+            actual_skills=actual,
+            skill_limit=MAX_PLUGIN_DEDUP_SKILLS,
+        )
+    except PluginProfileError as exc:
+        return _catalog_check_skips(f"Plugin manifest could not supply a comparable profile: {exc}")
+    except (SecurePathError, ValueError) as exc:
+        return [_unsafe_plugin_result(exc, name=INTER_SKILL_NAME, description=INTER_SKILL_DESCRIPTION)]
+
+    safe_paths = (plugin_root, catalog)
+    registry = EmbeddingRegistry(EmbeddingClient(model=model), max_scalar_comparisons=max_scalar_comparisons)
+    try:
+        registry.load_catalog(catalog)
+    except (ValueError, OSError, SimilarityConfigError) as exc:
+        return _catalog_check_skips(
+            sanitize_path_text(f"Local catalog could not be loaded; comparison did not run: {exc}", safe_paths)
+        )
+
+    checks = (
+        (
+            INTER_SKILL_NAME,
+            INTER_SKILL_DESCRIPTION,
+            INTER_SKILL_KEY,
+            len(registry.skill_entries),
+            lambda: check_catalog_skills(profile, registry, threshold=threshold),
+        ),
+        (
+            INTER_PLUGIN_NAME,
+            INTER_PLUGIN_DESCRIPTION,
+            INTER_PLUGIN_KEY,
+            registry.plugin_size,
+            lambda: check_catalog_plugins(
+                profile,
+                registry,
+                threshold=threshold,
+                llm_verdict=llm_verdict,
+                llm_model=llm_model,
+            ),
+        ),
+    )
+    results: list[ValidationResult] = []
+    for name, description, key, catalog_entries, run_check in checks:
+        try:
+            result = run_check()
+        except (SimilarityConfigError, ValueError, OSError) as exc:
+            # Provider failures and exceeded work limits mean the comparison
+            # did not run; record an advisory skip with a path-free reason.
+            prefix = "Embedding provider error" if isinstance(exc, SimilarityConfigError) else "Comparison did not run"
+            reason = sanitize_path_text(f"{prefix}: {exc}", safe_paths)
+            result = skipped_result(name, description, key, reason, catalog_entries=catalog_entries)
+        results.append(_finalize_catalog_result(result))
+    return results
+
+
 def run_plugin_dedup_scan(
     plugin_root: Path,
     *,
@@ -271,8 +426,16 @@ def run_plugin_dedup_scan(
     threshold: float = 0.80,
     model: str | None = None,
     llm_model: str | None = None,
+    catalog: Path | None = None,
+    similarity_threshold: float = SIMILARITY_DEFAULT_THRESHOLD,
+    llm_verdict: bool = False,
 ) -> list[ValidationResult]:
-    """Run the public plugin Tier 2 contract: offline Check A and C-intra."""
+    """Run the public plugin Tier 2 contract.
+
+    Check A and C-intra always run offline or against the configured embedding
+    provider. Check C-inter and Check B compare against an optional local JSON
+    catalog and are recorded as skipped when no catalog is supplied.
+    """
     from skillevaluator.deduplication.plugin import IntraPluginValidator
     from skillevaluator.utils.helpers import find_bundled_plugin_skills
 
@@ -302,6 +465,23 @@ def run_plugin_dedup_scan(
             {"execution_status": "skipped", "skip_reason": reason, "optional": True, "advisory_tier2": True}
         )
         results.append(skipped)
+    if catalog is not None and not run_context:
+        results.extend(
+            _catalog_check_skips(
+                "Local catalog comparison needs a configured public embedding provider and the Tier 2 extra."
+            )
+        )
+    else:
+        results.extend(
+            run_plugin_catalog_checks(
+                plugin_root,
+                catalog=catalog,
+                threshold=similarity_threshold,
+                model=model,
+                llm_verdict=llm_verdict,
+                llm_model=llm_model,
+            )
+        )
     return results
 
 
@@ -309,6 +489,7 @@ __all__ = [
     "emit_reports",
     "run_context_optimization_check",
     "run_dedup_scan",
+    "run_plugin_catalog_checks",
     "run_plugin_dedup_scan",
     "run_plugin_skill_context_dedup",
     "run_similarity_check",

@@ -1,0 +1,296 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Bounded, local plugin profiles for local-catalog Tier 2 comparisons.
+
+A profile holds only what the local catalog Checks B and C-inter need: the
+manifest name and description, the member skill names, the bundled skill
+manifests, and a credential-free source identity (the SHA-256 of the manifest
+bytes). Every read goes through the no-follow, root-contained plugin manifest
+locator and the bounded embedding extractor; nothing is fetched remotely.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_TOTAL_BYTES,
+    DESCRIPTION_MAX_LENGTH,
+    NAME_MAX_LENGTH,
+    PLUGIN_CATALOG_MAX_MEMBER_CHARS,
+    PLUGIN_CATALOG_MAX_MEMBERS,
+    PLUGIN_CONTAINED_MANIFEST_DIR,
+    PLUGIN_CONTAINED_MANIFEST_FILE,
+    PLUGIN_CONTAINED_MANIFEST_TYPE,
+    PLUGIN_MANIFEST_FILES,
+    SCAN_EXCLUDED_DIRS,
+    SIMILARITY_MAX_DISCOVERED_PATHS,
+)
+from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
+from skillevaluator.embedding.extractor import ContentEntry, extract_from_skill
+from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.utils.helpers import find_bundled_plugin_skills
+from skillevaluator.utils.secure_fs import SecurePathError, discover_secure_files
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    load_bounded_json,
+    load_bounded_yaml,
+    require_bounded_string,
+)
+
+MAX_PLUGIN_MEMBERS = PLUGIN_CATALOG_MAX_MEMBERS
+MAX_PLUGIN_MEMBER_CHARS = PLUGIN_CATALOG_MAX_MEMBER_CHARS
+
+
+class PluginProfileError(ValueError):
+    """Raised when a plugin manifest cannot supply a comparable profile."""
+
+
+class PluginSkillLimitError(PluginProfileError):
+    """Raised before reading more bundled skills than the caller allows."""
+
+
+class ProfileByteBudget:
+    """Aggregate byte budget shared by the manifests and skills of a plugin collection."""
+
+    def __init__(self, max_bytes: int = CONTENT_DEDUP_MAX_TOTAL_BYTES) -> None:
+        self.max_bytes = max_bytes
+        self.used = 0
+
+    def consume(self, text: str) -> None:
+        self.used += len(text.encode("utf-8"))
+        if self.used > self.max_bytes:
+            raise ValueError(f"Collection total byte limit exceeded ({self.max_bytes}) before embedding")
+
+
+@dataclass(frozen=True)
+class BundledSkill:
+    """One live skill under ``<plugin>/skills`` and its bounded manifest fields."""
+
+    rel: str
+    path: Path
+    entry: ContentEntry | None
+    skip_reason: str | None = None
+
+    @property
+    def root_relative(self) -> str:
+        """Plugin-root-relative identity, matching Tier 1 ``bundled_skills``."""
+        return f"skills/{self.rel}"
+
+
+@dataclass(frozen=True)
+class PluginProfile:
+    """Comparable, bounded plugin facts for local catalog checks."""
+
+    root: Path
+    name: str
+    description: str | None
+    manifest: str
+    source_fingerprint: str
+    members: tuple[str, ...]
+    bundled_skills: tuple[BundledSkill, ...]
+
+    @property
+    def embedding_text(self) -> str:
+        """Text embedded for plugin entries; mirrors ``ContentEntry.embedding_text``."""
+        return plugin_embedding_text(self.name, self.description or "")
+
+
+def plugin_embedding_text(name: str, description: str) -> str:
+    return f"{name}: {description}"
+
+
+def member_overlap(left: Iterable[str], right: Iterable[str]) -> float:
+    """Return the Jaccard overlap of two member-name collections (0.0 when both are empty)."""
+    left_set = {item.casefold() for item in left}
+    right_set = {item.casefold() for item in right}
+    union = left_set | right_set
+    if not union:
+        return 0.0
+    return len(left_set & right_set) / len(union)
+
+
+def _member_name(value: str) -> str:
+    member = value.strip().casefold()
+    if len(member) > MAX_PLUGIN_MEMBER_CHARS:
+        raise PluginProfileError(f"Plugin member skill name exceeds {MAX_PLUGIN_MEMBER_CHARS} characters")
+    return member
+
+
+def _ref_member_name(ref: Any) -> str | None:
+    """Return the leaf skill name of a normalized ``skills.refs`` entry."""
+    canonical = normalize_ref(ref)
+    if canonical is None:
+        return None
+    segments = canonical.split("::")
+    tail = segments[-1] if len(segments) == 4 else canonical
+    leaf = tail.rstrip("/").rsplit("/", 1)[-1].strip()
+    return leaf or None
+
+
+def _load_manifest_data(plugin_root: Path, budget: ProfileByteBudget | None) -> tuple[dict[str, Any], str, str]:
+    located = locate_plugin_manifest(plugin_root)
+    if located is None:
+        raise PluginProfileError("No plugin manifest (agent_plugin.yaml/.yml or .claude-plugin/plugin.json) found")
+    raw = located.read_text()
+    if budget is not None:
+        budget.consume(raw)
+    try:
+        data: Any = (
+            load_bounded_json(raw)
+            if located.manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE
+            else load_bounded_yaml(raw)
+        )
+    except StructuredDataError as exc:
+        raise PluginProfileError("Plugin manifest could not be parsed within structured-data limits") from exc
+    if not isinstance(data, dict):
+        raise PluginProfileError("Plugin manifest is not a mapping")
+    fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return data, located.manifest_filename, fingerprint
+
+
+def _bundled_skills(
+    plugin_root: Path,
+    *,
+    max_skills: int | None,
+    budget: ProfileByteBudget | None,
+) -> tuple[BundledSkill, ...]:
+    skill_dirs = find_bundled_plugin_skills(plugin_root)
+    if max_skills is not None and len(skill_dirs) > max_skills:
+        raise PluginSkillLimitError(f"Plugin bundles {len(skill_dirs)} skills, exceeding the limit of {max_skills}")
+    skills_root = plugin_root / "skills"
+    bundled: list[BundledSkill] = []
+    for skill_dir in skill_dirs:
+        rel = skill_dir.relative_to(skills_root).as_posix()
+        try:
+            entry = extract_from_skill(skill_dir)
+        except SecurePathError:
+            raise
+        except ValueError as exc:
+            # Tier 1 owns malformed skill metadata; this comparison skips it.
+            bundled.append(BundledSkill(rel=rel, path=skill_dir, entry=None, skip_reason=str(exc)))
+            continue
+        if entry is not None and budget is not None:
+            budget.consume(entry.full_text)
+        reason = None if entry is not None else "SKILL.md lacks a name or description in its frontmatter"
+        bundled.append(BundledSkill(rel=rel, path=skill_dir, entry=entry, skip_reason=reason))
+    return tuple(bundled)
+
+
+def load_plugin_profile(
+    plugin_root: Path,
+    *,
+    max_skills: int | None = None,
+    budget: ProfileByteBudget | None = None,
+) -> PluginProfile:
+    """Load one plugin's comparable profile through the secure bounded readers.
+
+    Raises :class:`PluginManifestPathError` (or ``SecurePathError``) for unsafe
+    inputs, ``ValueError`` for unsafe bundled skill discovery, and
+    :class:`PluginProfileError` when the manifest cannot supply a profile.
+    """
+    data, manifest, fingerprint = _load_manifest_data(plugin_root, budget)
+
+    raw_name = data.get("name")
+    if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
+        raw_name = plugin_root.resolve().name
+    try:
+        name = require_bounded_string(raw_name, "Plugin name", max_chars=NAME_MAX_LENGTH).strip()
+    except ValueError as exc:
+        raise PluginProfileError(f"Invalid plugin name: {exc}") from exc
+
+    raw_description = data.get("description")
+    description: str | None = None
+    if raw_description is not None and not (isinstance(raw_description, str) and not raw_description.strip()):
+        try:
+            description = require_bounded_string(
+                raw_description,
+                "Plugin description",
+                max_chars=DESCRIPTION_MAX_LENGTH,
+            ).strip()
+        except ValueError as exc:
+            raise PluginProfileError(f"Invalid plugin description: {exc}") from exc
+
+    members: set[str] = set()
+    skills_section = data.get("skills")
+    refs = skills_section.get("refs") if isinstance(skills_section, dict) else None
+    if isinstance(refs, list):
+        if len(refs) > MAX_PLUGIN_MEMBERS:
+            raise PluginProfileError(f"Plugin skills.refs exceeds the {MAX_PLUGIN_MEMBERS}-item limit")
+        for ref in refs:
+            leaf = _ref_member_name(ref)
+            if leaf:
+                members.add(_member_name(leaf))
+
+    bundled = _bundled_skills(plugin_root, max_skills=max_skills, budget=budget)
+    for skill in bundled:
+        label = skill.entry.name if skill.entry is not None else PurePosixPath(skill.rel).name
+        if label.strip():
+            members.add(_member_name(label))
+    if len(members) > MAX_PLUGIN_MEMBERS:
+        raise PluginProfileError(f"Plugin member skills exceed the {MAX_PLUGIN_MEMBERS}-item limit")
+
+    return PluginProfile(
+        root=plugin_root,
+        name=name,
+        description=description,
+        manifest=manifest,
+        source_fingerprint=fingerprint,
+        members=tuple(sorted(members)),
+        bundled_skills=bundled,
+    )
+
+
+def discover_plugin_roots(root: Path, *, max_plugins: int) -> list[Path]:
+    """Return plugin roots at or below ``root`` without following redirects.
+
+    ``root`` itself is returned when it is a plugin. Otherwise every regular
+    plugin manifest below it (bounded by the similarity path budget) marks a
+    plugin root. Unsafe links fail closed through the secure discovery walk.
+    """
+    if locate_plugin_manifest(root) is not None:
+        return [root]
+    contained = PurePosixPath(PLUGIN_CONTAINED_MANIFEST_DIR) / PLUGIN_CONTAINED_MANIFEST_FILE
+
+    def _selected(relative: Path) -> bool:
+        posix = PurePosixPath(relative.as_posix())
+        return posix.name in PLUGIN_MANIFEST_FILES or (len(posix.parts) >= 2 and posix.parts[-2:] == contained.parts)
+
+    files = discover_secure_files(
+        root,
+        selected=_selected,
+        excluded_dirs=SCAN_EXCLUDED_DIRS,
+        max_paths=SIMILARITY_MAX_DISCOVERED_PATHS,
+    )
+    plugin_dirs: set[PurePosixPath] = set()
+    for file in files:
+        relative = PurePosixPath(file.relative_path.as_posix())
+        plugin_dir = relative.parent if relative.name in PLUGIN_MANIFEST_FILES else relative.parent.parent
+        plugin_dirs.add(plugin_dir)
+        if len(plugin_dirs) > max_plugins:
+            raise ValueError(
+                f"Collection entry limit exceeded ({max_plugins}) before embedding; "
+                "increase --max-entries within its supported range to scan the complete collection"
+            )
+    return [root / Path(*plugin_dir.parts) for plugin_dir in sorted(plugin_dirs, key=lambda item: item.as_posix())]
+
+
+__all__ = [
+    "MAX_PLUGIN_MEMBERS",
+    "MAX_PLUGIN_MEMBER_CHARS",
+    "BundledSkill",
+    "PluginManifestPathError",
+    "PluginProfile",
+    "PluginProfileError",
+    "PluginSkillLimitError",
+    "ProfileByteBudget",
+    "discover_plugin_roots",
+    "load_plugin_profile",
+    "member_overlap",
+    "plugin_embedding_text",
+]

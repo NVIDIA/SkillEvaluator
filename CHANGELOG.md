@@ -79,6 +79,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Plugin Tier 3 runs record report-only per-trial and per-arm component signals
   (activations, tool selection, arguments, MCP outcomes, order, handoffs,
   conflicts, coverage), driven by optional advisory dataset fields.
+- Plugin Tier 2 compares bundled skills and the plugin with a local catalog
+  (`tier2 PLUGIN --catalog FILE`; optional `--llm` verdict); save plugin catalogs
+  with `similarity-check PLUGINS --type plugin --save-catalog FILE`.
 
 ### Changed
 

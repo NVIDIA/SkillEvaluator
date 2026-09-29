@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import click
 
+from skillevaluator.constants import PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY, PLUGIN_CATALOG_SKILL_SIMILARITY_KEY
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 
 if TYPE_CHECKING:
@@ -380,6 +381,26 @@ def additional_errors(result: ValidationResult) -> list[str]:
             prefix += label + "] "
             represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
     return [error for error in result.errors if error not in represented]
+
+
+PLUGIN_CATALOG_SIMILARITY_KEYS = (PLUGIN_CATALOG_SKILL_SIMILARITY_KEY, PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY)
+
+
+def plugin_catalog_similarity_summary(result: ValidationResult) -> str | None:
+    """One-line text for a plugin Tier 2 local-catalog check, or ``None``."""
+    plugin = result.metadata.get("plugin") if isinstance(result.metadata, dict) else None
+    if not isinstance(plugin, dict):
+        return None
+    for key in PLUGIN_CATALOG_SIMILARITY_KEYS:
+        block = plugin.get(key)
+        if not isinstance(block, dict):
+            continue
+        if block.get("status") == "skipped":
+            return f"Skipped: {block.get('reason') or 'prerequisite unavailable'}"
+        matches = block.get("matches")
+        match_count = len(matches) if isinstance(matches, list) else 0
+        return f"Compared with {block.get('catalog_entries', 0)} catalog entries; {match_count} advisory match(es)"
+    return None
 
 
 class ReporterBase(ABC):

@@ -77,10 +77,11 @@ def test_public_plugin_scan_never_requires_remote_catalog(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     results = run_plugin_dedup_scan(tmp_path, run_context=False)
-    assert len(results) == 2
+    # Check A, C-intra, and the local-catalog C-inter and B (skipped without a catalog).
+    assert len(results) == 4
     assert all(result.passed for result in results)
     assert all(result.metadata.get("advisory_tier2") for result in results)
-    assert results[1].metadata["execution_status"] == "skipped"
+    assert all(result.metadata["execution_status"] == "skipped" for result in results[1:])
 
 
 def test_plugin_context_scan_rejects_linked_skills_root(tmp_path: Path) -> None:

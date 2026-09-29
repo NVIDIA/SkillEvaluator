@@ -2428,7 +2428,13 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
 
 @cli.command("similarity-check")
 @click.argument("content_path", type=click.Path(exists=True, path_type=Path))
-@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "auto"]))
+@click.option(
+    "--type",
+    "content_type",
+    default="auto",
+    type=click.Choice(["skill", "rules", "workflows", "plugin", "auto"]),
+    help="Content type; plugin builds a local catalog of plugins and their bundled skills (with --save-catalog).",
+)
 @click.option("--threshold", type=float, default=0.75, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
@@ -2456,7 +2462,7 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
     "--save-catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Build and save a versioned local catalog from this collection.",
+    help="Build and save a versioned local catalog from this collection (skills, or plugins with bundled skills).",
 )
 @click.option("--cache", type=click.Path(path_type=Path), default=None, hidden=True)
 @click.option("--save-cache", type=click.Path(path_type=Path), default=None, hidden=True)
@@ -2650,7 +2656,7 @@ def _tier1_workflow(
     "--catalog",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Saved JSON catalog for inter-skill comparison.",
+    help="Saved JSON catalog for inter-skill comparison; for plugins, also inter-plugin comparison.",
 )
 @click.option(
     "--threshold",
@@ -2666,9 +2672,15 @@ def _tier1_workflow(
     default=0.75,
     show_default=True,
     callback=_validate_similarity_threshold,
-    help="Inter-skill similarity threshold.",
+    help="Inter-skill and inter-plugin catalog similarity threshold.",
 )
 @click.option("--full-body", is_flag=True, help="Compare full SKILL.md content against a full-body catalog.")
+@click.option(
+    "--llm/--no-llm",
+    default=False,
+    show_default=True,
+    help="Plugin only: add an advisory LLM verdict to inter-plugin catalog matches (requires --catalog).",
+)
 @_workflow_report_options
 def _tier2_workflow(
     skill_path: Path,
@@ -2676,10 +2688,11 @@ def _tier2_workflow(
     threshold: float,
     similarity_threshold: float,
     full_body: bool,
+    llm: bool,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
-    """Run intra-skill deduplication and optional inter-skill catalog comparison."""
+    """Run intra-skill deduplication and optional local catalog comparison for a skill or plugin."""
     from skillevaluator.tier_workflows import run_tier2_workflow
 
     _reject_linked_tier2_root(skill_path)
@@ -2691,6 +2704,7 @@ def _tier2_workflow(
         threshold=threshold,
         similarity_threshold=similarity_threshold,
         full_body=full_body,
+        llm=llm,
     )
     sanitize_tier2_results(results, skill_path, catalog)
     if not emit_reports(

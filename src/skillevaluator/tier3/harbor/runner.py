@@ -91,7 +91,7 @@ from skillevaluator.tier3.harbor.collector import (
     harbor_job_passed,
     validate_harbor_job_result,
 )
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_definition, score_policy_for_metrics
 from skillevaluator.tier3.harbor.progress import (
     MIN_EXACT_SECRET_CHARS,
     NullProgressReporter,
@@ -4775,6 +4775,7 @@ def _run_harbor_eval_impl(
                 "pass_threshold": float(pass_threshold),
                 "stop_on_pass": bool(stop_on_pass),
                 "score_definition": score_definition(tuple(results.get("metrics", DEFAULT_METRICS))),
+                "score_policy": score_policy_for_metrics(tuple(results.get("metrics", DEFAULT_METRICS))),
             },
         }
     )

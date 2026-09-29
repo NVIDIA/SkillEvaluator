@@ -34,6 +34,7 @@ from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
     MAX_CUSTOM_METRICS,
@@ -48,9 +49,9 @@ from skillevaluator.tier3.harbor.metrics import (
     metric_set_for_reward,
     metric_value,
     overall_score,
-    rewards_have_mixed_metric_contracts,
+    overall_score_from_metrics,
     score_definition,
-    score_value,
+    score_policy_for_metrics,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id
@@ -5016,8 +5017,12 @@ def _compute_lift(
         }
     metrics = tuple(paired_scores)
     if metrics in {DISPLAY_METRICS, LEGACY_METRICS}:
-        overall_with = sum(paired_scores[m][0] for m in metrics) / len(metrics)
-        overall_without = sum(paired_scores[m][1] for m in metrics) / len(metrics)
+        overall_with = overall_score_from_metrics(with_scores, metrics)
+        overall_without = overall_score_from_metrics(without_scores, metrics)
+    else:
+        overall_with = None
+        overall_without = None
+    if overall_with is not None and overall_without is not None:
         lift["overall"] = {
             "with_skill": round(overall_with, 4),
             "without_skill": round(overall_without, 4),
@@ -5034,6 +5039,18 @@ def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
     if not values or any(value is None for value in values):
         return None
     return round(sum(value for value in values if value is not None) / len(values), 4)
+
+
+def _aggregate_condition_overall(
+    scores: dict[str, float],
+    metrics: tuple[str, ...],
+    rewards: list[dict[str, Any]],
+) -> float | None:
+    """Aggregate a condition consistently with lift and canonical reports."""
+    if not metrics:
+        return _average_overall(rewards)
+    score = overall_score_from_metrics(scores, metrics)
+    return round(score, 4) if score is not None else None
 
 
 def _compute_custom_lift(
@@ -6188,11 +6205,13 @@ def collect_harbor_results(
         "agents": {},
         "metric_set": DEFAULT_METRIC_SET,
         "metrics": list(DISPLAY_METRICS),
+        "score_policy": DEFAULT_SCORE_POLICY,
         "attempt_policy": {
             "max_attempts": n_attempts,
             "pass_threshold": pass_threshold,
             "stop_on_pass": stop_on_pass,
             "score_definition": score_definition(DISPLAY_METRICS),
+            "score_policy": DEFAULT_SCORE_POLICY,
         },
     }
 
@@ -6218,6 +6237,10 @@ def collect_harbor_results(
         with_trial_failures: list[dict[str, str]] = []
         with_job_failure = ""
         with_execution: dict[str, Any] = {}
+        with_overall_score: float | None = None
+        with_policy = DEFAULT_SCORE_POLICY
+        with_policy_ambiguous = False
+        with_metrics: tuple[str, ...] = ()
 
         with_arm_suffix = "-with-skill" if not skip_baseline else ""
         if with_job_dir:
@@ -6254,6 +6277,8 @@ def collect_harbor_results(
             all_results["metric_set"] = with_metric_set
             all_results["metrics"] = list(with_metrics)
             all_results["attempt_policy"]["score_definition"] = score_definition(with_metrics)
+            all_results["score_policy"] = score_policy_for_metrics(with_metrics)
+            all_results["attempt_policy"]["score_policy"] = score_policy_for_metrics(with_metrics)
             with_custom_scores = average_custom_metrics(with_logical_rewards)
             with_pass = _pass_summary(
                 with_logical_rewards,
@@ -6279,7 +6304,9 @@ def collect_harbor_results(
                 with_custom_scores = {}
                 with_pass = {}
             with_overall_score = (
-                _average_overall(with_logical_rewards) if with_execution["execution_status"] == "succeeded" else None
+                _aggregate_condition_overall(with_scores, with_metrics, with_logical_rewards)
+                if with_execution["execution_status"] == "succeeded"
+                else None
             )
             _save_trials(
                 with_collected_rewards,
@@ -6292,34 +6319,28 @@ def collect_harbor_results(
                 agent_model_source=agent_model_source,
                 expected_case_ids=expected_case_ids,
             )
-            _write_generated_root_json(
-                agent_dir / "with-skill" / "summary.json",
-                output_dir,
-                {
-                    "agent": agent,
-                    "model": agent_model,
-                    "model_source": agent_model_source,
-                    "scores": with_scores,
-                    "custom_scores": with_custom_scores,
-                    "overall_score": with_overall_score,
-                    "metric_set": with_metric_set,
-                    "metrics": list(with_metrics),
-                    "dimensions": dimension_scores(with_scores),
-                    "num_trials": len(with_logical_rewards),
-                    "num_reward_rows": len(with_collected_rewards),
-                    "mixed_metric_contracts": with_mixed_metric_contracts,
-                    "pass_at_k": _public_pass_summary(with_pass),
-                    **with_execution,
-                    "job_failure": with_job_failure,
-                    "trial_failures": _public_failure_list(with_trial_failures),
-                    **_failure_list_metadata("trial_failure_details", with_trial_failures),
-                },
-            )
-            logger.debug(
-                "Agent %s with-skill: %d trials, scores=%s",
-                agent,
-                len(with_logical_rewards),
-                with_scores,
+            (agent_dir / "with-skill" / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "agent": agent,
+                        "model": agent_model,
+                        "model_source": agent_model_source,
+                        "scores": with_scores,
+                        "custom_scores": with_custom_scores,
+                        "overall_score": with_overall_score,
+                        "metric_set": with_metric_set,
+                        "metrics": list(with_metrics),
+                        "score_policy": score_policy_for_metrics(with_metrics),
+                        "dimensions": dimension_scores(with_scores),
+                        "num_trials": len(with_rewards),
+                        "pass_at_k": with_pass,
+                        **with_execution,
+                        "job_failure": with_job_failure,
+                        "trial_failures": with_trial_failures,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
             )
         else:
             with_job_failure = f"No Harbor job found for {with_job_name}"
@@ -6401,6 +6422,10 @@ def collect_harbor_results(
         without_trial_failures: list[dict[str, str]] = []
         without_job_failure = ""
         without_execution: dict[str, Any] = {}
+        without_overall_score: float | None = None
+        without_policy = DEFAULT_SCORE_POLICY
+        without_policy_ambiguous = False
+        without_metrics: tuple[str, ...] = ()
         without_job_dir: Path | None = None
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
@@ -6460,7 +6485,7 @@ def collect_harbor_results(
                     without_custom_scores = {}
                     without_pass = {}
                 without_overall_score = (
-                    _average_overall(without_logical_rewards)
+                    _aggregate_condition_overall(without_scores, without_metrics, without_logical_rewards)
                     if without_execution["execution_status"] == "succeeded"
                     else None
                 )
@@ -6475,28 +6500,28 @@ def collect_harbor_results(
                     agent_model_source=agent_model_source,
                     expected_case_ids=expected_case_ids,
                 )
-                _write_generated_root_json(
-                    agent_dir / "without-skill" / "summary.json",
-                    output_dir,
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": without_scores,
-                        "custom_scores": without_custom_scores,
-                        "overall_score": without_overall_score,
-                        "metric_set": without_metric_set,
-                        "metrics": list(without_metrics),
-                        "dimensions": dimension_scores(without_scores),
-                        "num_trials": len(without_logical_rewards),
-                        "num_reward_rows": len(without_collected_rewards),
-                        "mixed_metric_contracts": without_mixed_metric_contracts,
-                        "pass_at_k": _public_pass_summary(without_pass),
-                        **without_execution,
-                        "job_failure": without_job_failure,
-                        "trial_failures": _public_failure_list(without_trial_failures),
-                        **_failure_list_metadata("trial_failure_details", without_trial_failures),
-                    },
+                (agent_dir / "without-skill" / "summary.json").write_text(
+                    json.dumps(
+                        {
+                            "agent": agent,
+                            "model": agent_model,
+                            "model_source": agent_model_source,
+                            "scores": without_scores,
+                            "custom_scores": without_custom_scores,
+                            "overall_score": without_overall_score,
+                            "metric_set": without_metric_set,
+                            "metrics": list(without_metrics),
+                            "score_policy": score_policy_for_metrics(without_metrics),
+                            "dimensions": dimension_scores(without_scores),
+                            "num_trials": len(without_rewards),
+                            "pass_at_k": without_pass,
+                            **without_execution,
+                            "job_failure": without_job_failure,
+                            "trial_failures": without_trial_failures,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
                 )
                 logger.debug(
                     "Agent %s without-skill: %d trials, scores=%s",
@@ -6515,26 +6540,27 @@ def collect_harbor_results(
                 without_job_failure = _published_job_failure(without_job_failure)
                 summary_dir = agent_dir / "without-skill"
                 summary_dir.mkdir(parents=True, exist_ok=True)
-                _write_generated_root_json(
-                    summary_dir / "summary.json",
-                    output_dir,
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metric_set": DEFAULT_METRIC_SET,
-                        "metrics": list(DISPLAY_METRICS),
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "num_reward_rows": 0,
-                        "mixed_metric_contracts": False,
-                        "pass_at_k": {},
-                        "job_failure": without_job_failure,
-                        "trial_failures": [],
-                    },
+                (summary_dir / "summary.json").write_text(
+                    json.dumps(
+                        {
+                            "agent": agent,
+                            "model": agent_model,
+                            "model_source": agent_model_source,
+                            "scores": {},
+                            "custom_scores": {},
+                            "overall_score": None,
+                            "metric_set": DEFAULT_METRIC_SET,
+                            "metrics": list(DISPLAY_METRICS),
+                            "score_policy": DEFAULT_SCORE_POLICY,
+                            "dimensions": {},
+                            "num_trials": 0,
+                            "pass_at_k": {},
+                            "job_failure": without_job_failure,
+                            "trial_failures": [],
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
                 )
 
         if not without_execution:
@@ -6552,27 +6578,76 @@ def collect_harbor_results(
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
-            _write_generated_root_json(
-                summary_dir / "summary.json",
-                output_dir,
-                {
-                    "agent": agent,
-                    "model": agent_model,
-                    "model_source": agent_model_source,
-                    "scores": {},
-                    "custom_scores": {},
-                    "overall_score": None,
-                    "metrics": [],
-                    "dimensions": {},
-                    "num_trials": 0,
-                    "num_reward_rows": 0,
-                    "mixed_metric_contracts": False,
-                    "pass_at_k": {},
-                    **without_execution,
-                    "job_failure": without_job_failure,
-                    "trial_failures": [],
-                },
+            (summary_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "agent": agent,
+                        "model": agent_model,
+                        "model_source": agent_model_source,
+                        "scores": {},
+                        "custom_scores": {},
+                        "overall_score": None,
+                        "metrics": [],
+                        "score_policy": DEFAULT_SCORE_POLICY,
+                        "dimensions": {},
+                        "num_trials": 0,
+                        "pass_at_k": {},
+                        **without_execution,
+                        "job_failure": without_job_failure,
+                        "trial_failures": [],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
             )
+
+        if (
+            not skip_baseline
+            and with_execution.get("execution_status") == "succeeded"
+            and without_execution.get("execution_status") == "succeeded"
+            and with_policy != without_policy
+            and set(with_metrics) == set(without_metrics)
+        ):
+            if with_policy_ambiguous and not without_policy_ambiguous:
+                with_policy = without_policy
+                summary_path = agent_dir / "with-skill" / "summary.json"
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                summary["score_policy"] = with_policy
+                summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            elif without_policy_ambiguous and not with_policy_ambiguous:
+                without_policy = with_policy
+                summary_path = agent_dir / "without-skill" / "summary.json"
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                summary["score_policy"] = without_policy
+                summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        all_results["score_policy"] = with_policy
+        all_results["attempt_policy"]["score_policy"] = with_policy
+        if with_job_dir:
+            all_results["attempt_policy"]["score_definition"] = _score_definition_for_policy(with_metrics, with_policy)
+        policy_conflict = (
+            not skip_baseline
+            and with_execution.get("execution_status") == "succeeded"
+            and without_execution.get("execution_status") == "succeeded"
+            and with_policy != without_policy
+        )
+        if policy_conflict:
+            reason = f"Conflicting score policies across conditions: {with_policy}, {without_policy}"
+            for condition, execution in (("with-skill", with_execution), ("without-skill", without_execution)):
+                execution["execution_status"] = "failed"
+                execution.setdefault("execution_errors", []).append(reason)
+                summary_path = agent_dir / condition / "summary.json"
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                summary.update(execution)
+                summary.update({"scores": {}, "custom_scores": {}, "overall_score": None, "pass_at_k": {}})
+                summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            with_scores = {}
+            without_scores = {}
+            with_custom_scores = {}
+            without_custom_scores = {}
+            with_pass = {}
+            without_pass = {}
+            with_overall_score = None
+            without_overall_score = None
 
         lift: dict[str, Any] = {}
         paired_execution_succeeded = (
@@ -6580,14 +6655,21 @@ def collect_harbor_results(
             and without_execution.get("execution_status") == "succeeded"
         )
         if paired_execution_succeeded and with_scores and without_scores:
-            lift = _compute_lift(
-                with_scores,
-                without_scores,
-                with_logical_rewards,
-                without_logical_rewards,
-                expected_case_ids,
-            )
-            _write_generated_root_json(agent_dir / "lift.json", output_dir, lift)
+            lift = _compute_lift(with_scores, without_scores)
+            # The policy and scored metric set must match before comparing
+            # overall scores; shared per-metric deltas remain useful separately.
+            lift.pop("overall", None)
+            if (
+                set(with_metrics) == set(without_metrics)
+                and with_overall_score is not None
+                and without_overall_score is not None
+            ):
+                lift["overall"] = {
+                    "with_skill": with_overall_score,
+                    "without_skill": without_overall_score,
+                    "delta": round(with_overall_score - without_overall_score, 4),
+                }
+            (agent_dir / "lift.json").write_text(json.dumps(lift, indent=2), encoding="utf-8")
 
         custom_lift: dict[str, Any] = {}
         if (
@@ -6607,7 +6689,7 @@ def collect_harbor_results(
                 _write_generated_root_json(agent_dir / "custom_lift.json", output_dir, custom_lift)
 
         pass_lift: dict[str, Any] = {}
-        if paired_execution_succeeded and with_pass and without_pass:
+        if paired_execution_succeeded and set(with_metrics) == set(without_metrics) and with_pass and without_pass:
             pass_lift = {
                 "with_skill": with_pass.get("rate", 0.0),
                 "without_skill": without_pass.get("rate", 0.0),
@@ -6657,6 +6739,12 @@ def collect_harbor_results(
             },
             "with_skill": with_scores,
             "without_skill": without_scores,
+            "overall_with_skill": with_overall_score,
+            "overall_without_skill": without_overall_score,
+            "metrics_with_skill": list(with_metrics),
+            "metrics_without_skill": list(without_metrics),
+            "score_policy_with_skill": with_policy,
+            "score_policy_without_skill": without_policy if not skip_baseline else None,
             "custom_with_skill": with_custom_scores,
             "custom_without_skill": without_custom_scores,
             "dimensions_with_skill": dimension_scores(with_scores),

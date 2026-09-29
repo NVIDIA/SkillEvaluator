@@ -10,6 +10,7 @@ from pathlib import Path
 
 from skillevaluator import __version__
 from skillevaluator.constants import (
+    DEFAULT_SCORE_POLICY,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
     TIER3_LIFT_FAIL_THRESHOLD,
@@ -24,6 +25,7 @@ from skillevaluator.evaluation.tier3_report import (
     agent_eval_result_from_run,
     build_agent_eval_payload,
 )
+from skillevaluator.tier3.harbor.metrics import LEGACY_METRICS, LEGACY_SCORE_POLICY
 from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot, load_dataset_snapshot
 
 
@@ -81,6 +83,8 @@ def test_payload_exposes_report_truth_metadata() -> None:
     assert payload["evaluator_version"] == __version__
     assert payload["dataset_digest"].startswith("sha256:")
     assert payload["dataset_digest_algorithm"] == "skill-evaluator-dataset-snapshot/1"
+    assert payload["score_policy"] == DEFAULT_SCORE_POLICY
+    assert payload["attempt_policy"]["score_policy"] == DEFAULT_SCORE_POLICY
     assert payload["dataset_summary"] == {
         "total_tasks": 3,
         "positive_tasks": 1,
@@ -97,7 +101,34 @@ def test_payload_exposes_report_truth_metadata() -> None:
         "overall_pass_rule": "one_supported_agent_all_dimensions_pass",
     }
     assert payload["summary"]["dataset_summary"] == payload["dataset_summary"]
+    assert payload["summary"]["score_policy"] == payload["score_policy"]
     assert payload["summary"]["verdict_policy"] == payload["verdict_policy"]
+
+
+def test_legacy_payload_preserves_the_versioned_metric_mean() -> None:
+    scores = {
+        "skill_execution": 0.2,
+        "skill_efficiency": 0.4,
+        "accuracy": 0.6,
+        "goal_accuracy": 0.8,
+        "behavior_check": 1.0,
+    }
+
+    payload = build_agent_eval_payload(
+        "legacy-demo",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "metrics_with_skill": list(LEGACY_METRICS),
+                "with_skill": scores,
+            }
+        },
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["overall_score"] == 0.6
+    assert payload["score_policy"] == LEGACY_SCORE_POLICY
 
 
 def test_advisory_payload_exposes_same_report_truth_metadata() -> None:
@@ -110,6 +141,7 @@ def test_advisory_payload_exposes_same_report_truth_metadata() -> None:
 
     assert payload["evaluated_at"] is None
     assert payload["evaluator_version"] == __version__
+    assert payload["score_policy"] == DEFAULT_SCORE_POLICY
     assert payload["dataset_summary"] == {
         "total_tasks": 0,
         "positive_tasks": 0,

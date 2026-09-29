@@ -26,8 +26,7 @@ from skillevaluator.tier3.harbor.metrics import (
     METRIC_DISPLAY,
     METRIC_QUESTIONS,
     extract_custom_metrics,
-    metric_set_for_reward,
-    metric_value,
+    overall_score_from_metrics,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
@@ -127,9 +126,9 @@ def _pick_best_agent(
     from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
 
     best_agent = ""
-    best_rank: tuple[float, float] | None = None
-    for agent in sorted(agents_data):
-        data = agents_data[agent]
+    best_score = -1.0
+    scored_metric_sets: set[frozenset[str]] = set()
+    for agent, data in agents_data.items():
         if not _findings_eligible(data):
             continue
         persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
@@ -141,11 +140,24 @@ def _pick_best_agent(
             or any(metric_value(with_scores, metric) is None for metric in standard_metrics)
         ):
             continue
-        rank = _canonical_agent_rank_from_info(ranking_data)
-        if rank is None:
+        metrics = tuple(report_data.metrics_for_condition(data, "with_skill"))
+        if data.get("score_policy_with_skill") == LEGACY_SCORE_POLICY:
+            overall = overall_score(
+                {
+                    "metric_set": DEFAULT_METRIC_SET if "security" in metrics else LEGACY_METRIC_SET,
+                    "score_policy": LEGACY_SCORE_POLICY,
+                    **with_scores,
+                }
+            )
+        else:
+            overall = overall_score_from_metrics(with_scores, metrics)
+        if overall is None:
             continue
-        if best_rank is None or rank > best_rank:
-            best_rank = rank
+        scored_metric_sets.add(frozenset(metrics))
+        if len(scored_metric_sets) > 1:
+            return ""
+        if overall > best_score:
+            best_score = overall
             best_agent = agent
     return best_agent
 

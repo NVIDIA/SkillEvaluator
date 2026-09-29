@@ -9,7 +9,7 @@ Harbor calls this with:
   python metric.py -i rewards.jsonl -o metrics.json
 
 Input: JSONL where each line is one task's reward.json content.
-Output: JSON with averaged 5-eval scores.
+Output: JSON with six averaged evaluator scores and their five-dimension overall.
 """
 
 import argparse
@@ -72,7 +72,17 @@ def main(input_path: Path, output_path: Path) -> None:
         c = counts[metric]
         result[metric] = round(sums[metric] / c, 4) if c > 0 else 0.0
 
-    result["overall"] = round(sum(result.values()) / len(result), 4) if result else 0.0
+    if metrics == DEFAULT_METRICS:
+        dimensions = (
+            result["security"],
+            result["accuracy"],
+            result["skill_execution"],
+            round((result["goal_accuracy"] + result["behavior_check"]) / 2, 4),
+            result["skill_efficiency"],
+        )
+        result["overall"] = round(sum(dimensions) / len(dimensions), 4)
+    else:
+        result["overall"] = round(sum(result.values()) / len(result), 4) if result else 0.0
     result["metric_set"] = "skill-evaluator-default-v2" if "security" in metrics else "skill-evaluator-default-v1"
 
     output_path.write_text(json.dumps(result, indent=2))

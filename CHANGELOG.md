@@ -14,6 +14,26 @@ All notable changes to SkillEvaluator are documented in this file.
   persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
   retain their historical semantics
   (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
+- Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
+  similarity scans now allow 1,024 selected manifests and 128 million scalar
+  comparisons by default, covering 343 skills with 2,048-dimensional embeddings.
+  Add `--max-entries` and `--max-scalar-comparisons` for explicit scan budgets;
+  exceeded limits fail with actionable errors and never truncate the collection.
+  Fresh pairwise scans reject excessive scalar work after the first validated
+  embedding response, before requesting more embeddings or saving a catalog.
+  Collection discovery has its own 20,000-path ceiling, allowing the supported
+  5,000-entry maximum for minimal collections while retaining the 4,096-path
+  per-skill ceiling. Invalid Python command API budgets raise option-specific
+  errors before provider initialization. Similarity comparisons validate and
+  normalize each vector once instead of once per pair, making large pairwise
+  scans more than an order of magnitude faster. Equal nonzero embeddings score
+  exactly 1.0, so `--threshold 1` reports exact duplicates.
+- Keep headings and comments inside fenced code examples in their enclosing Markdown
+  section during Tier 2 content chunking, preserving original source line numbers.
+- Run the public Docker image as an unprivileged user, with writable default report and home directories.
+  Document UID/GID overrides for host-owned output mounts.
+- Pin the HTML report Chart.js dependency and verify its integrity before browser execution.
+
 - Preserve full Codex gateway model IDs in cloud environments, including E2B
   and Daytona, while retaining local runtime setup and native provider routing.
 - Keep Tier 2 execution diagnostics visible alongside duplicate findings in
@@ -128,6 +148,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).

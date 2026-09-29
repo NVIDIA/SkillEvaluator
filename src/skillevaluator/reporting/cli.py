@@ -90,7 +90,6 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
         )
     if integration:
         if integration["measured"]:
-            ci = f" {esc(integration['ci']['summary'])}" if integration["ci"] else ""
             point = (
                 f" [dim](point estimate: {esc(integration['point_verdict_label'])})[/dim]"
                 if integration["point_verdict_label"]
@@ -98,8 +97,13 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
             )
             console.print(
                 f"  [bold]Integration:[/bold] {esc(integration['verdict_label']).upper()} "
-                f"(lift {integration['integration_lift']}{ci}){point} [dim](advisory)[/dim]"
+                f"(lift {integration['integration_lift']}){point} [dim](advisory)[/dim]"
             )
+            ci = integration["ci"]
+            if ci:
+                console.print(
+                    f"    [dim]{esc(ci['confidence'])} {esc(ci['interval'])}, precision {esc(ci['precision'])}[/dim]"
+                )
             if integration["reason"]:
                 console.print(f"    [dim]{esc(integration['reason'])}[/dim]", soft_wrap=True)
             if integration["components"]:

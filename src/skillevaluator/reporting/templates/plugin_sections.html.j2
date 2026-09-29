@@ -274,6 +274,11 @@
         <tr><td>MCP servers</td><td>{{ c.mcp_runnable }}</td><td>{{ c.mcp_provider_only + c.mcp_unsupported_config }}</td><td>{{ _names_inline(comp.names.mcp_provider_only + comp.names.mcp_unsupported_config, '&mdash;' | safe) }}</td></tr>
         </tbody>
     </table></div>
+    {% if v.dependency_counts %}
+    <p class="t3-section-hint" id="tier3-plugin-dependency-counts"><strong>Declared dependency resolution:</strong>
+        {% for row in v.dependency_counts %}<span class="metadata-tag">{{ row.state }}: {{ row.count }}</span>{% endfor %}
+    </p>
+    {% endif %}
     </div>
 </details>
 {% endmacro %}

@@ -427,6 +427,11 @@ def test_complete_plugin_run_reports_complete_and_no_incomplete_callout(tmp_path
     assert result.passed is True
     assert element_text(html, "tier3-plugin-incomplete") is None
     assert "0 components not evaluated" in (element_text(html, "tier3-plugin-coverage") or "")
+    completeness = element_text(html, "tier3-plugin-completeness") or ""
+    assert completeness.startswith("Plugin Dependency Completeness — Complete")
+    assert element_text(html, "tier3-plugin-dependency-counts") == (
+        "Declared dependency resolution: provided: 1 referenced: 0 missing: 0 external: 1 unresolved: 0"
+    )
 
 
 def test_tier3_payload_carries_plugin_signals_per_agent_and_for_the_best_agent(tmp_path: Path) -> None:

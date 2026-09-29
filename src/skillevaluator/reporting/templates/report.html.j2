@@ -2419,7 +2419,7 @@
             </div>
             {%- if tier3_plugin %}
             {%- if tier3_plugin.coverage %}{{ tier3_coverage_section(tier3_plugin) }}{% endif %}
-            {%- if tier3_plugin.completeness and (tier3_plugin.partial or not tier3_plugin.coverage) %}{{ tier3_completeness_section(tier3_plugin) }}{% endif %}
+            {%- if tier3_plugin.completeness %}{{ tier3_completeness_section(tier3_plugin) }}{% endif %}
             {%- endif %}
 
             {% if tier3.dimensions %}

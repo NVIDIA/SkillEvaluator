@@ -21,6 +21,7 @@ from skillevaluator.tier3.harbor import collector, report
 from skillevaluator.tier3.harbor.adapter import _write_test_sh
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
+    DEFAULT_SCORE_POLICY,
     RESERVED_METRIC_NAMES,
     metric_set_for_reward,
     overall_score,
@@ -124,6 +125,7 @@ def test_verifier_main_fails_closed_after_collecting_every_required_judge(
     assert rich["accuracy"] is None
     assert rich["goal_accuracy"] is None
     assert rich["behavior_check"] is None
+    assert rich["score_policy"] == DEFAULT_SCORE_POLICY
     assert rich["evaluation_status"] == "failed"
     assert rich["details"]["accuracy"]["status"] == "error"
     assert rich["details"]["goal_accuracy"]["status"] == "error"
@@ -182,6 +184,7 @@ def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
     numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
     assert "evaluation_status" not in rich
     assert "evaluation_errors" not in rich
+    assert rich["score_policy"] == DEFAULT_SCORE_POLICY
     assert {metric: numeric[metric] for metric in verifier.DISPLAY_METRICS} == {
         "security": 1.0,
         "skill_execution": 1.0,
@@ -190,8 +193,8 @@ def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
         "goal_accuracy": 0.0,
         "behavior_check": 0.0,
     }
-    assert numeric["overall"] == 0.5
-    assert overall_score(numeric) == 0.5
+    assert numeric["overall"] == 0.6
+    assert overall_score(numeric) == 0.6
 
 
 def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(

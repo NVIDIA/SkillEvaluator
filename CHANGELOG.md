@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 now uses one versioned, equal-weight five-dimension overall-score
+  policy across Harbor rewards, pass@k, Skill Lift, reports, comparisons, and
+  best-agent selection. Previously, some paths averaged all six evaluators
+  directly while reports averaged five dimensions, which gave Effectiveness
+  two votes and could reverse the reported lift direction. Current artifacts
+  persist `skill-evaluator-dimension-mean-v1`; legacy and partial artifacts
+  retain their historical semantics. Conditions keep their own recorded metric
+  sets; overall lift and best-agent rankings are omitted across incomparable
+  metric sets while individual scores are preserved
+  (Relates to [#61](https://github.com/NVIDIA/SkillEvaluator/issues/61)).
 - Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
   similarity scans now allow 1,024 selected manifests and 128 million scalar
   comparisons by default, covering 343 skills with 2,048-dimensional embeddings.

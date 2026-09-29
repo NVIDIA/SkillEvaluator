@@ -20,11 +20,16 @@ from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
+    DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
+    LEGACY_METRIC_SET,
+    LEGACY_SCORE_POLICY,
     METRIC_DESCRIPTIONS,
     METRIC_DISPLAY,
     METRIC_QUESTIONS,
     extract_custom_metrics,
+    overall_score,
+    overall_score_from_metrics,
 )
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -87,14 +92,29 @@ def _pick_best_agent(
     """Select the agent with the highest overall with-skill score."""
     best_agent = ""
     best_score = -1.0
+    scored_metric_sets: set[frozenset[str]] = set()
     for agent, data in agents_data.items():
         if not _findings_eligible(data):
             continue
         with_scores = data.get("with_skill", {})
         if not with_scores:
             continue
-        metrics = [m for m in DISPLAY_METRICS if m in with_scores] or list(DISPLAY_METRICS)
-        overall = sum(with_scores.get(m, 0.0) for m in metrics) / len(metrics)
+        metrics = tuple(report_data.metrics_for_condition(data, "with_skill"))
+        if data.get("score_policy_with_skill") == LEGACY_SCORE_POLICY:
+            overall = overall_score(
+                {
+                    "metric_set": DEFAULT_METRIC_SET if "security" in metrics else LEGACY_METRIC_SET,
+                    "score_policy": LEGACY_SCORE_POLICY,
+                    **with_scores,
+                }
+            )
+        else:
+            overall = overall_score_from_metrics(with_scores, metrics)
+        if overall is None:
+            continue
+        scored_metric_sets.add(frozenset(metrics))
+        if len(scored_metric_sets) > 1:
+            return ""
         if overall > best_score:
             best_score = overall
             best_agent = agent

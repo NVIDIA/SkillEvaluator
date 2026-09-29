@@ -1100,6 +1100,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--policy", str(params["policy_path"])])
     if params.get("profile"):
         argv.extend(["--profile", str(params["profile"])])
+    if params.get("repo_root"):
+        argv.extend(["--repo-root", str(params["repo_root"])])
     if params.get("agent_eval") is True:
         argv.append("--tier3")
     elif params.get("agent_eval") is False:

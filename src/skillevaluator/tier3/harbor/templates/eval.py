@@ -1202,6 +1202,27 @@ def _judge_error(error_reason, **metadata):
     return {**metadata, "score": None, "status": "error", "reason": safe_reason}
 
 
+NOT_APPLICABLE_STATUS = "not_applicable"
+_NO_GROUND_TRUTH_REASON = "N/A: no ground_truth defined for this eval case"
+_NO_EXPECTED_BEHAVIOR_REASON = "N/A: no expected_behavior defined for this eval case"
+
+
+def _judge_not_applicable(reason, **metadata):
+    """Return a scoreless result for a judge that has nothing to judge against."""
+    return {**metadata, "score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _has_judge_reference(value):
+    """Return whether a ground_truth / expected_behavior value gives a judge something to check."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(_has_judge_reference(item) for item in value)
+    return bool(value)
+
+
 def _bounded_judge_text(value):
     """Normalize trusted-shape model text before it reaches artifacts and reports."""
     text = _redact_configured_credentials(value).strip() if isinstance(value, str) else ""
@@ -4080,8 +4101,8 @@ def _goal_payload_error(parsed):
 
 
 def judge_accuracy(question, ground_truth, agent_text):
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
     prompt = f"""You are an expert evaluator for AI agent responses. Evaluate by checking \
 each criterion below against the expected answer. For each, answer YES or NO.
 
@@ -4135,8 +4156,8 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
 
 
 def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
     if _ragas_goal_accuracy_enabled():
         try:
@@ -4277,8 +4298,8 @@ _BEHAVIOR_RETRY_REMINDER = (
 
 
 def judge_behavior_check(conversation_text, expected_behaviors):
-    if not expected_behaviors:
-        return {"score": 1.0, "reason": "No expected_behavior defined", "results": []}
+    if not _has_judge_reference(expected_behaviors):
+        return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
 
@@ -4388,17 +4409,28 @@ def _finite_reward_number(value):
     return numeric if math.isfinite(numeric) else None
 
 
-def _normalize_required_judge_result(metric, result):
+def _normalize_required_judge_result(metric, result, *, allow_not_applicable=False):
     if isinstance(result, dict):
         normalized = dict(result)
-        status_is_error = str(result.get("status", "")).casefold() == "error"
+        status = str(result.get("status", "")).casefold()
+        status_is_error = status == "error"
+        if status == NOT_APPLICABLE_STATUS and allow_not_applicable:
+            # Only the verifier decides N/A (the case has no reference input);
+            # the score is always null so it can never be averaged as 0 or 1.
+            normalized["score"] = None
+            normalized["status"] = NOT_APPLICABLE_STATUS
+            normalized["reason"] = _bounded_judge_text(result.get("reason")) or f"{metric} is not applicable"
+            return normalized
         score_is_valid = _finite_reward_number(result.get("score")) is not None
-        if not status_is_error and score_is_valid:
+        if not status_is_error and status != NOT_APPLICABLE_STATUS and score_is_valid:
             return normalized
         supplied_reason = str(result.get("reason") or "").strip()
-        reason = supplied_reason if status_is_error else f"Required {metric} judge returned an invalid score"
-        if supplied_reason and not status_is_error:
-            reason = f"{reason}: {supplied_reason}"
+        if status == NOT_APPLICABLE_STATUS:
+            reason = f"Required {metric} judge reported not_applicable although the eval case defines its reference"
+        else:
+            reason = supplied_reason if status_is_error else f"Required {metric} judge returned an invalid score"
+            if supplied_reason and not status_is_error:
+                reason = f"{reason}: {supplied_reason}"
     else:
         normalized = {}
         reason = f"Required {metric} judge returned an invalid result"
@@ -4409,12 +4441,31 @@ def _normalize_required_judge_result(metric, result):
     return normalized
 
 
-def _call_required_judge(metric, judge, *args, **kwargs):
+def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwargs):
     try:
         result = judge(*args, **kwargs)
     except Exception as exc:
         result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
-    return _normalize_required_judge_result(metric, result)
+    return _normalize_required_judge_result(metric, result, allow_not_applicable=allow_not_applicable)
+
+
+def _reward_overall(result, details):
+    """Mean of the scored display metrics, excluding judged metrics recorded as N/A."""
+    scores = [
+        float(result[metric])
+        for metric in DISPLAY_METRICS
+        if not (
+            result.get(metric) is None
+            and isinstance(details.get(metric), dict)
+            and details[metric].get("status") == NOT_APPLICABLE_STATUS
+        )
+    ]
+    return round(sum(scores) / len(scores), 4)
+
+
+def _format_log_score(value):
+    numeric = _finite_reward_number(value)
+    return f"{numeric:.2f}" if numeric is not None else "N/A"
 
 
 def _numeric_reward_payload(result, overall):
@@ -4554,6 +4605,7 @@ def main():
         question,
         ground_truth,
         bundles["accuracy"]["prompt_evidence"],
+        allow_not_applicable=not _has_judge_reference(ground_truth),
     )
     acc_score = acc_result["score"]
     details["accuracy"] = acc_result
@@ -4566,6 +4618,7 @@ def main():
         ground_truth,
         bundles["goal_accuracy"]["prompt_evidence"],
         tool_summary="",
+        allow_not_applicable=not _has_judge_reference(ground_truth),
     )
     ga_score = ga_result["score"]
     details["goal_accuracy"] = ga_result
@@ -4576,6 +4629,7 @@ def main():
         judge_behavior_check,
         bundles["behavior_check"]["prompt_evidence"],
         expected_behavior,
+        allow_not_applicable=not _has_judge_reference(expected_behavior),
     )
     bc_score = bc_result["score"]
     details["behavior_check"] = bc_result
@@ -4616,20 +4670,18 @@ def main():
         logger.error("Required LLM judging failed for: %s", ", ".join(sorted(judge_errors)))
         raise SystemExit(1)
 
-    scores = [float(result[metric]) for metric in DISPLAY_METRICS]
-    overall = round(sum(scores) / len(scores), 4)
+    # N/A judged metrics (null score, details status "not_applicable") are left
+    # out of the overall. The deterministic metrics are always scored, so the
+    # mean is never empty. reward.json stays numeric-only for Harbor; the N/A
+    # markers travel in the skill_evaluator_reward.json sidecar.
+    overall = _reward_overall(result, details)
 
     write_reward_outputs(result, overall)
 
     logger.info(
-        "Scores: security=%.2f skill_exec=%.2f efficiency=%.2f accuracy=%.2f goal=%.2f behavior=%.2f overall=%.2f",
-        security_score,
-        se_score,
-        sef_score,
-        acc_score,
-        ga_score,
-        bc_score,
-        overall,
+        "Scores: security=%s skill_exec=%s efficiency=%s accuracy=%s goal=%s behavior=%s overall=%s",
+        *(_format_log_score(value) for value in (security_score, se_score, sef_score, acc_score, ga_score, bc_score)),
+        _format_log_score(overall),
     )
 
 

@@ -20,7 +20,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_METRICS, NOT_APPLICABLE_ELIGIBLE_METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +468,13 @@ def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict
     return list(groups.values())
 
 
+def _not_applicable_metric_list(value: Any) -> list[str]:
+    """Return the judged metrics a summary recorded as N/A for its whole arm."""
+    if not isinstance(value, list):
+        return []
+    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in value]
+
+
 def _nonnegative_counter(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
@@ -544,6 +551,9 @@ def load_agent_data(
                     dimension_key = f"dimensions_{key}"
                     if "dimensions" in data:
                         agent_info[dimension_key] = data.get("dimensions", {})
+                    not_applicable = _not_applicable_metric_list(data.get("not_applicable_metrics"))
+                    if not_applicable:
+                        agent_info[f"not_applicable_{key}"] = not_applicable
                     pass_key = f"pass_{key}"
                     if "pass_at_k" in data:
                         agent_info[pass_key] = data["pass_at_k"]
@@ -752,6 +762,7 @@ def load_agent_data(
             condition_status = _condition_status(agent_info, condition)
             if condition_status == "succeeded":
                 continue
+            agent_info.pop(f"not_applicable_{condition}", None)
             condition_info = condition_execution.get(condition, {})
             for field in fields:
                 if field.startswith("pass_") and condition_status in {"failed", "unknown"}:

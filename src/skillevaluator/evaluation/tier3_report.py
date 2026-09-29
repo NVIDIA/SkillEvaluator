@@ -794,6 +794,8 @@ def build_agent_eval_payload(
         "dimension_hints": dict(DIMENSION_HINTS),
         "evaluators": best.get("evaluators", {}),
         "evaluator_cards": best.get("evaluator_cards", []),
+        "not_applicable_evaluators": best.get("not_applicable_evaluators", []),
+        "not_applicable_dimensions": best.get("not_applicable_dimensions", []),
         "cases": best.get("cases", []),
         "trials": canonical_trials,
         "pass_at_k": best.get("pass_at_k", {}),
@@ -1262,6 +1264,9 @@ def _build_agent(
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
     )
+    with_not_applicable = _arm_not_applicable(info, "with_skill") if with_quality_available else []
+    not_applicable_evaluators = _not_applicable_evaluators(metrics, with_scores, with_not_applicable)
+    not_applicable_dimensions = _not_applicable_dimensions(dimensions, with_not_applicable)
     overall_ws = _mean([d["with_skill"] for d in dimensions])
     overall_bl = _mean([d["baseline"] for d in dimensions])
     if overall_ws is None and not metrics and with_quality_available:
@@ -1315,7 +1320,9 @@ def _build_agent(
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
         "evaluators": evaluators,
         "evaluator_cards": [],
+        "not_applicable_evaluators": not_applicable_evaluators,
         "dimensions": dimensions,
+        "not_applicable_dimensions": not_applicable_dimensions,
         "with_skill": overall_ws,
         "baseline": overall_bl,
         "lift": overall_lift,
@@ -1356,6 +1363,57 @@ def _attach_agent_report_details(
         custom_lift=info.get("custom_lift") or {},
         report_budget=report_budget,
     )
+
+
+def _arm_not_applicable(info: dict[str, Any], condition: str) -> list[str]:
+    """Judged metrics an arm recorded as not applicable in every trial."""
+    from skillevaluator.tier3.harbor.metrics import NOT_APPLICABLE_ELIGIBLE_METRICS
+
+    raw = info.get(f"not_applicable_{condition}")
+    if not isinstance(raw, list):
+        return []
+    return [metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric in raw]
+
+
+def _not_applicable_evaluators(
+    metrics: list[str],
+    with_scores: dict[str, Any],
+    not_applicable: list[str],
+) -> list[dict[str, str]]:
+    """Evaluators with no with-skill score because no eval case gave them a reference."""
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, NOT_APPLICABLE_REASONS
+
+    return [
+        {
+            "id": metric,
+            "label": METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
+            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to these eval cases"),
+        }
+        for metric in metrics
+        if metric in not_applicable and _finite_float(with_scores.get(metric)) is None
+    ]
+
+
+def _not_applicable_dimensions(
+    dimensions: list[dict[str, Any]],
+    not_applicable: list[str],
+) -> list[dict[str, str]]:
+    """Dimensions left unscored because every source evaluator was not applicable."""
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, dimension_is_not_applicable
+
+    scored = {dimension.get("id") for dimension in dimensions}
+    out: list[dict[str, str]] = []
+    for dim_id in _DIMENSION_IDS:
+        if dim_id in scored or not dimension_is_not_applicable(dim_id, not_applicable):
+            continue
+        labels = ", ".join(METRIC_DISPLAY.get(metric, metric) for metric in DIMENSION_MAPPING[dim_id]["evaluators"])
+        out.append(
+            {
+                "id": dim_id,
+                "reason": f"Not applicable: {labels} had nothing to judge against in any eval case",
+            }
+        )
+    return out
 
 
 def _build_evaluators(
@@ -1869,6 +1927,8 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     from skillevaluator.tier3.harbor.metrics import (
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
+        NOT_APPLICABLE_REASONS,
+        metric_is_not_applicable,
         metric_set_for_reward,
         metric_value,
     )
@@ -1893,6 +1953,13 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             "scores": scores,
             "overall": _finite_float(reward.get("overall")),
         }
+        not_applicable = {
+            metric: NOT_APPLICABLE_REASONS[metric]
+            for metric in metrics
+            if metric in NOT_APPLICABLE_REASONS and metric_is_not_applicable(reward, metric)
+        }
+        if not_applicable:
+            trial["not_applicable"] = not_applicable
         traj = reward.get("_traj")
         if isinstance(traj, dict):
             trial["steps"] = traj.get("steps")

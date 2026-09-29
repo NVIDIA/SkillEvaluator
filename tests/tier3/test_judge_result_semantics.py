@@ -1204,20 +1204,46 @@ def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkey
     assert result["results"] == [{"passed": True}]
 
 
-def test_neutral_judge_skips_remain_unchanged(judge_module) -> None:
-    assert judge_module.judge_accuracy("question", "", "agent response") == {
-        "score": 1.0,
-        "reason": "No ground_truth -- skipped",
+@pytest.mark.parametrize("ground_truth", ["", "   \n", None, []])
+def test_judges_without_ground_truth_are_not_applicable(judge_module, monkeypatch, ground_truth) -> None:
+    def no_llm(*_args, **_kwargs):
+        raise AssertionError("an N/A judge must not call the LLM")
+
+    monkeypatch.setattr(judge_module, "call_public_llm", no_llm)
+
+    assert judge_module.judge_accuracy("question", ground_truth, "agent response") == {
+        "score": None,
+        "status": "not_applicable",
+        "reason": "N/A: no ground_truth defined for this eval case",
     }
-    assert judge_module.judge_goal_accuracy("question", "", "agent response") == {
-        "score": 1.0,
-        "reason": "No ground_truth -- skipped",
+    assert judge_module.judge_goal_accuracy("question", ground_truth, "agent response") == {
+        "score": None,
+        "status": "not_applicable",
+        "reason": "N/A: no ground_truth defined for this eval case",
     }
-    assert judge_module.judge_behavior_check("conversation", []) == {
-        "score": 1.0,
-        "reason": "No expected_behavior defined",
+
+
+@pytest.mark.parametrize("expected_behaviors", [[], None, ["", "  "]])
+def test_behavior_check_without_expected_behavior_is_not_applicable(
+    judge_module, monkeypatch, expected_behaviors
+) -> None:
+    def no_llm(*_args, **_kwargs):
+        raise AssertionError("an N/A judge must not call the LLM")
+
+    monkeypatch.setattr(judge_module, "call_public_llm", no_llm)
+
+    assert judge_module.judge_behavior_check("conversation", expected_behaviors) == {
+        "score": None,
+        "status": "not_applicable",
+        "reason": "N/A: no expected_behavior defined for this eval case",
         "results": [],
     }
+
+
+def test_shared_and_template_not_applicable_results_match() -> None:
+    assert eval_template.judge_accuracy("q", "", "a") == llm_judge.judge_accuracy("q", "", "a")
+    assert eval_template.judge_goal_accuracy("q", "", "a") == llm_judge.judge_goal_accuracy("q", "", "a")
+    assert eval_template.judge_behavior_check("c", []) == llm_judge.judge_behavior_check("c", [])
 
 
 def test_shared_and_template_accuracy_core_results_match(monkeypatch) -> None:

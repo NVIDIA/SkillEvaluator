@@ -2423,6 +2423,18 @@
                         </td>
                     </tr>
                     {% endfor %}
+                    {% for na_dim in tier3.not_applicable_dimensions or [] %}
+                    <tr data-not-applicable="true">
+                        <td>
+                            <strong>{{ na_dim.id | title }}</strong>
+                            {% if t3_dim_hints.get(na_dim.id) %}<div class="t3-dim-hint">{{ t3_dim_hints.get(na_dim.id) }}</div>{% endif %}
+                        </td>
+                        <td>N/A</td><td>N/A</td><td style="color:var(--text-secondary);">N/A</td>
+                        <td><span class="t3-pill warning">N/A</span></td>
+                        <td></td>
+                        <td class="t3-reasoning">{{ na_dim.reason }}</td>
+                    </tr>
+                    {% endfor %}
                     </tbody>
                 </table>
                 </div>
@@ -2816,6 +2828,7 @@
                     <tbody>
                     {% for trial in tier3.trials %}
                         {% set scores = trial.scores or {} %}
+                        {% set trial_na = trial.not_applicable if trial.not_applicable is mapping else {} %}
                         {% set tokens = trial.tokens or {} %}
                         <tr>
                             <td><strong>{{ trial.agent or '(default)' }}</strong></td>
@@ -2825,7 +2838,8 @@
                             </td>
                             {% for eval_id in t3_eval_ids %}
                                 {% set s = scores.get(eval_id) %}
-                                <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% endif %}">{{ "%.2f" | format(s) if s is not none else "—" }}</td>
+                                {% set na_reason = trial_na.get(eval_id) if s is none else none %}
+                                <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% elif na_reason %}color:var(--text-secondary);{% endif %}"{% if na_reason %} title="{{ na_reason }}" data-not-applicable="true"{% endif %}>{{ "%.2f" | format(s) if s is not none else ("N/A" if na_reason else "—") }}</td>
                             {% endfor %}
                             <td>{{ trial.steps or 0 }}</td>
                             <td>{{ ((tokens.prompt or 0) + (tokens.completion or 0)) }}</td>
@@ -3156,6 +3170,16 @@
                 {% endfor %}
                 </div>
                 {% endif %}
+                {% if agent.not_applicable_evaluators %}
+                <div class="t3-na-evaluators" style="color:var(--text-secondary);font-size:0.85rem;margin-top:0.75rem;">
+                    <strong>Not applicable (excluded from scores and lift):</strong>
+                    <ul style="margin:0.25rem 0 0;">
+                    {% for item in agent.not_applicable_evaluators %}
+                        <li><strong>{{ item.label or item.id }}</strong>: {{ item.reason }}</li>
+                    {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
             </div>
             {% endfor %}
             {% else %}
@@ -3408,6 +3432,13 @@
                         <td style="color:{{ 'var(--success-color)' if scores.lift is not none and scores.lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if scores.lift is not none and scores.lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
                             {{ "%+.2f" | format(scores.lift) if scores.lift is not none else "N/A" }}
                         </td>
+                    </tr>
+                    {% endfor %}
+                    {% for item in tier3.not_applicable_evaluators or [] %}
+                    <tr data-not-applicable="true" title="{{ item.reason }}">
+                        <td><strong>{{ item.label or (item.id | replace("_", " ") | title) }}</strong></td>
+                        <td>N/A</td><td>N/A</td>
+                        <td style="color:var(--text-secondary);">N/A (not applicable)</td>
                     </tr>
                     {% endfor %}
                     </tbody>

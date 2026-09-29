@@ -183,6 +183,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
   `reward.json` `entry_id` metadata, using folder-name parsing only as an
   unambiguous legacy fallback.
+- Tier 3 `accuracy`, `goal_accuracy`, and `behavior_check` are now not
+  applicable (N/A) instead of a fabricated 1.0 when an eval case has no
+  `ground_truth` or `expected_behavior`; N/A metrics are left out of overall
+  scores, averages, and lift, and render as N/A.
 - Tier 3 local mode now drops evaluator-managed empty process-loader resets
   while continuing to reject non-empty loader overrides, allowing generated
   tasks to reach agent execution

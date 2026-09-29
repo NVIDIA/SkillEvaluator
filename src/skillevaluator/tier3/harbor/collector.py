@@ -28,12 +28,17 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
     LEGACY_METRIC_SET,
     LEGACY_METRICS,
+    NOT_APPLICABLE_ELIGIBLE_METRICS,
     average_custom_metrics,
     average_metrics,
     dimension_scores,
     extract_custom_metrics,
+    mark_not_applicable,
+    metric_is_not_applicable,
     metric_set_for_reward,
     metric_value,
+    not_applicable_counts,
+    not_applicable_metrics,
     overall_score,
     score_definition,
 )
@@ -1514,6 +1519,7 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
         return ""
 
     root_metrics = _standard_reward_metrics(root_rewards) if isinstance(root_rewards, dict) else ()
+    declared_not_applicable: dict[str, frozenset[str]] | None = None
 
     for index, step in enumerate(step_results, start=1):
         if not isinstance(step, dict):
@@ -1562,14 +1568,66 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
         )
         if not expected_metrics:
             continue
-        if all(metric_value(rewards, metric) is not None for metric in expected_metrics):
+        missing = {metric for metric in expected_metrics if metric_value(rewards, metric) is None}
+        if not missing:
             continue
+        # Harbor keeps only numeric rewards; a judged metric the step's verifier
+        # recorded as N/A is absent here, never non-finite, and is declared in
+        # that step's sidecar.
+        raw_step_name = step.get("step_name")
+        if trial_root is not None and isinstance(raw_step_name, str) and not missing.intersection(rewards):
+            if declared_not_applicable is None:
+                declared_not_applicable = _declared_not_applicable_metrics(trial_root)
+            if missing <= declared_not_applicable.get(raw_step_name, frozenset()):
+                continue
 
         return (
             f"Constituent default reward for step {step_name} is incomplete, non-finite, or failed; "
             "the authoritative aggregate was not scored"
         )
     return ""
+
+
+def _declared_not_applicable_metrics(trial_dir: Path) -> dict[str, frozenset[str]]:
+    """Return the judged metrics each verifier sidecar recorded as N/A.
+
+    Keys are step directory names, with ``""`` for the trial-root verifier.
+    Reuses the bounded, no-follow sidecar scan; an incomplete scan declares
+    nothing (the judge-failure merge already makes that trial unscoreable).
+    """
+    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
+    if scan_failure:
+        return {}
+    declared: dict[str, frozenset[str]] = {}
+    for step_name, path, expected in sidecar_paths:
+        sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
+        if read_failure or sidecar is None:
+            continue
+        declared[step_name] = frozenset(
+            metric for metric in NOT_APPLICABLE_ELIGIBLE_METRICS if metric_is_not_applicable(sidecar, metric)
+        )
+    return declared
+
+
+def _restore_not_applicable_markers(data: dict[str, Any], trial_dir: Path) -> None:
+    """Carry verifier N/A markers onto a reward rebuilt from Harbor's numeric ``result.json``.
+
+    A judged metric absent from the rebuilt reward becomes N/A only when every
+    verifier sidecar of the trial recorded it as N/A. Otherwise it stays
+    missing and the reward stays unscoreable.
+    """
+    if str(data.get("evaluation_status") or "").casefold() in {"error", "failed"}:
+        return
+    metrics = _standard_reward_metrics(data)
+    absent = [metric for metric in metrics if metric in NOT_APPLICABLE_ELIGIBLE_METRICS and metric not in data]
+    if not absent:
+        return
+    declared = _declared_not_applicable_metrics(trial_dir)
+    if not declared:
+        return
+    for metric in absent:
+        if all(metric in names for names in declared.values()):
+            mark_not_applicable(data, metric)
 
 
 def _merge_constituent_default_reward_failure(
@@ -1612,6 +1670,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
             continue
         _merge_constituent_default_reward_failure(data, result, trial_dir)
         _merge_trial_evaluation_failures(data, trial_dir)
+        _restore_not_applicable_markers(data, trial_dir)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
@@ -1685,6 +1744,7 @@ def _extract_rewards(job_dir: Path) -> list[dict[str, Any]]:
             continue
         _merge_constituent_default_reward_failure(data, result, trial_dir)
         _merge_trial_evaluation_failures(data, trial_dir)
+        _restore_not_applicable_markers(data, trial_dir)
         trial_name = str(result.get("trial_name") or trial_dir.name)
         data["_trial_name"] = trial_name
         data["_trial_root_name"] = trial_dir.name
@@ -1929,6 +1989,8 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         for metric in metrics:
             if metric in standard_scores:
                 logical_reward[metric] = standard_scores[metric]
+        for metric in not_applicable_metrics(rows, metrics):
+            mark_not_applicable(logical_reward, metric)
         logical_reward.update(custom_scores)
         if custom_scores:
             logical_reward["custom_metrics"] = custom_scores
@@ -2320,8 +2382,17 @@ def _pass_summary(
 def _compute_lift(
     with_scores: dict[str, float],
     without_scores: dict[str, float],
+    *,
+    with_not_applicable: list[str] | tuple[str, ...] = (),
+    without_not_applicable: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Compute skill lift (with-skill minus without-skill) per metric."""
+    """Compute skill lift (with-skill minus without-skill) per metric.
+
+    A metric that an arm recorded as not applicable in every trial is absent
+    from that arm's scores, so it gets no per-metric lift row. The overall lift
+    is then the mean over the metrics both arms scored, with the same
+    denominator on each side. Any other missing metric still suppresses it.
+    """
     lift: dict[str, Any] = {}
     metrics = tuple(m for m in DISPLAY_METRICS if m in with_scores and m in without_scores)
     for metric in metrics:
@@ -2334,7 +2405,7 @@ def _compute_lift(
             "delta": delta,
             "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
         }
-    if metrics in {DISPLAY_METRICS, LEGACY_METRICS}:
+    if _lift_overall_basket_complete(metrics, with_scores, without_scores, with_not_applicable, without_not_applicable):
         overall_with = sum(with_scores[m] for m in metrics) / len(metrics)
         overall_without = sum(without_scores[m] for m in metrics) / len(metrics)
         lift["overall"] = {
@@ -2343,6 +2414,28 @@ def _compute_lift(
             "delta": round(overall_with - overall_without, 4),
         }
     return lift
+
+
+def _lift_overall_basket_complete(
+    metrics: tuple[str, ...],
+    with_scores: dict[str, float],
+    without_scores: dict[str, float],
+    with_not_applicable: list[str] | tuple[str, ...],
+    without_not_applicable: list[str] | tuple[str, ...],
+) -> bool:
+    """Return whether every active metric is scored by both arms or explained by N/A."""
+    if not metrics:
+        return False
+    for active in (DISPLAY_METRICS, LEGACY_METRICS):
+        if not set(metrics).issubset(active):
+            continue
+        if all(
+            (metric in with_scores or metric in with_not_applicable)
+            and (metric in without_scores or metric in without_not_applicable)
+            for metric in active
+        ):
+            return True
+    return False
 
 
 def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
@@ -3208,6 +3301,7 @@ def _collect_report_only_condition(
 
     logical_rewards = _logical_attempt_rewards(rewards)
     scores, metric_set, metrics = average_metrics(logical_rewards)
+    condition_not_applicable = not_applicable_metrics(logical_rewards, metrics)
     custom_scores = average_custom_metrics(logical_rewards)
     pass_summary = _pass_summary(
         logical_rewards,
@@ -3232,6 +3326,7 @@ def _collect_report_only_condition(
         overall_score = _average_overall(logical_rewards)
     else:
         scores = {}
+        condition_not_applicable = []
         custom_scores = {}
         pass_summary = {}
         overall_score = None
@@ -3255,11 +3350,17 @@ def _collect_report_only_condition(
                 "model": agent_model,
                 "model_source": agent_model_source,
                 "scores": scores,
+                "not_applicable_metrics": condition_not_applicable,
+                "not_applicable_counts": (
+                    not_applicable_counts(logical_rewards, metrics)
+                    if execution["execution_status"] == "succeeded"
+                    else {}
+                ),
                 "custom_scores": custom_scores,
                 "overall_score": overall_score,
                 "metric_set": metric_set,
                 "metrics": list(metrics),
-                "dimensions": dimension_scores(scores),
+                "dimensions": dimension_scores(scores, condition_not_applicable),
                 "num_trials": len(rewards),
                 "pass_at_k": pass_summary,
                 **execution,
@@ -3272,9 +3373,10 @@ def _collect_report_only_condition(
     )
     return {
         "scores": scores,
+        "not_applicable_metrics": condition_not_applicable,
         "custom_scores": custom_scores,
         "overall_score": overall_score,
-        "dimensions": dimension_scores(scores),
+        "dimensions": dimension_scores(scores, condition_not_applicable),
         "pass_at_k": pass_summary,
         "execution": execution,
         "runtime_failures": runtime_failures,
@@ -3347,6 +3449,7 @@ def collect_harbor_results(
         with_rewards: list[dict[str, Any]] = []
         with_logical_rewards: list[dict[str, Any]] = []
         with_scores: dict[str, float] = {}
+        with_not_applicable: list[str] = []
         with_custom_scores: dict[str, float] = {}
         with_pass: dict[str, Any] = {}
         with_runtime_failures: list[dict[str, str]] = []
@@ -3367,6 +3470,7 @@ def collect_harbor_results(
             with_logical_rewards = _logical_attempt_rewards(with_rewards)
             with_trial_failures.extend(invalid_score_failures)
             with_scores, with_metric_set, with_metrics = average_metrics(with_logical_rewards)
+            with_not_applicable = not_applicable_metrics(with_logical_rewards, with_metrics)
             all_results["metric_set"] = with_metric_set
             all_results["metrics"] = list(with_metrics)
             all_results["attempt_policy"]["score_definition"] = score_definition(with_metrics)
@@ -3392,6 +3496,7 @@ def collect_harbor_results(
             )
             if with_execution["execution_status"] != "succeeded":
                 with_scores = {}
+                with_not_applicable = []
                 with_custom_scores = {}
                 with_pass = {}
             with_overall_score = (
@@ -3414,11 +3519,17 @@ def collect_harbor_results(
                         "model": agent_model,
                         "model_source": agent_model_source,
                         "scores": with_scores,
+                        "not_applicable_metrics": with_not_applicable,
+                        "not_applicable_counts": (
+                            not_applicable_counts(with_logical_rewards, with_metrics)
+                            if with_execution["execution_status"] == "succeeded"
+                            else {}
+                        ),
                         "custom_scores": with_custom_scores,
                         "overall_score": with_overall_score,
                         "metric_set": with_metric_set,
                         "metrics": list(with_metrics),
-                        "dimensions": dimension_scores(with_scores),
+                        "dimensions": dimension_scores(with_scores, with_not_applicable),
                         "num_trials": len(with_rewards),
                         "pass_at_k": with_pass,
                         **with_execution,
@@ -3502,6 +3613,7 @@ def collect_harbor_results(
         without_rewards: list[dict[str, Any]] = []
         without_logical_rewards: list[dict[str, Any]] = []
         without_scores: dict[str, float] = {}
+        without_not_applicable: list[str] = []
         without_custom_scores: dict[str, float] = {}
         without_pass: dict[str, Any] = {}
         without_runtime_failures: list[dict[str, str]] = []
@@ -3528,6 +3640,7 @@ def collect_harbor_results(
                 without_logical_rewards = _logical_attempt_rewards(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
                 without_scores, without_metric_set, without_metrics = average_metrics(without_logical_rewards)
+                without_not_applicable = not_applicable_metrics(without_logical_rewards, without_metrics)
                 without_custom_scores = average_custom_metrics(without_logical_rewards)
                 without_pass = _pass_summary(
                     without_logical_rewards,
@@ -3550,6 +3663,7 @@ def collect_harbor_results(
                 )
                 if without_execution["execution_status"] != "succeeded":
                     without_scores = {}
+                    without_not_applicable = []
                     without_custom_scores = {}
                     without_pass = {}
                 without_overall_score = (
@@ -3574,11 +3688,17 @@ def collect_harbor_results(
                             "model": agent_model,
                             "model_source": agent_model_source,
                             "scores": without_scores,
+                            "not_applicable_metrics": without_not_applicable,
+                            "not_applicable_counts": (
+                                not_applicable_counts(without_logical_rewards, without_metrics)
+                                if without_execution["execution_status"] == "succeeded"
+                                else {}
+                            ),
                             "custom_scores": without_custom_scores,
                             "overall_score": without_overall_score,
                             "metric_set": without_metric_set,
                             "metrics": list(without_metrics),
-                            "dimensions": dimension_scores(without_scores),
+                            "dimensions": dimension_scores(without_scores, without_not_applicable),
                             "num_trials": len(without_rewards),
                             "pass_at_k": without_pass,
                             **without_execution,
@@ -3666,6 +3786,7 @@ def collect_harbor_results(
 
         sum_of_parts = {
             "scores": {},
+            "not_applicable_metrics": [],
             "custom_scores": {},
             "overall_score": None,
             "dimensions": {},
@@ -3695,7 +3816,12 @@ def collect_harbor_results(
             )
         integration_lift: dict[str, Any] = {}
         if with_scores and sum_of_parts["scores"]:
-            integration_lift = _compute_lift(with_scores, sum_of_parts["scores"])
+            integration_lift = _compute_lift(
+                with_scores,
+                sum_of_parts["scores"],
+                with_not_applicable=with_not_applicable,
+                without_not_applicable=sum_of_parts.get("not_applicable_metrics", []),
+            )
             (agent_dir / "integration_lift.json").write_text(json.dumps(integration_lift, indent=2), encoding="utf-8")
         arm_observations = {
             "with_skill": _arm_observations(
@@ -3742,7 +3868,12 @@ def collect_harbor_results(
             and without_execution.get("execution_status") == "succeeded"
         )
         if paired_execution_succeeded and with_scores and without_scores:
-            lift = _compute_lift(with_scores, without_scores)
+            lift = _compute_lift(
+                with_scores,
+                without_scores,
+                with_not_applicable=with_not_applicable,
+                without_not_applicable=without_not_applicable,
+            )
             (agent_dir / "lift.json").write_text(json.dumps(lift, indent=2), encoding="utf-8")
 
         custom_lift: dict[str, Any] = {}
@@ -3814,9 +3945,14 @@ def collect_harbor_results(
             "custom_with_skill": with_custom_scores,
             "custom_without_skill": without_custom_scores,
             "custom_sum_of_parts": sum_of_parts["custom_scores"],
-            "dimensions_with_skill": dimension_scores(with_scores),
-            "dimensions_without_skill": dimension_scores(without_scores),
+            "dimensions_with_skill": dimension_scores(with_scores, with_not_applicable),
+            "dimensions_without_skill": dimension_scores(without_scores, without_not_applicable),
             "dimensions_sum_of_parts": sum_of_parts["dimensions"],
+            "not_applicable_metrics": {
+                "with_skill": with_not_applicable,
+                "without_skill": without_not_applicable,
+                "sum_of_parts": sum_of_parts.get("not_applicable_metrics", []),
+            },
             "lift": lift,
             "integration_lift": integration_lift,
             "integration_completeness": integration_completeness,

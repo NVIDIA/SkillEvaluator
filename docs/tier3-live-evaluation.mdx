@@ -561,6 +561,24 @@ Missing metrics are never coerced to `0.0`: an unscored run reports an
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
 `execution_status` is not `succeeded`.
 
+The LLM judges need something to judge against: `accuracy` and
+`goal_accuracy` use the case's `ground_truth` (`expected_output` in the
+agentskills format), and `behavior_check` uses its `expected_behavior`
+(`assertions`). When a case leaves that reference empty, the metric is **not
+applicable** for that trial rather than a free `1.0`. The verifier records a
+`null` score with `status: "not_applicable"` and a `reason` in
+`skill_evaluator_reward.json`. Harbor's `reward.json` stays numeric-only and
+omits the metric. Not-applicable metrics are left out of the trial's overall
+score, the per-arm metric averages, and Skill Lift. Summaries list them under
+`not_applicable_metrics` (every trial N/A) and `not_applicable_counts`, and the
+terminal and HTML report show **N/A**. A dimension loses a not-applicable
+source and reweights the rest, so Effectiveness uses `goal_accuracy` alone when
+no case defines `expected_behavior`. A dimension whose sources are all not
+applicable, such as Correctness when no case has a `ground_truth`, has no score.
+Because the gate needs every dimension, that agent's verdict is Neutral
+(inconclusive) rather than Pass or Fail. A missing metric without the
+verifier's not-applicable marker still leaves the trial unscored.
+
 A partially errored Harbor job remains an execution failure, but rewards from
 its completed trials are preserved when every aggregate error maps to a
 concrete failed trial and Harbor reports no failed status or non-zero aggregate

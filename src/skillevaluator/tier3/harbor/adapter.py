@@ -1795,6 +1795,11 @@ _MCP_LITERAL_SECRET_RE = re.compile(
 )
 
 
+_MCP_COMPLETE_PLACEHOLDER_RE = re.compile(
+    r"(?<!\$)((?:\$\$)*)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
 def _extract_mcp_env_refs(value: object) -> list[str]:
     """Extract all $VAR and ${VAR} references from a string or nested structure."""
     refs: list[str] = []
@@ -1813,11 +1818,18 @@ def _extract_mcp_env_refs(value: object) -> list[str]:
     return refs
 
 
+def _strip_complete_mcp_placeholders(value: str) -> str:
+    """Return the string with complete $VAR and ${VAR} placeholders removed while preserving escaped $$."""
+    return _MCP_COMPLETE_PLACEHOLDER_RE.sub(r"\1", value).strip()
+
+
 def _contains_literal_secret(value: str) -> bool:
-    """Return True if a string contains a literal secret after stripping ${VAR}/$VAR placeholders."""
-    stripped = _COMPOSE_ENV_RE.sub("", value).strip()
+    """Return True if a string contains a literal or malformed secret after stripping ${VAR}/$VAR placeholders."""
+    stripped = _strip_complete_mcp_placeholders(value)
     if not stripped:
         return False
+    if "${" in stripped or "$$" in value:
+        return True
     return bool(_MCP_LITERAL_SECRET_RE.search(stripped))
 
 
@@ -1884,7 +1896,9 @@ def validate_mcp_server_declarations(
             header_refs = _extract_mcp_env_refs(header_val_str)
             is_sensitive_header = any(token in header_lower for token in _MCP_SENSITIVE_HEADER_TOKENS)
             has_literal_secret = _contains_literal_secret(header_val_str)
-            if has_literal_secret or (is_sensitive_header and not header_refs):
+            header_residual = _strip_complete_mcp_placeholders(header_val_str).lower()
+            has_unapproved_sensitive_residual = is_sensitive_header and header_residual not in {"", "bearer", "basic"}
+            if has_literal_secret or has_unapproved_sensitive_residual or (is_sensitive_header and not header_refs):
                 raise ValueError(
                     f"MCP server '{name}' in {source_label} declares literal credential or unapproved authentication "
                     f"header '{header_name_str}'. Literal secrets in mcp_servers.toml are prohibited; use an "
@@ -1908,7 +1922,8 @@ def validate_mcp_server_declarations(
             key_upper = cleaned_key.upper()
             is_sensitive_key = any(token in key_upper for token in _MCP_SENSITIVE_ENV_TOKENS)
             has_literal_secret = _contains_literal_secret(env_val_str)
-            if has_literal_secret or (is_sensitive_key and not env_refs):
+            env_residual = _strip_complete_mcp_placeholders(env_val_str)
+            if has_literal_secret or (is_sensitive_key and (not env_refs or bool(env_residual))):
                 raise ValueError(
                     f"MCP server '{name}' in {source_label} declares literal secret value for sensitive env variable "
                     f"'{cleaned_key}'. Use an operator-approved ${{VAR}} reference with SKILLEVALUATOR_ALLOWED_MCP_SECRETS."

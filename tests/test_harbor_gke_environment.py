@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import urllib.parse
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,7 @@ from kubernetes import client as k8s_client
 import skillevaluator.tier3.harbor.gke_environment as gke_env_mod
 from skillevaluator.tier3.harbor.gke_environment import (
     SkillEvaluatorGKEEnvironment,
+    _build_metadata_blocking_network_policy,
     _redact_exec_stderr,
 )
 
@@ -29,40 +31,93 @@ def _make_pod(name: str = "eval-pod", namespace: str = "skill-eval") -> k8s_clie
     )
 
 
-def test_gke_environment_create_pod_fails_closed_on_service_account_api_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Fail closed when ServiceAccount inspection raises a Kubernetes API error without Workload Identity opt-in."""
+def _make_weak_metadata_network_policy(namespace: str = "skill-eval") -> k8s_client.V1NetworkPolicy:
+    """Return a weakened V1NetworkPolicy missing the Standard GKE 169.254.169.252/32 exclusion."""
+    policy = _build_metadata_blocking_network_policy(namespace)
+    policy.spec.egress[0].to[0].ip_block._except = ["169.254.169.254/32"]
+    return policy
+
+
+@pytest.fixture
+def make_gke_env(monkeypatch: pytest.MonkeyPatch) -> Callable[..., SkillEvaluatorGKEEnvironment]:
+    """Provide a factory for SkillEvaluatorGKEEnvironment wired to fake CoreV1Api and NetworkingV1Api."""
     monkeypatch.delenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", raising=False)
     monkeypatch.setattr(GKEEnvironment, "_api", property(lambda self: self._fake_api))
+
+    def _factory(
+        *,
+        namespace: str = "skill-eval",
+        allow_workload_identity: bool = False,
+        compose_mode: bool = False,
+        fake_api: object | None = None,
+        networking_api: object | None = None,
+    ) -> SkillEvaluatorGKEEnvironment:
+        env = object.__new__(SkillEvaluatorGKEEnvironment)
+        env.pod_name = "pod-under-test"
+        env.namespace = namespace
+        env._compose_mode = compose_mode
+        env._kwargs = {"allow_workload_identity": "1"} if allow_workload_identity else {}
+        env._allow_workload_identity = allow_workload_identity
+        env._persistent_env = {}
+        env._fake_api = fake_api
+        if networking_api is not None:
+            env._networking_api = networking_api
+        return env
+
+    return _factory
+
+
+def test_gke_environment_create_pod_fails_closed_on_service_account_api_error(
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+) -> None:
+    """Fail closed when ServiceAccount inspection raises a Kubernetes API error without Workload Identity opt-in."""
 
     def raise_forbidden(**_kw: object) -> None:
         raise RuntimeError("403 Forbidden: serviceaccounts 'default' is forbidden")
 
-    env = object.__new__(SkillEvaluatorGKEEnvironment)
-    env.namespace = "skill-eval"
-    env._kwargs = {}
-    env._allow_workload_identity = False
-    env._fake_api = SimpleNamespace(read_namespaced_service_account=raise_forbidden)
+    env = make_gke_env(fake_api=SimpleNamespace(read_namespaced_service_account=raise_forbidden))
 
     with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
         asyncio.run(env._create_pod(_make_pod("pod-forbidden")))
 
 
 @pytest.mark.parametrize(
-    ("allow_workload_identity", "annotations", "expected_metadata_host", "expected_automount", "expect_error"),
+    (
+        "allow_workload_identity",
+        "annotations",
+        "has_networking_api",
+        "expected_metadata_host",
+        "expected_automount",
+        "expect_error",
+    ),
     [
-        (False, {}, "127.0.0.1:1", False, False),
+        # 1. Unannotated KSA WITHOUT NetworkingV1Api / metadata NetworkPolicy fails closed (offline reproduction)
+        (False, {}, False, "127.0.0.1:1", False, True),
+        # 2. Unannotated KSA WITH verified metadata NetworkPolicy succeeds and labels pod
+        (False, {}, True, "127.0.0.1:1", False, False),
+        # 3. Annotated KSA (iam.gke.io/gcp-service-account) fails closed even with NetworkingV1Api
         (
             False,
             {"iam.gke.io/gcp-service-account": "eval-sa@my-proj.iam.gserviceaccount.com"},
+            True,
             "127.0.0.1:1",
             False,
             True,
         ),
+        # 4. Direct WIF email annotation (iam.gke.io/return-principal-id-as-email=true) fails closed
+        (
+            False,
+            {"iam.gke.io/return-principal-id-as-email": "true"},
+            True,
+            "127.0.0.1:1",
+            False,
+            True,
+        ),
+        # 5. Explicit opt-in allows bound KSA without metadata NetworkPolicy
         (
             True,
             {"iam.gke.io/gcp-service-account": "eval-sa@my-proj.iam.gserviceaccount.com"},
+            False,
             None,
             None,
             False,
@@ -71,32 +126,45 @@ def test_gke_environment_create_pod_fails_closed_on_service_account_api_error(
 )
 def test_gke_environment_create_pod_blocks_metadata_host_and_bound_ksa_when_unprivileged(
     monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
     allow_workload_identity: bool,
     annotations: dict[str, str],
+    has_networking_api: bool,
     expected_metadata_host: str | None,
     expected_automount: bool | None,
     expect_error: bool,
 ) -> None:
-    """Inject GCE_METADATA_HOST=127.0.0.1:1, disable token automount, and reject bound KSAs unless opted in."""
+    """Enforce metadata NetworkPolicy, disable token automount + hostNetwork, and reject bound/unisolated KSAs unless opted in."""
     created_pods: list[k8s_client.V1Pod] = []
+    created_policies: list[k8s_client.V1NetworkPolicy] = []
 
     async def record_create_pod(self: GKEEnvironment, pod: k8s_client.V1Pod) -> None:
         created_pods.append(pod)
 
     monkeypatch.setattr(GKEEnvironment, "_create_pod", record_create_pod)
-    monkeypatch.setattr(GKEEnvironment, "_api", property(lambda self: self._fake_api))
-    monkeypatch.delenv("SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY", raising=False)
 
-    env = object.__new__(SkillEvaluatorGKEEnvironment)
-    env.namespace = "skill-eval"
-    env._kwargs = {"allow_workload_identity": "1"} if allow_workload_identity else {}
-    env._allow_workload_identity = allow_workload_identity
-    env._persistent_env = {}
-    env._fake_api = SimpleNamespace(
-        read_namespaced_service_account=lambda **_kw: SimpleNamespace(metadata=SimpleNamespace(annotations=annotations))
+    networking_api = (
+        SimpleNamespace(
+            read_namespaced_network_policy=lambda **_kw: (_ for _ in ()).throw(RuntimeError("404 Not Found")),
+            create_namespaced_network_policy=lambda namespace, body, **_kw: (
+                created_policies.append(body) or _build_metadata_blocking_network_policy(namespace)
+            ),
+        )
+        if has_networking_api
+        else None
+    )
+    env = make_gke_env(
+        allow_workload_identity=allow_workload_identity,
+        fake_api=SimpleNamespace(
+            read_namespaced_service_account=lambda **_kw: SimpleNamespace(
+                metadata=SimpleNamespace(annotations=annotations)
+            )
+        ),
+        networking_api=networking_api,
     )
 
     pod = _make_pod("pod-metadata-check")
+    pod.spec.host_network = True
     if expect_error:
         with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
             asyncio.run(env._create_pod(pod))
@@ -107,15 +175,89 @@ def test_gke_environment_create_pod_blocks_metadata_host_and_bound_ksa_when_unpr
 
     assert len(created_pods) == 1
     assert pod.spec.automount_service_account_token is expected_automount
+    if not allow_workload_identity:
+        assert pod.spec.host_network is False
+        assert pod.metadata.labels.get("skillevaluator.nvidia.com/metadata-isolated") == "true"
+        assert len(created_policies) == 1
     assert env._persistent_env.get("GCE_METADATA_HOST") == expected_metadata_host
     container_env_map = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
     assert container_env_map.get("GCE_METADATA_HOST") == expected_metadata_host
 
 
+@pytest.mark.parametrize(
+    ("read_outcomes", "create_conflict", "expect_error"),
+    [
+        # Existing policy is weakened (missing 169.254.169.252/32) -> rejected
+        ([_make_weak_metadata_network_policy("skill-eval")], False, True),
+        # 404 on first read, 409 Conflict on create, re-read returns weakened policy -> rejected
+        ([RuntimeError("404 Not Found"), _make_weak_metadata_network_policy("skill-eval")], True, True),
+        # 404 on first read, 409 Conflict on create, re-read returns valid policy -> accepted
+        ([RuntimeError("404 Not Found"), _build_metadata_blocking_network_policy("skill-eval")], True, False),
+    ],
+)
+def test_gke_environment_create_pod_rejects_weakened_existing_network_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+    read_outcomes: list[object],
+    create_conflict: bool,
+    expect_error: bool,
+) -> None:
+    """Reject pod creation when an existing or concurrently created (409) NetworkPolicy does not block both GKE metadata IPs."""
+    created_pods: list[k8s_client.V1Pod] = []
+
+    async def record_create_pod(self: GKEEnvironment, pod: k8s_client.V1Pod) -> None:
+        created_pods.append(pod)
+
+    monkeypatch.setattr(GKEEnvironment, "_create_pod", record_create_pod)
+    outcomes = list(read_outcomes)
+
+    def fake_read_np(**_kw: object) -> object:
+        item = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def fake_create_np(**_kw: object) -> object:
+        if create_conflict:
+            raise RuntimeError("409 Conflict: networkpolicies 'skillevaluator-block-gce-metadata' already exists")
+        return _build_metadata_blocking_network_policy("skill-eval")
+
+    env = make_gke_env(
+        fake_api=SimpleNamespace(
+            read_namespaced_service_account=lambda **_kw: SimpleNamespace(metadata=SimpleNamespace(annotations={}))
+        ),
+        networking_api=SimpleNamespace(
+            read_namespaced_network_policy=fake_read_np,
+            create_namespaced_network_policy=fake_create_np,
+        ),
+    )
+
+    if expect_error:
+        with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
+            asyncio.run(env._create_pod(_make_pod("pod-weak-policy")))
+        assert created_pods == []
+    else:
+        asyncio.run(env._create_pod(_make_pod("pod-conflict-valid")))
+        assert len(created_pods) == 1
+
+
+@pytest.mark.parametrize(
+    ("probe_rc", "compose_mode", "expect_error"),
+    [
+        (0, False, False),
+        (0, True, False),
+        (42, False, True),
+        (43, False, True),
+    ],
+)
 def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries(
     monkeypatch: pytest.MonkeyPatch,
+    make_gke_env: Callable[..., SkillEvaluatorGKEEnvironment],
+    probe_rc: int,
+    compose_mode: bool,
+    expect_error: bool,
 ) -> None:
-    """Drain the Kubernetes WSClient stream and retry until returncode is 0 or attempts are exhausted."""
+    """Drain the Kubernetes WSClient stream, retry readiness, and enforce the in-pod direct metadata isolation probe."""
     ws_outcomes: list[int | Exception] = [
         ValueError(
             "invalid literal for int() with base 10: "
@@ -123,9 +265,13 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
         ),
         1,
         0,
+        # 4th stream call is the in-pod metadata isolation probe
+        probe_rc,
     ]
     ws_attempts = 0
     read_output_calls = 0
+    deleted_pods: list[tuple[str, str]] = []
+    recorded_calls: list[tuple[list[str], str | None]] = []
 
     class FakeWSClient:
         def __init__(self, outcome: int | Exception) -> None:
@@ -147,8 +293,16 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
         def close(self) -> None:
             self.closed = True
 
-    def fake_stream(*_args: object, **_kwargs: object) -> FakeWSClient:
+    def fake_stream(
+        _fn: object,
+        *_args: object,
+        command: list[str] | None = None,
+        container: str | None = None,
+        **_kwargs: object,
+    ) -> FakeWSClient:
         nonlocal ws_attempts
+        if command is not None:
+            recorded_calls.append((list(command), container))
         outcome = ws_outcomes[min(ws_attempts, len(ws_outcomes) - 1)]
         ws_attempts += 1
         return FakeWSClient(outcome)
@@ -161,22 +315,36 @@ def test_gke_environment_wait_for_container_exec_ready_drains_stream_and_retries
 
     monkeypatch.setattr(gke_env_mod, "stream", fake_stream, raising=False)
     monkeypatch.setattr(gke_env_mod.asyncio, "sleep", fast_sleep)
-    monkeypatch.setattr(GKEEnvironment, "_api", property(lambda self: self._fake_api))
     monkeypatch.setattr(GKEEnvironment, "_check_pod_terminated", noop_check_terminated)
 
-    env = object.__new__(SkillEvaluatorGKEEnvironment)
+    env = make_gke_env(
+        namespace="skilleval",
+        compose_mode=compose_mode,
+        fake_api=SimpleNamespace(
+            connect_get_namespaced_pod_exec=lambda *_a, **_k: None,
+            delete_namespaced_pod=lambda name, namespace, **_k: deleted_pods.append((name, namespace)),
+        ),
+    )
     env.pod_name = "pod-ready-check"
-    env.namespace = "skilleval"
-    env._fake_api = SimpleNamespace(connect_get_namespaced_pod_exec=lambda *_a, **_k: None)
 
     def record_read_output(_resp: object) -> None:
         nonlocal read_output_calls
         read_output_calls += 1
 
     env._read_exec_output = record_read_output  # type: ignore[method-assign]
+    if expect_error:
+        with pytest.raises(RuntimeError, match="SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY=1"):
+            asyncio.run(env._wait_for_container_exec_ready(max_attempts=4))
+        assert deleted_pods == [("pod-ready-check", "skilleval")]
+        return
+
     asyncio.run(env._wait_for_container_exec_ready(max_attempts=4))
-    assert ws_attempts == 3
-    assert read_output_calls == 3
+    assert ws_attempts == 4
+    assert read_output_calls == 4
+    assert deleted_pods == []
+    assert any("169.254.169.254" in " ".join(cmd) for cmd, _ in recorded_calls)
+    expected_container = "dind" if compose_mode else None
+    assert all(container == expected_container for _, container in recorded_calls)
 
     # Exhausting max_attempts raises RuntimeError
     ws_outcomes[:] = [RuntimeError("kubelet stream refused")]

@@ -1193,6 +1193,8 @@ def _check_prerequisites(
                 api = k8s_client.CoreV1Api()
                 api.get_api_resources(_request_timeout=5.0)
                 if not is_gke_workload_identity_allowed(environment_kwargs):
+                    from skillevaluator.tier3.harbor.gke_environment import ensure_gke_metadata_network_policy
+
                     target_namespace = (
                         str((environment_kwargs or {}).get("namespace") or "default").strip() or "default"
                     )
@@ -1208,6 +1210,14 @@ def _check_prerequisites(
                                 service_account="default",
                                 gcp_sa=bound_gcp_sa,
                             )
+                        )
+                    api_client = getattr(api, "api_client", None)
+                    networking_cls = getattr(k8s_client, "NetworkingV1Api", None)
+                    if api_client is not None and callable(networking_cls):
+                        networking_api = networking_cls(api_client)
+                        ensure_gke_metadata_network_policy(
+                            networking_api,
+                            namespace=target_namespace,
                         )
             except Exception as exc:
                 gke_errors.append(f"GKE cluster probe failed: {exc}")

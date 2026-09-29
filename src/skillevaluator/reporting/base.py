@@ -21,11 +21,12 @@ import tempfile
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 
 from skillevaluator.constants import PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY, PLUGIN_CATALOG_SKILL_SIMILARITY_KEY
+from skillevaluator.reporting.plugin_sections import completeness_view, plugin_block
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 
 if TYPE_CHECKING:
@@ -356,6 +357,16 @@ def is_advisory_agent_eval_skip(result: ValidationResult) -> bool:
     )
 
 
+def is_partial_plugin_agent_eval(result: ValidationResult) -> bool:
+    """Return whether a Tier 3 result records a partial (INCOMPLETE) plugin run."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    payload = metadata.get("agent_eval")
+    if not isinstance(payload, dict):
+        return False
+    completeness = completeness_view(payload.get("plugin_provenance"))
+    return bool(completeness and completeness["partial"])
+
+
 def passes_required_gate(result: ValidationResult) -> bool:
     """Return whether *result* permits the required validation gate to pass."""
     gating = result.metadata.get("gating") if isinstance(result.metadata, dict) else None
@@ -481,3 +492,76 @@ class ReporterBase(ABC):
             "sarif": ".sarif.json",
         }
         return extensions.get(self.name, ".txt")
+
+    @classmethod
+    def _plugin_status(cls, results: list[ValidationResult]) -> str:
+        """Return the canonical plugin status with fail-closed precedence.
+
+        A plugin is failed when any completed check fails the required gate,
+        incomplete when required work did not finish (missing scanner evidence
+        or a partial Tier 3 plugin run), and passed otherwise. Reporters share
+        this helper so their plugin row cannot disagree with the overall verdict.
+        """
+        incomplete = False
+        for result in results:
+            if result.is_incomplete or is_partial_plugin_agent_eval(result):
+                incomplete = True
+            elif not passes_required_gate(result):
+                return "failed"
+        return "incomplete" if incomplete else "passed"
+
+    @staticmethod
+    def _plugin_block(result: ValidationResult) -> dict[str, Any] | None:
+        """Return normalized Tier 1 plugin metadata for one result, if present."""
+        return plugin_block(result.metadata)
+
+    @classmethod
+    def _plugin_block_from_results(cls, results: list[ValidationResult]) -> dict[str, Any] | None:
+        """Return the plugin metadata merged across *results*.
+
+        Tier 1 (manifest, dependencies, components) and Tier 2 (advisory
+        catalog similarity) record their plugin keys on separate results, so
+        the ``plugin`` dicts are merged. The first non-empty value for a key
+        wins, which keeps the manifest identity from the Tier 1 result.
+        """
+        merged: dict[str, Any] = {}
+        found = False
+        for result in results:
+            block = cls._plugin_block(result)
+            if block is None:
+                metadata = result.metadata if isinstance(result.metadata, dict) else {}
+                block = dict(metadata["plugin"]) if isinstance(metadata.get("plugin"), dict) else None
+            if block is None:
+                continue
+            found = True
+            for key, value in block.items():
+                if merged.get(key) in (None, "", {}, []):
+                    merged[key] = value
+        return merged if found else None
+
+    @classmethod
+    def _plugin_child_names(cls, results: list[ValidationResult]) -> list[str]:
+        """Return canonical root-relative bundled-skill identifiers."""
+        block = cls._plugin_block_from_results(results)
+        if block is None:
+            return []
+
+        bundled = block.get("bundled_skills")
+        if isinstance(bundled, list):
+            return list(dict.fromkeys(name for name in bundled if isinstance(name, str) and name))
+
+        # Results produced before the explicit ``bundled_skills`` field existed
+        # name bundled skills only through success details and prefixed findings.
+        plugin_result = next((result for result in results if cls._plugin_block(result) is not None), None)
+        if plugin_result is None:
+            return []
+        names = [
+            detail.check_name
+            for detail in plugin_result.success_details
+            if detail.check_name != "plugin_manifest" and not detail.check_name.startswith("[")
+        ]
+        for finding in plugin_result.findings:
+            file_path = finding.file_path or ""
+            if file_path.startswith("[") and "]" in file_path:
+                names.append(file_path[1 : file_path.index("]")])
+        return list(dict.fromkeys(names))

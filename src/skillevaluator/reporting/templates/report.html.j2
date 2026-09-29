@@ -1224,6 +1224,46 @@
             .agent-hero-top { align-items: flex-start; }
             .tier-cards { grid-template-columns: 1fr; }
         }
+        {%- if plugin_view or tier3_plugin %}
+        /* Plugin sections (Tier 1 static metadata and Tier 3 plugin evidence) */
+        .plugin-section { background: var(--bg); border: 1px solid var(--border-color); border-left: 4px solid var(--secondary-color); border-radius: 12px; padding: 1rem 1.15rem; margin: 0 0 1.25rem; box-shadow: var(--shadow); }
+        .plugin-section-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+        .plugin-section-head h3 { margin: 0; font-size: 1.05rem; color: var(--dark-text); }
+        .plugin-kv { display: flex; flex-wrap: wrap; gap: 0.35rem 1.25rem; margin: 0.6rem 0; font-size: 0.875rem; color: var(--text-secondary); }
+        .plugin-kv strong { color: var(--dark-text); }
+        .plugin-hint { color: var(--text-secondary); font-size: 0.85rem; margin: 0.4rem 0; }
+        .plugin-subsection { margin-top: 1rem; }
+        .plugin-subsection h4 { margin: 0 0 0.5rem; font-size: 0.95rem; color: var(--dark-text); display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+        .plugin-stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.55rem; margin: 0.5rem 0; }
+        .plugin-stat { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.5rem 0.65rem; display: flex; flex-direction: column; gap: 0.15rem; }
+        .plugin-stat-value { font-size: 1.1rem; font-weight: 800; color: var(--dark-text); font-variant-numeric: tabular-nums; }
+        .plugin-stat-label { font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+        .plugin-stat.bad .plugin-stat-value { color: var(--danger-color); }
+        .plugin-pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
+        .plugin-pill.ok { background: var(--badge-pass-bg); color: var(--badge-pass-tx); }
+        .plugin-pill.warn { background: var(--badge-warn-bg); color: var(--badge-warn-tx); }
+        .plugin-pill.fail { background: var(--badge-fail-bg); color: var(--badge-fail-tx); }
+        .plugin-pill.neutral { background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color); }
+        .plugin-callout { border: 1px solid var(--border-color); border-left: 4px solid var(--secondary-color); border-radius: 8px; padding: 0.65rem 0.85rem; margin: 0.65rem 0; font-size: 0.875rem; color: var(--dark-text); background: var(--bg-secondary); }
+        .plugin-callout.warn { border-left-color: var(--warning-color); background: var(--badge-warn-bg); }
+        .plugin-callout ul { margin: 0.35rem 0 0; padding-left: 1.2rem; }
+        .plugin-subtle { color: var(--text-secondary); font-size: 0.78rem; font-weight: 500; }
+        .plugin-headline { font-size: 1.05rem; margin: 0 0 0.5rem; color: var(--dark-text); }
+        .plugin-headline.bad strong { color: var(--danger-color); }
+        .t3-incomplete-callout { background: var(--bg); border: 1px solid var(--danger-color); border-left: 5px solid var(--danger-color); border-radius: 12px; padding: 1rem 1.15rem; margin: 0 0 1rem; box-shadow: var(--shadow); }
+        .t3-incomplete-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
+        .t3-incomplete-badge { background: var(--danger-color); color: #fff; font-weight: 800; font-size: 0.72rem; letter-spacing: 0.06em; padding: 0.22rem 0.6rem; border-radius: 6px; }
+        .t3-incomplete-title { font-weight: 800; color: var(--dark-text); }
+        .t3-incomplete-body { margin: 0 0 0.8rem; color: var(--text-secondary); font-size: 0.9rem; line-height: 1.5; }
+        .t3-incomplete-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 0.55rem; margin-bottom: 0.8rem; }
+        .t3-incomplete-grid > div { background: var(--bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.5rem 0.65rem; display: flex; flex-direction: column; gap: 0.15rem; }
+        .t3-incomplete-num { font-size: 1.35rem; font-weight: 800; line-height: 1; }
+        .t3-incomplete-num.ok { color: var(--success-color); }
+        .t3-incomplete-num.bad { color: var(--danger-color); }
+        .t3-incomplete-env { font-size: 1rem; font-weight: 800; color: var(--dark-text); font-family: monospace; }
+        .t3-incomplete-grid > div span:last-child { font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+        .t3-incomplete-link { display: inline-block; font-weight: 700; color: var(--danger-color); text-decoration: none; font-size: 0.85rem; }
+        {%- endif %}
     </style>
 </head>
 <body>
@@ -1233,6 +1273,8 @@
     {% set tier3_execution_status = (tier3.get('execution_status') or tier3_summary_data.get('execution_status')) if has_tier3 else none %}
     {% set tier3_is_skipped = tier3_execution_status == 'skipped' or (tier3_provenance_data.get('advisory') and tier3_provenance_data.get('reason') == 'skipped') %}
     {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
+    {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_modes_line, statistics_section, signals_section %}
+    {%- set tier3_plugin_incomplete = has_tier3 and tier3_plugin and tier3_plugin.partial and not tier3_is_skipped %}
     <div class="main-header">
         <div class="header-content">
             <div class="logo-section">
@@ -1312,9 +1354,9 @@
                 </div>
                 {% else %}
                 <div>
-                    <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</div>
+                    <div class="agent-hero-score {{ 'score-warn' if tier3_plugin_incomplete else ('score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail')) }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</div>
                     <div class="agent-hero-detail">
-                        <div><strong>Best performing agent:</strong> {{ tier3.best_agent or 'N/A' }}</div>
+                        {% if tier3_plugin_incomplete %}<div><strong>Status:</strong> INCOMPLETE &mdash; partial plugin run; not a pass</div>{% endif %}<div><strong>Best performing agent:</strong> {{ tier3.best_agent or 'N/A' }}</div>
                         <div><strong>Trials:</strong> {{ hero_trials }} across {{ (tier3.agents_run or []) | length }} agent(s)</div>
                         <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
                         {% if tier3_environment %}<div><strong>Environment:</strong> <code>{{ tier3_environment }}</code></div>{% endif %}
@@ -1402,8 +1444,8 @@
                 {% endif %}
                 {% if has_tier3 %}
                 {% set tier3_verdict = (tier3.verdict or 'unknown') | lower %}
-                {% set tier3_display_verdict = 'SKIPPED' if tier3_is_skipped else tier3_verdict | upper %}
-                {% set t3_class = 'skipped' if tier3_is_skipped else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn')) %}
+                {% set tier3_display_verdict = 'SKIPPED' if tier3_is_skipped else ('INCOMPLETE' if tier3_plugin_incomplete else tier3_verdict | upper) %}
+                {% set t3_class = 'skipped' if tier3_is_skipped else ('warn' if tier3_plugin_incomplete else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn'))) %}
                 <div class="tier-card {{ t3_class }}{% if initial_tab == 'tier3' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1493,6 +1535,7 @@
                 <div class="progress-bar"><div class="progress-bar-fill" style="width: {{ pass_percentage }}%"></div></div>
             </div>
         </div>
+        {%- if plugin_view %}{{ tier1_plugin_section(plugin_view) }}{% endif %}
         <div class="view-toggle-section">
             <span style="font-size: 0.875rem; color: var(--text-secondary); margin-right: 0.5rem;">View by:</span>
             <button class="view-toggle-btn active" id="view-skill" onclick="switchView('skill')">By {{ content_label }}</button>
@@ -2291,12 +2334,14 @@
 
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview">
+            {%- if tier3_plugin_incomplete %}{{ tier3_incomplete_callout(tier3_plugin, (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment) }}{% endif %}
             <div class="t3-overview-lead">
                 {% if tier3_is_skipped %}
                 <strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
                 Tier 3 is advisory and does not block required validation.
                 {% else %}
                 <strong>Verdict at a glance:</strong>
+                {%- if tier3_plugin_incomplete %} <span class="t3-pill critical">INCOMPLETE (partial)</span> &mdash;{% endif %}
                 {{ (tier3.verdict or 'unknown') | upper }} with an overall score of
                 {{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}.
                 {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>{% else %}No successfully scored agent is available{% endif %}
@@ -2318,8 +2363,8 @@
             <div class="dashboard">
                 <div class="dashboard-card {{ 'success' if tier3.verdict == 'pass' else ('danger' if tier3.verdict == 'fail' else '') }}">
                     <h3 class="dashboard-card-title">Verdict</h3>
-                    <p class="dashboard-card-value">{{ 'SKIPPED' if tier3_is_skipped else (tier3.verdict or 'unknown') | upper }}</p>
-                    <p class="dashboard-card-subtitle">Evaluation outcome</p>
+                    <p class="dashboard-card-value">{{ 'SKIPPED' if tier3_is_skipped else ('INCOMPLETE' if tier3_plugin_incomplete else (tier3.verdict or 'unknown') | upper) }}</p>
+                    <p class="dashboard-card-subtitle">{{ 'Partial plugin run; not a pass' if tier3_plugin_incomplete else 'Evaluation outcome' }}</p>
                 </div>
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">Overall Score</h3>
@@ -2372,6 +2417,10 @@
                 <p class="t3-next-steps-conclusion">No recommendations were generated for this evaluation.</p>
                 {% endif %}
             </div>
+            {%- if tier3_plugin %}
+            {%- if tier3_plugin.coverage %}{{ tier3_coverage_section(tier3_plugin) }}{% endif %}
+            {%- if tier3_plugin.completeness and (tier3_plugin.partial or not tier3_plugin.coverage) %}{{ tier3_completeness_section(tier3_plugin) }}{% endif %}
+            {%- endif %}
 
             {% if tier3.dimensions %}
             <details class="t3-details" id="tier3-dimension-lift" open>
@@ -2441,27 +2490,7 @@
                 </div>
             </details>
 
-            {% if tier3.integration %}
-            {% set integ = tier3.integration %}
-            {% set integ_pill = 'ok' if integ.verdict == 'real_integration' else ('critical' if integ.verdict == 'negative_integration' else 'warning') %}
-            <details class="t3-details" id="tier3-integration" open>
-                <summary>Integration (Plugin Composition) &mdash; <span class="t3-pill warning">Advisory &middot; Report-only</span></summary>
-                <div class="t3-details-body">
-                <p class="t3-section-hint">Compositional-lift ablation: the coordinated plugin versus its member components staged individually. This signal never affects the overall score or verdict.</p>
-                <div class="table-scroll"><table class="summary-table">
-                    <thead><tr><th>Verdict</th><th>Plugin</th><th>Sum-of-parts</th><th>Integration Lift</th><th>Components</th></tr></thead>
-                    <tbody><tr>
-                        <td><span class="t3-pill {{ integ_pill }}">{{ (integ.verdict or 'inconclusive') | replace('_', ' ') | title }}</span></td>
-                        <td>{{ "%.2f" | format(integ.with_plugin) if integ.with_plugin is not none else "N/A" }}</td>
-                        <td>{{ "%.2f" | format(integ.sum_of_parts) if integ.sum_of_parts is not none else "N/A" }}</td>
-                        <td>{{ "%+.2f" | format(integ.integration_lift) if integ.integration_lift is not none else "N/A" }}</td>
-                        <td>{% for comp in integ.components or [] %}<span class="metadata-tag">{{ comp }}</span>{% endfor %}</td>
-                    </tr></tbody>
-                </table></div>
-                {% if integ.interpretation %}<p class="t3-section-hint">{{ integ.interpretation }}</p>{% endif %}
-                </div>
-            </details>
-            {% endif %}
+            {# Integration renders after the dimension block (plugin_sections.html.j2). #}
 
             {% if t3_agents | length > 1 %}
             <details class="t3-details" open>
@@ -2543,6 +2572,11 @@
             {% endif %}
 
             {% endif %}
+            {%- if tier3_plugin %}
+            {%- if tier3_plugin.integration %}{{ integration_section(tier3_plugin.integration) }}{% elif tier3_plugin.lift_modes %}{{ lift_modes_line(tier3_plugin.lift_modes) }}{% endif %}
+            {%- if tier3_plugin.statistics %}{{ statistics_section(tier3_plugin.statistics) }}{% endif %}
+            {%- if tier3_plugin.signals %}{{ signals_section(tier3_plugin.signals) }}{% endif %}
+            {%- endif %}
 
             {% if t3_agents %}
             <details class="t3-details" open>

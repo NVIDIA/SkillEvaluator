@@ -756,6 +756,26 @@ def _render_feedback_and_suggestions(
     )
 
 
+def _redact_strings(value: Any, safe: Any) -> Any:
+    if isinstance(value, str):
+        return safe(value)
+    if isinstance(value, dict):
+        return {key: _redact_strings(item, safe) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_strings(item, safe) for item in value]
+    return value
+
+
+def _render_plugin_blocks(*, console: Console, result: Mapping[str, Any], safe: Any) -> None:
+    """Render advisory plugin statistics and signals carried by a plugin run's engine result."""
+    from skillevaluator.reporting.cli import print_plugin_tier3
+    from skillevaluator.reporting.plugin_sections import tier3_plugin_view
+
+    view = tier3_plugin_view(result)
+    if view is not None:
+        print_plugin_tier3(_redact_strings(view, safe), console)
+
+
 def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> None:
     """Render persisted engine truth, aggregating only canonical score components."""
     secret_values = secret_values_from_environment(os.environ)
@@ -794,6 +814,7 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
             )
 
         _render_dimensions(console=console, agents=agents, safe=safe)
+        _render_plugin_blocks(console=console, result=result, safe=safe)
 
         # The per-evaluator findings report — evaluator reasonings, evidence
         # pointers, and next-step suggestions — is the feedback surface that

@@ -557,6 +557,10 @@ def load_agent_data(
                     pass_key = f"pass_{key}"
                     if "pass_at_k" in data:
                         agent_info[pass_key] = data["pass_at_k"]
+                    # Advisory, report-only plugin signals aggregated per arm.
+                    signals_summary = data.get("plugin_signals_summary")
+                    if isinstance(signals_summary, dict) and signals_summary:
+                        agent_info.setdefault("plugin_signals_summary", {})[key] = signals_summary
                     status = data.get("execution_status")
                     if status is None and allow_legacy_missing_status:
                         status = "succeeded"

@@ -815,7 +815,11 @@ def _run_plugin_agent_eval(
 
     from skillevaluator.cli_core import resolve_plugin_path
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
-    from skillevaluator.evaluation.tier3_report import advisory_skip_result, agent_eval_result_from_run
+    from skillevaluator.evaluation.tier3_report import (
+        advisory_skip_result,
+        agent_eval_result_from_run,
+        refresh_plugin_run_report,
+    )
     from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package, write_plugin_provenance
     from skillevaluator.tier3.results_location import resolve_results_root
 
@@ -896,6 +900,9 @@ def _run_plugin_agent_eval(
                 engine_result=engine_result if isinstance(engine_result, dict) else None,
                 plugin_provenance=provenance,
             )
+            if result is not None and isinstance(engine_result, dict) and engine_result.get("run_dir"):
+                # The runner rendered report.html before the sidecar existed.
+                refresh_plugin_run_report(plugin_dir, Path(str(engine_result["run_dir"])), result=result)
     except Exception as exc:
         return _skipped(f"Tier 3 plugin evaluation skipped: {exc}")
 
@@ -3014,7 +3021,7 @@ def evaluate_plugin(
 
     from skillevaluator.cli_core import resolve_plugin_path
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
-    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason
+    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason, refresh_plugin_run_report
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
     from skillevaluator.tier3.plugin_eval import prepare_plugin_eval_package, write_plugin_provenance
     from skillevaluator.tier3.results_location import resolve_results_root
@@ -3106,6 +3113,13 @@ def evaluate_plugin(
             )
             if isinstance(engine_result, dict) and engine_result.get("run_dir"):
                 write_plugin_provenance(Path(str(engine_result["run_dir"])), provenance)
+                # The runner rendered report.html before the sidecar existed.
+                refresh_plugin_run_report(
+                    plugin_dir,
+                    Path(str(engine_result["run_dir"])),
+                    env_mode=env_mode,
+                    engine_result=engine_result,
+                )
             if provenance.get("partial"):
                 raise click.ClickException(_incomplete_skip_reason(provenance))
     except click.ClickException:

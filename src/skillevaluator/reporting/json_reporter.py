@@ -24,6 +24,7 @@ from skillevaluator.reporting.base import (
     is_advisory_agent_eval_skip,
     passes_required_gate,
 )
+from skillevaluator.reporting.plugin_sections import json_safe
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -169,6 +170,12 @@ class JSONReporter(ReporterBase):
             )
             if applicability is not None:
                 data["tier3_applicability"] = applicability
+
+        # Surface the Tier 1 plugin model without requiring consumers to
+        # inspect individual validator results.
+        plugin = self._plugin_block_from_results(results)
+        if plugin is not None:
+            data["plugin"] = json_safe(plugin)
 
         if self.include_timestamp:
             data["generated_at"] = datetime.now(tz=UTC).isoformat()

@@ -56,6 +56,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Re-rendered plugin Tier 3 reports (`view` and standalone renders) keep plugin
   provenance and INCOMPLETE status by reading the bounded, no-follow
   `plugin_provenance.json` sidecar.
+- Re-rendered plugin Tier 3 reports (`view`, standalone renders, and the report
+  delivered after a plugin run) keep plugin provenance and INCOMPLETE status by
+  reading the bounded, no-follow `plugin_provenance.json` sidecar.
 
 ### Added
 
@@ -99,6 +102,10 @@ All notable changes to SkillEvaluator are documented in this file.
   context-cost estimate; Tier 3 provenance adds report-only component coverage.
 - Validation policies accept `mcp.allowed_private_hosts` for intended private
   MCP endpoints.
+- Plugin reports: JSON, Markdown, SARIF, and HTML render plugin dependencies,
+  components, MCP pinning, and static context cost; Tier 3 reports add component
+  coverage, Integration (including INCONCLUSIVE), lift intervals, and advisory
+  plugin signals.
 
 ### Changed
 

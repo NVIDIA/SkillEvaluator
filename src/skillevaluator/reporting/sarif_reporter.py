@@ -19,6 +19,13 @@ from urllib.parse import quote
 
 from skillevaluator import __version__
 from skillevaluator.reporting.base import ReporterBase
+from skillevaluator.reporting.plugin_sections import (
+    component_for_path,
+    inventory_view,
+    json_safe,
+    pinning_view,
+    tier3_plugin_view,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -150,6 +157,7 @@ def _result_from_finding(
     validator_name: str,
     workspace_root: Path | None,
     scan_root: Path | None = None,
+    plugin_component: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     severity = _finding_severity_value(finding)
     result: dict[str, Any] = {
@@ -170,8 +178,66 @@ def _result_from_finding(
     }
     if finding.metadata:
         properties["metadata"] = finding.metadata
+    if plugin_component:
+        properties["pluginComponent"] = plugin_component
     result["properties"] = properties
     return result
+
+
+def _plugin_run_properties(plugin: dict[str, Any], results: list[ValidationResult]) -> dict[str, Any]:
+    """Summarize Tier 1 (and, when present, Tier 3) plugin context for a SARIF run."""
+    properties: dict[str, Any] = {
+        "name": plugin.get("name"),
+        "manifestType": plugin.get("manifest_type"),
+        "pluginMode": plugin.get("plugin_mode"),
+    }
+    for source_key, target_key in (
+        ("declared_dependencies", "declaredDependencies"),
+        ("dependency_status_counts", "dependencyStatusCounts"),
+    ):
+        if isinstance(plugin.get(source_key), dict):
+            properties[target_key] = plugin[source_key]
+    inventory = inventory_view(plugin.get("component_inventory"))
+    if inventory is not None:
+        properties["componentCounts"] = {row["type"]: row["count"] for row in inventory["counts"]}
+        properties["unsupportedTypesPresent"] = inventory["unsupported_types"]
+    mcp = plugin.get("mcp") if isinstance(plugin.get("mcp"), dict) else {}
+    pinning = pinning_view(mcp.get("pinning"))
+    if pinning is not None:
+        properties["mcpPinning"] = {
+            key: pinning[key] for key in ("total", "pinned", "unpinned", "not_applicable", "ratio")
+        }
+    cost = plugin.get("context_cost") if isinstance(plugin.get("context_cost"), dict) else {}
+    if cost:
+        properties["contextCost"] = {
+            "method": cost.get("method"),
+            "estimator": cost.get("estimator"),
+            "alwaysOnTokens": cost.get("always_on_tokens"),
+            "onDemandTokens": cost.get("on_demand_tokens"),
+        }
+    for source_key, target_key in (
+        ("catalog_skill_similarity", "catalogSkillSimilarity"),
+        ("inter_plugin_similarity", "interPluginSimilarity"),
+    ):
+        similarity = plugin.get(source_key) if isinstance(plugin.get(source_key), dict) else {}
+        if similarity:
+            matches = similarity.get("matches")
+            properties[target_key] = {
+                "status": similarity.get("status"),
+                "catalogEntries": similarity.get("catalog_entries"),
+                "matches": len(matches) if isinstance(matches, list) else 0,
+                "advisory": True,
+            }
+    for result in results:
+        payload = result.metadata.get("agent_eval") if isinstance(result.metadata, dict) else None
+        view = tier3_plugin_view(payload)
+        if view is None:
+            continue
+        properties["evaluationIncomplete"] = view["partial"]
+        if view["coverage"] is not None:
+            properties["componentsNotEvaluated"] = view["coverage"]["not_evaluated"]
+        break
+    return json_safe({key: value for key, value in properties.items() if value is not None})
 
 
 def _collect_incomplete_scans(results: list[ValidationResult]) -> list[str]:
@@ -281,12 +347,16 @@ class SARIFReporter(ReporterBase):
         workspace_root = self.workspace_root
         scan_root = self.scan_root
 
+        plugin = self._plugin_block_from_results(results)
         for result in results:
             validator_name = result.validator_name or "UNKNOWN"
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                sarif_results.append(_result_from_finding(finding, validator_name, workspace_root, scan_root))
+                component = component_for_path(finding.file_path, plugin) if plugin is not None else None
+                sarif_results.append(
+                    _result_from_finding(finding, validator_name, workspace_root, scan_root, component)
+                )
 
         run: dict[str, Any] = {
             "tool": {
@@ -301,6 +371,8 @@ class SARIFReporter(ReporterBase):
         }
         if self.include_timestamp or _collect_incomplete_scans(results):
             run["invocations"] = [_build_invocation(results)]
+        if plugin is not None:
+            run["properties"] = {"plugin": _plugin_run_properties(plugin, results)}
 
         document: dict[str, Any] = {
             "$schema": _SARIF_SCHEMA,

@@ -571,8 +571,6 @@ def render_agent_eval_html_report(
     use_llm_judge: bool = True,
 ) -> Path:
     """Render one standalone Tier 3 run with the canonical HTML reporter."""
-    from skillevaluator.reporting import HTMLReporter
-
     skill_path = skill_path.expanduser().resolve()
     run_dir = run_dir.expanduser().resolve()
     result = agent_eval_result_from_directory(
@@ -596,13 +594,60 @@ def render_agent_eval_html_report(
         }
 
     target = output_path.expanduser().resolve() if output_path is not None else run_dir / "report.html"
+    _save_agent_eval_html(result, skill_path, target)
+    return target
+
+
+def _save_agent_eval_html(result: ValidationResult, skill_path: Path, target: Path) -> None:
+    """Write the Tier 3-only canonical HTML report for one result."""
+    from skillevaluator.reporting import HTMLReporter
+    from skillevaluator.reporting.plugin_sections import is_plugin_payload
+
+    payload = result.metadata.get("agent_eval")
     reporter = HTMLReporter(
         target_path=str(skill_path),
-        content_label="Skill",
+        content_label="Plugin" if is_plugin_payload(payload) else "Skill",
         tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
     )
     reporter.save([result], target)
-    return target
+
+
+def refresh_plugin_run_report(
+    skill_path: Path,
+    run_dir: Path,
+    *,
+    result: ValidationResult | None = None,
+    env_mode: str | None = None,
+    engine_result: dict[str, Any] | None = None,
+    use_llm_judge: bool = True,
+) -> Path | None:
+    """Re-render a plugin run's ``report.html`` once its provenance sidecar exists.
+
+    The Harbor runner writes ``report.html`` before the CLI persists
+    ``plugin_provenance.json``, so the runner's copy cannot show plugin
+    provenance or an INCOMPLETE status, and ``view`` opens that copy. Pass the
+    already-built *result* to avoid rebuilding the payload; otherwise the run is
+    re-read (with the sidecar). Best effort: a failure keeps the runner's report.
+    """
+    try:
+        run_dir = Path(run_dir).expanduser().resolve()
+        target = run_dir / "report.html"
+        if result is None:
+            result = agent_eval_result_from_directory(
+                Path(skill_path),
+                run_dir,
+                env_mode=env_mode,
+                engine_result=dict(engine_result) if isinstance(engine_result, dict) else None,
+                use_llm_judge=use_llm_judge,
+            )
+        if result is None or not isinstance(result.metadata.get("agent_eval"), dict):
+            return None
+        _save_agent_eval_html(result, Path(skill_path).expanduser().resolve(), target)
+        return target
+    except Exception as exc:  # best effort: the runner's report remains usable
+        logger.warning("Plugin report refresh failed (%s); keeping the runner's report.html", type(exc).__name__)
+        logger.debug("Plugin report refresh failure detail", exc_info=True)
+        return None
 
 
 def build_agent_eval_payload(
@@ -845,6 +890,7 @@ def build_agent_eval_payload(
     integration = _build_integration_report(best, run_config, plugin_provenance)
     if integration is not None:
         payload["integration"] = integration
+    _attach_plugin_report_fields(payload, agents)
 
     _layer_llm_insights(
         payload,
@@ -3145,6 +3191,85 @@ def _typed_plugin_provenance(loaded: dict[str, Any]) -> dict[str, Any]:
     return provenance
 
 
+_MAX_SIGNAL_LIST_ITEMS = 32
+
+
+def _bounded_report_copy(value: Any, *, depth: int = 0) -> Any:
+    """Copy advisory report data with bounded list lengths and nesting depth."""
+    if depth > 8:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(key): _bounded_report_copy(item, depth=depth + 1)
+            for key, item in islice(value.items(), _MAX_RAW_REWARD_FIELDS)
+        }
+    if isinstance(value, list | tuple):
+        return [_bounded_report_copy(item, depth=depth + 1) for item in value[:_MAX_SIGNAL_LIST_ITEMS]]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+_MAX_TOP_ARGUMENT_FAILURES = 5
+_SIGNAL_REWARD_FIELDS = {
+    "with_skill": "rewards",
+    "without_skill": "rewards_baseline",
+    "sum_of_parts": "rewards_sum_of_parts",
+}
+
+
+def _top_argument_failures(rewards: object) -> list[dict[str, Any]]:
+    """Aggregate per-trial ``plugin_signals.arguments.failures`` into the most frequent failures."""
+    counts: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for reward in rewards[:_MAX_RAW_TRIAL_REWARDS_TOTAL] if isinstance(rewards, list) else []:
+        signals = reward.get("plugin_signals") if isinstance(reward, dict) else None
+        arguments = signals.get("arguments") if isinstance(signals, dict) else None
+        failures = arguments.get("failures") if isinstance(arguments, dict) else None
+        for failure in failures[:_MAX_SIGNAL_LIST_ITEMS] if isinstance(failures, list) else []:
+            if not isinstance(failure, dict):
+                continue
+            key = tuple(str(failure.get(field) or "")[:200] for field in ("tool", "arg", "rule"))
+            entry = counts.setdefault(
+                key,
+                {"tool": key[0], "arg": key[1], "rule": key[2], "detail": str(failure.get("detail") or "")[:300]},
+            )
+            entry["count"] = entry.get("count", 0) + 1
+    return sorted(counts.values(), key=lambda item: (-item["count"], item["tool"], item["arg"]))[
+        :_MAX_TOP_ARGUMENT_FAILURES
+    ]
+
+
+def _attach_plugin_report_fields(payload: dict[str, Any], agents: dict[str, dict[str, Any]]) -> None:
+    """Carry advisory per-arm plugin signals from run artifacts into the payload.
+
+    Report-only: nothing here feeds a score or verdict. Per-arm
+    ``plugin_signals_summary`` blocks loaded from condition summaries are copied
+    onto each agent (bounded, with the most frequent argument failures from the
+    per-trial rewards), and the best agent's copy is repeated at the top level.
+    An existing value wins (``setdefault``), so a producer that already placed
+    the field keeps it.
+    """
+    agent_payloads = payload.get("agents")
+    if not isinstance(agent_payloads, dict):
+        return
+    for name, agent_payload in agent_payloads.items():
+        raw_agent = agents.get(name) or {}
+        signals = raw_agent.get("plugin_signals_summary")
+        if not isinstance(agent_payload, dict) or not isinstance(signals, dict) or not signals:
+            continue
+        summaries = _bounded_report_copy(signals)
+        for arm, summary in summaries.items():
+            arguments = summary.get("arguments") if isinstance(summary, dict) else None
+            if isinstance(arguments, dict) and "failures" not in arguments and arm in _SIGNAL_REWARD_FIELDS:
+                top = _top_argument_failures(raw_agent.get(_SIGNAL_REWARD_FIELDS[arm]))
+                if top:
+                    arguments["top_failures"] = top
+        agent_payload.setdefault("plugin_signals_summary", summaries)
+    best = agent_payloads.get(payload.get("best_agent"))
+    if isinstance(best, dict) and isinstance(best.get("plugin_signals_summary"), dict):
+        payload.setdefault("plugin_signals_summary", best["plugin_signals_summary"])
+
+
 def _run_truth_metadata(
     run_dir: Path,
     engine_result: dict[str, Any] | None,
@@ -3319,4 +3444,5 @@ __all__ = [
     "advisory_skip_result",
     "agent_eval_result_from_run",
     "build_agent_eval_payload",
+    "refresh_plugin_run_report",
 ]

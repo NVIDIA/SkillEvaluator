@@ -38,6 +38,7 @@ from skillevaluator.reporting.harbor_viewer import (
     normalize_harbor_viewer_for_display,
     safe_url,
 )
+from skillevaluator.reporting.plugin_sections import NOT_CONFIGURED, tier3_plugin_view
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -54,6 +55,171 @@ def _related_paths(finding: Finding) -> list[str]:
         if isinstance(value, str) and value and value not in paths:
             paths.append(value)
     return paths
+
+
+def print_plugin_tier3(view: dict, console: Console) -> None:
+    """Print the Tier 3 plugin blocks: completeness, coverage, Integration, statistics, signals."""
+    esc = rich_escape
+    if view.get("partial"):
+        console.print(
+            f"  [bold red]INCOMPLETE: {esc(view['incomplete_reason'])}.[/bold red] [red]Partial result, not a pass.[/red]"
+        )
+    coverage = view.get("coverage")
+    if coverage:
+        style = "bold red" if coverage["not_evaluated"] else "green"
+        console.print(
+            f"  [{style}]Component coverage: {esc(coverage['headline'])}[/{style}] "
+            f"(of {coverage['total']}; {coverage['staged']} staged)"
+        )
+        console.print("    [dim]Files staged ≠ components loaded ≠ behavior verified.[/dim]")
+        for row in coverage["not_evaluated_rows"][:10]:
+            reason = f": {esc(row['reason'])}" if row["reason"] else ""
+            console.print(f"    [dim]- {esc(row['type'])} {esc(row['name'])} ({esc(row['state_label'])}){reason}[/dim]")
+        remaining = len(coverage["not_evaluated_rows"]) - 10
+        if remaining > 0:
+            console.print(f"    [dim]... and {remaining} more[/dim]")
+        activation = coverage.get("activation")
+        if activation:
+            console.print(f"    [dim]Observed activation (advisory): {esc(activation['summary'])}[/dim]")
+    integration = view.get("integration")
+    modes = (integration or {}).get("modes") or view.get("lift_modes")
+    if modes:
+        fallback = " [yellow](fell back)[/yellow]" if modes["fallback"] else ""
+        console.print(
+            f"  [bold]Lift mode:[/bold] requested {esc(modes['requested'])} · effective {esc(modes['effective'])}{fallback}"
+        )
+    if integration:
+        if integration["measured"]:
+            ci = f" {esc(integration['ci']['summary'])}" if integration["ci"] else ""
+            point = (
+                f" [dim](point estimate: {esc(integration['point_verdict_label'])})[/dim]"
+                if integration["point_verdict_label"]
+                else ""
+            )
+            console.print(
+                f"  [bold]Integration:[/bold] {esc(integration['verdict_label']).upper()} "
+                f"(lift {integration['integration_lift']}{ci}){point} [dim](advisory)[/dim]"
+            )
+            if integration["reason"]:
+                console.print(f"    [dim]{esc(integration['reason'])}[/dim]", soft_wrap=True)
+            if integration["components"]:
+                console.print(f"    [dim]components: {esc(', '.join(integration['components']))}[/dim]")
+            if integration["interpretation"]:
+                console.print(f"    [dim]{esc(integration['interpretation'])}[/dim]", soft_wrap=True)
+        else:
+            console.print(
+                f"  [bold]Integration:[/bold] [yellow]INCONCLUSIVE[/yellow] — {esc(integration['reason'])} "
+                "[dim](advisory)[/dim]",
+                soft_wrap=True,
+            )
+    statistics = view.get("statistics")
+    if statistics:
+        for scope in statistics["scopes"]:
+            _print_plugin_statistics_scope(scope, console, show_label=len(statistics["scopes"]) > 1)
+    signals = view.get("signals")
+    if signals:
+        console.print(
+            "  [bold]Plugin signals[/bold] [dim](advisory, report-only; never changes a score or verdict)[/dim]"
+        )
+        for entry in signals["entries"]:
+            missing = f"; {entry['n_missing_trajectory']} without a trajectory" if entry["n_missing_trajectory"] else ""
+            console.print(
+                f"    [bold]{esc(entry['scope'])} · {esc(entry['arm_label'])}[/bold] ({entry['n_trials']} trials{missing})"
+            )
+            details = []
+            tool = entry["tool_selection"]
+            if tool:
+                details.append(
+                    f"tool selection P/R/F1 {tool['precision']} / {tool['recall']} / {tool['f1']}, "
+                    f"{tool['decoy_calls']} decoy call(s)"
+                    if tool["applicable"]
+                    else f"tool selection {NOT_CONFIGURED}"
+                )
+            arguments = entry["arguments"]
+            if arguments:
+                details.append(
+                    f"arguments {arguments['pass_rate']} ({arguments['passed']}/{arguments['checked']})"
+                    if arguments["applicable"]
+                    else f"arguments {NOT_CONFIGURED}"
+                )
+            mcp = entry["mcp_calls"]
+            if mcp:
+                details.append(f"MCP calls {mcp['success_rate']} succeeded ({mcp['succeeded']}/{mcp['total']})")
+            details.extend(f"{check['name'].lower()} {check['label']}" for check in entry["checks"])
+            activation = entry["activation"]
+            if activation:
+                details.append(f"activation {len(activation['exercised'])}/{len(activation['declared'])} exercised")
+            for detail in details:
+                console.print(f"      [dim]- {esc(detail)}[/dim]", soft_wrap=True)
+    console.print()
+
+
+def _print_plugin_statistics_scope(scope: dict, console: Console, *, show_label: bool) -> None:
+    esc = rich_escape
+    label = f" — {esc(scope['label'])}" if show_label else ""
+    if scope["lift_ci"]:
+        table = Table(title=f"Lift Uncertainty (advisory){label}", border_style="cyan", show_header=True)
+        table.add_column("Lift", style="bold")
+        table.add_column("Estimate", justify="right")
+        table.add_column("Interval")
+        table.add_column("Precision")
+        table.add_column("Cases", justify="right")
+        for row in scope["lift_ci"]:
+            warning = " [yellow](CI includes zero)[/yellow]" if row["ci_includes_zero"] else ""
+            table.add_row(
+                esc(row["label"]),
+                row["estimate"],
+                f"{esc(row['interval'])} {esc(row['confidence'])}{warning}",
+                esc(row["precision"]),
+                row["n_cases"],
+            )
+        console.print(table)
+    if scope["arms"] and (scope["has_reliability"] or scope["has_tokens"] or scope["has_efficiency"]):
+        table = Table(title=f"Reliability and Cost (advisory){label}", border_style="cyan", show_header=True)
+        table.add_column("Arm", style="bold")
+        if scope["has_reliability"]:
+            table.add_column("pass@k", justify="right")
+            table.add_column("pass^k", justify="right")
+            table.add_column("k", justify="right")
+        if scope["has_tokens"]:
+            table.add_column("Tokens/success", justify="right")
+        if scope["has_usd"]:
+            table.add_column("USD/success", justify="right")
+        if scope["has_efficiency"]:
+            table.add_column("Token eff.", justify="right")
+        for arm in scope["arms"]:
+            row = [esc(arm["label"])]
+            if scope["has_reliability"]:
+                row.extend([arm["pass_at_k"], arm["pass_hat_k"], arm["k"]])
+            if scope["has_tokens"]:
+                row.append(arm["tokens_per_success"])
+            if scope["has_usd"]:
+                row.append(arm["usd_per_success"])
+            if scope["has_efficiency"]:
+                row.append(arm["token_efficiency"])
+            table.add_row(*row)
+        console.print(table)
+    measured = scope["context_measured"]
+    if measured:
+        if measured["measured"]:
+            console.print(
+                f"  [bold]Measured context delta:[/bold] {esc(measured['delta'])} per first turn "
+                f"({measured['n_pairs']} pairs)"
+            )
+        else:
+            reason = f": {esc(measured['reason'])}" if measured["reason"] else ""
+            console.print(f"  [bold]Measured context delta:[/bold] not measured ({esc(measured['status'])}){reason}")
+    completeness = scope["completeness"]
+    if completeness and completeness["issues"]:
+        parts = []
+        if completeness["missing_cases"]:
+            parts.append(f"missing cases: {', '.join(completeness['missing_cases'])}")
+        if completeness["failed_arms"]:
+            parts.append(f"failed arms: {', '.join(completeness['failed_arms'])}")
+        if completeness["attempt_shortfall"]:
+            parts.append(f"{len(completeness['attempt_shortfall'])} case(s) with attempt shortfall")
+        detail = "; ".join(parts) or "the compared arms did not score the same cases"
+        console.print(f"  [yellow]Integration completeness issues:[/yellow] {esc(detail)}", soft_wrap=True)
 
 
 class CLIReporter(ReporterBase):
@@ -363,31 +529,9 @@ class CLIReporter(ReporterBase):
             console.print(table)
             console.print()
 
-        integration = agent_eval.get("integration")
-        if isinstance(integration, dict):
-            verdict = str(integration.get("verdict") or "inconclusive").replace("_", " ").upper()
-            lift = integration.get("integration_lift")
-            lift_text = f"{lift:+.2f}" if isinstance(lift, int | float) else "N/A"
-            console.print(f"  [bold]Integration:[/bold] {verdict} (lift {lift_text}) [dim](advisory)[/dim]")
-            uncertainty = integration.get("lift_uncertainty")
-            if isinstance(uncertainty, dict) and all(
-                isinstance(uncertainty.get(key), int | float) for key in ("ci_low", "ci_high")
-            ):
-                ci_text = (
-                    f"95% CI [{uncertainty['ci_low']:+.2f}, {uncertainty['ci_high']:+.2f}], "
-                    f"precision {uncertainty.get('precision') or 'unknown'}"
-                )
-                console.print(f"    [dim]{rich_escape(ci_text)}[/dim]")
-            reason = str(integration.get("reason") or "").strip()
-            if reason:
-                console.print(f"    [dim]{rich_escape(reason)}[/dim]", soft_wrap=True)
-            components = integration.get("components") or []
-            if components:
-                console.print(f"    [dim]components: {', '.join(str(component) for component in components)}[/dim]")
-            interpretation = str(integration.get("interpretation") or "").strip()
-            if interpretation:
-                console.print(f"    [dim]{interpretation}[/dim]", soft_wrap=True)
-            console.print()
+        plugin_view = tier3_plugin_view(agent_eval)
+        if plugin_view is not None:
+            print_plugin_tier3(plugin_view, console)
 
         recommendations = agent_eval.get("recommendations") or []
         if recommendations:

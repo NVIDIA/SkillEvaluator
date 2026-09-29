@@ -68,13 +68,20 @@ and never clobbers the previous run.
 
 ## BENCHMARK.md
 
-When the target is a skill, `validate` always writes `BENCHMARK.md` to the
-output directory — regardless of which `-r` formats you picked, and even when
-validation fails. It is a decision-first publication card: the overall verdict
+When the target is a skill or a plugin, `validate` always writes `BENCHMARK.md`
+to the output directory — regardless of which `-r` formats you picked, and even
+when validation fails. It is a decision-first publication card: the overall verdict
 and recommendation come first, followed by per-tier evidence, evaluator and
 dataset provenance, agent/model details, and a dimension-by-dimension
 `Baseline → Skill Uplift` table when Tier 3 ran. Public cards omit validation
 profile names and absolute host paths.
+
+A plugin card (`# Plugin Benchmark:`) adds Effectiveness and Integration results
+with their confidence intervals when recorded, a per-component coverage table,
+and the behavior the run did not evaluate: components that were not staged,
+provider-only MCP servers, unresolved references, and an unmeasured Integration.
+Staging a component's files is not evidence that the agent loaded it or that its
+behavior was verified, so a partial plugin run is `INCOMPLETE`, never a pass.
 
 The card carries one overall verdict — `PASS`, `NEUTRAL`, `FAIL`, or
 `INCOMPLETE`. It

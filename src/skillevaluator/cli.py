@@ -2321,10 +2321,11 @@ def validate(
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
 
-    # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
-    # failure, so the publication card always reflects the latest evaluation --
-    # now including Tier 3 results when --agent-eval ran.
-    if resolved_type == CONTENT_TYPE_SKILL:
+    # BENCHMARK.md is generated compulsorily for skills and plugins (matches SkillEvaluator),
+    # even on failure, so the publication card always reflects the latest evaluation --
+    # now including Tier 3 results when --agent-eval ran. Plugin cards add component
+    # coverage, Integration, and the behavior the run did not evaluate.
+    if resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN):
         from skillevaluator.reporting import BenchmarkReporter
         from skillevaluator.reporting.naming import BENCHMARK_FILENAME
         from skillevaluator.source_identity import EvaluatedSourceConflict
@@ -2335,7 +2336,10 @@ def validate(
         # stays as the last line of defence: the renderer re-validates the
         # carriers it is handed, and a producer can record one after the fact.
         try:
-            BenchmarkReporter(skill_name=target_name).save(results, output_dir / BENCHMARK_FILENAME)
+            BenchmarkReporter(
+                skill_name=target_name,
+                content_type="plugin" if resolved_type == CONTENT_TYPE_PLUGIN else "skill",
+            ).save(results, output_dir / BENCHMARK_FILENAME)
         except EvaluatedSourceConflict as exc:
             # Publication fails closed on a contradictory identity, so report which
             # values disagreed rather than letting the card write a guess.

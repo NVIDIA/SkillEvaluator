@@ -106,6 +106,8 @@ All notable changes to SkillEvaluator are documented in this file.
   components, MCP pinning, and static context cost; Tier 3 reports add component
   coverage, Integration (including INCONCLUSIVE), lift intervals, and advisory
   plugin signals.
+- `validate` writes a plugin `BENCHMARK.md` card with component coverage,
+  Effectiveness and Integration results, and the behavior the run excluded.
 
 ### Changed
 

@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 import sys
+from collections.abc import Iterable, Mapping
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from skillevaluator.tier3.harbor.metrics import (
     score_definition,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
+from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_data, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
 
@@ -47,6 +49,7 @@ DISPLAY_METRICS = DEFAULT_METRICS
 DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024
 DIAGNOSTIC_ARTIFACT_HARD_MAX_BYTES = 64 * 1024 * 1024
 REWARD_DIAGNOSTIC_STRING_MAX_CHARS = 8192
+MAX_STAGED_TASK_TOMLS = 512
 TRIAL_DIAGNOSTIC_ARTIFACTS = ("result.json", "config.json", "exception.txt", "trial.log")
 AGENT_LOG_ARTIFACTS = (
     "trajectory.json",
@@ -1577,11 +1580,129 @@ def _merge_constituent_default_reward_failure(
     )
 
 
-def _extract_rewards(job_dir: Path, *, arm_suffix: str = "") -> list[dict[str, Any]]:
+def _staged_task_entry_id_map(
+    output_dir: Path | None,
+    agent: str = "",
+    variant: str = "",
+    *,
+    arm_suffix: str = "",
+    max_tasks: int = MAX_STAGED_TASK_TOMLS,
+) -> dict[str, str]:
+    """Build an unambiguous mapping from staged task directory or task.name to [metadata].entry_id."""
+    if output_dir is None:
+        return {}
+    tasks_root = output_dir / "_harbor-tasks"
+    if not tasks_root.is_dir() or tasks_root.is_symlink():
+        return {}
+
+    search_roots: list[Path] = []
+    if agent and variant:
+        candidate = tasks_root / agent / variant
+        if candidate.is_dir() and not candidate.is_symlink():
+            search_roots.append(candidate)
+    if not search_roots:
+        search_roots.append(tasks_root)
+
+    mapping: dict[str, str] = {}
+    ambiguous: set[str] = set()
+
+    def _bind(key: str, entry_id: str) -> None:
+        if not key or key in ambiguous:
+            return
+        existing = mapping.get(key)
+        if existing is not None and existing != entry_id:
+            del mapping[key]
+            ambiguous.add(key)
+        else:
+            mapping[key] = entry_id
+
+    for root in search_roots:
+        try:
+            task_tomls = sorted(root.rglob("task.toml"))
+        except OSError:
+            continue
+        for task_toml in task_tomls[:max_tasks]:
+            if task_toml.is_symlink() or not task_toml.is_file():
+                continue
+            raw_toml = _read_bounded_text(task_toml)
+            if raw_toml is None:
+                continue
+            try:
+                import tomllib
+
+                parsed = tomllib.loads(raw_toml)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            raw_entry_id = extract_toml_metadata_entry_id(parsed)
+            entry_id = str(raw_entry_id).strip() if raw_entry_id is not None else ""
+            if not entry_id:
+                entry_id = task_toml.parent.name
+            _bind(task_toml.parent.name, entry_id)
+            task_table = parsed.get("task")
+            if isinstance(task_table, dict) and isinstance(task_table.get("name"), str):
+                task_name = task_table["name"].strip()
+                if task_name:
+                    _bind(task_name, entry_id)
+                    short_name = task_name.rsplit("/", 1)[-1]
+                    _bind(short_name, entry_id)
+                    if arm_suffix and short_name.endswith(arm_suffix):
+                        _bind(short_name.removesuffix(arm_suffix), entry_id)
+    return mapping
+
+
+def _extract_rewards(
+    job_dir: Path,
+    *,
+    arm_suffix: str = "",
+    task_entry_id_map: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """Extract reward.json from all trials in a job directory."""
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
     authoritative_trial_roots: set[Path] = set()
+
+    def _resolve_trial_name_entry_id(trial_name_val: str) -> str:
+        if not task_entry_id_map or not trial_name_val:
+            return ""
+        raw_prefix = trial_name_val.split("__", 1)[0]
+        candidates = [raw_prefix, _strip_attempt_suffix(raw_prefix)]
+        if arm_suffix:
+            for base in list(candidates):
+                if base.endswith(arm_suffix):
+                    stripped = base.removesuffix(arm_suffix)
+                    candidates.extend([stripped, _strip_attempt_suffix(stripped)])
+        for candidate in candidates:
+            if candidate in task_entry_id_map:
+                return task_entry_id_map[candidate]
+        return ""
+
+    def _populate_reward_entry_id(
+        reward_data: dict[str, Any],
+        result_payload: dict[str, Any] | None,
+        trial_name_val: str,
+    ) -> None:
+        if reward_data.get("entry_id"):
+            return
+        entry_id = ""
+        is_authoritative = False
+        if isinstance(result_payload, dict):
+            entry_id, is_authoritative = _resolve_harbor_result_entry_id(
+                result_payload,
+                arm_suffix=arm_suffix,
+                task_entry_id_map=task_entry_id_map,
+            )
+        if not entry_id:
+            entry_id = _resolve_trial_name_entry_id(trial_name_val)
+            if entry_id:
+                is_authoritative = True
+        if entry_id:
+            reward_data["entry_id"] = entry_id
+            if is_authoritative:
+                reward_data["_authoritative_entry_id"] = True
+            else:
+                reward_data["_result_entry_id"] = entry_id
 
     # Native multi-step Harbor tasks can persist an authoritative aggregate at
     # the trial root in addition to one reward file per step. Materialize that
@@ -1607,11 +1728,7 @@ def _extract_rewards(job_dir: Path, *, arm_suffix: str = "") -> list[dict[str, A
         data["_started_at"] = result.get("started_at")
         if arm_suffix:
             data["_arm_suffix"] = arm_suffix
-        if not data.get("entry_id"):
-            entry_id = _entry_id_from_harbor_result(result, arm_suffix=arm_suffix)
-            if entry_id:
-                data["entry_id"] = entry_id
-                data["_result_entry_id"] = entry_id
+        _populate_reward_entry_id(data, result, trial_name)
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -1645,16 +1762,14 @@ def _extract_rewards(job_dir: Path, *, arm_suffix: str = "") -> list[dict[str, A
                 if step_name:
                     data["_step_name"] = step_name
                 result_file = trial_dir / "result.json"
+                parsed_result: dict[str, Any] | None = None
                 if result_file.exists():
                     result = _read_json(result_file)
                     if isinstance(result, dict):
+                        parsed_result = result
                         _merge_constituent_default_reward_failure(data, result, trial_dir)
                         data["_started_at"] = result.get("started_at")
-                        if not data.get("entry_id"):
-                            entry_id = _entry_id_from_harbor_result(result, arm_suffix=arm_suffix)
-                            if entry_id:
-                                data["entry_id"] = entry_id
-                                data["_result_entry_id"] = entry_id
+                _populate_reward_entry_id(data, parsed_result, trial_name)
                 traj_file = _reward_trajectory_path(trial_dir, step_name)
                 if traj_file.exists():
                     data["_has_trajectory"] = True
@@ -1686,11 +1801,7 @@ def _extract_rewards(job_dir: Path, *, arm_suffix: str = "") -> list[dict[str, A
         data["_started_at"] = result.get("started_at")
         if arm_suffix:
             data["_arm_suffix"] = arm_suffix
-        if not data.get("entry_id"):
-            entry_id = _entry_id_from_harbor_result(result, arm_suffix=arm_suffix)
-            if entry_id:
-                data["entry_id"] = entry_id
-                data["_result_entry_id"] = entry_id
+        _populate_reward_entry_id(data, result, trial_name)
         traj_file = _reward_trajectory_path(trial_dir, None)
         if traj_file.exists():
             data["_has_trajectory"] = True
@@ -1787,21 +1898,29 @@ def _result_task_path_entry_id(task_path_value: Any) -> tuple[str, str]:
                 import tomllib
 
                 parsed = tomllib.loads(raw_toml)
-                metadata = parsed.get("metadata") if isinstance(parsed, dict) else None
-                if isinstance(metadata, dict) and metadata.get("entry_id"):
-                    return str(metadata["entry_id"]).strip(), task_dir.name
+                raw_entry_id = extract_toml_metadata_entry_id(parsed)
+                if raw_entry_id is not None:
+                    entry_id = str(raw_entry_id).strip()
+                    if entry_id:
+                        return entry_id, task_dir.name
             except Exception:
                 pass
     return "", task_dir.name
 
 
-def _entry_id_from_harbor_result(result: dict[str, Any], *, arm_suffix: str = "") -> str:
+def _resolve_harbor_result_entry_id(
+    result: dict[str, Any],
+    *,
+    arm_suffix: str = "",
+    task_entry_id_map: Mapping[str, str] | None = None,
+) -> tuple[str, bool]:
+    """Resolve (entry_id, is_authoritative) from a Harbor result.json payload."""
     fallback_dir_name = ""
     task_id = result.get("task_id")
     if isinstance(task_id, dict):
         meta_id, dir_name = _result_task_path_entry_id(task_id.get("path"))
         if meta_id:
-            return meta_id
+            return meta_id, True
         fallback_dir_name = dir_name or fallback_dir_name
 
     config = result.get("config")
@@ -1810,17 +1929,57 @@ def _entry_id_from_harbor_result(result: dict[str, Any], *, arm_suffix: str = ""
         if isinstance(task, dict):
             meta_id, dir_name = _result_task_path_entry_id(task.get("path"))
             if meta_id:
-                return meta_id
+                return meta_id, True
             fallback_dir_name = dir_name or fallback_dir_name
+
+    if fallback_dir_name and task_entry_id_map and fallback_dir_name in task_entry_id_map:
+        return task_entry_id_map[fallback_dir_name], True
 
     task_name = result.get("task_name")
     if isinstance(task_name, str) and task_name.strip():
-        short_name = _strip_attempt_suffix(task_name.strip().rsplit("/", 1)[-1])
-        if arm_suffix and short_name.endswith(arm_suffix):
-            short_name = short_name.removesuffix(arm_suffix)
-        return _strip_attempt_suffix(short_name)
+        raw_name = task_name.strip()
+        short_raw = raw_name.rsplit("/", 1)[-1]
+        attempt_stripped_raw = _strip_attempt_suffix(raw_name)
+        attempt_stripped_short = _strip_attempt_suffix(short_raw)
 
-    return fallback_dir_name
+        if task_entry_id_map:
+            lookup_keys = [raw_name, short_raw, attempt_stripped_raw, attempt_stripped_short]
+            if arm_suffix:
+                for base in (short_raw, attempt_stripped_short):
+                    if base.endswith(arm_suffix):
+                        without_arm = base.removesuffix(arm_suffix)
+                        lookup_keys.extend([without_arm, _strip_attempt_suffix(without_arm)])
+            for key in lookup_keys:
+                if key in task_entry_id_map:
+                    return task_entry_id_map[key], True
+
+        if arm_suffix:
+            if short_raw.endswith(arm_suffix):
+                return short_raw.removesuffix(arm_suffix), False
+            if attempt_stripped_short.endswith(arm_suffix):
+                return attempt_stripped_short.removesuffix(arm_suffix), False
+        return short_raw, False
+
+    if fallback_dir_name and task_entry_id_map and fallback_dir_name in task_entry_id_map:
+        return task_entry_id_map[fallback_dir_name], True
+    return fallback_dir_name, False
+
+
+def _entry_id_from_harbor_result(
+    result: dict[str, Any],
+    *,
+    arm_suffix: str = "",
+    task_entry_id_map: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve the best-effort case ID from a Harbor trial result payload."""
+    entry_id, is_authoritative = _resolve_harbor_result_entry_id(
+        result,
+        arm_suffix=arm_suffix,
+        task_entry_id_map=task_entry_id_map,
+    )
+    if is_authoritative or not entry_id:
+        return entry_id
+    return _strip_attempt_suffix(entry_id)
 
 
 def _overall_score(reward: dict[str, Any]) -> float | None:
@@ -1937,9 +2096,21 @@ def _canonical_case_id(
     return _strip_attempt_suffix(name_part)
 
 
+def _normalize_expected_case_id_set(
+    expected_case_ids: Iterable[str] | None,
+) -> set[str] | None:
+    """Normalize optional expected case IDs into a stripped string set."""
+    if expected_case_ids is None:
+        return None
+    return {str(case_id).strip() for case_id in expected_case_ids if str(case_id).strip()}
+
+
 def _entry_id(reward: dict[str, Any], expected_case_ids: set[str] | None = None) -> str:
+    """Resolve the canonical case ID for a collected reward dictionary."""
     if reward.get("entry_id"):
         raw_entry_id = str(reward["entry_id"]).strip()
+        if reward.get("_authoritative_entry_id"):
+            return raw_entry_id
         if not reward.get("_result_entry_id"):
             if expected_case_ids:
                 if raw_entry_id in expected_case_ids:
@@ -2518,11 +2689,7 @@ def _annotate_security_attribution(
     expected_case_ids: list[str] | set[str] | None = None,
 ) -> dict[str, Any]:
     """Annotate with-skill security findings with baseline-aware attribution."""
-    expected_id_set = (
-        {str(case_id).strip() for case_id in expected_case_ids if str(case_id).strip()}
-        if expected_case_ids is not None
-        else None
-    )
+    expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
     baseline_by_case: dict[str, list[dict[str, Any]]] = {}
     for reward in without_rewards:
         baseline_by_case.setdefault(_entry_id(reward, expected_id_set), []).extend(_security_score_findings(reward))
@@ -2839,11 +3006,7 @@ def _save_trials(
     expected_case_ids: list[str] | set[str] | None = None,
 ) -> None:
     """Save per-trial reward.json and trajectory.json into the results directory."""
-    expected_id_set = (
-        {str(case_id).strip() for case_id in expected_case_ids if str(case_id).strip()}
-        if expected_case_ids is not None
-        else None
-    )
+    expected_id_set = _normalize_expected_case_id_set(expected_case_ids)
     trials_dir.mkdir(parents=True, exist_ok=True)
     for reward in rewards:
         trial_name, trial_root_name = _persisted_trial_name(reward)
@@ -3190,8 +3353,20 @@ def collect_harbor_results(
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
             with_trial_failures = _extract_trial_failures(with_job_dir)
             preserve_partial = _can_preserve_partial_rewards(with_job_dir, with_trial_failures)
+            with_task_entry_ids = _staged_task_entry_id_map(
+                output_dir,
+                agent,
+                "with",
+                arm_suffix=with_arm_suffix,
+            )
             with_collected_rewards = (
-                _extract_rewards(with_job_dir, arm_suffix=with_arm_suffix) if with_job_ok or preserve_partial else []
+                _extract_rewards(
+                    with_job_dir,
+                    arm_suffix=with_arm_suffix,
+                    task_entry_id_map=with_task_entry_ids,
+                )
+                if with_job_ok or preserve_partial
+                else []
             )
             with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
             with_logical_rewards = _logical_attempt_rewards(with_rewards)
@@ -3352,8 +3527,18 @@ def collect_harbor_results(
                 without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
                 without_trial_failures = _extract_trial_failures(without_job_dir)
                 preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
+                without_task_entry_ids = _staged_task_entry_id_map(
+                    output_dir,
+                    agent,
+                    "without",
+                    arm_suffix="-without-skill",
+                )
                 without_collected_rewards = (
-                    _extract_rewards(without_job_dir, arm_suffix="-without-skill")
+                    _extract_rewards(
+                        without_job_dir,
+                        arm_suffix="-without-skill",
+                        task_entry_id_map=without_task_entry_ids,
+                    )
                     if without_job_ok or preserve_partial
                     else []
                 )

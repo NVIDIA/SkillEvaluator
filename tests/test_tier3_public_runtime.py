@@ -1532,7 +1532,40 @@ def test_stage_native_harbor_tasks_dual_arm_suffix(
             "inline-metadata-name",
         ),
         (
+            'schema_version = "1.3"\nmetadata = {}\n\n'
+            'task = { authors = [{ name = "Alice" }], name = "nvidia/case-001", tags = ["a", "b"] }\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+        (
+            'schema_version = "1.3"\nmetadata.name = "dotted-metadata-name"\n'
+            'task = { subtable = { name = "subtable-name" }, name = "nvidia/case-001" }\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            "dotted-metadata-name",
+        ),
+        (
+            'schema_version = "1.3"\n["\\u006detadata"]\nname = "escaped-metadata-name"\n\n'
+            '["\\u0074ask"]\n"\\u006eame" = "nvidia/case-001"\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            "escaped-metadata-name",
+        ),
+        (
+            'schema_version = "1.3"\n"\\u0074ask"."\\u006eame" = "nvidia/case-001"\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+        (
             'schema_version = "1.3"\ntask.name = "nvidia/case-001"\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+        (
+            'schema_version = "1.3"\n\n[metadata.extra]\nfoo = "bar"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
+            "nvidia/case-001-with-skill",
+            None,
+        ),
+        (
+            'schema_version = "1.3"\n\n[[metadata.items]]\nname = "item1"\n\n[task]\nname = "nvidia/case-001"\n\n[environment]\n',
             "nvidia/case-001-with-skill",
             None,
         ),
@@ -1544,7 +1577,7 @@ def test_stage_native_harbor_tasks_structural_toml_variants(
     expected_task_name: str,
     expected_metadata_name: str | None,
 ) -> None:
-    """Verify structural [task].name update preserves valid TOML across multiline strings, comments, and [metadata].name."""
+    """Verify structural [task].name update preserves valid TOML across inline tables, escaped keys, and [metadata]."""
     skill_dir = tmp_path / "target-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
@@ -1564,6 +1597,7 @@ def test_stage_native_harbor_tasks_structural_toml_variants(
     )[0]
     parsed = tomllib.loads((staged / "task.toml").read_text(encoding="utf-8"))
     assert parsed["task"]["name"] == expected_task_name
+    assert parsed["metadata"]["entry_id"] == "case-001"
     if expected_metadata_name is not None:
         assert parsed["metadata"]["name"] == expected_metadata_name
     if "task.name" in parsed:
@@ -1572,7 +1606,7 @@ def test_stage_native_harbor_tasks_structural_toml_variants(
 
 
 def test_append_native_task_name_suffix_sad_paths(tmp_path: Path) -> None:
-    """Verify _append_native_task_name_suffix safely no-ops on missing, corrupt, or non-string task names."""
+    """Verify _append_native_task_name_suffix safely handles missing/corrupt/non-string task names and fails closed when [metadata].entry_id cannot be written."""
     from skillevaluator.tier3.harbor.adapter import _append_native_task_name_suffix
 
     missing_dir = tmp_path / "missing"
@@ -1606,34 +1640,59 @@ def test_append_native_task_name_suffix_sad_paths(tmp_path: Path) -> None:
     assert parsed["task"]["name"] == "nvidia/case-1-with-skill"
     assert parsed["metadata"]["entry_id"] == "authored-entry"
 
+    uninjectable_dir = tmp_path / "uninjectable-metadata"
+    uninjectable_dir.mkdir()
+    (uninjectable_dir / "task.toml").write_text(
+        'metadata = "not-a-table"\n\n[task]\nname = "nvidia/case-1"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Updated native Harbor task config is invalid TOML"):
+        _append_native_task_name_suffix(uninjectable_dir, "-with-skill")
+
+    mismatched_dir = tmp_path / "mismatched-metadata"
+    mismatched_dir.mkdir()
+    (mismatched_dir / "task.toml").write_text(
+        '[metadata]\nentry_id = "existing-id"\n\n[task]\nname = "nvidia/case-1"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"Failed to record \[metadata\]\.entry_id"):
+        _append_native_task_name_suffix(mismatched_dir, "-with-skill", entry_id="conflicting-id")
+
 
 def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom_only_collection(
     tmp_path: Path,
 ) -> None:
-    """Verify dual-arm staging and custom-only collection keep 'case-1' and 'case-1-with-skill' distinct."""
+    """Verify dual-arm staging and custom-only collection keep 'case-1', 'case-1-with-skill', and 'retry-attempt1' distinct across inline and standard task.toml syntax."""
     from skillevaluator.tier3.harbor.collector import collect_harbor_results
 
     skill_dir = tmp_path / "target-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# Target Skill\n", encoding="utf-8")
     harbor_dir = skill_dir / "evals" / "harbor"
-    for case_id in ("case-1", "case-1-with-skill"):
+    task_toml_templates = {
+        "case-1": 'schema_version = "1.3"\n\n["\\u0074ask"]\n"\\u006eame" = "nvidia/case-1"\n\n[environment]\n',
+        "case-1-with-skill": 'schema_version = "1.3"\ntask = { name = "nvidia/case-1-with-skill" }\n\n[environment]\n',
+        "retry-attempt1": 'schema_version = "1.3"\n[task]\nname = "nvidia/skillevaluator-retry-attempt1"\n\n[environment]\n',
+    }
+    for case_id, toml_body in task_toml_templates.items():
         task_dir = harbor_dir / case_id
         task_dir.mkdir(parents=True)
         (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
-        (task_dir / "task.toml").write_text(
-            f'schema_version = "1.3"\n\n[task]\nname = "nvidia/{case_id}"\n\n[environment]\n',
-            encoding="utf-8",
-        )
+        (task_dir / "task.toml").write_text(toml_body, encoding="utf-8")
         tests_dir = task_dir / "tests"
         tests_dir.mkdir()
         (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
 
+    # Stage into results-1/_harbor-tasks/opencode/{with,without} so idx=1 (expected_case_ids=None)
+    # tests authoritative [metadata].entry_id lookup via _staged_task_entry_id_map, while idx=0
+    # (expected_case_ids=[...], no _harbor-tasks in results-0) tests deferred attempt-suffix stripping
+    # on raw result["task_name"] protected by expected_case_ids.
+    staged_root = tmp_path / "results-1" / "_harbor-tasks" / "opencode"
     with_staged = {
         p.name: tomllib.loads((p / "task.toml").read_text(encoding="utf-8"))
         for p in stage_native_harbor_tasks(
             skill_dir,
-            tmp_path / "staged-with",
+            staged_root / "with",
             grading_mode="custom_only",
             arm_suffix="-with-skill",
         )
@@ -1642,7 +1701,7 @@ def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom
         p.name: tomllib.loads((p / "task.toml").read_text(encoding="utf-8"))
         for p in stage_native_harbor_tasks(
             skill_dir,
-            tmp_path / "staged-without",
+            staged_root / "without",
             grading_mode="custom_only",
             with_skill=False,
             arm_suffix="-without-skill",
@@ -1651,13 +1710,15 @@ def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom
 
     assert with_staged["case-1"]["task"]["name"] == "nvidia/case-1-with-skill"
     assert with_staged["case-1-with-skill"]["task"]["name"] == "nvidia/case-1-with-skill-with-skill"
+    assert with_staged["retry-attempt1"]["task"]["name"] == "nvidia/skillevaluator-retry-attempt1-with-skill"
     assert without_staged["case-1"]["task"]["name"] == "nvidia/case-1-without-skill"
     assert without_staged["case-1-with-skill"]["task"]["name"] == "nvidia/case-1-with-skill-without-skill"
+    assert without_staged["retry-attempt1"]["task"]["name"] == "nvidia/skillevaluator-retry-attempt1-without-skill"
 
     jobs_dir = tmp_path / "jobs"
     for variant, staged_map, scores in (
-        ("with", with_staged, {"case-1": 1.0, "case-1-with-skill": 0.9}),
-        ("without", without_staged, {"case-1": 0.2, "case-1-with-skill": 0.3}),
+        ("with", with_staged, {"case-1": 1.0, "case-1-with-skill": 0.9, "retry-attempt1": 0.8}),
+        ("without", without_staged, {"case-1": 0.2, "case-1-with-skill": 0.3, "retry-attempt1": 0.4}),
     ):
         job_dir = jobs_dir / f"target-skill-opencode-{variant}"
         trial_names: list[str] = []
@@ -1666,11 +1727,17 @@ def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom
             trial_names.append(trial_name)
             trial_dir = job_dir / trial_name
             trial_dir.mkdir(parents=True)
+            # Test both raw task_name (no _attempt1 suffix) and _attempt1 suffixed task_name
+            task_name_val = (
+                parsed_toml["task"]["name"]
+                if case_id == "retry-attempt1"
+                else f"{parsed_toml['task']['name']}_attempt1"
+            )
             (trial_dir / "result.json").write_text(
                 json.dumps(
                     {
                         "trial_name": trial_name,
-                        "task_name": f"{parsed_toml['task']['name']}_attempt1",
+                        "task_name": task_name_val,
                         "verifier_result": {"rewards": {"reward": scores[case_id]}},
                     }
                 ),
@@ -1696,25 +1763,31 @@ def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom
             encoding="utf-8",
         )
 
-    for idx, expected_ids in enumerate((["case-1", "case-1-with-skill"], None)):
+    for idx, expected_ids in enumerate((["case-1", "case-1-with-skill", "retry-attempt1"], None)):
         result = collect_harbor_results(
             skill_name="target-skill",
             agents=["opencode"],
             output_dir=tmp_path / f"results-{idx}",
             jobs_dir=jobs_dir,
             n_attempts=1,
-            expected_cases=2,
+            expected_cases=3,
             expected_case_ids=expected_ids,
         )
 
         assert result["execution_status"] == "succeeded"
         agent_res = result["agents"]["opencode"]
-        assert set(agent_res["pass_at_k"]["with_skill"]["cases"]) == {"case-1", "case-1-with-skill"}
-        assert set(agent_res["pass_at_k"]["without_skill"]["cases"]) == {"case-1", "case-1-with-skill"}
+        assert set(agent_res["pass_at_k"]["with_skill"]["cases"]) == {"case-1", "case-1-with-skill", "retry-attempt1"}
+        assert set(agent_res["pass_at_k"]["without_skill"]["cases"]) == {
+            "case-1",
+            "case-1-with-skill",
+            "retry-attempt1",
+        }
         assert agent_res["pass_at_k"]["with_skill"]["cases"]["case-1"]["best_score"] == 1.0
         assert agent_res["pass_at_k"]["with_skill"]["cases"]["case-1-with-skill"]["best_score"] == 0.9
+        assert agent_res["pass_at_k"]["with_skill"]["cases"]["retry-attempt1"]["best_score"] == 0.8
         assert agent_res["pass_at_k"]["without_skill"]["cases"]["case-1"]["best_score"] == 0.2
         assert agent_res["pass_at_k"]["without_skill"]["cases"]["case-1-with-skill"]["best_score"] == 0.3
+        assert agent_res["pass_at_k"]["without_skill"]["cases"]["retry-attempt1"]["best_score"] == 0.4
 
     # Sad path: if only 'case-1' is expected, 'case-1-with-skill' must be flagged as unexpected, not collapsed onto 'case-1'
     partial_expected_result = collect_harbor_results(
@@ -1723,11 +1796,207 @@ def test_dual_arm_native_tasks_with_authored_arm_suffix_do_not_collide_in_custom
         output_dir=tmp_path / "results-unexpected",
         jobs_dir=jobs_dir,
         n_attempts=1,
-        expected_cases=2,
+        expected_cases=3,
         expected_case_ids=["case-1"],
     )
     assert partial_expected_result["execution_status"] == "failed"
     assert any("case-1-with-skill" in err for err in partial_expected_result["execution_errors"])
+
+
+def test_stage_native_harbor_tasks_validates_metadata_entry_ids_sad_paths(tmp_path: Path) -> None:
+    """Verify native staging rejects unsafe or duplicate [metadata].entry_id values before mutating output_dir."""
+    # 1. Unsafe metadata.entry_id (e.g. path traversal or boolean)
+    for idx, bad_entry_id in enumerate(('"../escape"', "true", '""')):
+        skill_dir = tmp_path / f"bad-skill-{idx}"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Bad Skill\n", encoding="utf-8")
+        task_dir = skill_dir / "evals" / "harbor" / "physical-case"
+        task_dir.mkdir(parents=True)
+        (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
+        (task_dir / "task.toml").write_text(
+            f'[metadata]\nentry_id = {bad_entry_id}\n\n[task]\nname = "nvidia/physical-case"\n',
+            encoding="utf-8",
+        )
+        tests_dir = task_dir / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+
+        out_dir = tmp_path / f"out-bad-{idx}"
+        with pytest.raises(ValueError, match="case id"):
+            stage_native_harbor_tasks(skill_dir, out_dir, grading_mode="custom_only")
+        assert not out_dir.exists()
+
+    # 2. Duplicate metadata.entry_id across two distinct physical task directories
+    dup_skill = tmp_path / "dup-skill"
+    dup_skill.mkdir()
+    (dup_skill / "SKILL.md").write_text("# Dup Skill\n", encoding="utf-8")
+    for folder in ("physical-a", "physical-b"):
+        task_dir = dup_skill / "evals" / "harbor" / folder
+        task_dir.mkdir(parents=True)
+        (task_dir / "instruction.md").write_text("Instruction\n", encoding="utf-8")
+        (task_dir / "task.toml").write_text(
+            '[metadata]\nentry_id = "shared-authored-id"\n\n[task]\nname = "nvidia/task"\n',
+            encoding="utf-8",
+        )
+        tests_dir = task_dir / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+
+    dup_out = tmp_path / "out-dup"
+    with pytest.raises(ValueError, match=r"duplicate or cross-platform colliding case id.*shared-authored-id"):
+        stage_native_harbor_tasks(dup_skill, dup_out, grading_mode="custom_only")
+    assert not dup_out.exists()
+
+
+def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_dataset_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify native custom-only tasks with [metadata].entry_id != directory name align across runner, collector, and dataset_snapshot.json."""
+    from skillevaluator.provider_config import ProviderConfig
+    from skillevaluator.tier3.harbor import runner, runtime_preflight
+
+    skill_dir = tmp_path / "target-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: target-skill\ndescription: demo\n---\n# Body\n", encoding="utf-8")
+    (skill_dir / "evals").mkdir()
+    (skill_dir / "evals" / "config.yaml").write_text(
+        "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n",
+        encoding="utf-8",
+    )
+    for folder, authored_entry_id in (("physical-case", '"authored-entry"'), ("zero-case", "0")):
+        task_dir = skill_dir / "evals" / "harbor" / folder
+        task_dir.mkdir(parents=True)
+        (task_dir / "instruction.md").write_text("Solve the task.\n", encoding="utf-8")
+        (task_dir / "task.toml").write_text(
+            f'schema_version = "1.3"\n\n[metadata]\nentry_id = {authored_entry_id}\n\n'
+            f'[task]\nname = "nvidia/{folder}"\n\n[environment]\n',
+            encoding="utf-8",
+        )
+        tests_dir = task_dir / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+
+    output_dir = tmp_path / "eval-out"
+    provider = ProviderConfig(
+        provider="nv_build",
+        model="nvidia/nemotron-3-nano-30b-a3b",
+        api_key="nvapi-test",
+        base_url="https://integrate.api.nvidia.com/v1",
+        litellm_model="nvidia_nim/nvidia/nemotron-3-nano-30b-a3b",
+    )
+    monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected_provider: runtime_preflight.ModelProbeResult(
+            True,
+            selected_provider.provider,
+            selected_provider.model,
+            "ok",
+        ),
+    )
+
+    seen_include_task_names: list[list[str] | None] = []
+
+    def fake_run_harbor(
+        *,
+        dataset: Path,
+        agent: str,
+        job_name: str,
+        env_mode: str,
+        model: str,
+        jobs_dir: Path,
+        run_env: dict[str, str],
+        n_attempts: int,
+        n_concurrent: int,
+        timeout_multiplier: float,
+        override_cpus: int | None,
+        override_memory_mb: int | None,
+        override_storage_mb: int | None,
+        expected_trials: int,
+        agent_import_path: str | None = None,
+        verifier_env: object = None,
+        include_task_names: list[str] | None = None,
+    ) -> tuple[bool, str]:
+        seen_include_task_names.append(include_task_names)
+        job_dir = jobs_dir / job_name
+        is_with = "-with-" in job_name or job_name.endswith("-with")
+        arm_suffix = "-with-skill" if is_with else "-without-skill"
+        selected_folders = include_task_names or ["physical-case", "zero-case"]
+        trial_names: list[str] = []
+        for idx, folder in enumerate(selected_folders, start=1):
+            trial_name = f"trial-{idx}-{folder}__attempt1"
+            trial_names.append(trial_name)
+            trial_dir = job_dir / trial_name
+            trial_dir.mkdir(parents=True, exist_ok=True)
+            # Notice result.json only has task_name derived from the staged [task].name (physical-case),
+            # not [metadata].entry_id, exercising collector's staged task.toml entry_id lookup!
+            (trial_dir / "result.json").write_text(
+                json.dumps(
+                    {
+                        "trial_name": trial_name,
+                        "task_name": f"nvidia/{folder}{arm_suffix}_attempt1",
+                        "verifier_result": {"rewards": {"reward": 1.0 if is_with else 0.25}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+        (job_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "n_total_trials": len(trial_names),
+                    "stats": {
+                        "n_trials": len(trial_names),
+                        "n_errors": 0,
+                        "evals": {
+                            agent: {
+                                "n_trials": len(trial_names),
+                                "n_errors": 0,
+                                "reward_stats": {"reward": {"1.0": trial_names}},
+                            }
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return True, ""
+
+    monkeypatch.setattr(runner, "_run_harbor", fake_run_harbor)
+
+    results = runner.run_harbor_eval(
+        skill_path=skill_dir,
+        agents=["opencode"],
+        output_dir=output_dir,
+        env_mode="docker",
+        n_attempts=2,
+        stop_on_pass=True,
+        agent_runtime_preflight=False,
+    )
+
+    assert results["execution_status"] == "succeeded"
+    # stop_on_pass passes physical task directory names to Harbor CLI --include-task-name
+    # With-skill passes on attempt 1 (1.0 >= 0.50), baseline runs 2 attempts per task (0.25 < 0.50)
+    assert seen_include_task_names == [
+        ["physical-case"],
+        ["zero-case"],
+        ["physical-case"],
+        ["physical-case"],
+        ["zero-case"],
+        ["zero-case"],
+    ]
+
+    agent_res = results["agents"]["opencode"]
+    assert set(agent_res["pass_at_k"]["with_skill"]["cases"]) == {"authored-entry", "0"}
+    assert set(agent_res["pass_at_k"]["without_skill"]["cases"]) == {"authored-entry", "0"}
+    assert agent_res["pass_at_k"]["with_skill"]["cases"]["authored-entry"]["best_score"] == 1.0
+    assert agent_res["pass_at_k"]["without_skill"]["cases"]["authored-entry"]["best_score"] == 0.25
+
+    run_dir = Path(results["run_dir"])
+    snapshot = json.loads((run_dir / "dataset_snapshot.json").read_text(encoding="utf-8"))
+    assert snapshot["dataset"] == [{"id": "authored-entry"}, {"id": "0"}]
 
 
 def test_stage_native_harbor_tasks_type_safety(tmp_path: Path) -> None:

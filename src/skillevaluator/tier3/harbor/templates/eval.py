@@ -7892,18 +7892,33 @@ def main():
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
 
     if not traj:
+        # Without a trajectory every metric the case defines fails, but a judge
+        # without its reference input stays N/A exactly as on the judged path,
+        # so one crashed trial cannot turn an arm's N/A judge metric into 0.0.
+        judge_scores = {}
+        judge_details = {}
+        for metric, reference, na_reason in (
+            ("accuracy", entry.get("ground_truth", ""), _NO_GROUND_TRUTH_REASON),
+            ("goal_accuracy", entry.get("ground_truth", ""), _NO_GROUND_TRUTH_REASON),
+            ("behavior_check", entry.get("expected_behavior", []), _NO_EXPECTED_BEHAVIOR_REASON),
+        ):
+            if _has_judge_reference(reference):
+                judge_scores[metric] = 0
+            else:
+                judge_scores[metric] = None
+                judge_details[metric] = _judge_not_applicable(na_reason)
         result = {
             "security": 0,
             "skill_execution": 0,
             "skill_efficiency": 0,
-            "accuracy": 0,
-            "goal_accuracy": 0,
-            "behavior_check": 0,
+            **judge_scores,
             "metric_set": DEFAULT_METRIC_SET,
             "error": "No trajectory or reconstructible agent log",
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
         }
+        if judge_details:
+            result["details"] = judge_details
         write_reward_outputs(result, 0.0)
         return
 

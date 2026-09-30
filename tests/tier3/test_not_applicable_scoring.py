@@ -13,9 +13,11 @@ and lift, and must render as N/A, never as 0 or 1.
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -368,6 +370,95 @@ def test_collector_fails_closed_when_the_not_applicable_sidecar_is_missing(tmp_p
     assert result["execution_status"] == "failed"
     assert agent["conditions"]["with_skill"]["scored_attempts"] == 0
     assert agent["with_skill"] == {}
+
+
+_EVAL_TEMPLATE = (
+    Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
+)
+
+
+def _run_verifier_without_trajectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the verifier template's main() for an agent that left no trajectory."""
+    module_name = f"harbor_eval_no_trajectory_{tmp_path.name}"
+    spec = importlib.util.spec_from_file_location(module_name, _EVAL_TEMPLATE)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+    logs_dir = tmp_path / "logs"
+    agent_dir = logs_dir / "agent"
+    verifier_dir = logs_dir / "verifier"
+    tests_dir = tmp_path / "tests"
+    for directory in (agent_dir, verifier_dir, tests_dir):
+        directory.mkdir(parents=True)
+    for name, value in {
+        "LOGS_DIR": logs_dir,
+        "AGENT_LOGS_DIR": agent_dir,
+        "VERIFIER_DIR": verifier_dir,
+        "TESTS_DIR": tests_dir,
+        "ATIF_PATH": agent_dir / "trajectory.json",
+        "ENTRY_PATH": tests_dir / "entry.json",
+        "REWARD_JSON": verifier_dir / "reward.json",
+        "REWARD_TXT": verifier_dir / "reward.txt",
+        "SKILL_EVALUATOR_REWARD_JSON": verifier_dir / "skill_evaluator_reward.json",
+    }.items():
+        monkeypatch.setattr(module, name, value)
+    (tests_dir / "entry.json").write_text(json.dumps(entry), encoding="utf-8")
+
+    module.main()
+
+    reward = json.loads((verifier_dir / "reward.json").read_text(encoding="utf-8"))
+    sidecar = json.loads((verifier_dir / "skill_evaluator_reward.json").read_text(encoding="utf-8"))
+    return reward, sidecar
+
+
+def test_no_trajectory_trial_keeps_reference_less_judges_not_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The agent crashed before writing a trajectory. The case has no
+    # ground_truth / expected_behavior, so its judge metrics stay N/A instead
+    # of turning the arm's N/A accuracy into 0.0.
+    entry = {"id": "case-1", "question": "Summarize the report.", "expected_skill": "reporter", "has_skill": True}
+
+    reward, sidecar = _run_verifier_without_trajectory(tmp_path, monkeypatch, entry)
+
+    assert sidecar["error"] == "No trajectory or reconstructible agent log"
+    assert set(reward) == {"security", "skill_execution", "skill_efficiency", "overall"}
+    assert reward["overall"] == 0.0
+    merged = {**sidecar, **reward}
+    for metric in JUDGED:
+        assert sidecar[metric] is None
+        assert sidecar["details"][metric]["status"] == "not_applicable"
+        assert sidecar["details"][metric]["reason"].startswith("N/A")
+        assert metric_is_not_applicable(merged, metric)
+    assert overall_score(merged) == 0.0
+
+    # Nine judged-N/A trials plus this crash: the arm keeps the judges N/A.
+    arm = [_merged((1.0, 1.0, 1.0, N, N, N)) for _ in range(9)] + [merged]
+    averages, _metric_set, metrics = average_metrics(arm)
+    assert not set(JUDGED) & set(averages)
+    assert set(not_applicable_metrics(arm, metrics)) == set(JUDGED)
+
+
+def test_no_trajectory_trial_fails_every_judge_the_case_defines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = {
+        "id": "case-1",
+        "question": "Summarize the report.",
+        "ground_truth": "A summary.",
+        "expected_behavior": ["Summarizes the report"],
+        "has_skill": True,
+    }
+
+    reward, sidecar = _run_verifier_without_trajectory(tmp_path, monkeypatch, entry)
+
+    assert [sidecar[metric] for metric in JUDGED] == [0, 0, 0]
+    assert [reward[metric] for metric in JUDGED] == [0.0, 0.0, 0.0]
+    assert "details" not in sidecar
+    assert overall_score({**sidecar, **reward}) == 0.0
 
 
 def _write_multistep_trial(

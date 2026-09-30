@@ -57,6 +57,20 @@ CONTROL_PAYLOADS = {
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
+# Untrusted text (a skill name or failure reason) with control sequences between
+# visible words and an emoji code, and exactly what the terminal must show for it.
+HOSTILE_TEXT = (
+    "alpha\x1b[2J"  # clear the screen
+    "bravo\x1b]8;;https://evil.test/\x1b\\x\x1b]8;;\x1b\\"  # OSC 8 hyperlink around "x"
+    "charlie\x1bc"  # RIS: full terminal reset
+    "delta\x9b2J"  # 8-bit CSI: only the C1 byte is a control character
+    "echo :white_check_mark:"
+)
+HOSTILE_VISIBLE = "alphabravoxcharliedelta2Jecho :white_check_mark:"
+# A path component cannot hold the OSC 8 URL's "/", and ":" is not valid in Windows file names.
+HOSTILE_PATH_PART = "run\x1b[2J\x1bc\x9b2J"
+HOSTILE_PATH_PART_VISIBLE = "run2J"
+
 
 def _recording_console(width: int = 200) -> Console:
     # Tests that print absolute tmp paths pass a wider width so long paths do not wrap.
@@ -72,6 +86,20 @@ def _terminal_text(output: str) -> str:
     text = _SGR.sub("", output)
     assert _CONTROL.search(text) is None, repr(text)
     return text
+
+
+def _plain_output_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real consoles out of terminal mode, so Rich adds no escape sequences of its own."""
+    monkeypatch.setenv("COLUMNS", "200")
+    for name in ("FORCE_COLOR", "TTY_COMPATIBLE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _assert_no_controls_or_emoji(output: str) -> None:
+    """No ESC, C1 or other control byte reaches the output, and emoji codes stay literal."""
+    assert _CONTROL.search(output) is None, repr(output)
+    assert "evil.test" not in output  # the OSC 8 target goes with its sequence
+    assert [glyph for glyph in EMOJI_GLYPHS if glyph in output] == []
 
 
 def _quality_result(payload: str) -> ValidationResult:
@@ -627,3 +655,109 @@ def test_rubric_progress_status_renders_skill_name_literally(
 
     assert all(isinstance(status, Text) for status in statuses)
     assert [status.plain for status in statuses] == [f"Evaluating {name} with LLM judge..."]
+
+
+def test_catalog_divider_and_scoreboard_strip_terminal_controls(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator import cli as cli_module
+
+    _plain_output_env(monkeypatch)
+
+    # Both print through the view console, which resolves sys.stdout per call.
+    cli_module._print_catalog_divider(1, 2, HOSTILE_TEXT)
+    cli_module._print_catalog_summary(
+        2,
+        [(HOSTILE_TEXT, "validation failed"), ("plain-skill", HOSTILE_TEXT)],
+        Path("reports") / HOSTILE_PATH_PART,
+    )
+
+    output = capsys.readouterr().out
+    _assert_no_controls_or_emoji(output)
+    assert f"skill 1/2 · {HOSTILE_VISIBLE}" in output
+    assert f"✗ {HOSTILE_VISIBLE}validation failed" in output
+    assert f"✗ {'plain-skill':<28}{HOSTILE_VISIBLE}" in output
+    assert f"reports     {Path('reports') / HOSTILE_PATH_PART_VISIBLE}/<skill>/" in output
+
+
+def test_validate_view_strips_terminal_controls(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.reporting.console_ui import ValidateView, detail_row, summarize_tier1
+
+    _plain_output_env(monkeypatch)
+    failing = ValidationResult(validator_name="SECURITY", validator_description="Security checks")
+    failing.add_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.HIGH,
+            check_name="mcp-least-privilege",
+            message=HOSTILE_TEXT,
+            file_path="SKILL.md",
+            suggestion=HOSTILE_TEXT,
+        )
+    )
+    # No console argument: the view prints through its own default console.
+    view = ValidateView(
+        skill=f"skill: {HOSTILE_TEXT}",
+        tiers=[(1, "Static & Security", "static & security"), (3, "Live Agent Eval", "live agent eval")],
+    )
+
+    view.start()
+    view.tier_start(0)
+    _passed, rows = summarize_tier1([failing])
+    view.tier_done(0, failed=True, rows=[*rows, detail_row("dataset", HOSTILE_TEXT)])
+    view.tier_skip(1, HOSTILE_TEXT)
+    cli_module._finish_pipeline_view(
+        view,
+        tier_gate_results=[failing],
+        tier3_result=None,
+        gate_failed=True,
+        output_dir=Path("reports"),
+        basename=HOSTILE_PATH_PART,
+        report_formats=("html",),
+        target_path=Path("skills") / HOSTILE_PATH_PART,
+        agent_eval=False,
+    )
+
+    output = capsys.readouterr().out
+    _assert_no_controls_or_emoji(output)
+    assert f" skill: {HOSTILE_VISIBLE} " in output  # header pill
+    assert f"SECURITY — {HOSTILE_VISIBLE}" in output  # failed check row
+    assert f"{'dataset':<12}{HOSTILE_VISIBLE}" in output
+    assert f"{'skipped':<12}{HOSTILE_VISIBLE}" in output
+    assert f"fix     {HOSTILE_VISIBLE}" in output
+    assert f"skillevaluator validate {Path('skills') / HOSTILE_PATH_PART_VISIBLE}" in output  # rerun hint
+    assert f"{'report':<12}{Path('reports') / (HOSTILE_PATH_PART_VISIBLE + '.html')}" in output
+
+
+@pytest.mark.skipif(_WINDOWS, reason="Windows file names cannot contain control characters")
+def test_catalog_run_strips_terminal_controls_from_skill_names_and_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import click
+    from click.testing import CliRunner
+
+    from skillevaluator import cli as cli_module
+
+    _plain_output_env(monkeypatch)
+    skill_dir = tmp_path / "catalog" / HOSTILE_PATH_PART
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+
+    def _failing_validate(**_params: object) -> None:
+        raise click.ClickException(HOSTILE_TEXT)
+
+    # Only the per-skill run is replaced: the catalog loop, divider, scoreboard and exit error are real.
+    monkeypatch.setattr(cli_module, "validate", _failing_validate)
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["validate", str(tmp_path / "catalog"), "--no-llm", "--no-dedup", "--no-tier3", "-o", str(tmp_path / "out")],
+    )
+
+    assert result.exit_code == 1, result.output
+    _assert_no_controls_or_emoji(result.output)
+    assert f"skill 1/1 · {HOSTILE_PATH_PART_VISIBLE}" in result.output
+    assert f"✗ {HOSTILE_PATH_PART_VISIBLE:<28}{HOSTILE_VISIBLE}" in result.output
+    assert f"1/1 skills failed validation: {HOSTILE_PATH_PART_VISIBLE}" in result.output

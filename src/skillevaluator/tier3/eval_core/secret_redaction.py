@@ -23,6 +23,10 @@ LOG_CRSR_RE = re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}")
 OPENSHIFT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+")
 LOG_YA29_RE = re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}")
 LOG_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b")
+# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
+# Single bounded character classes keep both patterns linear.
+LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
+LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
 
 
 def redact_secrets_in_log_line(
@@ -37,6 +41,8 @@ def redact_secrets_in_log_line(
     line = LOG_SK_RE.sub("sk-<redacted>", line)
     line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
     line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
+    line = LOG_GITHUB_TOKEN_RE.sub(lambda match: match.group()[:4] + "<redacted>", line)
+    line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
     line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
     line = LOG_YA29_RE.sub("ya29.<redacted>", line)
     return LOG_JWT_RE.sub("jwt-<redacted>", line)

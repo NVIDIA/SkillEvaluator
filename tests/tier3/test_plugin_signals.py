@@ -466,6 +466,35 @@ class TestArguments:
         assert (block["checked"], block["passed"]) == (20, 0)
         assert {failure["detail"] for failure in block["failures"]} == {"pattern check timed out"}
 
+    def test_huge_integers_and_non_ascii_digits_never_crash_grading(self) -> None:
+        huge = 10**400
+        traj = _traj(_one("Bash", {"n": huge, "items": [1, 2, 3]}))
+        case = {
+            "tool_arguments": [
+                {"tool": "Bash", "equals": {"n": huge}},
+                {"tool": "Bash", "equals": {"n": huge + 1}},
+                {"tool": "Bash", "required": ["items.²"]},
+                {"tool": "Bash", "schema": {"properties": {"n": {"maximum": huge - 1}}}},
+            ]
+        }
+        assert validate_plugin_case_fields(case) == []
+
+        block = _signals(traj, case)["arguments"]
+
+        assert (block["checked"], block["passed"]) == (4, 1)
+        assert [(failure["arg"], failure["detail"]) for failure in block["failures"]] == [
+            ("n", "expected " + str(huge + 1)[:66] + "...<truncated>, got integer"),
+            ("items.²", "argument is missing"),
+            ("n", "value is above maximum " + str(huge - 1)[:66] + "...<truncated>"),
+        ]
+
+    @pytest.mark.parametrize("bound", ["minimum", "maximum"])
+    def test_huge_schema_bounds_are_validated_not_raised(self, bound: str) -> None:
+        entry = {"tool_arguments": [{"tool": "Bash", "schema": {"properties": {"n": {bound: 10**400}}}}]}
+        assert validate_plugin_case_fields(entry) == []
+        inverted = {"tool_arguments": [{"tool": "Bash", "schema": {"minimum": 10**400, "maximum": 10**399}}]}
+        assert any("minimum must not exceed" in problem for problem in validate_plugin_case_fields(inverted))
+
 
 class TestMcpCalls:
     def test_success_rate_excludes_unknown_and_covers_every_server(self) -> None:
@@ -859,3 +888,8 @@ class TestUntrustedTrajectoryContent:
 
         assert time.monotonic() - started < 1.0
         assert len(signals["arguments"]["failures"]) == 4
+
+    def test_unhashable_step_source_is_ignored(self) -> None:
+        traj = _traj(_one("Skill", {"skill": "alpha"}))
+        traj["steps"].insert(0, {"source": ["user"], "message": "hi"})
+        assert _signals(traj)["activations"][0]["name"] == "alpha"

@@ -324,6 +324,15 @@ def test_dataset_validation_accepts_plugin_signal_fields(tmp_path: Path) -> None
     assert not [check for check in checks if check.status in {"missing", "error"}]
 
 
+def test_dataset_validation_accepts_huge_numeric_bounds_instead_of_raising(tmp_path: Path) -> None:
+    schema = {"properties": {"number": {"minimum": -(10**400), "maximum": 10**400}}}
+    entry = {**CASE, "tool_arguments": [{"tool": "mcp__github__get_issue", "schema": schema}]}
+
+    _source, checks = validate_tier3_source(_skill_with_dataset(tmp_path, entry))
+
+    assert not [check for check in checks if check.status in {"missing", "error"}]
+
+
 def test_dataset_validation_rejects_malformed_plugin_signal_fields(tmp_path: Path) -> None:
     bad = {**CASE, "expected_tools": "Skill:alpha", "handoffs": [{"producer": "a", "consumer": "b"}]}
 

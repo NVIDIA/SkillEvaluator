@@ -400,7 +400,10 @@ def _check_regex(value: Any, where: str, errors: _FieldErrors) -> str | None:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(float(value))
+    # ``float(10**400)`` overflows, so an int is finite by type; floats must be finite.
+    return (isinstance(value, int) and not isinstance(value, bool)) or (
+        isinstance(value, float) and math.isfinite(value)
+    )
 
 
 def _bounded_json_text(value: Any, limit: int) -> str | None:
@@ -466,7 +469,7 @@ def _check_schema(schema: Any, where: str, errors: _FieldErrors, *, depth: int, 
     if (
         _is_number(schema.get("minimum"))
         and _is_number(schema.get("maximum"))
-        and float(schema["minimum"]) > float(schema["maximum"])
+        and schema["minimum"] > schema["maximum"]
     ):
         errors.add(where, "minimum must not exceed maximum")
         ok = False
@@ -1347,7 +1350,8 @@ def _prompt_texts(trajectory: Mapping[str, Any]) -> list[str]:
     if not isinstance(steps, list):
         return texts
     for step in steps[:_MAX_STEPS]:
-        if not isinstance(step, Mapping) or step.get("source") not in {"user", "system"}:
+        source = step.get("source") if isinstance(step, Mapping) else None
+        if not isinstance(source, str) or source not in {"user", "system"}:
             continue
         message = step.get("message")
         text = message if isinstance(message, str) else _content_text(message)
@@ -1510,7 +1514,7 @@ def _lookup(args: Any, name: str) -> Any:
     for part in name.split("."):
         if isinstance(current, Mapping) and part in current:
             current = current[part]
-        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+        elif isinstance(current, list) and part.isascii() and part.isdigit() and int(part) < len(current):
             current = current[int(part)]
         else:
             return _MISSING
@@ -1521,7 +1525,8 @@ def _json_equal(left: Any, right: Any) -> bool:
     if isinstance(left, bool) or isinstance(right, bool):
         return isinstance(left, bool) and isinstance(right, bool) and left == right
     if _is_number(left) and _is_number(right):
-        return float(left) == float(right)
+        # int/float comparison is exact in Python and never overflows.
+        return bool(left == right)
     if isinstance(left, Mapping) and isinstance(right, Mapping):
         return left.keys() == right.keys() and all(_json_equal(left[key], right[key]) for key in left)
     if isinstance(left, list) and isinstance(right, list):
@@ -1623,9 +1628,9 @@ def _schema_errors(
         elif not found:
             errors.append((path, f"value {_describe(value)} does not match the schema pattern"))
     if _is_number(value):
-        if _is_number(schema.get("minimum")) and float(value) < float(schema["minimum"]):
+        if _is_number(schema.get("minimum")) and value < schema["minimum"]:
             errors.append((path, f"value is below minimum {_preview(schema['minimum'])}"))
-        if _is_number(schema.get("maximum")) and float(value) > float(schema["maximum"]):
+        if _is_number(schema.get("maximum")) and value > schema["maximum"]:
             errors.append((path, f"value is above maximum {_preview(schema['maximum'])}"))
     if isinstance(value, Mapping):
         for name in schema.get("required") or ():

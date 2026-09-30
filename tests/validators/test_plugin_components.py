@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from skillevaluator.constants import CONTENT_TYPE_PLUGIN, PLUGIN_CONFIG_MAX_BYTES
+import skillevaluator
+from skillevaluator.constants import CONTENT_DEDUP_MAX_DISCOVERED_PATHS, CONTENT_TYPE_PLUGIN, PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_components import (
     COMPONENT_TYPES,
@@ -710,3 +713,41 @@ def test_env_scan_does_not_follow_symlinked_directories(tmp_path: Path) -> None:
     (root / "a" / "b" / "linked").symlink_to(outside, target_is_directory=True)
     findings = [f for f in _validate(root).findings if f.check_name == "plugin_env_file_shipped"]
     assert findings == []
+
+
+_ENV_SCAN_UNDER_FD_LIMIT = """
+import resource, sys
+from pathlib import Path
+from skillevaluator.plugin_components import build_plugin_inventory
+resource.setrlimit(resource.RLIMIT_NOFILE, (128, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+root = Path(sys.argv[1])
+inventory = build_plugin_inventory(root, None, contained=True, manifest_rel=".claude-plugin/plugin.json")
+for finding in inventory.findings:
+    print(finding.check_name, Path(finding.file_path).relative_to(root).as_posix())
+"""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="RLIMIT_NOFILE is POSIX-only")
+def test_env_scan_keeps_open_descriptors_bounded(tmp_path: Path) -> None:
+    for index in range(400):
+        (tmp_path / f"d{index:03d}").mkdir()
+    (tmp_path / "d000" / ".env").write_text("X=1", encoding="utf-8")
+    (tmp_path / "d399" / ".env").write_text("X=1", encoding="utf-8")
+    src = Path(skillevaluator.__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "-c", _ENV_SCAN_UNDER_FD_LIMIT, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONPATH": str(src)},
+    )
+    assert completed.stdout.splitlines() == ["plugin_env_file_shipped d000/.env", "plugin_env_file_shipped d399/.env"]
+
+
+def test_env_scan_budget_exhaustion_is_reported(tmp_path: Path) -> None:
+    (tmp_path / "many").mkdir()
+    for index in range(CONTENT_DEDUP_MAX_DISCOVERED_PATHS + 1):
+        (tmp_path / "many" / f"f{index}").touch()
+    inventory = build_plugin_inventory(tmp_path, None, contained=True, manifest_rel=".claude-plugin/plugin.json")
+    checks = {finding.check_name: finding.severity for finding in inventory.findings}
+    assert checks["plugin_env_scan_incomplete"] == Severity.LOW

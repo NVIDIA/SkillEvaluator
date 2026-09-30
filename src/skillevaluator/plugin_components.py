@@ -1288,7 +1288,18 @@ class _Builder:
 
     # -- shipped .env files ------------------------------------------------ #
     def env_files(self) -> None:
-        hits = _find_env_files(self.reader.root)
+        hits, complete = _find_env_files(self.reader.root)
+        if not complete:
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.LOW,
+                    "plugin_env_scan_incomplete",
+                    f"the shipped .env file scan stopped early (more than {CONTENT_DEDUP_MAX_DISCOVERED_PATHS} "
+                    "entries, or a directory could not be opened); later directories were not checked",
+                    self.reader.display("."),
+                    "Keep generated or unreadable directories out of the plugin package.",
+                )
+            )
         for rel in hits[:_MAX_ENV_FILE_FINDINGS]:
             self.inventory.findings.append(
                 _plugin_finding(
@@ -1368,56 +1379,81 @@ def _is_env_file(name: str) -> bool:
     )
 
 
-def _find_env_files(root: Path) -> list[PurePosixPath]:
+def _scan_env_entries(
+    entries: list[os.DirEntry[str]], rel_dir: PurePosixPath, depth: int, hits: list[PurePosixPath], budget: int
+) -> tuple[list[str], int]:
+    """Record ``.env`` hits among one directory's entries; return (subdirectories to visit, budget left)."""
+    children: list[str] = []
+    for entry in entries:
+        budget -= 1
+        if budget < 0:
+            break
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if not is_dir:
+            if _is_env_file(entry.name):
+                hits.append(rel_dir / entry.name)
+        elif entry.name not in SCAN_EXCLUDED_DIRS and depth < 32:
+            children.append(entry.name)
+    return children, budget
+
+
+def _find_env_files(root: Path) -> tuple[list[PurePosixPath], bool]:
     """Names-only walk for shipped ``.env`` / ``.env.*`` files; files are never opened.
 
+    Returns the hits and whether the walk was complete (``False`` when the entry
+    budget ran out or a directory could not be opened or listed).
+
     On POSIX every directory is opened relative to its parent descriptor with
-    ``O_NOFOLLOW``, so a directory swapped for a symlink is never listed.
+    ``O_NOFOLLOW``, so a directory swapped for a symlink is never listed. The walk
+    is depth-first and opens a subdirectory only after its previous sibling's
+    subtree is closed, so open descriptors grow with depth (at most 33), not with
+    the number of sibling directories.
     """
     hits: list[PurePosixPath] = []
     budget = CONTENT_DEDUP_MAX_DISCOVERED_PATHS
+    complete = True
     if os.name == "posix" and os.open in os.supports_dir_fd and os.scandir in os.supports_fd:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         try:
             root_fd = os.open(root, flags)
         except OSError:
-            return hits
-        stack: list[tuple[int, PurePosixPath, int]] = [(root_fd, PurePosixPath(), 0)]
-        while stack:
-            fd, rel_dir, depth = stack.pop()
-            try:
-                with os.scandir(fd) as iterator:
-                    entries = sorted(iterator, key=lambda item: item.name)
-            except OSError:
-                entries = []
-            try:
-                for entry in entries:
-                    budget -= 1
-                    if budget < 0:
-                        break
+            return hits, False
+        # Frames: (fd, rel_dir, depth, subdirectories left to visit; None until listed).
+        stack: list[tuple[int, PurePosixPath, int, list[str] | None]] = [(root_fd, PurePosixPath(), 0, None)]
+        try:
+            while stack:
+                fd, rel_dir, depth, children = stack[-1]
+                if children is None:
                     try:
-                        is_dir = entry.is_dir(follow_symlinks=False)
+                        with os.scandir(fd) as iterator:
+                            entries = sorted(iterator, key=lambda item: item.name)
                     except OSError:
-                        continue
-                    if not is_dir:
-                        if _is_env_file(entry.name):
-                            hits.append(rel_dir / entry.name)
-                        continue
-                    if entry.name in SCAN_EXCLUDED_DIRS or depth >= 32:
-                        continue
-                    try:
-                        child_fd = os.open(entry.name, flags, dir_fd=fd)
-                    except OSError:
-                        continue
-                    stack.append((child_fd, rel_dir / entry.name, depth + 1))
-            finally:
+                        complete = False
+                        entries = []
+                    found, budget = _scan_env_entries(entries, rel_dir, depth, hits, budget)
+                    children = found[::-1]  # pop() visits them in name order
+                    stack[-1] = (fd, rel_dir, depth, children)
+                if budget < 0 or not children:
+                    stack.pop()
+                    os.close(fd)
+                    continue
+                name = children.pop()
+                try:
+                    child_fd = os.open(name, flags, dir_fd=fd)
+                except OSError:
+                    complete = False
+                    continue
+                stack.append((child_fd, rel_dir / name, depth + 1, None))
+        finally:
+            for fd, *_frame in stack:
                 os.close(fd)
-        for fd, _rel, _depth in stack:
-            os.close(fd)
-        return sorted(hits)
+        return sorted(hits), complete and budget >= 0
 
     pending: list[tuple[Path, PurePosixPath, int]] = [(root, PurePosixPath(), 0)]
-    while pending and budget > 0:
+    while pending and budget >= 0:
         directory, rel_dir, depth = pending.pop()
         try:
             if stat_is_link_or_reparse(directory.lstat()):
@@ -1425,21 +1461,11 @@ def _find_env_files(root: Path) -> list[PurePosixPath]:
             with os.scandir(directory) as iterator:
                 entries = sorted(iterator, key=lambda item: item.name)
         except OSError:
+            complete = False
             continue
-        for entry in entries:
-            budget -= 1
-            if budget < 0:
-                break
-            try:
-                is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                continue
-            if not is_dir:
-                if _is_env_file(entry.name):
-                    hits.append(rel_dir / entry.name)
-            elif entry.name not in SCAN_EXCLUDED_DIRS and depth < 32:
-                pending.append((Path(entry.path), rel_dir / entry.name, depth + 1))
-    return sorted(hits)
+        children, budget = _scan_env_entries(entries, rel_dir, depth, hits, budget)
+        pending.extend((directory / name, rel_dir / name, depth + 1) for name in children)
+    return sorted(hits), complete and budget >= 0
 
 
 # --------------------------------------------------------------------------- #

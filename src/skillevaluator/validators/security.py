@@ -2528,6 +2528,12 @@ class SecurityValidator(ValidatorBase):
     )
     _URL_AUTHORITY_PREFIX_PATTERN = re.compile(r"(?i)[a-z][a-z0-9+.-]*://[^/\s\"']*\Z")
     _IPV4_LITERAL_PATTERN = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+    # Chromium's reduced User-Agent reports every version as ``<major>.0.0.0``
+    # after a product token, as in ``Chrome/140.0.0.0`` (or ``Chrome\/140.0.0.0``
+    # in JSON with escaped slashes). A ``.0.0.0`` value is never a host address,
+    # and a version is never followed by ``/``, so CIDR blocks stay reported.
+    _USER_AGENT_PRODUCT_PREFIX_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*\\?/\Z")
+    _REDUCED_USER_AGENT_VERSION_PATTERN = re.compile(r"\d{1,3}\.0\.0\.0")
 
     @staticmethod
     def _is_near_zero_gps(line: str) -> bool:
@@ -2549,6 +2555,13 @@ class SecurityValidator(ValidatorBase):
         if any(
             artifact.start() <= match.start() and artifact.end() >= match.end()
             for artifact in artifact_pattern.finditer(line)
+        ):
+            return True
+
+        if (
+            cls._REDUCED_USER_AGENT_VERSION_PATTERN.fullmatch(match.group())
+            and cls._USER_AGENT_PRODUCT_PREFIX_PATTERN.search(prefix)
+            and not line.startswith("/", match.end())
         ):
             return True
 

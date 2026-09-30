@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Stop the PII scan reporting User-Agent product versions such as `Chrome/140.0.0.0`
+  as public IP addresses. Chromium's reduced User-Agent gives every version this shape.
 - Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
   similarity scans now allow 1,024 selected manifests and 128 million scalar
   comparisons by default, covering 343 skills with 2,048-dimensional embeddings.

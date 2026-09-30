@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from skillevaluator.constants import SIMILARITY_DEFAULT_MAX_ENTRIES, SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.tier1.commands import emit_reports
 from skillevaluator.validators.similarity import SimilarityValidator
@@ -44,7 +46,13 @@ def run_similarity_check(
     save_catalog: Path | None = None,
     cache: Path | None = None,
     save_cache: Path | None = None,
+    max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES,
+    max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
 ) -> list[ValidationResult]:
+    # Caller option errors have safe diagnostics and should not become provider failures.
+    validate_max_entries(max_entries)
+    validate_max_scalar_comparisons(max_scalar_comparisons)
+
     def _run() -> ValidationResult:
         validator = SimilarityValidator(
             threshold=threshold,
@@ -55,6 +63,8 @@ def run_similarity_check(
             save_cache_path=save_cache,
             content_type=None if content_type == "auto" else content_type,
             full_body=full_body,
+            max_entries=max_entries,
+            max_scalar_comparisons=max_scalar_comparisons,
         )
         return validator.validate(content_path)
 

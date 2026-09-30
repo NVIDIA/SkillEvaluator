@@ -154,6 +154,23 @@ class TestClassifierCodexStyle:
         traj = _traj(_one("exec_command", {"cmd": command}))
         assert detect_component_activations(traj, DECLARED) == []
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # The apostrophe sits in a here-document body, so the script is valid bash.
+            "ls skills\ncat skills/alpha/SKILL.md\ncat > notes.md <<'EOF'\nIt's fine\nEOF",
+            # A genuinely unbalanced quote on a later line must not merge the lines.
+            "cd /workspace\nsed -n '1,120p' skills/alpha/SKILL.md\necho Don't forget",
+        ],
+    )
+    def test_multiline_script_with_a_stray_quote_still_credits_the_read(self, command: str) -> None:
+        (activation,) = detect_component_activations(_traj(_one("exec_command", {"cmd": command})), DECLARED)
+        assert (activation["type"], activation["name"]) == ("skill", "alpha")
+
+    def test_heredoc_body_is_data_not_a_manifest_read(self) -> None:
+        command = "cat > notes.md <<EOF\ncat skills/alpha/SKILL.md\nEOF\nls"
+        assert detect_component_activations(_traj(_one("exec_command", {"cmd": command})), DECLARED) == []
+
     def test_native_exec_wrapper_is_normalized_and_mapped_observation_is_used(self) -> None:
         source = 'const r = await tools.mcp__github__list_issues({repo: "o/r"});\ntext(JSON.stringify(r));'
         traj = _traj(_step([_codex_exec(source)], [_res("exec-1", "[1, 2]")]))

@@ -240,6 +240,8 @@ _ARTIFACT_CONSUMER_VERBS = _FILE_READER_VERBS | frozenset(
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")", ";;", "|&", ";&"})
 _OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "1>", "2>"})
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# ``<<EOF``/``<<-'EOF'``/``<<"EOF"`` (not ``<<<`` here-strings); the groups hold the delimiter.
+_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
 _WRITE_VERB_RE = re.compile(
     r"(?:^|_|-)(?:write|create|save|export|put|upload|dump|store|generate|render|append)(?:$|_|-)"
 )
@@ -1129,8 +1131,32 @@ def _shell_texts(fn_base: str, args: Mapping[str, Any]) -> list[str]:
     return texts
 
 
+def _strip_heredoc_bodies(text: str) -> str:
+    """Drop here-document bodies: they are data, not commands, and may hold stray quotes.
+
+    A body is dropped only when its terminator line is found, so a ``<<`` that
+    is not really a here-document never swallows the rest of the script.
+    """
+    if "<<" not in text:
+        return text
+    lines = text.split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for match in _HEREDOC_RE.finditer(line):
+            delimiter = next(group for group in match.groups() if group)
+            end = next((at for at in range(index, len(lines)) if lines[at].strip() == delimiter), None)
+            if end is None:
+                return text
+            index = end + 1
+    return "\n".join(kept)
+
+
 def _shell_tokens(text: str) -> list[str]:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
+    normalized = _strip_heredoc_bodies(text.replace("\r\n", "\n").replace("\r", "\n")).replace("\n", " ; ")
     lexer = shlex.shlex(normalized, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -1141,10 +1167,12 @@ def _shell_tokens(text: str) -> list[str]:
             if len(tokens) >= _MAX_SHELL_TOKENS:
                 break
     except ValueError:
+        # Unbalanced quote: fall back on the same newline-normalized text so a
+        # multi-line script still splits into its commands.
         try:
-            return shlex.split(text, posix=True)[:_MAX_SHELL_TOKENS]
+            return shlex.split(normalized, posix=True)[:_MAX_SHELL_TOKENS]
         except ValueError:
-            return text.split()[:_MAX_SHELL_TOKENS]
+            return normalized.split()[:_MAX_SHELL_TOKENS]
     return tokens
 
 

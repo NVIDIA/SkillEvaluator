@@ -674,11 +674,27 @@ class _Builder:
             self.inventory.unread_files += 1
             return None
 
-    def _declared_values(self, value: Any) -> list[Any]:
+    def _declared_values(self, field_name: str, value: Any) -> list[Any]:
         if value is None:
             return []
         values = value if isinstance(value, list) else [value]
+        self._check_item_count(f"'{field_name}'", len(values))
         return values[:PLUGIN_COMPONENT_MAX_ITEMS]
+
+    def _check_item_count(self, what: str, count: int, rel: str | None = None) -> None:
+        """HIGH finding when only the first ``PLUGIN_COMPONENT_MAX_ITEMS`` entries get checked."""
+        if count <= PLUGIN_COMPONENT_MAX_ITEMS:
+            return
+        self.inventory.findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "plugin_component_list_truncated",
+                f"{what} has {count} entries; only the first {PLUGIN_COMPONENT_MAX_ITEMS} are inspected, so the "
+                "rest are loaded without static checks",
+                self.reader.display(rel or self.manifest_rel),
+                f"Keep each declared component list or server map to at most {PLUGIN_COMPONENT_MAX_ITEMS} entries.",
+            )
+        )
 
     def _resolve_declared(self, field_name: str, raw: Any, *, style: bool = True) -> tuple[DeclaredPath | None, str]:
         """Normalize + classify one declared path; record findings. Returns (path, kind|problem)."""
@@ -751,7 +767,7 @@ class _Builder:
 
         declared_default = False
         if self.contained and self.manifest is not None:
-            for raw in self._declared_values(self.manifest.get("skills")):
+            for raw in self._declared_values("skills", self.manifest.get("skills")):
                 declared, kind = self._resolve_declared("skills", raw)
                 if declared is None or declared.rel is None or kind in {"escape", "invalid", "missing", "unsafe"}:
                     self._broken("skill", declared, raw, kind)
@@ -857,7 +873,7 @@ class _Builder:
         declared_default = False
         section = self.manifest.get("rules") if self.manifest is not None else None
         if self.contained and section is not None:
-            for raw in self._declared_values(section):
+            for raw in self._declared_values("rules", section):
                 if isinstance(raw, str) and "::" in raw:
                     self._add(Component("rule", _ref_label(raw), "declared", None, "evaluated"))
                     continue
@@ -920,7 +936,7 @@ class _Builder:
         if component_type == "command" and isinstance(declared_value, dict):
             self._command_map(declared_value)
             return
-        for raw in self._declared_values(declared_value):
+        for raw in self._declared_values(field_name, declared_value):
             declared, kind = self._resolve_declared(field_name, raw)
             if declared is None or declared.rel is None or kind in {"escape", "invalid", "missing", "unsafe"}:
                 self._broken(component_type, declared, raw, kind)
@@ -953,6 +969,7 @@ class _Builder:
             component.cost = _markdown_cost(component_type, component.name, parsed)
 
     def _command_map(self, commands: dict[str, Any]) -> None:
+        self._check_item_count("'commands' map", len(commands))
         for index, (command_name, entry) in enumerate(commands.items()):
             if index >= PLUGIN_COMPONENT_MAX_ITEMS:
                 break
@@ -1030,7 +1047,7 @@ class _Builder:
         ``hooks`` and ``lspServers`` merge with their default file; monitors replace it
         (``merge_default=False``) when declared.
         """
-        declared_values = self._declared_values(declared_value)
+        declared_values = self._declared_values(field_name, declared_value)
         explicit: set[PurePosixPath] = set()
         for raw in declared_values:
             if isinstance(raw, str):
@@ -1096,6 +1113,7 @@ class _Builder:
             if not isinstance(servers, dict) or not servers:
                 self._add(Component("lsp", name, origin, rel, "unsupported"))
                 continue
+            self._check_item_count(f"lspServers map in '{rel}'", len(servers), rel)
             for server_name, server in list(servers.items())[:PLUGIN_COMPONENT_MAX_ITEMS]:
                 self._add(Component("lsp", str(server_name), origin, rel, "unsupported"))
                 where = f"lspServers['{server_name}']"
@@ -1199,7 +1217,7 @@ class _Builder:
                 broad = sorted(
                     {
                         str(rule)
-                        for rule in allow[:PLUGIN_COMPONENT_MAX_ITEMS]
+                        for rule in allow  # every rule: already bounded by the structured-data limits
                         if isinstance(rule, str) and rule.replace(" ", "").lower() in _BROAD_ALLOW_RULES
                     }
                 )
@@ -1514,6 +1532,18 @@ def collect_mcp_declarations(
     # 2. Declared shapes in order.
     for index, entry in enumerate(entries):
         if isinstance(entry, dict):
+            if len(entry) > PLUGIN_COMPONENT_MAX_ITEMS:
+                collection.findings.append(
+                    _plugin_finding(
+                        Severity.HIGH,
+                        "mcp_config_file_too_large",
+                        f"inline 'mcpServers' map declares {len(entry)} servers; only "
+                        f"{PLUGIN_COMPONENT_MAX_ITEMS} are inspected",
+                        manifest_display,
+                        "Reduce the number of MCP servers per map.",
+                        category=MCP_CATEGORY,
+                    )
+                )
             for name, config in list(entry.items())[:PLUGIN_COMPONENT_MAX_ITEMS]:
                 collection.declarations.append(McpDeclaration(str(name), config, "inline", manifest_rel))
         elif isinstance(entry, str):

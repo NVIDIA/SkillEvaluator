@@ -111,3 +111,55 @@ def test_skill_run_stages_the_baseline_arm(
 
     assert result.get("error") is None, result.get("error")
     assert _arms(harbor_jobs) == ["with", "without"]
+
+
+@pytest.mark.parametrize(
+    ("workspace_skills_baseline", "sum_of_parts_arm", "expected_arms"),
+    [
+        (True, False, ["with", "without"]),
+        (False, False, ["with", "without"]),
+        (False, True, ["sumofparts", "with", "without"]),
+    ],
+    ids=["integration", "effectiveness", "both"],
+)
+def test_group_run_stages_every_baseline_style_arm(
+    harbor_jobs: list[str],
+    tmp_path: Path,
+    workspace_skills_baseline: bool,
+    sum_of_parts_arm: bool,
+    expected_arms: list[str],
+) -> None:
+    skill = _write_skill(tmp_path / "skills", "target-skill")
+    member = _write_skill(tmp_path / "skills", "member-skill", with_evals=False)
+
+    result = _run(
+        skill,
+        skill_workspace_mode="group",
+        include_skills=[member],
+        workspace_skills_baseline=workspace_skills_baseline,
+        sum_of_parts_arm=sum_of_parts_arm,
+    )
+
+    assert result.get("error") is None, result.get("error")
+    assert _arms(harbor_jobs) == expected_arms
+
+
+def test_sum_of_parts_run_still_rejects_a_member_that_copies_the_target(
+    harbor_jobs: list[str],
+    tmp_path: Path,
+) -> None:
+    skill = _write_skill(tmp_path / "skills", "target-skill")
+    copy = tmp_path / "skills" / "copied-skill"
+    copy.mkdir()
+    (copy / "SKILL.md").write_bytes((skill / "SKILL.md").read_bytes())
+
+    result = _run(
+        skill,
+        skill_workspace_mode="group",
+        include_skills=[copy],
+        workspace_skills_baseline=False,
+        sum_of_parts_arm=True,
+    )
+
+    assert any("is an alias of target skill" in error for error in result.get("error") or []), result.get("error")
+    assert _arms(harbor_jobs) == []

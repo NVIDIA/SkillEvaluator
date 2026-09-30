@@ -2440,17 +2440,31 @@ def _run_harbor_eval_impl(
                 raise ValueError(f"Generated task cases differ for agent {agent}")
             agent_task_dirs[agent] = (with_dir, without_dir, sumofparts_dir)
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
+        baseline_workspace_skills = workspace_skills if workspace_skills_baseline else []
+        baseline_alias_validation = None
+        sumofparts_alias_validation = None
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="running"))
             staging_failure_stage = "baseline-tasks"
+            # The emitter accepts a proof only for the exact source set it stages. The baseline arm may leave the
+            # member skills out, while the sum-of-parts arm always stages them, so each arm gets its own proof.
             baseline_alias_validation = _prevalidate_baseline_skill_candidates(
                 skill_path,
                 reference_skills_dir,
-                workspace_skills,
+                baseline_workspace_skills,
                 excluded_roots=(root,),
             )
-        else:
-            baseline_alias_validation = None
+            if run_sum_of_parts:
+                sumofparts_alias_validation = (
+                    baseline_alias_validation
+                    if workspace_skills_baseline
+                    else _prevalidate_baseline_skill_candidates(
+                        skill_path,
+                        reference_skills_dir,
+                        workspace_skills,
+                        excluded_roots=(root,),
+                    )
+                )
         for agent in agents:
             without_dir = agent_task_dirs[agent][1]
             if without_dir is not None:
@@ -2459,7 +2473,7 @@ def _run_harbor_eval_impl(
                     without_dir,
                     with_skill=False,
                     reference_skills_dir=reference_skills_dir,
-                    workspace_skill_paths=workspace_skills if workspace_skills_baseline else [],
+                    workspace_skill_paths=baseline_workspace_skills,
                     workspace_mode=workspace_mode,
                     grading_mode=grading_mode,
                     base_image=base_image,
@@ -2494,7 +2508,7 @@ def _run_harbor_eval_impl(
                     task_resources=resource_config,
                     agent_workdir=harbor_config.get("agent_workdir"),
                     evaluator_skill_path=evaluator_skill_path,
-                    _baseline_alias_validation=baseline_alias_validation,
+                    _baseline_alias_validation=sumofparts_alias_validation,
                 )
         if not skip_baseline:
             reporter.emit(ProgressEvent(stage="baseline-tasks", state="ready", detail="baseline inputs staged"))

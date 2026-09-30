@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import re
+import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -31,8 +32,15 @@ PAYLOADS = ("[/x]", "[bold]evil[/bold]", "[link=http://x]y[/link]")
 # pathlib collapses "//", so path payloads avoid it; a payload with "/" spans
 # directory components ("[" and "x]" for "[/x]").
 PATH_PAYLOADS = ("[/x]", "[bold]evil[/bold]")
-# A single path component (a skill or agent directory name) cannot contain "/".
-NAME_PAYLOADS = ("[bold]evil", "[green]PASS", "demo:x:")
+# A single path component (a skill or agent directory name) cannot contain "/",
+# and on Windows it cannot contain ":" either, so the emoji name is POSIX-only there.
+_WINDOWS = sys.platform == "win32"
+_EMOJI_NAME_SUFFIX = "" if _WINDOWS else ":x:"
+NAME_PAYLOADS = (
+    "[bold]evil",
+    "[green]PASS",
+    pytest.param("demo:x:", marks=pytest.mark.skipif(_WINDOWS, reason="':' is not valid in Windows file names")),
+)
 # Rich turns ":x:", ":key:" and ":white_check_mark:" into emoji unless the console,
 # Panel title or Status text disables it.
 EMOJI_TEXT = "grep root:x:0:0:root:/root:/bin/bash :key: :white_check_mark:"
@@ -454,7 +462,7 @@ def test_tier3_compare_renders_agent_and_summary_values_literally(
 
     console = _recording_console()
     monkeypatch.setattr(tier3_commands, "console", console)
-    skill_name, agent = "[green]PASS:x:", "[bold]evil"
+    skill_name, agent = f"[green]PASS{_EMOJI_NAME_SUFFIX}", "[bold]evil"
     skill_path = tmp_path / skill_name
     skill_path.mkdir()
     results_root = tmp_path / "results"

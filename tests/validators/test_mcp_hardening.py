@@ -340,6 +340,15 @@ def test_allowlist_does_not_cover_other_hosts_or_metadata() -> None:
         {"command": "wrapper", "args": ["--agent-args", "claude --dangerously-skip-permissions"]},
         {"command": "wrapper", "env": {"AGENT_FLAGS": "--yolo"}},
         {"command": "wrapper", "extra": {"launch": ["--yolo"]}},
+        {"command": "claude", "args": ["--permission-mode", "bypassPermissions", "mcp", "serve"]},
+        {"command": "claude", "args": ["mcp", "serve", "--permission-mode=bypassPermissions"]},
+        {"command": "claude --permission-mode bypassPermissions -p go"},
+        {"command": "wrapper", "args": ["--agent-args", "claude --permission-mode 'bypassPermissions'"]},
+        {"command": "gemini", "args": ["--approval-mode", "yolo"]},
+        {"command": "gemini", "args": ["--approval-mode=yolo"]},
+        {"command": "codex", "args": ["exec", "--sandbox", "danger-full-access"]},
+        {"command": "codex", "args": ["exec", "-s", "danger-full-access"]},
+        {"command": "codex exec --sandbox=danger-full-access go"},
     ],
 )
 def test_permission_bypass_flags_are_high(config) -> None:
@@ -365,6 +374,12 @@ def test_bypass_scan_that_hits_its_node_bound_fails_closed() -> None:
         {"command": "server", "description": "Never run with --yolo or --dangerously-skip-permissions"},
         {"command": "server", "args": ["--yolo-mode"]},
         {"command": "server", "args": ["--no-yolo"]},
+        {"command": "claude", "args": ["--permission-mode", "plan"]},
+        {"command": "claude --permission-mode acceptEdits"},
+        {"command": "gemini", "args": ["--approval-mode", "auto_edit"]},
+        {"command": "codex", "args": ["--sandbox", "workspace-write"]},
+        {"command": "codex", "args": ["-s", "read-only", "danger-full-access"]},
+        {"command": "server", "args": ["--permission-mode"], "mode": "bypassPermissions"},
     ],
 )
 def test_bypass_flag_documentation_and_lookalikes_are_not_flagged(config) -> None:

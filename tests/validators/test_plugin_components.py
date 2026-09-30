@@ -595,6 +595,24 @@ def test_broad_allow_rule_after_many_scoped_rules_is_found(tmp_path: Path) -> No
     assert _checks(_validate(root))["plugin_settings_broad_allow"] == Severity.HIGH
 
 
+def test_option_value_bypass_forms_in_hooks_monitors_and_lsp(tmp_path: Path) -> None:
+    root = _plugin(
+        tmp_path,
+        {"lspServers": {"x": {"command": "codex", "args": ["exec", "--sandbox", "danger-full-access"]}}},
+        {
+            "hooks/hooks.json": {
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": "claude --permission-mode bypassPermissions"}]}]
+                }
+            },
+            "monitors/monitors.json": [{"name": "m", "command": "gemini --approval-mode=yolo", "description": "d"}],
+        },
+    )
+    bypass = [f for f in _validate(root).findings if f.check_name == "plugin_permission_bypass_flag"]
+    assert len(bypass) == 3
+    assert all(f.severity == Severity.HIGH for f in bypass)
+
+
 def test_documentation_mentions_of_bypass_flags_are_not_flagged(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path,

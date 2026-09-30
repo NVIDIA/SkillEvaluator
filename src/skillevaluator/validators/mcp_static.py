@@ -24,6 +24,7 @@ well-known names only: DNS resolution and HTTP redirects are never evaluated.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import re
 import unicodedata
 from collections.abc import Iterable, Iterator
@@ -1246,6 +1247,26 @@ _BYPASS_FLAG_RE = re.compile(
     r"(?<![\w-])(" + "|".join(re.escape(flag) for flag in PERMISSION_BYPASS_FLAGS) + r")(?![\w-])",
     re.IGNORECASE,
 )
+# Option/value pairs with the same effect: Claude Code's permission mode, Gemini
+# CLI's approval mode, and Codex CLI's sandbox (long and short option).
+PERMISSION_BYPASS_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("--permission-mode", "bypassPermissions"),
+    ("--approval-mode", "yolo"),
+    ("--sandbox", "danger-full-access"),
+    ("-s", "danger-full-access"),
+)
+# In one string: "--opt value", "--opt=value", or a quoted value.
+_BYPASS_OPTION_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (
+        f"{option} {value}",
+        re.compile(rf"(?<![\w-]){re.escape(option)}(?:=|\s+)[\"']?{re.escape(value)}(?![\w-])", re.IGNORECASE),
+    )
+    for option, value in PERMISSION_BYPASS_OPTIONS
+)
+# Split across adjacent argv tokens: option -> (value, reported flag).
+_BYPASS_OPTION_VALUES: dict[str, tuple[str, str]] = {
+    option.lower(): (value.lower(), f"{option} {value}") for option, value in PERMISSION_BYPASS_OPTIONS
+}
 # Keys whose values are prose, never executed config -- documentation mentions of
 # a flag are not flagged.
 _DOC_KEYS = frozenset({"description", "title", "summary", "notes", "note", "comment", "comments", "help"})
@@ -1335,19 +1356,34 @@ def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[t
             yield path, node
 
 
+def _bypass_hits(path: str, node: Any) -> Iterator[tuple[str, str]]:
+    """Yield ``(json_path, flag)`` for bypass flags in a string or split across argv tokens."""
+    if isinstance(node, str):
+        for match in _BYPASS_FLAG_RE.finditer(node):
+            yield path, match.group(1).lower()
+        for label, pattern in _BYPASS_OPTION_RES:
+            if pattern.search(node):
+                yield path, label
+    elif isinstance(node, list):
+        # argv lists carry an option and its value as two tokens: ["--sandbox", "danger-full-access"].
+        for index, (option, value) in enumerate(itertools.pairwise(node)):
+            if not isinstance(option, str) or not isinstance(value, str):
+                continue
+            expected = _BYPASS_OPTION_VALUES.get(option.strip().lower())
+            if expected is not None and value.strip().strip("\"'").lower() == expected[0]:
+                yield f"{path}[{index}]", expected[1]
+
+
 def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
-    """Find agent-CLI permission-bypass flags in any config/command string.
+    """Find agent-CLI permission-bypass flags in any config/command string or argv list.
 
     A config too large to walk completely is itself a HIGH issue (fail closed).
     """
     issues: list[OverrideIssue] = []
     seen: set[tuple[str, str]] = set()
     walk = _ConfigWalk(value)
-    for path, text in walk:
-        if not isinstance(text, str):
-            continue
-        for match in _BYPASS_FLAG_RE.finditer(text):
-            flag = match.group(1).lower()
+    for node_path, node in walk:
+        for path, flag in _bypass_hits(node_path, node):
             if (path, flag) in seen:
                 continue
             seen.add((path, flag))

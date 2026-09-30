@@ -75,10 +75,11 @@ result.
 * When both are given, both must hold.
 
 Trajectory content is untrusted: step, call, text and regex-subject sizes are
-bounded, and every persisted string is redacted (from a bounded window) and
-truncated. Argument values are never persisted: failure details describe them
-by type and size, and a component name taken from tool arguments is kept only
-when it is identifier-shaped or a declared member.
+bounded, dataset patterns run under a deadline, and every persisted string is
+redacted (from a bounded window) and truncated. Argument values are never
+persisted: failure details describe them by type and size, and a component
+name taken from tool arguments is kept only when it is identifier-shaped or a
+declared member.
 """
 
 from __future__ import annotations
@@ -88,9 +89,12 @@ import json
 import math
 import re
 import shlex
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+import regex
 
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
@@ -155,6 +159,9 @@ _MAX_SHELL_TEXT_CHARS = 32 * 1024
 _MAX_SHELL_TOKENS = 4_096
 _MAX_SHELL_DEPTH = 3
 _MAX_PATTERN_SUBJECT_CHARS = 4_096
+# Dataset patterns run under a deadline: per check, and shared by all checks of one trial.
+_PATTERN_TIMEOUT_SECONDS = 0.1
+_PATTERN_BUDGET_SECONDS = 5.0
 _FAILURE_SCAN_CHARS = 2_048
 
 # -- output bounds -------------------------------------------------------------
@@ -1570,18 +1577,35 @@ def _describe(value: Any) -> str:
     return _json_type(value)
 
 
-def _regex_search(pattern: str, value: Any) -> bool | None:
-    """``re.search`` on a bounded subject; ``None`` when the subject is too large."""
+def _regex_search(pattern: str, value: Any, budget: list[float]) -> bool | str:
+    """Search a bounded subject under a deadline; returns whether it matched, or why it was not checked.
+
+    Patterns are dataset-authored and subjects agent-written, so a pattern that
+    backtracks catastrophically (``^(\\w+\\s?)+$``, ``[a-z]*[a-z0-9]*!``...) must
+    fail the check rather than hang collection. ``re`` cannot be interrupted, so
+    matching uses the ``regex`` engine (``re``-compatible syntax) with a
+    per-check timeout drawn from the trial's shared ``budget`` of seconds.
+    """
     text = value if isinstance(value, str) else _bounded_json_text(value, _MAX_PATTERN_SUBJECT_CHARS)
     if text is None or len(text) > _MAX_PATTERN_SUBJECT_CHARS:
-        return None
+        return "value exceeds the pattern-check size limit"
+    timeout = min(_PATTERN_TIMEOUT_SECONDS, budget[0])
+    if timeout <= 0:
+        return "pattern check timed out"
+    started = time.monotonic()
     try:
-        return re.search(pattern, text) is not None
-    except (re.error, RecursionError, OverflowError):
+        return regex.search(pattern, text, timeout=timeout) is not None
+    except TimeoutError:
+        return "pattern check timed out"
+    except (regex.error, RecursionError, OverflowError, ValueError):
         return False
+    finally:
+        budget[0] -= time.monotonic() - started
 
 
-def _schema_errors(value: Any, schema: Mapping[str, Any], path: str, errors: list[tuple[str, str]], depth: int) -> None:
+def _schema_errors(
+    value: Any, schema: Mapping[str, Any], path: str, errors: list[tuple[str, str]], depth: int, budget: list[float]
+) -> None:
     if len(errors) >= _MAX_SCHEMA_ERRORS_PER_CALL or depth > MAX_SCHEMA_DEPTH + 1:
         return
     if "type" in schema:
@@ -1593,9 +1617,9 @@ def _schema_errors(value: Any, schema: Mapping[str, Any], path: str, errors: lis
     if "enum" in schema and not any(_json_equal(value, item) for item in schema["enum"]):
         errors.append((path, f"value {_describe(value)} is not one of the allowed values"))
     if "pattern" in schema and isinstance(value, str):
-        found = _regex_search(str(schema["pattern"]), value)
-        if found is None:
-            errors.append((path, "value exceeds the pattern-check size limit"))
+        found = _regex_search(str(schema["pattern"]), value, budget)
+        if isinstance(found, str):
+            errors.append((path, found))
         elif not found:
             errors.append((path, f"value {_describe(value)} does not match the schema pattern"))
     if _is_number(value):
@@ -1611,10 +1635,12 @@ def _schema_errors(value: Any, schema: Mapping[str, Any], path: str, errors: lis
         if isinstance(properties, Mapping):
             for name, sub in properties.items():
                 if name in value and isinstance(sub, Mapping):
-                    _schema_errors(value[name], sub, f"{path}.{name}", errors, depth + 1)
+                    _schema_errors(value[name], sub, f"{path}.{name}", errors, depth + 1, budget)
 
 
-def _argument_failures(args: Mapping[str, Any], rule: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+def _argument_failures(
+    args: Mapping[str, Any], rule: Mapping[str, Any], budget: list[float]
+) -> list[tuple[str, str, str]]:
     failures: list[tuple[str, str, str]] = []
     for name in rule.get("required") or ():
         if _lookup(args, name) is _MISSING:
@@ -1622,7 +1648,7 @@ def _argument_failures(args: Mapping[str, Any], rule: Mapping[str, Any]) -> list
     schema = rule.get("schema")
     if isinstance(schema, Mapping):
         schema_errors: list[tuple[str, str]] = []
-        _schema_errors(args, schema, "$", schema_errors, 1)
+        _schema_errors(args, schema, "$", schema_errors, 1, budget)
         for path, message in schema_errors:
             failures.append((path.removeprefix("$.") if path != "$" else "$", "schema", message))
     for name, expected in (rule.get("equals") or {}).items():
@@ -1649,9 +1675,9 @@ def _argument_failures(args: Mapping[str, Any], rule: Mapping[str, Any]) -> list
         if actual is _MISSING:
             failures.append((name, "pattern", "argument is missing"))
             continue
-        found = _regex_search(pattern, actual)
-        if found is None:
-            failures.append((name, "pattern", "value exceeds the pattern-check size limit"))
+        found = _regex_search(pattern, actual, budget)
+        if isinstance(found, str):
+            failures.append((name, "pattern", found))
         elif not found:
             failures.append((name, "pattern", f"value {_describe(actual)} does not match {_preview(pattern)}"))
     return failures
@@ -1662,12 +1688,15 @@ def grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> d
 
     ``checked``/``passed`` count (call, rule) pairs. A rule that matched no call
     is listed as a ``not_called`` failure but is not counted as checked, since
-    whether the tool was called is ``tool_selection``'s job.
+    whether the tool was called is ``tool_selection``'s job. Pattern checks
+    share one time budget; a check that runs out of time is a failure, never a
+    pass.
     """
     rules = _spec_field(spec, "tool_arguments")
     failures: list[dict[str, str]] = []
     checked = 0
     passed = 0
+    budget = [_PATTERN_BUDGET_SECONDS]
 
     def _record(tool: str, arg: str, rule_name: str, detail: str) -> None:
         if len(failures) < _MAX_FAILURES:
@@ -1688,7 +1717,7 @@ def grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> d
             continue
         for call in matched:
             checked += 1
-            call_failures = _argument_failures(call.args, rule)
+            call_failures = _argument_failures(call.args, rule, budget)
             if not call_failures:
                 passed += 1
             label = next(

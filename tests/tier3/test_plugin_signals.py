@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from skillevaluator.tier3.eval_core import plugin_signals
 from skillevaluator.tier3.eval_core.plugin_signals import (
     MAX_TOOL_PATTERNS,
     build_plugin_signals_context,
@@ -427,6 +428,43 @@ class TestArguments:
         case = {"tool_arguments": [{"tool": "mcp__github__call", "pattern": {"body": "^(a+)+$"}}]}
         (failure,) = _signals(traj, case)["arguments"]["failures"]
         assert failure["detail"] == "value exceeds the pattern-check size limit"
+
+    @pytest.mark.parametrize(
+        ("pattern", "subject"),
+        [
+            (r"^(\w+\s?)+$", "a" * 39 + "!"),
+            (r"(a|aa)+$", "a" * 60 + "!"),
+            (r"[a-z]*[a-z0-9]*!", "a" * 4096),
+        ],
+        ids=["nested-quantifier", "overlapping-alternation", "adjacent-quantifiers-at-subject-cap"],
+    )
+    def test_backtracking_pattern_fails_fast_instead_of_hanging(self, pattern: str, subject: str) -> None:
+        traj = _traj(_one("Bash", {"command": subject}))
+        case = {"tool_arguments": [{"tool": "Bash", "pattern": {"command": pattern}}]}
+
+        started = time.monotonic()
+        block = _signals(traj, case)["arguments"]
+
+        assert time.monotonic() - started < 1.0
+        assert (block["checked"], block["passed"]) == (1, 0)
+        (failure,) = block["failures"]
+        assert failure["detail"] in {
+            "pattern check timed out",
+            f"value string(len={len(subject)}) does not match {pattern}",
+        }
+
+    def test_pattern_checks_share_one_time_budget_per_trial(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(plugin_signals, "_PATTERN_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(plugin_signals, "_PATTERN_BUDGET_SECONDS", 0.2)
+        steps = [_one("Bash", {"command": "a" * 60 + "!"}, call_id=f"c{index}") for index in range(20)]
+        case = {"tool_arguments": [{"tool": "Bash", "pattern": {"command": "(a|aa)+$"}}]}
+
+        started = time.monotonic()
+        block = _signals(_traj(*steps), case)["arguments"]
+
+        assert time.monotonic() - started < 1.0
+        assert (block["checked"], block["passed"]) == (20, 0)
+        assert {failure["detail"] for failure in block["failures"]} == {"pattern check timed out"}
 
 
 class TestMcpCalls:

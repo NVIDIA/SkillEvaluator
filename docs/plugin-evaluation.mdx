@@ -661,7 +661,10 @@ engine:
   the blocking Tier 1 MCP checks. A raw inline credential is never written to
   the staged file. MCP servers in the dataset's own
   `evals/environment/mcp_servers.toml` are task environment and are shared by
-  every arm.
+  every arm. A server launched from plugin files (a `command`, `args`, or `cwd`
+  that uses `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, or a `./` or `../`
+  path) is not staged, because those files are not copied into the task; it is
+  reported `unsupported` and the run is INCOMPLETE.
 
 Same-repository refs are resolved only when the repository root can be
 identified and its `origin` slug matches the ref. Pass `--repo-root` for a

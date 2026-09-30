@@ -6,6 +6,33 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Plugin evaluation review fixes. Tier 1 plugin checks fail closed on unreadable
+  hook, LSP, monitor, or settings config, on component lists past the 256-entry
+  cap, on permission-bypass scans that hit their bound, and on remote MCP bundles
+  over `http://`; they catch option-form permission bypasses
+  (`--permission-mode bypassPermissions`, `--approval-mode yolo`,
+  `--sandbox danger-full-access`) and percent-encoded endpoint hosts, and URL
+  findings no longer echo userinfo or query credentials.
+- Tier 2 plugin catalogs treat an entry as the plugin under test only when its
+  manifest fingerprint matches, so same-name plugins and verbatim skill copies
+  are compared and reported. A malformed plugin is skipped by name when building
+  a catalog, and an unsafe plugin profile fails both catalog checks.
+- Tier 3 plugin runs no longer count MCP servers launched from plugin files as
+  runnable, block only on MCP sources they stage, and bound ref-listed rules by
+  the aggregate byte limit.
+- Tier 3 security checks match protected writes by their redirect, `tee`, or
+  `sed -i` target (so `2>/dev/null` reads are no longer critical), normalize
+  `//`, `/./`, and `..` path spellings, and store the matched protected entry
+  rather than the command as path-finding evidence. Reference-less judges stay
+  N/A on no-trajectory trials, and a partially salvaged behavior verdict is left
+  unscored.
+- Plugin signals never persist tool-argument values or non-name component
+  names, run dataset regex patterns under a deadline, scan every MCP result
+  block for failure markers, and judge falsy but defined ground truth.
+- Plugin reports fail closed on an unreadable provenance sidecar, say how many
+  components were not staged or staged but not observed, and label a
+  sum-of-parts lift as integration rather than effectiveness. `regex` is now a
+  direct runtime dependency.
 - Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
   `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
   profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a

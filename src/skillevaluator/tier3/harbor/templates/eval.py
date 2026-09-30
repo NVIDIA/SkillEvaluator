@@ -250,6 +250,8 @@ _APPLY_PATCH_HEADER_RE = re.compile(
     r"^[ \t]*\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*([^\r\n]*)",
     re.MULTILINE,
 )
+# Codex runs apply_patch under either command name: "apply_patch" or "applypatch".
+_APPLY_PATCH_COMMAND_RE = re.compile(r"\bapply_?patch\b", re.IGNORECASE)
 # Home-directory spellings rewritten to "~" so "$HOME/.zshrc" or
 # "/home/agent/.bashrc" hit the "~/" protected-path entries.
 _HOME_DIR_PREFIX_RE = re.compile(r"^(?:/home/[^/]+|/users/[^/]+|/root|\$\{home\}|\$home|~[a-z0-9_.-]*)(?=/|$)")
@@ -2061,24 +2063,33 @@ def _lexical_path_components(value):
 
 def _is_apply_patch_action(action_lower):
     name = action_lower.strip()
-    return name == "apply_patch" or name.endswith(("__apply_patch", ".apply_patch", "/apply_patch", ":apply_patch"))
+    return any(
+        name == tool or name.endswith((f"__{tool}", f".{tool}", f"/{tool}", f":{tool}"))
+        for tool in ("apply_patch", "applypatch")
+    )
+
+
+def _string_argument(value):
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(part) for part in value)
+    return value if isinstance(value, str) else ""
 
 
 def _apply_patch_text(tool_call, action_lower, is_exec_tool):
-    """Return the patch an apply_patch tool call, or a shell command running apply_patch, applies."""
+    """Return the patch an apply_patch tool call, or a shell command running apply_patch, applies.
+
+    Harnesses name the tool's patch argument differently (Codex ``input``, OpenCode
+    ``patchText``, converter fallbacks ``raw`` and ``value``), so every argument is
+    scanned. A shell command counts when it runs ``apply_patch`` or ``applypatch``.
+    """
     args = _action_args(tool_call)
     if _is_apply_patch_action(action_lower):
-        keys, marker = ("input", "patch"), ""
-    elif is_exec_tool:
-        keys, marker = ("command", "cmd"), "apply_patch"
-    else:
-        return ""
-    for key in keys:
-        value = args.get(key)
-        if isinstance(value, (list, tuple)):
-            value = " ".join(str(part) for part in value)
-        if isinstance(value, str) and marker in value:
-            return value
+        return "\n".join(_string_argument(value) for value in args.values())
+    if is_exec_tool:
+        for key in ("command", "cmd"):
+            command = _string_argument(args.get(key))
+            if _APPLY_PATCH_COMMAND_RE.search(command):
+                return command
     return ""
 
 

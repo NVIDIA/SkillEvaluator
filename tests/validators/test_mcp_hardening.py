@@ -156,6 +156,9 @@ def test_pinned_and_local_commands_have_no_pinning_finding() -> None:
         "2852039166",
         "0251.0376.0251.0376",
         "64:ff9b::a9fe:a9fe",
+        "%31%36%39.254.169.254",
+        "169.254.169.%32%35%34",
+        "%6d%65%74%61%64%61%74%61.google.internal",
     ],
 )
 def test_metadata_endpoints(host: str) -> None:
@@ -193,6 +196,10 @@ def test_metadata_endpoints(host: str) -> None:
         ("127.1", "loopback"),
         ("0x7f.0.0.1", "loopback"),
         ("".join(chr(0xFF10 + int(c)) if c.isdigit() else c for c in "127.0.0.1"), "loopback"),
+        ("%31%32%37.0.0.1", "loopback"),
+        ("127.0.0.%31", "loopback"),
+        ("loc%61lhost", "loopback"),
+        ("[fe80::1%25eth0]", "link-local"),
     ],
 )
 def test_private_endpoints(host: str, reason: str) -> None:
@@ -212,6 +219,25 @@ def test_public_or_unparseable_hosts_are_not_flagged(host: str) -> None:
 def test_encoded_forms_are_marked_encoded() -> None:
     assert classify_endpoint_host("2130706433").encoded is True
     assert classify_endpoint_host("127.0.0.1").encoded is False
+    assert classify_endpoint_host("%31%32%37.0.0.1").encoded is True
+    assert classify_endpoint_host("loc%61lhost").encoded is True
+    assert classify_endpoint_host("fe80::1%25eth0").encoded is False
+
+
+@pytest.mark.parametrize(
+    ("url", "check"),
+    [
+        ("https://%31%36%39.254.169.254/latest/meta-data/", "mcp_endpoint_metadata"),
+        ("https://%6d%65%74%61%64%61%74%61.google.internal/", "mcp_endpoint_metadata"),
+        ("https://169.254.169.%32%35%34/latest/", "mcp_endpoint_metadata"),
+        ("https://%31%32%37.0.0.1/mcp", "mcp_endpoint_private"),
+        ("https://loc%61lhost/mcp", "mcp_endpoint_private"),
+    ],
+)
+def test_percent_encoded_url_hosts_are_decoded_like_whatwg(url: str, check: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
+    assert check in _checks(findings)
+    assert "encoded as" in next(f for f in findings if f.check_name == check).message
 
 
 def test_url_metadata_endpoint_is_high_and_mentions_static_scope() -> None:

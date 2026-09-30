@@ -29,7 +29,7 @@ import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import idna
 
@@ -1015,10 +1015,23 @@ class EndpointClass:
     encoded: bool = False
 
 
-def _normalize_host(host: str) -> str:
-    text = host.strip().split("%", 1)[0].translate(_DOT_LOOKALIKES).rstrip(".").lower()
+def _bare_host(host: str) -> str:
+    """Lower-case host without brackets, an IPv6 zone ID, or a trailing dot (nothing decoded)."""
+    text = host.strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]
+    if ":" in text:
+        text = text.split("%", 1)[0]  # IPv6 zone ID, e.g. fe80::1%25eth0
+    return text.rstrip(".").lower()
+
+
+def _normalize_host(host: str) -> str:
+    text = _bare_host(host)
+    if "%" in text:
+        # WHATWG URL parsing (Node, MCP clients) percent-decodes a non-IPv6 host
+        # before its IDNA and IPv4 steps: %31%32%37.0.0.1 is 127.0.0.1.
+        text = unquote(text)
+    text = text.translate(_DOT_LOOKALIKES).rstrip(".").lower()
     if not text.isascii():
         try:
             text = idna.encode(text, uts46=True).decode("ascii").lower()
@@ -1101,22 +1114,24 @@ def classify_endpoint_host(host: str) -> EndpointClass | None:
     """Classify an MCP URL host as a metadata or private endpoint, network-free.
 
     Only IP literals (including IPv4-mapped/embedded IPv6 and decimal, hex, or
-    octal IPv4 encodings) and well-known names are recognized. A public-looking
+    octal IPv4 encodings) and well-known names are recognized, after the same
+    percent-decoding a WHATWG URL parser applies to the host. A public-looking
     hostname returns ``None``: DNS resolution and redirect targets are not checked
     statically, so a public name may still resolve to a private address.
     """
     normalized = _normalize_host(host)
     if not normalized:
         return None
+    # Percent-encoding, fullwidth digits, lookalike dots, or IDNA forms.
+    name_encoded = normalized != _bare_host(host)
     if normalized in _METADATA_HOSTNAMES:
-        return EndpointClass("metadata", "cloud instance-metadata", normalized)
+        return EndpointClass("metadata", "cloud instance-metadata", normalized, encoded=name_encoded)
     if normalized in _LOOPBACK_HOSTNAMES or normalized.endswith(".localhost"):
-        return EndpointClass("private", "loopback", normalized)
+        return EndpointClass("private", "loopback", normalized, encoded=name_encoded)
     address, encoded = _parse_host_address(normalized)
     if address is None:
         return None
-    # Fullwidth digits, lookalike dots, or IDNA forms that normalize to an IP literal.
-    encoded = encoded or normalized != host.strip().split("%", 1)[0].strip("[]").rstrip(".").lower()
+    encoded = encoded or name_encoded
     found = _address_class(address)
     if found is None:
         inner = _embedded_ipv4(address)

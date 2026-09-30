@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+from rich.markup import escape as rich_escape
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
@@ -1279,11 +1280,11 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     run up front instead of opening straight on the Tier 1 section.
     """
     console.print(f"\n[bold]SkillEvaluator {content_type.title()} Validation[/bold]")
-    console.print(f"Target: {target_path}")
+    console.print(f"Target: {rich_escape(str(target_path))}")
     console.print(f"Type: {content_type}")
     if profile:
         profile_color = "cyan"
-        console.print(f"Profile: [{profile_color}]{profile}[/{profile_color}]")
+        console.print(f"Profile: [{profile_color}]{rich_escape(str(profile))}[/{profile_color}]")
 
 
 @cli.command(epilog=_VALIDATE_EPILOG)

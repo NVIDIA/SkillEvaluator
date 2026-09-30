@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 from rich.box import SIMPLE
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -461,7 +462,10 @@ def init_custom_grader(
         existing = [path for path in (grader_py, grader_sh) if path.exists()]
         if existing and not force:
             names = ", ".join(str(evals_dir / path.name) for path in existing)
-            console.print(f"[red]Error:[/red] custom grader already exists: {names}. Re-run with --force to overwrite.")
+            console.print(
+                f"[red]Error:[/red] custom grader already exists: {rich_escape(names)}. "
+                "Re-run with --force to overwrite."
+            )
             return 1
         if force:
             for existing_path in existing:
@@ -476,7 +480,7 @@ def init_custom_grader(
         copytree_secure(private_evals, evals_dir, replace_existing=True, allowed_root=private_root)
 
     grader_path = evals_dir / private_grader.name
-    console.print(f"Created SkillEvaluator custom grader starter at [cyan]{grader_path}[/cyan]")
+    console.print(f"Created SkillEvaluator custom grader starter at [cyan]{rich_escape(str(grader_path))}[/cyan]")
     return 0
 
 
@@ -535,7 +539,10 @@ def init_harbor_task(
         public_case = evals_dir / "harbor" / case_id
         if os.path.lexists(private_case):
             if not force:
-                console.print(f"[red]Error:[/red] {public_case} already exists. Re-run with --force to overwrite.")
+                console.print(
+                    f"[red]Error:[/red] {rich_escape(str(public_case))} already exists. "
+                    "Re-run with --force to overwrite."
+                )
                 return 1
             if not private_case.is_dir() or private_case.is_symlink():
                 raise ValueError(f"existing Harbor case must be a real directory: {public_case}")
@@ -614,7 +621,7 @@ Keep the result contract stable:
 
         copytree_secure(private_evals, evals_dir, replace_existing=True, allowed_root=private_root)
 
-    console.print(f"Created Harbor BYOT starter at [cyan]{evals_dir / 'harbor'}[/cyan]")
+    console.print(f"Created Harbor BYOT starter at [cyan]{rich_escape(str(evals_dir / 'harbor'))}[/cyan]")
     return 0
 
 
@@ -857,7 +864,7 @@ def doctor(
     status_styles = {"pass": "green", "warn": "yellow", "fail": "red"}
     for name, status, detail in rows:
         style = status_styles[status]
-        table.add_row(name, f"[{style}]{status}[/{style}]", detail)
+        table.add_row(rich_escape(str(name)), f"[{style}]{status}[/{style}]", rich_escape(str(detail)))
     console.print(table)
     return 1 if any(row[1] == "fail" for row in rows) else 0
 
@@ -943,7 +950,7 @@ def _print_validate_results(skill_path: Path, results: list[Any]) -> None:
     console.print(
         Panel(
             body,
-            title=f"[bold]Validate: {skill_path.name}/evals/[/bold]",
+            title=f"[bold]Validate: {rich_escape(skill_path.name)}/evals/[/bold]",
             border_style="cyan" if not n_err else "red",
             padding=(1, 1),
         )
@@ -968,7 +975,7 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     report_path = target / "report.html"
     if not report_path.exists():
         report_path = render_agent_eval_html_report(skill_path, target)
-    console.print(f"Opening: [cyan]{report_path}[/cyan]")
+    console.print(f"Opening: [cyan]{rich_escape(str(report_path))}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path
 
@@ -991,7 +998,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     candidate_roots = iter_candidate_results_roots(skill_path, results_dir)
     if not any(root.exists() for root in candidate_roots):
         searched = ", ".join(str(p) for p in candidate_roots)
-        console.print(f"[red]Error: No results found. Searched: {searched}[/red]")
+        console.print(f"[red]Error: No results found. Searched: {rich_escape(searched)}[/red]")
         return 1
 
     agent_with: dict[str, dict[str, float]] = {}
@@ -1058,7 +1065,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     table = Table(show_header=True, header_style="bold dim", box=SIMPLE, padding=(0, 1), show_edge=False, expand=True)
     table.add_column("Evaluator", style="white", min_width=18, no_wrap=True)
     for agent in agents:
-        table.add_column(f"{agent}\nscore", justify="right", min_width=7)
+        table.add_column(f"{rich_escape(agent)}\nscore", justify="right", min_width=7)
         if agent in agent_without:
             table.add_column("\nlift", justify="right", min_width=7)
 
@@ -1095,12 +1102,19 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 
     console.print()
     console.print(
-        Panel(table, title=f"[bold]Skill Evaluation - {skill_path.name}[/bold]", border_style="cyan", padding=(1, 1))
+        Panel(
+            table,
+            title=f"[bold]Skill Evaluation - {rich_escape(skill_path.name)}[/bold]",
+            border_style="cyan",
+            padding=(1, 1),
+        )
     )
     console.print()
     for agent in agents:
         meta = agent_meta[agent]
-        console.print(f"  [dim]{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)[/dim]")
+        # Pad before escaping so escape backslashes do not count toward the column width.
+        run_line = f"{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)"
+        console.print(f"  [dim]{rich_escape(run_line)}[/dim]")
     console.print()
     return 0
 

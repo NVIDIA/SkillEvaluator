@@ -11,6 +11,12 @@ from rich.logging import RichHandler
 # Global console instance for rich output
 console = Console()
 
+# Log messages interpolate skill paths, provider errors, and tool output, so the
+# handlers must not parse them as Rich markup: "[/x]" in a message would raise
+# rich.errors.MarkupError out of the logging call itself, and "[link=...]"
+# could spoof the log line.
+_LOG_MARKUP = False
+
 
 def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     """Get a configured logger instance.
@@ -33,7 +39,7 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
             console=console,
             show_time=False,
             show_path=False,
-            markup=True,
+            markup=_LOG_MARKUP,
             rich_tracebacks=True,
         )
         handler.setLevel(level)
@@ -71,7 +77,7 @@ def setup_logging(verbose: bool = False) -> None:
         console=console,
         show_time=False,
         show_path=False,
-        markup=True,
+        markup=_LOG_MARKUP,
         rich_tracebacks=True,
     )
     handler.setLevel(level)

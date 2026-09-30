@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape as rich_escape
 
 from skillevaluator.constants import (
     CONTENT_TYPE_PLUGIN,
@@ -369,6 +370,6 @@ def emit_reports(
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
         reporter.save(results, output_path)
         if announce_paths:
-            console.print(f"[dim]{fmt} report:[/dim] [cyan]{output_path}[/cyan]")
+            console.print(f"[dim]{fmt} report:[/dim] [cyan]{rich_escape(str(output_path))}[/cyan]")
 
     return all(result.passed for result in results)

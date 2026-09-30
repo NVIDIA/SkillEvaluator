@@ -835,10 +835,11 @@ def display_findings_report(
     """
     from rich.console import Console
     from rich.panel import Panel
+    from rich.text import Text
 
     from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
-    console = Console()
+    console = Console(emoji=False)
 
     agents_data = harbor_result.get("agents", {})
     report_agents = list(dict.fromkeys([*harbor_agents, *agents_data.keys()]))
@@ -945,7 +946,11 @@ def display_findings_report(
     console.print(
         Panel(
             body,
-            title=f"[bold]{escape_markup(f'{skill_name} / {panel_agent_label}')} \u2014 Findings[/bold]",
+            # Panel parses a str title with emoji enabled whatever the console says.
+            title=Text.from_markup(
+                f"[bold]{escape_markup(f'{skill_name} / {panel_agent_label}')} \u2014 Findings[/bold]",
+                emoji=False,
+            ),
             border_style="cyan",
             padding=(1, 1),
         )

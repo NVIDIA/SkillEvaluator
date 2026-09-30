@@ -15,7 +15,7 @@ import io
 import json
 import logging
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -32,7 +32,11 @@ PAYLOADS = ("[/x]", "[bold]evil[/bold]", "[link=http://x]y[/link]")
 # directory components ("[" and "x]" for "[/x]").
 PATH_PAYLOADS = ("[/x]", "[bold]evil[/bold]")
 # A single path component (a skill or agent directory name) cannot contain "/".
-NAME_PAYLOADS = ("[bold]evil", "[green]PASS")
+NAME_PAYLOADS = ("[bold]evil", "[green]PASS", "demo:x:")
+# Rich turns ":x:", ":key:" and ":white_check_mark:" into emoji unless the console,
+# Panel title or Status text disables it.
+EMOJI_TEXT = "grep root:x:0:0:root:/root:/bin/bash :key: :white_check_mark:"
+EMOJI_GLYPHS = ("\u274c", "\U0001f511", "\u2705")
 
 # Terminal control sequences untrusted text could carry, and what stays visible.
 CONTROL_PAYLOADS = {
@@ -224,6 +228,55 @@ def test_cli_report_strips_terminal_control_sequences(payload: str, visible: str
         assert f"{label} {visible}".rstrip() in text
 
 
+def test_cli_reporter_consoles_print_emoji_codes_literally(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "250")
+    results = [
+        _rubric_result(EMOJI_TEXT),
+        _finding_result(EMOJI_TEXT),
+        _agent_eval_result(EMOJI_TEXT),
+        _advisory_skip_result(EMOJI_TEXT),
+    ]
+    reporter = CLIReporter()  # the reporter's own default console
+
+    for result in results:
+        reporter.print(result)
+    reporter.print_all(results)
+    outputs = [capsys.readouterr().out, reporter.render(results[1]), reporter.render_all(results)]
+
+    for output in outputs:
+        text = _terminal_text(output)
+        assert [glyph for glyph in EMOJI_GLYPHS if glyph in text] == []
+        assert f"Finding message {EMOJI_TEXT}" in text
+        assert f"Suggested fix {EMOJI_TEXT}" in text
+    assert f"Judge notes {EMOJI_TEXT}" in outputs[0]
+    assert f"Skipped because {EMOJI_TEXT}" in outputs[0]
+
+
+def test_command_consoles_print_emoji_codes_literally(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.tier3 import commands as tier3_commands
+
+    monkeypatch.setenv("COLUMNS", "200")
+
+    # The run banner prints through the tier1 command console.
+    cli_module._print_run_banner(PurePosixPath("/work/root:x:0:0:/skill"), "skill", "custom :key:")
+    tier3_commands._print_validate_results(
+        PurePosixPath("/work/demo:x:"),
+        [SimpleNamespace(status="ok", path="evals/evals.json", message="found :white_check_mark:")],
+    )
+
+    text = _terminal_text(capsys.readouterr().out)
+    assert [glyph for glyph in EMOJI_GLYPHS if glyph in text] == []
+    assert "Target: /work/root:x:0:0:/skill" in text
+    assert "Profile: custom :key:" in text
+    assert "Validate: demo:x:/evals/" in text
+    assert "found :white_check_mark:" in text
+
+
 def test_log_handlers_render_untrusted_text_literally(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillevaluator import logging_config
 
@@ -373,7 +426,7 @@ def test_tier3_compare_renders_agent_and_summary_values_literally(
 
     console = _recording_console()
     monkeypatch.setattr(tier3_commands, "console", console)
-    skill_name, agent = "[green]PASS", "[bold]evil"
+    skill_name, agent = "[green]PASS:x:", "[bold]evil"
     skill_path = tmp_path / skill_name
     skill_path.mkdir()
     results_root = tmp_path / "results"
@@ -489,12 +542,12 @@ def test_harbor_findings_report_renders_skill_and_model_literally(
             {"suggestion": "Write the result file [/x]\x1bc", "dimension": "goal_accuracy", "evidence_refs": []}
         ],
     )
-    skill_name = "skill [bold]evil[/bold]"
+    skill_name = "skill [bold]evil[/bold] :x:"
 
     report.display_findings_report(
         {
             "agents": {
-                "codex": {"execution_status": "succeeded", "model": "gpt-[/x]", "with_skill": scores},
+                "codex": {"execution_status": "succeeded", "model": "gpt-[/x]:key:", "with_skill": scores},
                 "opencode": {"execution_status": "succeeded", "model": "m", "with_skill": {"security": 0.1}},
             }
         },
@@ -504,8 +557,8 @@ def test_harbor_findings_report_renders_skill_and_model_literally(
     )
 
     output = _terminal_text(capsys.readouterr().out)
-    assert "combination for your skill: codex / gpt-[/x]" in output
-    assert f"{skill_name} / codex / gpt-[/x] — Findings" in output
+    assert "combination for your skill: codex / gpt-[/x]:key:" in output
+    assert f"{skill_name} / codex / gpt-[/x]:key: — Findings" in output
     assert "no result [/x]" in output
     assert "Write the result file [/x]" in output
 
@@ -536,4 +589,5 @@ def test_rubric_progress_status_renders_skill_name_literally(
     with patch.object(RubricJudge, "process", return_value={}):
         RubricEvalValidator().validate(skill_dir)
 
-    assert [Text.from_markup(status).plain for status in statuses] == [f"Evaluating {name} with LLM judge..."]
+    assert all(isinstance(status, Text) for status in statuses)
+    assert [status.plain for status in statuses] == [f"Evaluating {name} with LLM judge..."]

@@ -41,7 +41,8 @@ from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
 from skillevaluator.validators.version import VersionValidator
 from skillevaluator.validators.workflows_schema import WorkflowsSchemaValidator
 
-console = Console()
+# emoji=False: ":name:" codes in untrusted text (such as "root:x:0:0:") must print literally.
+console = Console(emoji=False)
 
 # Per-check progress goes to stderr so piped stdout (reports, JSON) stays
 # clean; without it, slow targets print nothing for minutes and look hung.

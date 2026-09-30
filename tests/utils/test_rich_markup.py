@@ -16,7 +16,7 @@ from skillevaluator.utils.rich_markup import escape_markup
 
 
 def _render(markup: str) -> str:
-    console = Console(file=io.StringIO(), record=True, width=10_000, highlight=False, emoji=False)
+    console = Console(file=io.StringIO(), record=True, width=10_000, highlight=False)
     console.print(markup, soft_wrap=True)
     return console.export_text()[:-1]
 

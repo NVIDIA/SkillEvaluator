@@ -16,6 +16,8 @@ Text that SkillEvaluator does not author (skill and plugin content, paths,
 LLM judge output, external tool messages) goes through ``escape_markup`` before
 it is interpolated into Rich markup: ``[/x]`` would otherwise raise
 ``rich.errors.MarkupError`` and ``[link=...]`` could restyle or spoof output.
+Consoles are created with ``emoji=False`` so ``:name:`` codes in that text
+(``root:x:0:0:``) print literally.
 """
 
 from __future__ import annotations
@@ -75,7 +77,7 @@ class CLIReporter(ReporterBase):
     def console(self) -> Console:
         """Get or create the Rich console instance."""
         if self._console is None:
-            self._console = Console()
+            self._console = Console(emoji=False)
         return self._console
 
     @property
@@ -89,14 +91,14 @@ class CLIReporter(ReporterBase):
     def render(self, result: ValidationResult) -> str:
         """Render single result to string (captures console output)."""
         string_io = StringIO()
-        temp_console = Console(file=string_io, force_terminal=True)
+        temp_console = Console(file=string_io, force_terminal=True, emoji=False)
         self.render_result(result, temp_console)
         return string_io.getvalue()
 
     def render_all(self, results: list[ValidationResult]) -> str:
         """Render all results to string with summary table."""
         string_io = StringIO()
-        temp_console = Console(file=string_io, force_terminal=True)
+        temp_console = Console(file=string_io, force_terminal=True, emoji=False)
         self._render_all_results(results, temp_console)
         return string_io.getvalue()
 

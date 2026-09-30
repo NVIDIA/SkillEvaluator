@@ -48,6 +48,11 @@ def escape_markup(text: str) -> str:
     escaped: ``rich.markup.escape`` only escapes tag-shaped brackets, but Rich
     also turns every plain-text ``\\[`` into ``[``, so Windows paths such as
     ``C:\\skills\\[x]`` would lose a separator.
+
+    Rich also replaces ``:name:`` emoji codes, which markup cannot escape.
+    Consoles that print untrusted text must be created with ``emoji=False``, and
+    Panel titles and Status text, which Rich parses with emoji enabled whatever
+    the console says, must be passed as ``Text.from_markup(..., emoji=False)``.
     """
     text = strip_terminal_controls(text).replace("\r", "")
     escaped = _OPEN_BRACKET.sub(_escape_bracket, text)

@@ -515,14 +515,15 @@ class RubricEvalValidator(ValidatorBase):
 
         from rich.console import Console
         from rich.status import Status
+        from rich.text import Text
 
         from skillevaluator.utils.rich_markup import escape_markup
 
-        with Status(
-            f"[bold cyan]Evaluating {escape_markup(skill_path.name)} with LLM judge...[/bold cyan]",
-            console=Console(),
-            spinner="dots",
-        ):
+        # Status parses a str with emoji enabled whatever the console says.
+        status_text = Text.from_markup(
+            f"[bold cyan]Evaluating {escape_markup(skill_path.name)} with LLM judge...[/bold cyan]", emoji=False
+        )
+        with Status(status_text, console=Console(emoji=False), spinner="dots"):
             report = self._judge.process(
                 skill_name=skill_path.name,
                 skill_content=content,

@@ -64,7 +64,8 @@ from skillevaluator.tier3.results_location import (
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
-console = Console()
+# emoji=False: ":name:" codes in untrusted text must print literally.
+console = Console(emoji=False)
 
 _HARBOR_RESERVED_CASE_NAMES = frozenset({"dataset.toml", "readme.md", "metric.py", "results"})
 _DEFAULT_AGENT_BY_PROVIDER = {
@@ -950,7 +951,8 @@ def _print_validate_results(skill_path: Path, results: list[Any]) -> None:
     console.print(
         Panel(
             body,
-            title=f"[bold]Validate: {escape_markup(skill_path.name)}/evals/[/bold]",
+            # Panel parses a str title with emoji enabled whatever the console says.
+            title=Text.from_markup(f"[bold]Validate: {escape_markup(skill_path.name)}/evals/[/bold]", emoji=False),
             border_style="cyan" if not n_err else "red",
             padding=(1, 1),
         )
@@ -1104,7 +1106,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     console.print(
         Panel(
             table,
-            title=f"[bold]Skill Evaluation - {escape_markup(skill_path.name)}[/bold]",
+            title=Text.from_markup(f"[bold]Skill Evaluation - {escape_markup(skill_path.name)}[/bold]", emoji=False),
             border_style="cyan",
             padding=(1, 1),
         )

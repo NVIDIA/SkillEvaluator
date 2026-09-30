@@ -905,11 +905,27 @@ def _resolve_rules(
     staged when it resolves to a real file inside the plugin root (symlink-
     contained, mirroring :func:`find_bundled_plugin_skills`) OR when a canonical
     remote ref names *this* clone and resolves intra-repo under the clone root.
+    Each staged rule is read once, here, through a bounded no-follow read, and
+    the staged set shares the contained ``rules/`` aggregate byte bound.
     """
     staged: list[_StagedRule] = []
     unresolved: list[str] = []
     all_labels: list[str] = []
     seen: set[Path] = set()
+    total_bytes = 0
+
+    def _stage(path: Path) -> None:
+        nonlocal total_bytes
+        rule = _load_rule_path(path)
+        # Every staged body is held in memory and embedded in the wrapper (the
+        # with-plugin arm's skill context), so MAX_PLUGIN_MANIFEST_ITEMS
+        # per-file-bounded refs must not add up to a wrapper the contained
+        # rules/ form would reject.
+        total_bytes += len(rule.content.encode("utf-8"))
+        _reject_rules_over_total_limit(total_bytes)
+        staged.append(rule)
+        seen.add(path)
+
     for ref in _iter_raw_refs(section):
         label = _ref_label(ref)
         all_labels.append(label)
@@ -920,13 +936,11 @@ def _resolve_rules(
             if intra is None:
                 unresolved.append(label)
             elif intra not in seen:
-                staged.append(_load_rule_path(intra))
-                seen.add(intra)
+                _stage(intra)
             continue
         resolved = _resolve_contained_file(ref, plugin_dir, plugin_root)
         if resolved is not None and resolved not in seen:
-            staged.append(_load_rule_path(resolved))
-            seen.add(resolved)
+            _stage(resolved)
         elif resolved is None:
             unresolved.append(label)
     return tuple(staged), tuple(unresolved), tuple(all_labels)
@@ -958,6 +972,12 @@ def _resolve_contained_file(ref: Any, plugin_dir: Path, plugin_root: Path) -> Pa
         if resolved.is_file() and _is_within(resolved, plugin_root):
             return resolved
     return None
+
+
+def _reject_rules_over_total_limit(total_bytes: int) -> None:
+    """Fail closed once staged plugin rules exceed the shared aggregate byte bound."""
+    if total_bytes > CONTENT_DEDUP_MAX_TOTAL_BYTES:
+        raise ValueError(f"Plugin rules exceed the {CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit")
 
 
 def _load_rule_path(path: Path) -> _StagedRule:
@@ -995,9 +1015,7 @@ def _discover_contained_rule_files(plugin_root: Path) -> list[_StagedRule]:
         )
         if len(files) > MAX_PLUGIN_MANIFEST_ITEMS:
             raise ValueError(f"Plugin rules exceed the {MAX_PLUGIN_MANIFEST_ITEMS}-file limit")
-        total_bytes = sum(file.metadata.st_size for file in files)
-        if total_bytes > CONTENT_DEDUP_MAX_TOTAL_BYTES:
-            raise ValueError(f"Plugin rules exceed the {CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit")
+        _reject_rules_over_total_limit(sum(file.metadata.st_size for file in files))
         with SecureRoot(rules_root) as secure_root:
             return [
                 _StagedRule(

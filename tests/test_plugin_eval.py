@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.cli import _plugin_lift_mode_for_evidence
-from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES
+from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, CONTENT_DEDUP_MAX_TOTAL_BYTES
 from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.tier3 import plugin_eval as plugin_eval_module
 from skillevaluator.tier3.plugin_eval import (
@@ -255,6 +255,36 @@ rules:
     assert package.package_path is not None
     assert "Keep data local." in (package.package_path / "SKILL.md").read_text(encoding="utf-8")
     assert package.unresolved_rule_refs == ()
+
+
+@pytest.mark.parametrize("ref_form", ["in-plugin", "intra-repo"])
+def test_listed_rules_share_the_aggregate_byte_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ref_form: str
+) -> None:
+    # Each file passes the per-file bound; together they exceed the aggregate bound
+    # that already rejects the same files behind a contained "./rules/" pointer.
+    monkeypatch.setattr(plugin_eval_module, "_local_repo_slug", lambda _root: "example/repo")
+    count = CONTENT_DEDUP_MAX_TOTAL_BYTES // CONTENT_DEDUP_MAX_FILE_BYTES + 1
+    repo = tmp_path / "repo"
+    plugin = repo / "plugins" / "bundle" if ref_form == "intra-repo" else tmp_path / "bundle"
+    rules = repo / "rules" if ref_form == "intra-repo" else plugin / "rules"
+    rules.mkdir(parents=True)
+    plugin.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (rules / f"r{index}.md").write_text("x" * (CONTENT_DEDUP_MAX_FILE_BYTES - 16), encoding="utf-8")
+    refs = [
+        f"github::example/repo::rules::r{index}.md" if ref_form == "intra-repo" else f"./rules/r{index}.md"
+        for index in range(count)
+    ]
+    (plugin / "agent_plugin.yaml").write_text(
+        "name: bundle\nauthor: {email: dev@example.com}\nrules:\n" + "".join(f"  - {ref}\n" for ref in refs),
+        encoding="utf-8",
+    )
+    stage = tmp_path / "stage"
+
+    with pytest.raises(ValueError, match=f"{CONTENT_DEDUP_MAX_TOTAL_BYTES}-byte total limit"):
+        prepare_plugin_eval_package(plugin, stage_root=stage, repo_root=repo if ref_form == "intra-repo" else None)
+    assert not list(stage.glob("*-plugin-eval"))
 
 
 @pytest.mark.parametrize(

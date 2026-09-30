@@ -904,12 +904,12 @@ def test_behavior_retry_transport_failure_salvages_only_complete_first_entries(j
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2", "b3"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
     assert len(calls) == 2
-    assert result["score"] == round(1 / 3, 4)
+    assert result["score"] == 1.0
     assert result["results"] == [{"step": 1, "passed": True, "reason": "observed"}]
-    assert "1/3" in result["reason"]
+    assert "1/1" in result["reason"]
 
 
 def test_behavior_retry_transport_failure_without_salvage_is_redacted_error(judge_module, monkeypatch) -> None:
@@ -966,6 +966,8 @@ def test_behavior_salvage_rejects_noncompletable_current_entry(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 @pytest.mark.parametrize(
@@ -981,7 +983,7 @@ def test_behavior_salvage_accepts_append_only_completable_current_entry(
     monkeypatch,
     unfinished_entry: str,
 ) -> None:
-    truncated = '{"results":[{"passed":true},' + unfinished_entry
+    truncated = '{"results":[{"step":1,"passed":true},' + unfinished_entry
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -989,11 +991,11 @@ def test_behavior_salvage_accepts_append_only_completable_current_entry(
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
     assert len(calls) == 2
-    assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["score"] == 1.0
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 def test_behavior_retries_ambiguous_multiple_documents_then_errors(judge_module, monkeypatch) -> None:
@@ -1062,6 +1064,8 @@ def test_behavior_salvage_rejects_excessive_nesting(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 @pytest.mark.parametrize(
@@ -1098,6 +1102,8 @@ def test_behavior_salvage_rejects_nonstandard_constants(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 @pytest.mark.parametrize(
@@ -1169,10 +1175,12 @@ def test_behavior_salvage_rejects_invalid_top_level_prefixes(
     assert len(calls) == 2
     _assert_error_result(result)
     assert result["results"] == []
+    # The parser rejects the text itself; an error here is not merely an incomplete salvage.
+    assert judge_module._salvage_behavior_results(malformed) == []
 
 
 def test_behavior_salvage_keeps_finite_top_level_score_prefix(judge_module, monkeypatch) -> None:
-    truncated = '{"score":0.5,"results":[{"passed":true},{"passed":false'
+    truncated = '{"score":1.0,"results":[{"step":1,"passed":true},{"step":2,"passed":false'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1180,17 +1188,17 @@ def test_behavior_salvage_keeps_finite_top_level_score_prefix(judge_module, monk
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
-    assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["score"] == 1.0
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 @pytest.mark.parametrize(
     "prefix", [pytest.param("Here is the JSON:\n", id="prose"), pytest.param("```json\n", id="fence")]
 )
 def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkeypatch, prefix: str) -> None:
-    truncated = f'{prefix}{{"results":[{{"passed":true}},{{"passed":false'
+    truncated = f'{prefix}{{"results":[{{"step":1,"passed":true}},{{"step":2,"passed":false'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1198,10 +1206,10 @@ def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkey
         _pair_script([(truncated, None), (None, "request timed out")], calls),
     )
 
-    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
+    result = judge_module.judge_behavior_check("conversation", ["b1"])
 
-    assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["score"] == 1.0
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 @pytest.mark.parametrize("ground_truth", ["", "   \n", None, []])

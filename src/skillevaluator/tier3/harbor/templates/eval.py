@@ -2000,7 +2000,8 @@ def _salvage_behavior_results(text):
 
     Reasoning judges that hit the output-token cap emit ``{"results": [...`` and
     stop mid-entry (``finish_reason="length"``); every fully-formed ``{...}``
-    entry before the cut is still valid JSON and can be scored.
+    entry before the cut is still valid JSON. The verdict is scored only when
+    those entries cover every expected behavior.
     """
     text = text or ""
     if len(text) > _MAX_JSON_TEXT_CHARS or not _json_nesting_within_limit(text):
@@ -7728,7 +7729,8 @@ Respond with ONLY a JSON object:
             score = _behavior_payload_score(parsed, len(expected_behaviors))
 
     if score is None:
-        # Salvage complete entries from a truncated results array (newest first).
+        # Salvage a truncated results array (newest first) only when every
+        # behavior was judged before the cut.
         for text, extracted in reversed(attempts):
             if extracted is not None:
                 continue
@@ -7744,7 +7746,7 @@ Respond with ONLY a JSON object:
                 candidate_score = _behavior_payload_score(
                     candidate,
                     len(expected_behaviors),
-                    allow_partial=True,
+                    salvaged=True,
                 )
                 if candidate_score is not None:
                     parsed = candidate
@@ -7764,25 +7766,38 @@ Respond with ONLY a JSON object:
     }
 
 
-def _behavior_payload_score(parsed, expected_count, *, allow_partial=False):
+def _behavior_payload_score(parsed, expected_count, *, salvaged=False):
+    """Score a behavior verdict only when it is a complete, well-typed JSON object.
+
+    Every entry needs a boolean ``passed`` and the verdict judges exactly
+    ``expected_count`` behaviors. A verdict ``salvaged`` from a truncated reply
+    must also number its entries with the distinct steps ``1..expected_count``:
+    a behavior the cut left unjudged is a judge failure, never a failed
+    behavior. An optional ``score`` must be finite; the score is always
+    recomputed from the per-behavior results.
+    """
     if not isinstance(parsed, dict):
         return None
     results = parsed.get("results")
-    if not isinstance(results, list):
+    if not isinstance(results, list) or len(results) != expected_count:
         return None
     if any(not isinstance(result, dict) or not isinstance(result.get("passed"), bool) for result in results):
         return None
-    if allow_partial:
-        if not results or len(results) > expected_count:
-            return None
-    elif len(results) != expected_count:
+    if salvaged and not _covers_every_step(results, expected_count):
         return None
     if "score" in parsed and _finite_score(parsed["score"]) is None:
         return None
-    denominator = expected_count if allow_partial else len(results)
-    if denominator <= 0:
+    if expected_count <= 0:
         return None
-    return sum(1 for result in results if result["passed"]) / denominator
+    return sum(1 for result in results if result["passed"]) / expected_count
+
+
+def _covers_every_step(results, expected_count):
+    """Return whether *results* carry each step ``1..expected_count`` exactly once."""
+    steps = [result.get("step") for result in results]
+    if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
+        return False
+    return sorted(steps) == list(range(1, expected_count + 1))
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

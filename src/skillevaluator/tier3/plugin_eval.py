@@ -30,7 +30,10 @@ What Phase 1 *can* evaluate locally, without any network:
   any documented ``mcpServers`` form (inline map, ``.json`` path, or an array
   of both) and in the root ``.mcp.json``; every source is read through the
   bounded, no-follow plugin-root reader and passes the Tier 1 static checks
-  (fail closed) before anything is staged.
+  (fail closed) before anything is staged. A server launched from plugin files
+  (``${CLAUDE_PLUGIN_ROOT}`` or a relative path) is not staged: the plugin tree
+  never reaches the task environment, so it is reported unsupported and the run
+  INCOMPLETE rather than counted as runnable.
 
 Every declared and packaged component is also reported in
 ``provenance()['component_coverage']`` (staged / not_staged / unsupported /
@@ -133,6 +136,14 @@ _EVAL_DATASET_NAMES = tuple(f"evals{extension}" for extension in DATASET_EXTENSI
 # task-environment ``mcp_servers.toml`` so the adapter can stage it for the
 # with-plugin arm only (see ``adapter.generate_harbor_tasks``).
 PLUGIN_MCP_SERVERS_FILENAME = "plugin_mcp_servers.toml"
+
+# Install-time variables Claude Code expands when it loads an installed plugin,
+# plus the path forms that point into the plugin tree. The eval runtime expands
+# neither and never copies the plugin tree into the task environment, so an MCP
+# server launched through them cannot start (see _launches_from_plugin_files).
+_PLUGIN_INSTALL_VAR_RE = re.compile(r"\$\{?CLAUDE_PLUGIN_(?:ROOT|DATA)\b")
+_RELATIVE_PATH_PREFIXES = ("./", "../", ".\\", "..\\")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:/")
 
 
 @dataclass(frozen=True)
@@ -393,7 +404,7 @@ def prepare_plugin_eval_package(
             mcp_unsupported_config=tuple(mcp_unsupported_config),
             dependency_status_counts=dependency_status_counts,
             skipped=True,
-            skip_reason=_skip_reason(unresolved_skill_refs, unresolved_rule_refs, provider_mcp),
+            skip_reason=_skip_reason(unresolved_skill_refs, unresolved_rule_refs, provider_mcp, mcp_unsupported_config),
             **report_only,
         )
 
@@ -586,6 +597,14 @@ def _mcp_coverage_row(
         if component.name in unsupported_config:
             reason += "; its env/headers are not applied by the runtime (run reported INCOMPLETE)"
         return coverage_row(component, "staged", reason)
+    if component.name in unsupported_config:
+        # Not runnable: _split_mcp_servers keeps plugin-file launches out of the toml.
+        return coverage_row(
+            component,
+            "unsupported",
+            "MCP server launches from plugin files (${CLAUDE_PLUGIN_ROOT} or a relative path) that Tier 3 "
+            "does not stage into the task environment; not started (run reported INCOMPLETE)",
+        )
     if component.name in provider_names:
         return coverage_row(component, "unavailable", "provider-only MCP server is not runnable offline")
     return coverage_row(component, "not_staged", "MCP server was not staged")
@@ -1054,6 +1073,37 @@ def _reject_unsafe_mcp_declaration(name: Any, config: dict[str, Any]) -> None:
         )
 
 
+def _launches_from_plugin_files(config: dict[str, Any]) -> bool:
+    """Whether a runnable MCP server's launch config points into the plugin tree.
+
+    The documented form for a server shipped inside a plugin is
+    ``"command": "${CLAUDE_PLUGIN_ROOT}/servers/x"``, which Claude Code expands when
+    it loads the installed plugin. The eval runtime passes the staged config to
+    the agent verbatim and packages only the generated wrapper, member skills,
+    and evals, so ``${CLAUDE_PLUGIN_ROOT}`` / ``${CLAUDE_PLUGIN_DATA}``, a ``./`` or
+    ``../`` path in ``command``/``args``/``cwd`` (including ``--flag=./path``), or a
+    relative ``command`` path all name files the with-plugin arm does not have.
+    """
+    args = config.get("args")
+    launch = [config.get("command"), config.get("cwd"), *(args if isinstance(args, list) else ())]
+    values = [value.strip() for value in launch if isinstance(value, str)]
+    url = config.get("url")
+    if any(_PLUGIN_INSTALL_VAR_RE.search(value) for value in (*values, url if isinstance(url, str) else "")):
+        return True
+    for value in values:
+        path = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
+        # A bare "./" (or "../") is the arm's working directory, which exists there.
+        if path.startswith(_RELATIVE_PATH_PREFIXES) and path.replace("\\", "/").rstrip("/") not in {".", ".."}:
+            return True
+    command = config.get("command")
+    if not isinstance(command, str):
+        return False
+    # A command containing a separator is a path (never a PATH lookup); unless it
+    # is absolute (or env-rooted) it resolves against the arm's working directory.
+    command = command.strip().replace("\\", "/")
+    return "/" in command and not command.startswith(("/", "~", "$")) and not _WINDOWS_DRIVE_RE.match(command)
+
+
 def _normalize_mcp_entries(
     manifest: dict[str, Any], inventory: PluginInventory, contained_form: bool
 ) -> list[dict[str, Any]]:
@@ -1139,6 +1189,10 @@ def _normalize_mcp_entries(
             if args:
                 entry["args"] = list(args)
             entry["transport"] = config.get("transport") or config.get("type") or "stdio"
+            # Never staged (the runtime has no cwd field); carried only so
+            # _split_mcp_servers can see a cwd that points into the plugin tree.
+            if config.get("cwd") is not None:
+                entry["cwd"] = config["cwd"]
         elif config.get("url"):
             entry["url"] = config["url"]
             transport = config.get("transport") or config.get("type")
@@ -1159,7 +1213,9 @@ def _split_mcp_servers(
     Canonical ``PluginMcpEntry`` entries carry ``name`` + ``provider`` and are
     *not* runnable offline (returned as provider-only, contributing nothing to
     the run). Entries with a ``command``/``url`` are a documented local-testing
-    extension and are staged with-plugin-only.
+    extension and are staged with-plugin-only -- unless they launch from plugin
+    files the eval does not stage (:func:`_launches_from_plugin_files`); those
+    are returned only in the unsupported-config list.
     """
     raw_servers = _normalize_mcp_entries(manifest, inventory, contained_form)
 
@@ -1174,7 +1230,14 @@ def _split_mcp_servers(
             f"Plugin manifest mcp[{idx}].name",
             max_chars=MAX_PLUGIN_MANIFEST_TEXT_CHARS,
         ).strip()
-        if raw.get("command") or raw.get("url"):
+        if (raw.get("command") or raw.get("url")) and _launches_from_plugin_files(raw):
+            # Staged verbatim, this server could not start in the with-plugin arm,
+            # yet it would count as runnable: a plugin whose only component it is
+            # would run a "complete" evaluation with a meaningless zero lift instead
+            # of an honest skip. Keep it out of the toml and the skip decision, and
+            # record it as config the runtime cannot apply (run INCOMPLETE).
+            unsupported_config.append(name)
+        elif raw.get("command") or raw.get("url"):
             server: dict[str, Any] = {"name": name}
             for key in ("url", "command", "transport"):
                 if raw.get(key):
@@ -1221,6 +1284,7 @@ def _skip_reason(
     unresolved_skill_refs: tuple[str, ...],
     unresolved_rule_refs: tuple[str, ...],
     provider_mcp: list[dict[str, str]],
+    unsupported_mcp: list[str] | tuple[str, ...] = (),
 ) -> str:
     parts: list[str] = []
     if unresolved_skill_refs:
@@ -1229,6 +1293,10 @@ def _skip_reason(
         parts.append(f"{len(unresolved_rule_refs)} remote rule ref(s)")
     if provider_mcp:
         parts.append(f"{len(provider_mcp)} provider-only MCP server(s)")
+    if unsupported_mcp:
+        # In a skipped package these are only plugin-file launches: a server with
+        # just unapplied env/headers is still runnable, so it never reaches here.
+        parts.append(f"{len(unsupported_mcp)} MCP server(s) launched from unstaged plugin files")
     detail = ", ".join(parts) if parts else "no declared dependencies"
     return (
         "Plugin has no locally-resolvable components to evaluate in Phase 1 "

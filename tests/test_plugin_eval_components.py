@@ -63,7 +63,7 @@ def test_path_ref_is_staged(tmp_path: Path, wrapped: bool) -> None:
 def test_array_form_is_staged(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path / "p",
-        {"mcpServers": ["./a.json", {"inline-srv": {"command": "node", "args": ["./s.js"]}}]},
+        {"mcpServers": ["./a.json", {"inline-srv": {"command": "node", "args": ["/opt/mcp/s.js"]}}]},
         {"a.json": {"from-file": _PINNED}},
     )
     package = _prepare(root, tmp_path)
@@ -81,11 +81,112 @@ def test_absent_mcp_servers_stages_root_mcp_json(tmp_path: Path) -> None:
 def test_later_declaration_replaces_mcp_json_server(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path / "p",
-        {"mcpServers": {"fs": {"command": "node", "args": ["./local.js"]}}},
+        {"mcpServers": {"fs": {"command": "node", "args": ["/opt/mcp/local.js"]}}},
         {".mcp.json": {"mcpServers": {"fs": _PINNED}}},
     )
     staged = _staged_servers(_prepare(root, tmp_path))
     assert staged["fs"]["command"] == "node"
+
+
+# --------------------------------------------------------------------------- #
+# Servers launched from plugin files cannot start, so they are not runnable    #
+# --------------------------------------------------------------------------- #
+_SKILL_MD = "---\nname: demo\ndescription: Demo skill\n---\n# Demo\nBody\n"
+_PLUGIN_FILE_LAUNCHES = [
+    {"command": "${CLAUDE_PLUGIN_ROOT}/servers/db-server", "args": ["--config", "${CLAUDE_PLUGIN_ROOT}/c.json"]},
+    {"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.js"]},
+    {"command": "python", "args": ["-m", "srv", "--data=$CLAUDE_PLUGIN_DATA/db"]},
+    {"command": "python", "args": ["-m", "srv"], "cwd": "${CLAUDE_PLUGIN_ROOT}"},
+    {"command": "node", "args": ["./s.js"]},
+    {"command": "srv", "args": ["--config=../shared/config.json"]},
+    {"command": "servers/db-server"},
+]
+
+
+def _mcp_row(provenance: dict, name: str) -> dict:
+    return next(
+        row for row in provenance["component_coverage"]["components"] if row["type"] == "mcp" and row["name"] == name
+    )
+
+
+def test_plugin_root_mcp_json_only_plugin_is_skipped_not_run(tmp_path: Path) -> None:
+    # The documented Claude Code layout: the server binary ships in the plugin and
+    # .mcp.json launches it through ${CLAUDE_PLUGIN_ROOT}. Tier 3 stages neither the
+    # binary nor the variable, so this must stay an honest skip, not a "complete"
+    # run of a server that cannot start.
+    root = _plugin(
+        tmp_path / "p",
+        {},
+        {
+            ".mcp.json": {"mcpServers": {"plugin-database": _PLUGIN_FILE_LAUNCHES[0]}},
+            "servers/db-server": "#!/bin/sh\necho hi\n",
+            "c.json": "{}",
+        },
+    )
+    package = _prepare(root, tmp_path)
+    assert package.skipped
+    assert "launched from unstaged plugin files" in package.skip_reason
+    assert package.runnable_mcp_servers == ()
+    provenance = package.provenance()
+    assert provenance["partial"] is True
+    assert provenance["mcp_unsupported_config"] == ["plugin-database"]
+    assert _mcp_row(provenance, "plugin-database")["state"] == "unsupported"
+    assert not (tmp_path / "stage").exists() or not any((tmp_path / "stage").rglob(PLUGIN_MCP_SERVERS_FILENAME))
+
+
+@pytest.mark.parametrize(
+    "config",
+    _PLUGIN_FILE_LAUNCHES,
+    ids=["root-command", "root-arg", "data-flag", "root-cwd", "dot-arg", "parent-flag", "relative-command"],
+)
+def test_plugin_file_launch_is_not_staged_and_marks_run_incomplete(tmp_path: Path, config: dict) -> None:
+    root = _plugin(
+        tmp_path / "p",
+        {"mcpServers": {"fs": _PINNED, "local": config}},
+        {"skills/demo/SKILL.md": _SKILL_MD},
+    )
+    package = _prepare(root, tmp_path)
+    assert not package.skipped
+    assert package.runnable_mcp_servers == ("fs",)
+    assert set(_staged_servers(package)) == {"fs"}
+    toml_text = (package.package_path / "evals" / "environment" / PLUGIN_MCP_SERVERS_FILENAME).read_text()
+    assert "CLAUDE_PLUGIN" not in toml_text
+    provenance = package.provenance()
+    assert provenance["partial"] is True
+    assert provenance["mcp_unsupported_config"] == ["local"]
+    row = _mcp_row(provenance, "local")
+    assert row["state"] == "unsupported" and "does not stage" in row["reason"]
+
+
+def test_bundle_manifest_plugin_file_launch_is_not_staged(tmp_path: Path) -> None:
+    root = tmp_path / "b"
+    (root / "skills" / "alpha" / "evals").mkdir(parents=True)
+    (root / "agent_plugin.yaml").write_text(
+        "name: bundle\nauthor:\n  email: a@example.com\n"
+        "mcp:\n  - name: local\n    command: ${CLAUDE_PLUGIN_ROOT}/bin/srv\n",
+        encoding="utf-8",
+    )
+    (root / "skills" / "alpha" / "SKILL.md").write_text("---\nname: alpha\ndescription: A\n---\nA\n")
+    (root / "skills" / "alpha" / "evals" / "evals.json").write_text(json.dumps([{"id": "c", "prompt": "p"}]))
+    package = _prepare(root, tmp_path)
+    assert package.runnable_mcp_servers == ()
+    assert package.provenance()["partial"] is True
+    assert package.provenance()["mcp_unsupported_config"] == ["local"]
+
+
+def test_working_directory_and_absolute_paths_stay_runnable(tmp_path: Path) -> None:
+    root = _plugin(
+        tmp_path / "p",
+        {
+            "mcpServers": {
+                "files": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem@1.0.0", ".", "./"]},
+                "abs": {"command": "/usr/local/bin/srv", "args": ["--config=/etc/srv.json"]},
+            }
+        },
+    )
+    package = _prepare(root, tmp_path)
+    assert package.runnable_mcp_servers == ("files", "abs")
+    assert package.provenance()["mcp_unsupported_config"] == []
 
 
 # --------------------------------------------------------------------------- #

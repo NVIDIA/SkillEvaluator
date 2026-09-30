@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.tier3.plugin_eval import PLUGIN_MCP_SERVERS_FILENAME, prepare_plugin_eval_package
 
 _SKIP_SYMLINKS = pytest.mark.skipif(os.name == "nt", reason="POSIX symlink fixture")
@@ -229,8 +230,6 @@ def test_shadowed_unsafe_declaration_still_fails_closed(tmp_path: Path) -> None:
 
 
 def test_oversize_mcp_config_fails_closed(tmp_path: Path) -> None:
-    from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
-
     root = _plugin(tmp_path / "p", {"mcpServers": "./big.json"}, {"big.json": " " * (PLUGIN_CONFIG_MAX_BYTES + 1)})
     with pytest.raises(ValueError, match="mcp_config_file_too_large"):
         _prepare(root, tmp_path)
@@ -368,3 +367,41 @@ def test_bundle_manifest_root_mcp_json_is_not_staged(tmp_path: Path) -> None:
     assert states["local"][0] == "not_staged"
     assert "'mcp' list" in states["local"][1]
     assert states["search"][0] == "unavailable"
+
+
+def _bundle_plugin(root: Path, manifest_tail: str = "") -> Path:
+    (root / "skills" / "alpha" / "evals").mkdir(parents=True)
+    (root / "agent_plugin.yaml").write_text(
+        f"name: bundle\nauthor:\n  email: a@example.com\n{manifest_tail}", encoding="utf-8"
+    )
+    (root / "skills" / "alpha" / "SKILL.md").write_text("---\nname: alpha\ndescription: A\n---\nA\n")
+    (root / "skills" / "alpha" / "evals" / "evals.json").write_text(json.dumps([{"id": "c", "prompt": "p"}]))
+    return root
+
+
+@pytest.mark.parametrize("mcp_json", ["{not json", " " * (PLUGIN_CONFIG_MAX_BYTES + 1)], ids=["invalid", "oversize"])
+@pytest.mark.parametrize(
+    "manifest_tail", ["", "mcp:\n  - name: search\n    provider: public-provider\n"], ids=["no-mcp-list", "mcp-list"]
+)
+def test_bundle_manifest_broken_root_mcp_json_does_not_block(tmp_path: Path, mcp_json: str, manifest_tail: str) -> None:
+    # An agent_plugin.yaml plugin never stages its root .mcp.json, so a stale or
+    # malformed one is reported (coverage 'invalid'; Tier 1 flags it) but must not
+    # block preparation -- with or without an unrelated 'mcp' list in the manifest.
+    root = _bundle_plugin(tmp_path / "b", manifest_tail)
+    (root / ".mcp.json").write_text(mcp_json, encoding="utf-8")
+    package = _prepare(root, tmp_path)
+    assert not package.skipped
+    assert package.runnable_mcp_servers == ()
+    assert _mcp_row(package.provenance(), ".mcp.json")["state"] == "invalid"
+
+
+def test_staged_root_mcp_json_still_fails_closed(tmp_path: Path) -> None:
+    # The same file blocks wherever it IS staged: a contained plugin's root
+    # .mcp.json, or an agent_plugin.yaml mcpServers path that names it explicitly.
+    contained = _plugin(tmp_path / "c", {}, {".mcp.json": "{not json"})
+    with pytest.raises(ValueError, match="mcp_config_file_invalid"):
+        _prepare(contained, tmp_path)
+    bundle = _bundle_plugin(tmp_path / "b", "mcpServers: ./.mcp.json\n")
+    (bundle / ".mcp.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="mcp_config_file_invalid"):
+        _prepare(bundle, tmp_path)

@@ -74,12 +74,15 @@ from skillevaluator.constants import (
 from skillevaluator.deduplication.plugin.ref_utils import normalize_ref
 from skillevaluator.models.result import Severity
 from skillevaluator.plugin_components import (
+    MCP_JSON,
     CostRow,
     PluginInventory,
+    PluginRootReader,
     build_plugin_inventory,
     coverage_row,
     manifest_rel_for,
     mcp_pinning_summary,
+    normalize_declared_path,
     parse_markdown,
     problem_reason,
     summarize_coverage,
@@ -373,7 +376,9 @@ def prepare_plugin_eval_package(
         contained=contained_form,
         manifest_rel=manifest_rel_for(manifest_path, plugin_dir),
     )
-    runnable_mcp, provider_mcp, mcp_unsupported_config = _split_mcp_servers(manifest, inventory, contained_form)
+    runnable_mcp, provider_mcp, mcp_unsupported_config = _split_mcp_servers(
+        manifest, inventory, contained_form, plugin_root=plugin_root
+    )
     skipped = not (member_skills or staged_rules or runnable_mcp)
     report_only = _inventory_provenance(
         inventory,
@@ -1104,8 +1109,27 @@ def _launches_from_plugin_files(config: dict[str, Any]) -> bool:
     return "/" in command and not command.startswith(("/", "~", "$")) and not _WINDOWS_DRIVE_RE.match(command)
 
 
+def _unstaged_root_mcp_json(manifest: dict[str, Any], plugin_root: Path) -> str | None:
+    """Finding path of an ``agent_plugin.yaml`` plugin's implicit root ``.mcp.json``, or ``None``.
+
+    Mirrors :func:`~skillevaluator.plugin_components.collect_mcp_declarations`: the
+    root file is inventoried as the default ``mcp_json`` source (never staged for
+    this manifest form) unless an ``mcpServers`` path names it explicitly -- then it
+    is a staged ``path_ref`` source whose findings must keep blocking.
+    """
+    declared = manifest.get("mcpServers")
+    entries = declared if isinstance(declared, list) else [declared]
+    if any(isinstance(entry, str) and normalize_declared_path(entry).rel == MCP_JSON for entry in entries):
+        return None
+    return PluginRootReader(plugin_root).display(MCP_JSON)
+
+
 def _normalize_mcp_entries(
-    manifest: dict[str, Any], inventory: PluginInventory, contained_form: bool
+    manifest: dict[str, Any],
+    inventory: PluginInventory,
+    contained_form: bool,
+    *,
+    plugin_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize every manifest MCP form into the bundle-reference list shape.
 
@@ -1136,8 +1160,15 @@ def _normalize_mcp_entries(
 
     collection = inventory.mcp
     # Fail closed on config-source problems: escapes, absolute paths, symlinks,
-    # missing/oversize/invalid config files, and malformed mcpServers values.
+    # missing/oversize/invalid config files, and malformed mcpServers values --
+    # in the sources that will be staged. An agent_plugin.yaml plugin's implicit
+    # root .mcp.json is inventoried (Tier 1 reports it) but never staged, so it
+    # blocks here no more than it does when the manifest has an 'mcp' list.
+    # Without the plugin root the finding cannot be attributed: keep it (fail closed).
     blocking = collection.blocking_source_findings
+    if not contained_form and plugin_root is not None:
+        unstaged = _unstaged_root_mcp_json(manifest, plugin_root)
+        blocking = [finding for finding in blocking if finding.file_path != unstaged]
     if blocking:
         first = blocking[0]
         raise ValueError(
@@ -1206,7 +1237,11 @@ def _normalize_mcp_entries(
 
 
 def _split_mcp_servers(
-    manifest: dict[str, Any], inventory: PluginInventory, contained_form: bool
+    manifest: dict[str, Any],
+    inventory: PluginInventory,
+    contained_form: bool,
+    *,
+    plugin_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[str]]:
     """Split MCP entries into runnable (command/url) vs provider-only.
 
@@ -1217,7 +1252,7 @@ def _split_mcp_servers(
     files the eval does not stage (:func:`_launches_from_plugin_files`); those
     are returned only in the unsupported-config list.
     """
-    raw_servers = _normalize_mcp_entries(manifest, inventory, contained_form)
+    raw_servers = _normalize_mcp_entries(manifest, inventory, contained_form, plugin_root=plugin_root)
 
     runnable: list[dict[str, Any]] = []
     provider_only: list[dict[str, str]] = []

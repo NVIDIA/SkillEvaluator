@@ -35,6 +35,7 @@ import idna
 
 from skillevaluator.models.plugin import MCP_NAME_PATTERN
 from skillevaluator.models.result import Finding, Severity
+from skillevaluator.utils.structured_data import MAX_STRUCTURED_NODES
 
 CATEGORY = "MCP_DECLARATION"
 
@@ -1220,7 +1221,9 @@ _BYPASS_FLAG_RE = re.compile(
 # Keys whose values are prose, never executed config -- documentation mentions of
 # a flag are not flagged.
 _DOC_KEYS = frozenset({"description", "title", "summary", "notes", "note", "comment", "comments", "help"})
-_MAX_SCAN_NODES = 4_096
+# Matches the load_bounded_json node limit, so every config it accepts is walked
+# completely; a walk that still hits the bound is reported, never silently cut.
+_MAX_SCAN_NODES = MAX_STRUCTURED_NODES
 _CODE_INJECTION_ENV = frozenset({"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES"})
 _NODE_OPTIONS_INJECTION_RE = re.compile(
     r"(?:^|\s)(--require|-r|--import|--loader|--experimental-loader)(?:=|\s|$)", re.IGNORECASE
@@ -1253,36 +1256,68 @@ _AUTO_APPROVE_KEYS = frozenset({"autoapprove", "alwaysallow", "autoapprovetools"
 class OverrideIssue:
     """A dangerous flag/env/config override, independent of where it was declared."""
 
-    concept: Literal["permission_bypass_flag", "env_code_injection", "env_traffic_redirect", "auto_approve"]
+    concept: Literal[
+        "permission_bypass_flag",
+        "permission_bypass_scan_truncated",
+        "env_code_injection",
+        "env_traffic_redirect",
+        "auto_approve",
+    ]
     severity: Severity
     message: str
     suggestion: str
 
 
+class _ConfigWalk:
+    """Bounded, iterative walk yielding ``(json_path, node)`` for a config value.
+
+    ``complete`` turns False when the walk stops at ``_MAX_SCAN_NODES`` with nodes
+    still unvisited.
+    """
+
+    def __init__(self, value: Any, *, skip_doc_keys: bool = True) -> None:
+        self.value = value
+        self.skip_doc_keys = skip_doc_keys
+        self.complete = True
+
+    def __iter__(self) -> Iterator[tuple[str, Any]]:
+        stack: list[tuple[str, Any]] = [("", self.value)]
+        seen = 0
+        while stack:
+            if seen >= _MAX_SCAN_NODES:
+                self.complete = False
+                return
+            path, node = stack.pop()
+            seen += 1
+            yield path, node
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    if self.skip_doc_keys and str(key).lower() in _DOC_KEYS:
+                        continue
+                    stack.append((f"{path}.{key}" if path else str(key), child))
+            elif isinstance(node, list):
+                for index, child in enumerate(node):
+                    stack.append((f"{path}[{index}]", child))
+
+
 def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[tuple[str, str]]:
     """Yield ``(json_path, string)`` for string leaves of a config value (bounded, iterative)."""
-    stack: list[tuple[str, Any]] = [("", value)]
-    seen = 0
-    while stack and seen < _MAX_SCAN_NODES:
-        path, node = stack.pop()
-        seen += 1
+    for path, node in _ConfigWalk(value, skip_doc_keys=skip_doc_keys):
         if isinstance(node, str):
             yield path, node
-        elif isinstance(node, dict):
-            for key, child in node.items():
-                if skip_doc_keys and str(key).lower() in _DOC_KEYS:
-                    continue
-                stack.append((f"{path}.{key}" if path else str(key), child))
-        elif isinstance(node, list):
-            for index, child in enumerate(node):
-                stack.append((f"{path}[{index}]", child))
 
 
 def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
-    """Find agent-CLI permission-bypass flags in any config/command string."""
+    """Find agent-CLI permission-bypass flags in any config/command string.
+
+    A config too large to walk completely is itself a HIGH issue (fail closed).
+    """
     issues: list[OverrideIssue] = []
     seen: set[tuple[str, str]] = set()
-    for path, text in iter_config_strings(value):
+    walk = _ConfigWalk(value)
+    for path, text in walk:
+        if not isinstance(text, str):
+            continue
         for match in _BYPASS_FLAG_RE.finditer(text):
             flag = match.group(1).lower()
             if (path, flag) in seen:
@@ -1297,6 +1332,16 @@ def permission_bypass_issues(value: Any) -> list[OverrideIssue]:
                     "Remove the permission-bypass flag; plugins must not disable the host agent's approvals or sandbox.",
                 )
             )
+    if not walk.complete:
+        issues.append(
+            OverrideIssue(
+                "permission_bypass_scan_truncated",
+                Severity.HIGH,
+                f"config has more than {_MAX_SCAN_NODES} nodes; the permission-bypass scan stopped before "
+                "inspecting all of it",
+                "Split or simplify the config so every entry can be inspected.",
+            )
+        )
     return issues
 
 

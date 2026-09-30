@@ -291,6 +291,18 @@ def test_permission_bypass_flags_are_high(config) -> None:
     assert checks.get("mcp_permission_bypass_flag") == Severity.HIGH
 
 
+def test_bypass_flag_beside_a_large_sibling_key_is_found() -> None:
+    config = {"command": "claude", "args": ["mcp", "serve", "--dangerously-skip-permissions"], "zz": [[0] * 1000] * 5}
+    checks = _checks(validate_mcp_server_declaration("s", config, "p.json"))
+    assert checks.get("mcp_permission_bypass_flag") == Severity.HIGH
+
+
+def test_bypass_scan_that_hits_its_node_bound_fails_closed() -> None:
+    config = {"command": "server", "pad": [0] * 25_000}
+    checks = _checks(validate_mcp_server_declaration("s", config, "p.json"))
+    assert checks.get("mcp_permission_bypass_scan_truncated") == Severity.HIGH
+
+
 @pytest.mark.parametrize(
     "config",
     [

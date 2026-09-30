@@ -255,6 +255,36 @@ def test_url_private_endpoint_is_medium_and_names_the_policy_key() -> None:
     assert "DNS resolution" in finding.message
 
 
+_URL_SECRET = "sk-liveABCDEFGHIJKLMNOP1234"
+
+
+@pytest.mark.parametrize(
+    ("url", "check", "shown"),
+    [
+        (f"https://10.0.0.5/mcp?api_key={_URL_SECRET}", "mcp_endpoint_private", "https://10.0.0.5/mcp"),
+        (
+            f"https://metadata.google.internal/x?token={_URL_SECRET}#frag",
+            "mcp_endpoint_metadata",
+            "https://metadata.google.internal/x",
+        ),
+        (f"https://user:{_URL_SECRET}@10.0.0.5/mcp", "mcp_endpoint_private", "https://10.0.0.5/mcp"),
+        (f"https://user:{_URL_SECRET}@169.254.169.254/", "mcp_endpoint_metadata", "https://169.254.169.254/"),
+        (f"https://user:{_URL_SECRET}@h/mcp", "mcp_url_inline_secret", "https://h/mcp"),
+        (
+            f"http://user:{_URL_SECRET}@10.0.0.5/mcp?api_key={_URL_SECRET}",
+            "mcp_url_insecure_scheme",
+            "http://10.0.0.5/mcp",
+        ),
+        (f"https://user:{_URL_SECRET}@h:notaport/mcp", "mcp_url_malformed_authority", "https://h:notaport/mcp"),
+        (f"ftp://user:{_URL_SECRET}@h/x", "mcp_url_dangerous_scheme", "ftp://h/x"),
+    ],
+)
+def test_url_findings_never_echo_userinfo_or_query_credentials(url: str, check: str, shown: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
+    assert all(_URL_SECRET not in f.message for f in findings), [f.message for f in findings]
+    assert repr(shown) in next(f for f in findings if f.check_name == check).message
+
+
 def test_plaintext_url_still_reports_endpoint_class() -> None:
     checks = _checks(validate_mcp_server_declaration("s", {"url": "http://169.254.169.254/"}, "p.json"))
     assert checks["mcp_url_insecure_scheme"] == Severity.HIGH

@@ -223,6 +223,15 @@ def test_mcpb_bundles_are_recorded_but_not_inspected(tmp_path: Path) -> None:
     assert {row["path"] for row in bundles} == {"srv.mcpb", None}
 
 
+def test_remote_mcp_urls_are_reported_without_query_credentials(tmp_path: Path) -> None:
+    secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWX"
+    refs = [f"https://example.com/srv.mcpb?token={secret}", f"https://user:{secret}@example.com/servers.json"]
+    result = _validate(_plugin(tmp_path, {"mcpServers": refs}))
+    assert {"mcp_bundle_not_inspected", "mcp_config_path_invalid"} <= set(_checks(result))
+    assert all(secret not in f.message for f in result.findings)
+    assert all(secret not in row["name"] for row in _components(result, "mcp"))
+
+
 def test_non_dot_relative_mcp_path_gets_style_finding(tmp_path: Path) -> None:
     root = _plugin(tmp_path, {"mcpServers": "cfg.json"}, {"cfg.json": {"x": _PINNED_FS}})
     result = _validate(root)

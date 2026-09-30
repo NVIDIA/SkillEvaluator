@@ -65,6 +65,7 @@ from skillevaluator.validators.mcp_static import (
     classify_mcp_pinning,
     env_override_issues,
     permission_bypass_issues,
+    redacted_url,
     validate_mcp_server_declaration,
 )
 
@@ -1601,13 +1602,14 @@ def _collect_path_ref(reader: PluginRootReader, collection: McpCollection, raw: 
     manifest_display = reader.display(manifest_rel)
     lowered = raw.strip().lower()
     if lowered.startswith(("https://", "http://")):
+        shown = redacted_url(raw)  # reports and the inventory never carry userinfo or query credentials
         if lowered.split("?", 1)[0].endswith(_MCP_BUNDLE_SUFFIXES):
-            collection.bundles.append((raw, None))
+            collection.bundles.append((shown, None))
             collection.findings.append(
                 _plugin_finding(
                     Severity.MEDIUM,
                     "mcp_bundle_not_inspected",
-                    f"mcpServers references a remote MCP bundle {raw!r}; it is downloaded and executed at load time "
+                    f"mcpServers references a remote MCP bundle {shown!r}; it is downloaded and executed at load time "
                     "and its contents cannot be inspected statically",
                     manifest_display,
                     "Vendor the server into the plugin with a pinned version so its configuration can be reviewed.",
@@ -1619,13 +1621,13 @@ def _collect_path_ref(reader: PluginRootReader, collection: McpCollection, raw: 
             _plugin_finding(
                 Severity.HIGH,
                 "mcp_config_path_invalid",
-                f"mcpServers URL {raw!r} is not an .mcpb/.dxt bundle; only bundles may be referenced by URL",
+                f"mcpServers URL {shown!r} is not an .mcpb/.dxt bundle; only bundles may be referenced by URL",
                 manifest_display,
                 "Reference a './'-relative .json config file, an inline server map, or an .mcpb bundle.",
                 category=MCP_CATEGORY,
             )
         )
-        collection.broken_sources.append((raw, None, "invalid"))
+        collection.broken_sources.append((shown, None, "invalid"))
         return
 
     declared = normalize_declared_path(raw)

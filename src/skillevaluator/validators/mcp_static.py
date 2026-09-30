@@ -29,7 +29,7 @@ import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
 import idna
 
@@ -143,6 +143,16 @@ def _credential_flag_name(token: str) -> str | None:
     return flag if flag and _SECRET_KEY_RE.search(flag) else None
 
 
+def redacted_url(url: str) -> str:
+    """URL for finding messages: scheme, host, port, and path only.
+
+    Userinfo, parameters, query, and fragment are dropped so an inline credential
+    is never echoed into reports or CI logs.
+    """
+    parsed = urlparse(url.strip())
+    return urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
+
+
 def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, findings: list[Finding]) -> None:
     """Flag inline credentials embedded in a URL's userinfo or query string."""
     try:
@@ -154,7 +164,8 @@ def _check_url_inline_secrets(name: str, url: str, parsed: Any, file_path: str, 
             _finding(
                 Severity.CRITICAL,
                 "mcp_url_inline_secret",
-                f"url embeds inline userinfo credentials: {url!r}; only ${{ENV}} references are allowed",
+                f"url embeds inline userinfo credentials: {redacted_url(url)!r} (userinfo withheld); only "
+                "${ENV} references are allowed",
                 file_path,
                 'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
                 name=name,
@@ -355,6 +366,7 @@ def _validate_url(
 
     parsed = urlparse(url.strip())
     scheme = (parsed.scheme or "").lower()
+    shown = redacted_url(url)  # messages never echo userinfo or query credentials
     # Inline credentials in userinfo/query are persisted verbatim; check them
     # independent of the scheme (secure https URLs are the common case).
     _check_url_inline_secrets(name, url, parsed, file_path, findings)
@@ -370,7 +382,7 @@ def _validate_url(
                 _finding(
                     Severity.HIGH,
                     "mcp_url_malformed_authority",
-                    f"url has a malformed authority/port: {url!r}",
+                    f"url has a malformed authority/port: {shown!r}",
                     file_path,
                     "Use a valid host[:port] authority, e.g. https://host:443/path.",
                     name=name,
@@ -382,7 +394,7 @@ def _validate_url(
                 _finding(
                     Severity.HIGH,
                     "mcp_url_no_host",
-                    f"url uses scheme {scheme!r} but has no host to connect to: {url!r}",
+                    f"url uses scheme {scheme!r} but has no host to connect to: {shown!r}",
                     file_path,
                     "Provide a full endpoint with a hostname, e.g. https://host[:port]/path.",
                     name=name,
@@ -402,7 +414,7 @@ def _validate_url(
             _finding(
                 Severity.CRITICAL,
                 "mcp_url_dangerous_scheme",
-                f"url uses a dangerous/invalid scheme {scheme or '(none)'!r}: {url!r}",
+                f"url uses a dangerous/invalid scheme {scheme or '(none)'!r}: {shown!r}",
                 file_path,
                 "Use a secure https:// or wss:// endpoint; file/data/javascript/ftp schemes are not permitted.",
                 name=name,
@@ -413,7 +425,7 @@ def _validate_url(
             _finding(
                 Severity.HIGH,
                 "mcp_url_insecure_scheme",
-                f"url uses an insecure plaintext scheme {scheme!r}: {url!r}",
+                f"url uses an insecure plaintext scheme {scheme!r}: {shown!r}",
                 file_path,
                 "Use https:// (or wss://) so the MCP transport is encrypted.",
                 name=name,
@@ -424,7 +436,7 @@ def _validate_url(
             _finding(
                 Severity.HIGH,
                 "mcp_url_scheme_not_allowed",
-                f"url scheme {scheme!r} is not an allowed MCP scheme: {url!r}",
+                f"url scheme {scheme!r} is not an allowed MCP scheme: {shown!r}",
                 file_path,
                 f"Use one of the allowed secure schemes: {', '.join(sorted(ALLOWED_MCP_URL_SCHEMES))}.",
                 name=name,
@@ -1191,12 +1203,13 @@ def _validate_endpoint(
     if endpoint is None:
         return
     encoded = f" (encoded as {host!r})" if endpoint.encoded else ""
+    shown = redacted_url(url)  # never echo userinfo or query credentials
     if endpoint.kind == "metadata":
         findings.append(
             _finding(
                 Severity.HIGH,
                 "mcp_endpoint_metadata",
-                f"url targets a {endpoint.reason} endpoint{encoded}: {url!r}; an MCP client pointed here "
+                f"url targets a {endpoint.reason} endpoint{encoded}: {shown!r}; an MCP client pointed here "
                 f"can expose instance credentials ({_ENDPOINT_STATIC_NOTE})",
                 file_path,
                 "Remove the instance-metadata endpoint; MCP servers must never target cloud metadata services.",
@@ -1210,7 +1223,7 @@ def _validate_endpoint(
         _finding(
             Severity.MEDIUM,
             "mcp_endpoint_private",
-            f"url host is a {endpoint.reason} address{encoded}: {url!r}; the endpoint is not publicly "
+            f"url host is a {endpoint.reason} address{encoded}: {shown!r}; the endpoint is not publicly "
             f"reachable and may target local services ({_ENDPOINT_STATIC_NOTE})",
             file_path,
             "Use a public HTTPS endpoint, or allow this intended private host through the validation policy "

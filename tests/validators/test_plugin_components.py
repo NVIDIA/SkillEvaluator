@@ -226,6 +226,20 @@ def test_mcpb_bundles_are_recorded_but_not_inspected(tmp_path: Path) -> None:
     assert {row["path"] for row in bundles} == {"srv.mcpb", None}
 
 
+def test_plaintext_remote_mcp_bundle_is_blocking(tmp_path: Path) -> None:
+    manifest = {"name": "demo", "mcpServers": ["http://203.0.113.9/srv.mcpb", "https://example.com/ok.mcpb"]}
+    result = _validate(_plugin(tmp_path, manifest))
+    insecure = [f for f in result.findings if f.check_name == "mcp_url_insecure_scheme"]
+    assert [f.severity for f in insecure] == [Severity.HIGH]
+    assert "203.0.113.9" in insecure[0].message
+    assert not result.passed
+    inventory = build_plugin_inventory(tmp_path, manifest, contained=True, manifest_rel=".claude-plugin/plugin.json")
+    assert [f.check_name for f in inventory.mcp.blocking_source_findings] == ["mcp_url_insecure_scheme"]
+    rows = {row.name: row for row in inventory.of_type("mcp")}
+    assert rows["http://203.0.113.9/srv.mcpb"].problem == "invalid"
+    assert rows["https://example.com/ok.mcpb"].bundle is True
+
+
 def test_remote_mcp_urls_are_reported_without_query_credentials(tmp_path: Path) -> None:
     secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWX"
     refs = [f"https://example.com/srv.mcpb?token={secret}", f"https://user:{secret}@example.com/servers.json"]

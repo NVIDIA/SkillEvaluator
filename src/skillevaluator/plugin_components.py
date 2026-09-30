@@ -1630,7 +1630,6 @@ def _collect_path_ref(reader: PluginRootReader, collection: McpCollection, raw: 
     if lowered.startswith(("https://", "http://")):
         shown = redacted_url(raw)  # reports and the inventory never carry userinfo or query credentials
         if lowered.split("?", 1)[0].endswith(_MCP_BUNDLE_SUFFIXES):
-            collection.bundles.append((shown, None))
             collection.findings.append(
                 _plugin_finding(
                     Severity.MEDIUM,
@@ -1642,6 +1641,23 @@ def _collect_path_ref(reader: PluginRootReader, collection: McpCollection, raw: 
                     category=MCP_CATEGORY,
                 )
             )
+            if lowered.startswith("http://"):
+                # Code fetched over plaintext can be swapped in transit: block it like a plaintext url server,
+                # and record a broken source so Tier 3 staging fails closed.
+                collection.findings.append(
+                    _plugin_finding(
+                        Severity.HIGH,
+                        "mcp_url_insecure_scheme",
+                        f"mcpServers bundle {shown!r} is downloaded over plaintext http; the code it runs can be "
+                        "replaced in transit",
+                        manifest_display,
+                        "Serve the bundle over https:// or vendor it into the plugin.",
+                        category=MCP_CATEGORY,
+                    )
+                )
+                collection.broken_sources.append((shown, None, "invalid"))
+            else:
+                collection.bundles.append((shown, None))
             return
         collection.findings.append(
             _plugin_finding(

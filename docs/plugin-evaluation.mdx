@@ -1271,8 +1271,14 @@ latest on-disk run) and the payload has no provenance, SkillEvaluator reads `plu
 the run directory. The read is bounded, never follows links, accepts only a
 regular file, and must parse as a JSON object. Known fields are type-checked,
 and `partial` fails closed: a malformed field or any deferral marks the run
-partial. After a plugin run writes the sidecar, SkillEvaluator also refreshes
-the run's `report.html`. The HTML report delivered for a plugin run therefore
+partial. A sidecar that exists but cannot be used (too large, truncated or not
+valid JSON, not a JSON object, a link, or not a regular file) also marks the
+run `INCOMPLETE`. The reports then say that the plugin provenance sidecar was
+unreadable, and they don't show resolved or deferred counts. Only a missing
+sidecar is read as "no plugin provenance". After a plugin run writes the
+sidecar, SkillEvaluator also refreshes the run's `report.html` from the
+provenance it holds in memory, so a failed sidecar write can't drop the
+`INCOMPLETE` status. The HTML report delivered for a plugin run therefore
 always carries coverage and `INCOMPLETE` status.
 
 ### Plugin BENCHMARK.md

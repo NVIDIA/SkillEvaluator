@@ -680,11 +680,26 @@ _COMPLETENESS_FIELDS = {
 }
 
 
+def sidecar_error_reason(provenance: object) -> str:
+    """Return why an unusable provenance sidecar keeps a plugin run INCOMPLETE, or ``""``.
+
+    ``_read_plugin_provenance`` records ``sidecar_error`` when the run's
+    ``plugin_provenance.json`` exists but cannot be used. The run is then
+    INCOMPLETE because its evaluated components are unknown, not because a
+    listed dependency failed to resolve.
+    """
+    code = text(_mapping(provenance).get("sidecar_error"), limit=64)
+    if not code:
+        return ""
+    return f"plugin provenance sidecar unreadable ({code}), so the components evaluated at Tier 3 are unknown"
+
+
 def completeness_view(provenance: object) -> dict[str, Any] | None:
     """Return resolved versus deferred declared components for a plugin run."""
     source = _mapping(provenance)
     if not source:
         return None
+    sidecar_reason = sidecar_error_reason(source)
     groups = {
         "skills_resolved": _names(source.get("evaluated_member_skills")),
         "rules_resolved": _names(source.get("staged_rules")),
@@ -705,10 +720,12 @@ def completeness_view(provenance: object) -> dict[str, Any] | None:
     computed_partial = any(amount for amount, _label in deferred)
     detail = ", ".join(_plural(amount, label) for amount, label in deferred if amount)
     return {
-        "partial": declared_partial or computed_partial,
+        "partial": declared_partial or computed_partial or bool(sidecar_reason),
         "counts": counts,
         "names": {key: names for key, (names, _omitted) in groups.items()},
-        "reason": f"{detail or 'required declared components'} could not be resolved or evaluated at Tier 3",
+        "sidecar_error": text(source.get("sidecar_error"), limit=64) if sidecar_reason else "",
+        "reason": sidecar_reason
+        or f"{detail or 'required declared components'} could not be resolved or evaluated at Tier 3",
     }
 
 
@@ -1292,6 +1309,9 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
     """Return plain-language statements of what this plugin run did not evaluate."""
     source = _mapping(provenance)
     statements: list[str] = []
+    sidecar_reason = sidecar_error_reason(source)
+    if sidecar_reason:
+        statements.append(sidecar_reason[:1].upper() + sidecar_reason[1:])
     coverage = _mapping(view.get("coverage"))
     if coverage and coverage.get("not_evaluated"):
         names = [f"{row['type']} {row['name']}".strip() for row in _sequence(coverage.get("not_evaluated_rows"))[:12]]

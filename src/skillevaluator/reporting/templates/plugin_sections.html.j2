@@ -182,6 +182,13 @@
         <span class="t3-incomplete-badge">INCOMPLETE</span>
         <span class="t3-incomplete-title">Tier 3 did not cover all declared plugin components</span>
     </div>
+    {% if v.completeness.sidecar_error %}
+    <p class="t3-incomplete-body">
+        The plugin provenance sidecar could not be read (<code>{{ v.completeness.sidecar_error }}</code>), so this
+        report cannot show which declared components were evaluated. This run is a <strong>partial result</strong>,
+        not a pass.
+    </p>
+    {% else %}
     <p class="t3-incomplete-body">
         {{ v.incomplete_reason }}. This run is a <strong>partial result</strong>, not a pass: the score covers
         the resolved components only, and &ldquo;not evaluated&rdquo; never implies safe or passing.
@@ -194,6 +201,7 @@
         <div><span class="t3-incomplete-num bad">{{ c.mcp_provider_only + c.mcp_unsupported_config }}</span><span>MCP not evaluated</span></div>
         <div><span class="t3-incomplete-env">{{ environment or 'not recorded' }}</span><span>environment</span></div>
     </div>
+    {% endif %}
     <a class="t3-incomplete-link" href="#tier3-plugin-completeness">View resolved / deferred breakdown &rarr;</a>
 </div>
 {% endif %}
@@ -263,9 +271,12 @@
     <div class="t3-details-body">
     <p class="t3-section-hint">
         Which declared plugin dependencies were resolved and evaluated versus deferred.
-        {% if v.partial %}<strong>This run is INCOMPLETE:</strong> required declared components could not be resolved at Tier 3,
+        {% if comp.sidecar_error %}<strong>This run is INCOMPLETE:</strong> the plugin provenance sidecar could not be read
+        (<code>{{ comp.sidecar_error }}</code>), so the resolved and deferred components are unknown &mdash; never a pass.
+        {% elif v.partial %}<strong>This run is INCOMPLETE:</strong> required declared components could not be resolved at Tier 3,
         so the result is a partial result &mdash; never a pass on a reduced denominator.{% else %}All declared dependencies were resolved.{% endif %}
     </p>
+    {% if not comp.sidecar_error %}
     <div class="table-scroll"><table class="summary-table">
         <thead><tr><th>Category</th><th>Resolved</th><th>Deferred</th><th>Deferred names</th></tr></thead>
         <tbody>
@@ -274,6 +285,7 @@
         <tr><td>MCP servers</td><td>{{ c.mcp_runnable }}</td><td>{{ c.mcp_provider_only + c.mcp_unsupported_config }}</td><td>{{ _names_inline(comp.names.mcp_provider_only + comp.names.mcp_unsupported_config, '&mdash;' | safe) }}</td></tr>
         </tbody>
     </table></div>
+    {% endif %}
     {% if v.dependency_counts %}
     <p class="t3-section-hint" id="tier3-plugin-dependency-counts"><strong>Declared dependency resolution:</strong>
         {% for row in v.dependency_counts %}<span class="metadata-tag">{{ row.state }}: {{ row.count }}</span>{% endfor %}

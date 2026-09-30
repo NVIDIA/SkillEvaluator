@@ -94,63 +94,144 @@ def test_run_without_sidecar_renders_as_before(tmp_path: Path) -> None:
     assert _read_plugin_provenance(run_dir) == {}
 
 
+def _is_unusable(loaded: dict, code: str | None = None) -> bool:
+    """Whether *loaded* is the fail-closed record for a present but unusable sidecar."""
+    return loaded["partial"] is True and bool(loaded["sidecar_error"]) and code in (None, loaded["sidecar_error"])
+
+
 @posix_only
-def test_symlinked_sidecar_is_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_symlinked_sidecar_fails_closed(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     plugin_dir, run_dir = _run(tmp_path)
     outside = tmp_path / "outside.json"
-    outside.write_text(json.dumps(provenance(partial=True)), encoding="utf-8")
+    outside.write_text(json.dumps(provenance(partial=False)), encoding="utf-8")
     (run_dir / "plugin_provenance.json").symlink_to(outside)
 
     with caplog.at_level(logging.WARNING, logger=tier3_report.__name__):
-        assert _read_plugin_provenance(run_dir) == {}
+        assert _is_unusable(_read_plugin_provenance(run_dir), "symlink_or_reparse_point")
         result = agent_eval_result_from_directory(plugin_dir, run_dir, use_llm_judge=False)
 
     assert result is not None
-    assert "plugin_provenance" not in result.metadata["agent_eval"]
+    # The linked record is never followed, and the run is never reported complete.
+    assert result.metadata["agent_eval"]["plugin_provenance"] == {
+        "partial": True,
+        "sidecar_error": "symlink_or_reparse_point",
+    }
+    assert result.passed is False
+    assert result.metadata["execution_status"] == "skipped"
     assert "symlink" in caplog.text
 
 
 @posix_only
-def test_hardlinked_sidecar_is_rejected(tmp_path: Path) -> None:
+def test_hardlinked_sidecar_fails_closed(tmp_path: Path) -> None:
     _plugin_dir, run_dir = _run(tmp_path)
     outside = tmp_path / "outside.json"
-    outside.write_text(json.dumps(provenance(partial=True)), encoding="utf-8")
+    outside.write_text(json.dumps(provenance(partial=False)), encoding="utf-8")
     os.link(outside, run_dir / "plugin_provenance.json")
 
-    assert _read_plugin_provenance(run_dir) == {}
+    assert _is_unusable(_read_plugin_provenance(run_dir))
 
 
-def test_directory_sidecar_is_rejected(tmp_path: Path) -> None:
+@posix_only
+def test_symlinked_run_directory_fails_closed(tmp_path: Path) -> None:
+    _plugin_dir, run_dir = _run(tmp_path, sidecar=provenance(partial=False))
+    alias = tmp_path / "alias-run"
+    alias.symlink_to(run_dir, target_is_directory=True)
+
+    assert _is_unusable(_read_plugin_provenance(alias))
+
+
+def test_directory_sidecar_fails_closed(tmp_path: Path) -> None:
     _plugin_dir, run_dir = _run(tmp_path)
     (run_dir / "plugin_provenance.json").mkdir()
 
-    assert _read_plugin_provenance(run_dir) == {}
+    assert _is_unusable(_read_plugin_provenance(run_dir))
 
 
-def test_oversize_sidecar_is_ignored(tmp_path: Path) -> None:
+def test_oversize_sidecar_fails_closed(tmp_path: Path) -> None:
     _plugin_dir, run_dir = _run(tmp_path)
-    record = provenance(partial=True)
+    record = provenance(partial=False)
     record["padding"] = "x" * (_MAX_PLUGIN_PROVENANCE_BYTES + 1)
     (run_dir / "plugin_provenance.json").write_text(json.dumps(record), encoding="utf-8")
 
-    assert _read_plugin_provenance(run_dir) == {}
+    assert _read_plugin_provenance(run_dir) == {"partial": True, "sidecar_error": "file_size_limit"}
 
 
 @pytest.mark.parametrize(
-    "raw",
+    ("raw", "code"),
     [
-        b"{not json",
-        b"[1, 2, 3]",
-        b'"a string"',
-        b"\xff\xfe\x00 not utf-8",
-        b"[" * 5000 + b"]" * 5000,
+        (b"{not json", "invalid_json"),
+        (b"", "invalid_json"),
+        (b"[1, 2, 3]", "not_a_json_object"),
+        (b'"a string"', "not_a_json_object"),
+        (b"\xff\xfe\x00 not utf-8", "invalid_text_encoding"),
+        # Either a RecursionError or a (non-object) list, depending on the interpreter.
+        (b"[" * 5000 + b"]" * 5000, None),
     ],
+    ids=["not-json", "empty", "list", "string", "not-utf8", "deep-nesting"],
 )
-def test_malformed_sidecar_is_ignored(tmp_path: Path, raw: bytes) -> None:
+def test_malformed_sidecar_fails_closed(tmp_path: Path, raw: bytes, code: str | None) -> None:
     _plugin_dir, run_dir = _run(tmp_path)
     (run_dir / "plugin_provenance.json").write_bytes(raw)
 
-    assert _read_plugin_provenance(run_dir) == {}
+    loaded = _read_plugin_provenance(run_dir)
+
+    assert set(loaded) == {"partial", "sidecar_error"}
+    assert _is_unusable(loaded, code)
+
+
+@pytest.mark.parametrize("damage", ["oversize", "truncated"])
+def test_unreadable_sidecar_keeps_the_rerendered_run_incomplete(tmp_path: Path, damage: str) -> None:
+    """A partial run whose sidecar was cut off or grew past the bound never re-renders as PASS."""
+    plugin_dir, run_dir = _run(tmp_path)
+    record = provenance(partial=True)
+    if damage == "oversize":
+        raw = json.dumps({**record, "padding": "x" * (_MAX_PLUGIN_PROVENANCE_BYTES + 1)})
+    else:
+        raw = json.dumps(record)[:-20]
+    (run_dir / "plugin_provenance.json").write_text(raw, encoding="utf-8")
+
+    result = agent_eval_result_from_directory(plugin_dir, run_dir, use_llm_judge=False)
+
+    assert result is not None
+    assert result.passed is False
+    assert result.metadata["execution_status"] == "skipped"
+    assert result.metadata["skip_reason"].startswith("INCOMPLETE: plugin provenance sidecar unreadable (")
+    assert result.metadata["agent_eval"]["conclusions"][0]["title"] == (
+        "Evaluation INCOMPLETE - plugin provenance unreadable"
+    )
+    html = render_agent_eval_html_report(plugin_dir, run_dir, use_llm_judge=False).read_text(encoding="utf-8")
+    assert '<span class="tier-card-verdict">INCOMPLETE</span>' in html
+    callout = element_text(html, "tier3-plugin-incomplete") or ""
+    assert "INCOMPLETE" in callout
+    assert "plugin provenance sidecar could not be read" in callout
+    assert "skills resolved" not in callout
+    completeness = element_text(html, "tier3-plugin-completeness") or ""
+    assert "INCOMPLETE" in completeness
+    assert "Resolved" not in completeness
+
+
+def test_unreadable_sidecar_reason_reaches_every_report_view() -> None:
+    from skillevaluator.evaluation.tier3_report import _incomplete_skip_reason
+    from skillevaluator.reporting.plugin_sections import tier3_plugin_view
+
+    record = {"partial": True, "sidecar_error": "file_size_limit"}
+    view = tier3_plugin_view({"plugin_provenance": record})
+
+    assert view is not None
+    assert view["partial"] is True
+    assert view["incomplete_reason"] == (
+        "plugin provenance sidecar unreadable (file_size_limit), so the components evaluated at Tier 3 are unknown"
+    )
+    assert view["excluded"] == [
+        "Plugin provenance sidecar unreadable (file_size_limit), so the components evaluated at Tier 3 are unknown"
+    ]
+    assert _incomplete_skip_reason(record) == f"INCOMPLETE: {view['incomplete_reason']}"
+
+
+def test_recorded_sidecar_error_stays_partial(tmp_path: Path) -> None:
+    _plugin_dir, run_dir = _run(tmp_path, sidecar={"partial": False, "sidecar_error": "invalid_json"})
+
+    assert _read_plugin_provenance(run_dir)["partial"] is True
 
 
 def test_mistyped_sidecar_fields_fail_closed(tmp_path: Path) -> None:
@@ -198,6 +279,18 @@ def test_refresh_replaces_the_runner_report_with_provenance(tmp_path: Path) -> N
     html = refreshed.read_text(encoding="utf-8")
     assert element_text(html, "tier3-plugin-incomplete") is not None
     assert element_text(html, "tier3-plugin-coverage") is not None
+
+
+def test_refresh_prefers_the_callers_provenance_over_a_missing_sidecar(tmp_path: Path) -> None:
+    """A sidecar write that failed cannot drop the INCOMPLETE status from the delivered report."""
+    plugin_dir, run_dir = _run(tmp_path)
+
+    refreshed = refresh_plugin_run_report(
+        plugin_dir, run_dir, plugin_provenance=provenance(partial=True), use_llm_judge=False
+    )
+
+    assert refreshed is not None
+    assert element_text(refreshed.read_text(encoding="utf-8"), "tier3-plugin-incomplete") is not None
 
 
 def test_refresh_is_best_effort(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -257,6 +350,42 @@ def test_evaluate_plugin_delivers_report_with_provenance(monkeypatch: pytest.Mon
     assert "runner report without provenance" not in html
     assert element_text(html, "tier3-plugin-incomplete") is not None
     assert "2 components not evaluated" in (element_text(html, "tier3-plugin-coverage") or "")
+
+
+def test_evaluate_plugin_keeps_incomplete_when_the_sidecar_write_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """evaluate-plugin re-renders from its in-memory provenance, not only from the sidecar on disk."""
+    plugin_dir = tmp_path / "demo-plugin"
+    plugin_dir.mkdir()
+    run_dir = tmp_path / "results" / "demo-plugin" / "20260101_000000"
+    record = provenance(partial=True)
+
+    def evaluate(_self, _options, **_kwargs) -> dict:
+        write_run_dir(run_dir)
+        (run_dir / "report.html").write_text("<html>runner report without provenance</html>", encoding="utf-8")
+        return {"run_dir": str(run_dir), "execution_status": "succeeded"}
+
+    monkeypatch.setattr(
+        "skillevaluator.tier3.plugin_eval.prepare_plugin_eval_package",
+        lambda *_a, **_k: _prepared_package(tmp_path, record),
+    )
+    # The best-effort sidecar write fails (for example, a full disk) and leaves no file.
+    monkeypatch.setattr("skillevaluator.tier3.plugin_eval.write_plugin_provenance", lambda *_a, **_k: None)
+    monkeypatch.setattr(EvaluationService, "evaluate", evaluate)
+    monkeypatch.setattr(EvaluationService, "failure_reason", staticmethod(lambda _result: None))
+    monkeypatch.setattr("skillevaluator.tier3.result_display.render_evaluation_result", lambda *_a, **_k: None)
+
+    outcome = CliRunner().invoke(
+        cli_module.cli,
+        ["tier3", "evaluate-plugin", str(plugin_dir), "--lift-mode", "effectiveness", "--progress", "off"],
+    )
+
+    assert outcome.exit_code != 0
+    assert not (run_dir / "plugin_provenance.json").exists()
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    assert "runner report without provenance" not in html
+    assert element_text(html, "tier3-plugin-incomplete") is not None
 
 
 def test_validate_plugin_path_refreshes_the_run_report(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

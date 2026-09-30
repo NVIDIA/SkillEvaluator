@@ -854,15 +854,17 @@ class BenchmarkReporter(ReporterBase):
             )
         else:
             lines.append("- Status: complete — every declared dependency was resolved for Tier 3.")
-        lines.append(
-            f"- Resolved: {counts['skills_resolved']} skill(s), {counts['rules_resolved']} rule(s), "
-            f"{counts['mcp_runnable']} runnable MCP server(s)"
-        )
-        lines.append(
-            f"- Deferred: {counts['skills_unresolved']} skill ref(s), {counts['rules_unresolved']} rule ref(s), "
-            f"{counts['mcp_provider_only']} provider-only MCP server(s), "
-            f"{counts['mcp_unsupported_config']} MCP server(s) with unsupported config"
-        )
+        # An unreadable sidecar recorded no counts; zeros would read as "nothing deferred".
+        if not completeness.get("sidecar_error"):
+            lines.append(
+                f"- Resolved: {counts['skills_resolved']} skill(s), {counts['rules_resolved']} rule(s), "
+                f"{counts['mcp_runnable']} runnable MCP server(s)"
+            )
+            lines.append(
+                f"- Deferred: {counts['skills_unresolved']} skill ref(s), {counts['rules_unresolved']} rule ref(s), "
+                f"{counts['mcp_provider_only']} provider-only MCP server(s), "
+                f"{counts['mcp_unsupported_config']} MCP server(s) with unsupported config"
+            )
         dataset = (view or {}).get("dataset")
         if dataset:
             cases = dataset["cases"] if dataset["cases"] is not None else "not recorded"

@@ -518,6 +518,10 @@ def agent_eval_result_from_directory(
 
 def _incomplete_skip_reason(provenance: dict[str, Any]) -> str:
     """Return a stable explanation for a partial plugin evaluation."""
+    from skillevaluator.reporting.plugin_sections import sidecar_error_reason
+
+    if sidecar_reason := sidecar_error_reason(provenance):
+        return f"INCOMPLETE: {sidecar_reason}"
     counts = (
         ("unresolved skill ref(s)", len(provenance.get("unresolved_skill_refs") or [])),
         ("unresolved rule ref(s)", len(provenance.get("unresolved_rule_refs") or [])),
@@ -620,6 +624,7 @@ def refresh_plugin_run_report(
     env_mode: str | None = None,
     engine_result: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
+    plugin_provenance: dict[str, Any] | None = None,
 ) -> Path | None:
     """Re-render a plugin run's ``report.html`` once its provenance sidecar exists.
 
@@ -627,7 +632,9 @@ def refresh_plugin_run_report(
     ``plugin_provenance.json``, so the runner's copy cannot show plugin
     provenance or an INCOMPLETE status, and ``view`` opens that copy. Pass the
     already-built *result* to avoid rebuilding the payload; otherwise the run is
-    re-read (with the sidecar). Best effort: a failure keeps the runner's report.
+    re-read. The caller's in-memory *plugin_provenance* wins over the sidecar,
+    so a sidecar write that failed cannot drop an INCOMPLETE status. Best
+    effort: a failure keeps the runner's report.
     """
     try:
         run_dir = Path(run_dir).expanduser().resolve()
@@ -638,6 +645,7 @@ def refresh_plugin_run_report(
                 run_dir,
                 env_mode=env_mode,
                 engine_result=dict(engine_result) if isinstance(engine_result, dict) else None,
+                plugin_provenance=plugin_provenance,
                 use_llm_judge=use_llm_judge,
             )
         if result is None or not isinstance(result.metadata.get("agent_eval"), dict):
@@ -2609,6 +2617,17 @@ def _build_conclusions(
 
 def _plugin_incompleteness_conclusion(plugin_provenance: dict[str, Any]) -> dict[str, str]:
     """Build the leading deterministic conclusion for a partial plugin run."""
+    from skillevaluator.reporting.plugin_sections import sidecar_error_reason
+
+    if sidecar_reason := sidecar_error_reason(plugin_provenance):
+        return {
+            "severity": "fail",
+            "title": "Evaluation INCOMPLETE - plugin provenance unreadable",
+            "message": (
+                f"This plugin run is INCOMPLETE: {sidecar_reason}. "
+                "The score is not a full evaluation and must not be read as a pass."
+            ),
+        }
     unresolved = []
     for label, key in (
         ("skill ref(s)", "unresolved_skill_refs"),
@@ -3098,6 +3117,7 @@ _PLUGIN_PROVENANCE_TEXT_FIELDS = frozenset(
         "integration_skip_reason",
         "lift_mode_requested",
         "lift_mode_effective",
+        "sidecar_error",
     }
 )
 _PLUGIN_PROVENANCE_DEFERRAL_FIELDS = (
@@ -3125,8 +3145,13 @@ def _read_plugin_provenance(run_dir: Path) -> dict[str, Any]:
     is gone. The read is descriptor-anchored under the run directory, refuses
     symlinks, hard links, and non-regular files, is bounded in size, and only
     accepts a JSON object. Known fields are type-checked; the partial flag
-    fails closed, so a damaged sidecar can never turn an INCOMPLETE run into a
-    complete one.
+    fails closed, so a damaged or unreadable sidecar can never turn an
+    INCOMPLETE run into a complete one.
+
+    Returns ``{}`` only when the sidecar is absent. A sidecar that exists but
+    cannot be used returns a partial record whose ``sidecar_error`` names the
+    reason, so a truncated, oversized, or linked sidecar keeps the run
+    INCOMPLETE instead of reading as a run without plugin provenance.
     """
     from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
 
@@ -3137,25 +3162,40 @@ def _read_plugin_provenance(run_dir: Path) -> dict[str, Any]:
         return {}
     except OSError:
         logger.debug("Plugin provenance sidecar could not be inspected", exc_info=True)
-        return {}
+        return _unusable_plugin_provenance(run_dir, "not_inspectable")
     if stat_is_link_or_reparse(metadata):
-        logger.warning("Ignoring plugin provenance sidecar that is a symlink or reparse point: %s", run_dir.name)
-        return {}
+        return _unusable_plugin_provenance(run_dir, "symlink_or_reparse_point")
     try:
         with SecureRoot(run_dir) as secure_root:
             raw, _opened = secure_root.read_bytes(sidecar, _MAX_PLUGIN_PROVENANCE_BYTES)
         loaded = json.loads(raw.decode("utf-8"))
-    except (OSError, SecurePathError, UnicodeDecodeError, ValueError, RecursionError) as exc:
-        logger.warning("Ignoring unreadable plugin provenance sidecar in %s: %s", run_dir.name, type(exc).__name__)
-        return {}
+    except SecurePathError as exc:
+        return _unusable_plugin_provenance(run_dir, str(exc.code or "unsafe_path"))
+    except UnicodeDecodeError:
+        return _unusable_plugin_provenance(run_dir, "invalid_text_encoding")
+    except (ValueError, RecursionError):
+        return _unusable_plugin_provenance(run_dir, "invalid_json")
+    except OSError:
+        return _unusable_plugin_provenance(run_dir, "read_error")
     if not isinstance(loaded, dict):
-        logger.warning("Ignoring plugin provenance sidecar that is not a JSON object in %s", run_dir.name)
-        return {}
+        return _unusable_plugin_provenance(run_dir, "not_a_json_object")
     return _typed_plugin_provenance(loaded)
 
 
+def _unusable_plugin_provenance(run_dir: Path, code: str) -> dict[str, Any]:
+    """Return the fail-closed record for a sidecar that exists but cannot be used."""
+    logger.warning(
+        "Plugin provenance sidecar in %s is unusable (%s); reporting the run as INCOMPLETE", run_dir.name, code
+    )
+    return {"partial": True, "sidecar_error": code}
+
+
 def _typed_plugin_provenance(loaded: dict[str, Any]) -> dict[str, Any]:
-    """Drop mistyped known fields while keeping the partial verdict fail-closed."""
+    """Drop mistyped known fields while keeping the partial verdict fail-closed.
+
+    A mistyped deferral field or partial flag forces ``partial``, and so does a
+    recorded ``sidecar_error``.
+    """
     provenance: dict[str, Any] = {}
     damaged_deferral = False
     for key, value in loaded.items():
@@ -3184,7 +3224,7 @@ def _typed_plugin_provenance(loaded: dict[str, Any]) -> dict[str, Any]:
         else:
             provenance[key] = _sanitize_json_numbers(value)
     deferred = any(provenance.get(key) for key in _PLUGIN_PROVENANCE_DEFERRAL_FIELDS)
-    if provenance.get("partial") is True or deferred or damaged_deferral:
+    if provenance.get("partial") is True or deferred or damaged_deferral or provenance.get("sidecar_error"):
         provenance["partial"] = True
     elif provenance:
         provenance["partial"] = bool(provenance.get("partial", False))

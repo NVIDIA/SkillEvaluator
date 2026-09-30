@@ -3128,6 +3128,7 @@ def evaluate_plugin(
                     Path(str(engine_result["run_dir"])),
                     env_mode=env_mode,
                     engine_result=engine_result,
+                    plugin_provenance=provenance,
                 )
             if provenance.get("partial"):
                 raise click.ClickException(_incomplete_skip_reason(provenance))

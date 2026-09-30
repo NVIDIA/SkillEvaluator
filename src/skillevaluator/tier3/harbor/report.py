@@ -834,8 +834,9 @@ def display_findings_report(
     preserving payload-only conclusions and recommendations.
     """
     from rich.console import Console
-    from rich.markup import escape as rich_escape
     from rich.panel import Panel
+
+    from skillevaluator.utils.rich_markup import escape_markup
 
     console = Console()
 
@@ -850,7 +851,7 @@ def display_findings_report(
             best_agent_label = _agent_model_label(best_agent, harbor_result, agents_data)
             console.print(
                 f"  [dim]Findings from best performing agent/model combination for your skill:[/dim] "
-                f"[bold cyan]{rich_escape(best_agent_label)}[/bold cyan]"
+                f"[bold cyan]{escape_markup(best_agent_label)}[/bold cyan]"
             )
             console.print()
     else:
@@ -944,7 +945,7 @@ def display_findings_report(
     console.print(
         Panel(
             body,
-            title=f"[bold]{rich_escape(f'{skill_name} / {panel_agent_label}')} \u2014 Findings[/bold]",
+            title=f"[bold]{escape_markup(f'{skill_name} / {panel_agent_label}')} \u2014 Findings[/bold]",
             border_style="cyan",
             padding=(1, 1),
         )

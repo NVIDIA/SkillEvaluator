@@ -10,7 +10,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rich.console import Console
-from rich.markup import escape as rich_escape
 
 from skillevaluator.constants import (
     CONTENT_TYPE_PLUGIN,
@@ -23,6 +22,7 @@ from skillevaluator.models.result import ValidationResult
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
+from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
@@ -370,6 +370,6 @@ def emit_reports(
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
         reporter.save(results, output_path)
         if announce_paths:
-            console.print(f"[dim]{fmt} report:[/dim] [cyan]{rich_escape(str(output_path))}[/cyan]")
+            console.print(f"[dim]{fmt} report:[/dim] [cyan]{escape_markup(str(output_path))}[/cyan]")
 
     return all(result.passed for result in results)

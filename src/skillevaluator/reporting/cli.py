@@ -13,7 +13,7 @@ Features:
 - Progress indicators and spinners
 
 Text that SkillEvaluator does not author (skill and plugin content, paths,
-LLM judge output, external tool messages) goes through ``rich_escape`` before
+LLM judge output, external tool messages) goes through ``escape_markup`` before
 it is interpolated into Rich markup: ``[/x]`` would otherwise raise
 ``rich.errors.MarkupError`` and ``[link=...]`` could restyle or spoof output.
 """
@@ -24,7 +24,6 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 from rich.console import Console
-from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -38,6 +37,7 @@ from skillevaluator.reporting.harbor_viewer import (
     normalize_harbor_viewer_for_display,
     safe_url,
 )
+from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -169,9 +169,9 @@ class CLIReporter(ReporterBase):
     def render_result(self, result: ValidationResult, console: Console) -> None:
         """Render a single validation result."""
         # Header
-        console.print(f"\n[bold]{rich_escape(f'[{result.validator_name}]')}[/bold]")
+        console.print(f"\n[bold]{escape_markup(f'[{result.validator_name}]')}[/bold]")
         if result.validator_description:
-            console.print(f"[dim]{rich_escape(str(result.validator_description))}[/dim]")
+            console.print(f"[dim]{escape_markup(str(result.validator_description))}[/dim]")
 
         # Quality score display (unified table for single and multi-skill)
         qs = result.metadata.get("quality_scores") if result.metadata else None
@@ -196,7 +196,7 @@ class CLIReporter(ReporterBase):
             self._print_summary_stats(result, console)
         elif result.is_incomplete:
             tools = ", ".join(result.incomplete_scans)
-            console.print(f"[yellow][INCOMPLETE] {rich_escape(tools)} did not complete[/yellow]\n")
+            console.print(f"[yellow][INCOMPLETE] {escape_markup(tools)} did not complete[/yellow]\n")
             self._print_summary_stats(result, console)
             self._print_findings(result, console)
         elif result.passed:
@@ -230,14 +230,14 @@ class CLIReporter(ReporterBase):
         avg_score = qs.get("overall_score", 0)
         avg_grade = qs.get("grade", "?")
         gc = grade_colors.get(avg_grade, "white")
-        avg_grade_text = rich_escape(str(avg_grade))
+        avg_grade_text = escape_markup(str(avg_grade))
 
         if multi:
             console.print(f"\n  [{gc}]Average: {avg_score:.1f}/100 (Grade: {avg_grade_text})[/{gc}]")
-            skill_count = rich_escape(str(qs.get("skill_count", len(skills_list))))
+            skill_count = escape_markup(str(qs.get("skill_count", len(skills_list))))
             console.print(f"  [dim]Skills analyzed:[/dim] {skill_count}\n")
         else:
-            stype = rich_escape(str(skills_list[0].get("skill_type", "unknown")))
+            stype = escape_markup(str(skills_list[0].get("skill_type", "unknown")))
             console.print(f"\n  [{gc}]Overall: {avg_score:.1f}/100 (Grade: {avg_grade_text})[/{gc}]")
             console.print(f"  [dim]Skill Type:[/dim] {stype}\n")
 
@@ -257,8 +257,8 @@ class CLIReporter(ReporterBase):
             sgc = grade_colors.get(sgrade, "white")
             dims = skill_qs.get("dimensions", {})
             table.add_row(
-                rich_escape(str(sname)),
-                f"[{sgc}]{rich_escape(str(sgrade))}[/{sgc}]",
+                escape_markup(str(sname)),
+                f"[{sgc}]{escape_markup(str(sgrade))}[/{sgc}]",
                 f"[{sgc}]{sscore:.1f}[/{sgc}]",
                 CLIReporter._score_cell(dims, "correctness"),
                 CLIReporter._score_cell(dims, "discoverability"),
@@ -291,7 +291,7 @@ class CLIReporter(ReporterBase):
         console.print(f"\n  [{color}]LLM Rubric Score: {score}/100[/{color}]")
         summary = rubric.get("summary", "")
         if summary:
-            console.print(f"  [dim]{rich_escape(str(summary))}[/dim]")
+            console.print(f"  [dim]{escape_markup(str(summary))}[/dim]")
         console.print()
 
         table = Table(title="Rubric Evaluation", border_style="cyan", show_header=True)
@@ -305,10 +305,10 @@ class CLIReporter(ReporterBase):
             cc = "green" if cs >= 7 else ("yellow" if cs >= 5 else "red")
             passed = "[green]Yes[/green]" if check.get("pass") else "[red]No[/red]"
             table.add_row(
-                rich_escape(str(check.get("id", "?")).replace("_", " ").title()),
+                escape_markup(str(check.get("id", "?")).replace("_", " ").title()),
                 f"[{cc}]{cs}/10[/{cc}]",
                 passed,
-                rich_escape(str(check.get("notes") or "")),
+                escape_markup(str(check.get("notes") or "")),
             )
 
         console.print(table)
@@ -323,7 +323,7 @@ class CLIReporter(ReporterBase):
 
         vc = "green" if verdict == "pass" else ("red" if verdict == "fail" else "yellow")
         composite_text = f"{composite:+.2f}" if isinstance(composite, int | float) else "N/A"
-        verdict_text = rich_escape(str(verdict).upper())
+        verdict_text = escape_markup(str(verdict).upper())
         console.print(f"\n  [{vc}]Verdict: {verdict_text} (composite lift = {composite_text})[/{vc}]")
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
@@ -332,12 +332,12 @@ class CLIReporter(ReporterBase):
             console.print("  [dim]Harbor artifacts:[/dim]")
             if harbor_viewer.get("job_url"):
                 console.print(
-                    f"    [dim]Harbor logs:[/dim] [cyan]{rich_escape(harbor_viewer['job_url'])}[/cyan]",
+                    f"    [dim]Harbor logs:[/dim] [cyan]{escape_markup(harbor_viewer['job_url'])}[/cyan]",
                     soft_wrap=True,
                 )
             if harbor_viewer.get("analysis_url"):
                 console.print(
-                    f"    [dim]Harbor analysis:[/dim] [cyan]{rich_escape(harbor_viewer['analysis_url'])}[/cyan]",
+                    f"    [dim]Harbor analysis:[/dim] [cyan]{escape_markup(harbor_viewer['analysis_url'])}[/cyan]",
                     soft_wrap=True,
                 )
         console.print()
@@ -360,7 +360,7 @@ class CLIReporter(ReporterBase):
                 lift = scores.get("lift", 0.0)
                 lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
                 table.add_row(
-                    rich_escape(str(name).replace("_", " ").title()),
+                    escape_markup(str(name).replace("_", " ").title()),
                     f"{ws:.2f}",
                     f"{bl:.2f}",
                     f"[{lc}]{lift:+.2f}[/{lc}]",
@@ -381,13 +381,13 @@ class CLIReporter(ReporterBase):
                 if not printed:
                     console.print("[bold]Recommendations[/bold]")
                     printed = True
-                console.print(f"  • {rich_escape(message)}", soft_wrap=True)
+                console.print(f"  • {escape_markup(message)}", soft_wrap=True)
                 evidence = recommendation.get("evidence")
                 if isinstance(evidence, dict):
                     url = safe_url(evidence.get("url"))
                     if url:
-                        link_text = rich_escape(harbor_evidence_link_text(evidence))
-                        console.print(f"    [dim]{link_text}:[/dim] [cyan]{rich_escape(url)}[/cyan]", soft_wrap=True)
+                        link_text = escape_markup(harbor_evidence_link_text(evidence))
+                        console.print(f"    [dim]{link_text}:[/dim] [cyan]{escape_markup(url)}[/cyan]", soft_wrap=True)
             if printed:
                 console.print()
 
@@ -409,7 +409,7 @@ class CLIReporter(ReporterBase):
                 explanation = info.get("explanation", "")
                 if isinstance(score, str):
                     sc = "green" if score.upper() == "PASS" else "red"
-                    score_str = f"[{sc}]{rich_escape(score)}[/{sc}]"
+                    score_str = f"[{sc}]{escape_markup(score)}[/{sc}]"
                 else:
                     sc = (
                         "green"
@@ -419,9 +419,9 @@ class CLIReporter(ReporterBase):
                     score_str = f"[{sc}]{score:.2f}[/{sc}]"
                 # Truncate before escaping so the cut cannot split an escape sequence.
                 table.add_row(
-                    rich_escape(str(dim).title()),
+                    escape_markup(str(dim).title()),
                     score_str,
-                    rich_escape(str(explanation or "")[:80]),
+                    escape_markup(str(explanation or "")[:80]),
                 )
 
             console.print(table)
@@ -456,7 +456,7 @@ class CLIReporter(ReporterBase):
             if result.messages:
                 console.print("[dim]Details:[/dim]")
                 for msg in result.messages:
-                    console.print(f"  {rich_escape(str(msg))}")
+                    console.print(f"  {escape_markup(str(msg))}")
             return
 
         console.print("[dim]Details:[/dim]")
@@ -468,8 +468,8 @@ class CLIReporter(ReporterBase):
                     meta_str = f" ({', '.join(meta_parts)})"
             console.print(
                 "  [green][OK][/green] "
-                f"{rich_escape(str(detail.check_name))}: "
-                f"{rich_escape(str(detail.message))}{rich_escape(meta_str)}"
+                f"{escape_markup(str(detail.check_name))}: "
+                f"{escape_markup(str(detail.message))}{escape_markup(meta_str)}"
             )
 
     def _print_findings(self, result: ValidationResult, console: Console) -> None:
@@ -479,13 +479,13 @@ class CLIReporter(ReporterBase):
             label = "Execution errors" if result.is_incomplete else "Errors"
             console.print(f"[dim]{label}:[/dim]")
             for error in errors:
-                console.print(f"  [red]•[/red] {rich_escape(str(error))}")
+                console.print(f"  [red]•[/red] {escape_markup(str(error))}")
         if not result.findings:
             # Preserve legacy warnings when there are no structured findings.
             if result.warnings:
                 console.print("[dim]Warnings:[/dim]")
                 for warning in result.warnings:
-                    console.print(f"  [yellow][WARN][/yellow] {rich_escape(str(warning))}")
+                    console.print(f"  [yellow][WARN][/yellow] {escape_markup(str(warning))}")
             return
 
         if errors:
@@ -503,25 +503,25 @@ class CLIReporter(ReporterBase):
         """
         severity_color = finding.severity.color
         console.print(
-            f"  {index}. [{severity_color}]{rich_escape(finding.tag)}[/{severity_color}] {rich_escape(finding.message)}"
+            f"  {index}. [{severity_color}]{escape_markup(finding.tag)}[/{severity_color}] {escape_markup(finding.message)}"
         )
-        console.print(f"     [dim]File:[/dim]    {rich_escape(str(finding.location))}")
-        console.print(f"     [dim]Check:[/dim]   {rich_escape(str(finding.check_name))}")
+        console.print(f"     [dim]File:[/dim]    {escape_markup(str(finding.location))}")
+        console.print(f"     [dim]Check:[/dim]   {escape_markup(str(finding.check_name))}")
         related_paths = _related_paths(finding)
         if related_paths:
-            console.print(f"     [dim]Related paths:[/dim] {rich_escape(' <-> '.join(related_paths))}")
+            console.print(f"     [dim]Related paths:[/dim] {escape_markup(' <-> '.join(related_paths))}")
 
         if finding.line_content:
             content = finding.line_content.strip()
             if len(content) > 70:
                 content = content[:67] + "..."
-            console.print(f"     [dim]Content:[/dim] [italic]{rich_escape(content)}[/italic]")
+            console.print(f"     [dim]Content:[/dim] [italic]{escape_markup(content)}[/italic]")
 
         if finding.suggestion:
             label = (
                 "Recommendation" if finding.category in ("WHOLE_DUPLICATE", "PARTIAL_OVERLAP", "DUPLICATE") else "Fix"
             )
-            console.print(f"     [dim]{label}:[/dim]     {rich_escape(finding.suggestion)}")
+            console.print(f"     [dim]{label}:[/dim]     {escape_markup(finding.suggestion)}")
         console.print()
 
     def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:
@@ -554,9 +554,9 @@ class CLIReporter(ReporterBase):
             if advisory_skip:
                 agent_eval = result.metadata.get("agent_eval", {})
                 provenance = agent_eval.get("provenance", {}) if isinstance(agent_eval, dict) else {}
-                details = rich_escape(str(provenance.get("message") or "Live evaluation did not run"))
+                details = escape_markup(str(provenance.get("message") or "Live evaluation did not run"))
             elif result.is_incomplete:
-                scanners = rich_escape(", ".join(result.incomplete_scans))
+                scanners = escape_markup(", ".join(result.incomplete_scans))
                 details = f"[bold yellow]{scanners} did not complete[/bold yellow]"
                 counts = []
                 if s.errors:
@@ -569,7 +569,7 @@ class CLIReporter(ReporterBase):
                 if result.metadata.get("skipped"):
                     details = "Skipped (see warnings)"
                 elif static_test_evidence:
-                    details = rich_escape(static_test_evidence)
+                    details = escape_markup(static_test_evidence)
                 elif s.checks_performed > 0:
                     details = f"{s.checks_performed} checks passed"
                 else:
@@ -582,7 +582,7 @@ class CLIReporter(ReporterBase):
                     parts.append(f"{s.warnings} warnings")
                 details = ", ".join(parts) if parts else "Failed"
 
-            table.add_row(rich_escape(str(result.validator_name)), status, details)
+            table.add_row(escape_markup(str(result.validator_name)), status, details)
 
         console.print(table)
 

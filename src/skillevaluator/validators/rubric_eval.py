@@ -514,11 +514,12 @@ class RubricEvalValidator(ValidatorBase):
             )
 
         from rich.console import Console
-        from rich.markup import escape as rich_escape
         from rich.status import Status
 
+        from skillevaluator.utils.rich_markup import escape_markup
+
         with Status(
-            f"[bold cyan]Evaluating {rich_escape(skill_path.name)} with LLM judge...[/bold cyan]",
+            f"[bold cyan]Evaluating {escape_markup(skill_path.name)} with LLM judge...[/bold cyan]",
             console=Console(),
             spinner="dots",
         ):

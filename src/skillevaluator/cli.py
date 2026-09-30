@@ -57,7 +57,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
 from skillevaluator.tier_group import TierGroup
-from skillevaluator.utils.rich_markup import escape_markup
+from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
     paths_refer_to_same_location,
@@ -788,7 +788,7 @@ def _print_catalog_divider(index: int, total: int, name: str) -> None:
         ("━━ ", FAINT),
         (f"skill {index}/{total}", f"bold {GREEN}"),
         (" · ", FAINT),
-        (name, "bold"),
+        (strip_terminal_controls(name), "bold"),
         (" ", ""),
     )
     fill = max(0, width - label.cell_len)
@@ -824,7 +824,11 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
         )
         lines: list = [headline, Text()]
         for name, reason in failures[:10]:
-            lines.append(Text.assemble(("  ✗ ", f"bold {RED}"), (f"{name:<28}", TEXT), (reason[:56], MUTED)))
+            # Strip before padding and truncating, so controls neither print nor count toward the widths.
+            name_text = f"{strip_terminal_controls(name):<28}"
+            lines.append(
+                Text.assemble(("  ✗ ", f"bold {RED}"), (name_text, TEXT), (strip_terminal_controls(reason)[:56], MUTED))
+            )
         if len(failures) > 10:
             lines.append(Text(f"  … {len(failures) - 10} more — see per-skill reports", style=MUTED))
         body = Group(*lines)
@@ -848,7 +852,8 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
             title_align="left",
         )
     )
-    console_.print(Text.assemble(("      reports     ", MUTED), (f"{reports_root}/<skill>/", MUTED)))
+    reports = f"{strip_terminal_controls(str(reports_root))}/<skill>/"
+    console_.print(Text.assemble(("      reports     ", MUTED), (reports, MUTED)))
 
 
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
@@ -1130,7 +1135,7 @@ def _validate_catalog(
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
-            + ", ".join(name for name, _reason in failures)
+            + ", ".join(strip_terminal_controls(name) for name, _reason in failures)
         )
 
 
@@ -1191,7 +1196,7 @@ def _validate_catalog_parallel(
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
-            + ", ".join(name for name, _reason in failures)
+            + ", ".join(strip_terminal_controls(name) for name, _reason in failures)
         )
 
 

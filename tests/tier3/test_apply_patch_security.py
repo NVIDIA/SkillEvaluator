@@ -256,6 +256,41 @@ def test_apply_patch_heredoc_through_shell_is_critical_write(run, function_name,
     assert _PAYLOAD not in finding["evidence"]
 
 
+_GITHUB_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+_SECRET_BODY = f"+ssh-ed25519 AAAAC3Nza attacker\n+# {_GITHUB_TOKEN}"
+
+
+@RUNNERS
+def test_shell_patch_to_credential_path_reports_only_the_protected_entry(run):
+    patch = f"*** Begin Patch\n*** Add File: /root/.ssh/authorized_keys\n{_SECRET_BODY}\n*** End Patch"
+
+    result = run(_traj("exec_command", {"cmd": _heredoc("apply_patch", patch)}))
+
+    assert [(f["type"], f["evidence"]) for f in result["findings"]] == [("sensitive_file_write", "/root/.ssh")]
+
+
+@RUNNERS
+def test_shell_patch_evidence_omits_the_patch_body(run):
+    patch = f"*** Begin Patch\n*** Add File: docs/cleanup.md\n+rm -rf ~/.ssh/old\n{_SECRET_BODY}\n*** End Patch"
+
+    result = run(_traj("exec_command", {"cmd": _heredoc(f"GH_TOKEN={_GITHUB_TOKEN} apply_patch", patch)}))
+
+    assert [f["type"] for f in result["findings"]] == ["destructive_command", "sensitive_path_access"]
+    for finding in result["findings"]:
+        assert finding["evidence"] == "GH_TOKEN=ghp_<redacted> apply_patch <<'EOF' [apply_patch body omitted]"
+
+
+@RUNNERS
+def test_shell_command_naming_apply_patch_without_a_patch_keeps_redacted_evidence(run):
+    command = f"GH_TOKEN={_GITHUB_TOKEN} grep -rn apply_patch ~/.ssh"
+
+    result = run(_traj("exec_command", {"cmd": command}))
+
+    assert [(f["type"], f["evidence"]) for f in result["findings"]] == [
+        ("sensitive_path_access", "GH_TOKEN=ghp_<redacted> grep -rn apply_patch ~/.ssh")
+    ]
+
+
 @RUNNERS
 def test_shell_patch_headers_without_apply_patch_are_not_writes(run):
     result = run(_traj("exec_command", {"cmd": "grep -n '*** Add File: /root/.bashrc' notes.md"}))

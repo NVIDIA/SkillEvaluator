@@ -9,14 +9,17 @@ the only network calls are the configured embedding provider (and, only when
 explicitly requested, the configured chat LLM for Check B verdicts).
 
 - **Check C-inter** embeds each bundled skill's name and description and
-  compares it with every catalog skill entry, excluding the plugin's own
-  bundled skills by their canonical catalog path.
+  compares it with every catalog skill entry, excluding only catalog entries
+  that positively identify one of the plugin's own bundled skills (see
+  :class:`_SelfSkillIdentity`).
 - **Check B** embeds the plugin name and description, compares it with every
   catalog plugin entry, and scores member-skill overlap (Jaccard on member
-  skill names). The plugin itself is excluded by name or manifest source
-  fingerprint.
+  skill names). The plugin itself is excluded only by its manifest source
+  fingerprint; a same-name catalog plugin with a different manifest is a
+  distinct plugin and is always reported as a name collision.
 
-Results record ``metadata["plugin"]["catalog_skill_similarity"]`` and
+Both checks record the catalog paths they excluded as self matches, so every
+exclusion can be audited. Results record ``metadata["plugin"]["catalog_skill_similarity"]`` and
 ``metadata["plugin"]["inter_plugin_similarity"]``. Findings are advisory; the
 Tier 2 plugin orchestration caps their severity at MEDIUM.
 """
@@ -107,59 +110,60 @@ def skipped_result(name: str, description: str, key: str, reason: str, *, catalo
 
 
 def self_plugin_entries(profile: PluginProfile, registry: EmbeddingRegistry) -> list[PluginRegistryEntry]:
-    """Catalog plugin entries that identify the plugin under test (by name or source identity)."""
-    name_key = profile.name.casefold()
-    return [
-        entry
-        for entry in registry.plugin_entries
-        if entry.name.strip().casefold() == name_key or entry.source_fingerprint == profile.source_fingerprint
-    ]
+    """Catalog plugin entries that positively identify the plugin under test.
+
+    Only identical manifest bytes (the source fingerprint) identify the plugin.
+    Catalog names are not unique, so a same-name entry with a different
+    manifest is a distinct plugin: Check B compares it and reports the name
+    collision.
+    """
+    return [entry for entry in registry.plugin_entries if entry.source_fingerprint == profile.source_fingerprint]
+
+
+def _same_name(profile: PluginProfile, entry: PluginRegistryEntry) -> bool:
+    return entry.name.strip().casefold() == profile.name.casefold()
 
 
 @dataclass(frozen=True)
 class _SelfSkillIdentity:
-    """Canonical catalog identities of one bundled skill of the plugin under test.
+    """Catalog entries that positively identify one bundled skill of the plugin under test.
 
-    A catalog skill entry is the plugin's own skill when its path is the
-    bundled skill's path under a catalog plugin entry that identifies this
-    plugin, ends with ``<plugin-dir>/skills/<rel>``, is the bare
-    ``skills/<rel>`` of a skills-only catalog built from the plugin root, or
-    when it carries the same content fingerprint under a path ending in
-    ``<rel>`` (a catalog built from the plugin's ``skills/`` directory).
+    In a catalog with plugin entries, a skill entry is this skill only at
+    ``<prefix>/skills/<rel>`` under a catalog plugin entry that identifies this
+    plugin (see :func:`self_plugin_entries`). A skill-only catalog carries no
+    plugin identity, so an entry is this skill only when it has the same
+    content fingerprint at a path a catalog built from this plugin records:
+    ``<rel>`` (built from ``skills/``) or ``skills/<rel>`` (built from the
+    plugin root). A same-named or identical skill anywhere else is a distinct
+    skill and is compared.
     """
 
-    exact: frozenset[str]
-    suffix: str
-    rel: str
-    fingerprint: str
+    paths: frozenset[str]
+    fingerprint: str | None = None
 
     @classmethod
     def build(
         cls,
-        profile: PluginProfile,
         skill: BundledSkill,
         *,
         self_prefixes: list[str],
         catalog_has_plugins: bool,
     ) -> _SelfSkillIdentity:
         relative = skill.root_relative
-        exact = {relative if prefix == "." else f"{prefix}/{relative}" for prefix in self_prefixes}
-        if not catalog_has_plugins:
-            exact.add(relative)
+        if catalog_has_plugins:
+            return cls(
+                paths=frozenset(relative if prefix == "." else f"{prefix}/{relative}" for prefix in self_prefixes)
+            )
         text = skill.entry.embedding_text if skill.entry is not None else ""
         return cls(
-            exact=frozenset(exact),
-            suffix=f"{profile.root.resolve().name}/{relative}",
-            rel=skill.rel,
+            paths=frozenset({skill.rel, relative}),
             fingerprint=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
     def matches(self, entry: RegistryEntry) -> bool:
-        path = entry.path
-        if path in self.exact or path == self.suffix or path.endswith(f"/{self.suffix}"):
-            return True
-        same_leaf = path == self.rel or path.endswith(f"/{self.rel}")
-        return same_leaf and entry.content_fingerprint == self.fingerprint
+        if entry.path not in self.paths:
+            return False
+        return self.fingerprint is None or entry.content_fingerprint == self.fingerprint
 
 
 def check_catalog_skills(
@@ -211,9 +215,9 @@ def check_catalog_skills(
     scored = registry.score_skill_entries([skill.entry for skill in comparable if skill.entry is not None])
     matches: list[dict[str, Any]] = []
     excluded = 0
+    excluded_paths: set[str] = set()
     for skill, scores in zip(comparable, scored, strict=True):
         identity = _SelfSkillIdentity.build(
-            profile,
             skill,
             self_prefixes=self_prefixes,
             catalog_has_plugins=catalog_has_plugins,
@@ -222,6 +226,7 @@ def check_catalog_skills(
         for catalog_entry, score in scores:
             if identity.matches(catalog_entry):
                 excluded += 1
+                excluded_paths.add(catalog_entry.path)
                 continue
             if score >= threshold:
                 candidates.append((catalog_entry, score))
@@ -266,6 +271,7 @@ def check_catalog_skills(
         bundled_skills=len(comparable),
         catalog_entries=len(catalog_skills),
         self_matches_excluded=excluded,
+        excluded_catalog_paths=sorted(excluded_paths),
     )
     if not matches:
         result.add_success("skill_catalog_check", f"No near-duplicate catalog skills (threshold: {threshold})")
@@ -280,10 +286,10 @@ def check_catalog_skills(
     return result
 
 
-def _plugin_severity(similarity: float, threshold: float) -> tuple[str, Severity]:
-    """Classify a description match; member-overlap-only matches are LOW."""
+def _plugin_severity(similarity: float, threshold: float, *, name_collision: bool) -> tuple[str, Severity]:
+    """Classify a description match; name-collision-only and member-overlap-only matches are LOW."""
     if similarity < threshold:
-        return "MEMBER_OVERLAP", Severity.LOW
+        return ("NAME_COLLISION" if name_collision else "MEMBER_OVERLAP"), Severity.LOW
     return classify(similarity)
 
 
@@ -358,7 +364,12 @@ def check_catalog_plugins(
     llm_model: str | None = None,
     top_k: int = INTER_PLUGIN_TOP_K,
 ) -> ValidationResult:
-    """Check B: compare the plugin description and members with catalog plugin entries."""
+    """Check B: compare the plugin description and members with catalog plugin entries.
+
+    A catalog plugin with the same name but a different manifest is always a
+    candidate: it is either an unrelated plugin that collides with this name
+    or an older catalog snapshot of this plugin, and either way it is reported.
+    """
     catalog_plugins = registry.plugin_entries
     if not catalog_plugins:
         return skipped_result(
@@ -379,16 +390,22 @@ def check_catalog_plugins(
         )
 
     result = ValidationResult(validator_name=INTER_PLUGIN_NAME, validator_description=INTER_PLUGIN_DESCRIPTION)
-    self_ids = {entry.entry_id for entry in self_plugin_entries(profile, registry)}
+    self_entries = self_plugin_entries(profile, registry)
+    self_ids = {entry.entry_id for entry in self_entries}
     candidates: list[tuple[PluginRegistryEntry, float, float]] = []
     for entry, similarity in registry.score_plugin_text(profile.embedding_text):
         if entry.entry_id in self_ids:
             continue
         overlap = member_overlap(profile.members, entry.members)
         shared = bool(set(profile.members) & set(entry.members))
-        if similarity >= threshold or (shared and overlap >= INTER_PLUGIN_MEMBER_OVERLAP_THRESHOLD):
+        if (
+            similarity >= threshold
+            or (shared and overlap >= INTER_PLUGIN_MEMBER_OVERLAP_THRESHOLD)
+            or _same_name(profile, entry)
+        ):
             candidates.append((entry, similarity, overlap))
-    candidates.sort(key=lambda item: (-item[1], -item[2], item[0].path))
+    # Name collisions first, so the top-k cut never drops one.
+    candidates.sort(key=lambda item: (not _same_name(profile, item[0]), -item[1], -item[2], item[0].path))
     total_candidates = len(candidates)
     candidates = candidates[:top_k]
 
@@ -407,20 +424,35 @@ def check_catalog_plugins(
                 "verdict": verdict_name,
             }
         )
-        if verdict_name == "UNIQUE":
+        name_collision = _same_name(profile, entry)
+        # A UNIQUE verdict clears a functional overlap, not a shared plugin name.
+        if verdict_name == "UNIQUE" and not name_collision:
             continue
-        check_name, severity = _plugin_severity(similarity, threshold)
+        check_name, severity = _plugin_severity(similarity, threshold, name_collision=name_collision)
         suggestion = (
             "Review whether this plugin duplicates the catalog plugin; consider extending the existing "
             "plugin instead of creating a near-identical bundle."
         )
+        message = (
+            f"Plugin '{profile.name}' overlaps catalog plugin '{entry.name}' ({entry.path}): "
+            f"description similarity {similarity:.3f}, member skill overlap {overlap:.3f}"
+        )
+        if name_collision:
+            message += "; same plugin name with a different manifest"
+            suggestion = (
+                "A catalog plugin with this name has a different manifest. Rename this plugin, or rebuild the "
+                "catalog if that entry is an earlier version of this plugin."
+            )
         verdict_meta: dict[str, Any] = {}
         if verdict is not None:
             from skillevaluator.deduplication.plugin.llm_analyzer import inter_plugin_verdict_to_severity
 
-            severity = inter_plugin_verdict_to_severity(verdict)
-            check_name = verdict.verdict
-            suggestion = verdict.suggestion or suggestion
+            if verdict_name == "UNIQUE":
+                check_name, severity = "NAME_COLLISION", Severity.LOW
+            else:
+                severity = inter_plugin_verdict_to_severity(verdict)
+                check_name = verdict.verdict
+                suggestion = verdict.suggestion or suggestion
             verdict_meta = {
                 "verdict": verdict.verdict,
                 "confidence": verdict.confidence,
@@ -431,10 +463,7 @@ def check_catalog_plugins(
                 category="INTER_PLUGIN",
                 severity=advisory_severity(severity),
                 check_name=check_name,
-                message=(
-                    f"Plugin '{profile.name}' overlaps catalog plugin '{entry.name}' ({entry.path}): "
-                    f"description similarity {similarity:.3f}, member skill overlap {overlap:.3f}"
-                ),
+                message=message,
                 file_path=profile.manifest,
                 suggestion=suggestion,
                 metadata={
@@ -442,6 +471,7 @@ def check_catalog_plugins(
                     "catalog_path": entry.path,
                     "similarity": round(similarity, 4),
                     "member_overlap": round(overlap, 4),
+                    "name_collision": name_collision,
                     "native_severity": severity.value,
                     **verdict_meta,
                 },
@@ -454,6 +484,7 @@ def check_catalog_plugins(
         f"Compared plugin '{profile.name}' against {len(catalog_plugins)} catalog plugin entries",
         catalog_entries=len(catalog_plugins),
         self_matches_excluded=len(self_ids),
+        excluded_catalog_paths=sorted(entry.path for entry in self_entries),
         llm_verdict="enabled" if llm_verdict else "disabled",
     )
     if not matches:

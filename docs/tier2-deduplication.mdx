@@ -313,23 +313,34 @@ identity), the sorted, lowercased member skill names, and the description
 embedding. Member skills are the bundled skills under `skills/` plus the last
 path segment of each `skills.refs` entry.
 
+- **Self identity.** Only positive evidence excludes a catalog entry as the
+  plugin under test. A catalog plugin entry is this plugin only when its
+  manifest fingerprint matches (identical manifest bytes); catalog names are not
+  unique, so a same-name plugin with a different manifest is a distinct plugin.
+  In a catalog with plugin entries, a skill entry is one of this plugin's
+  bundled skills only at `<plugin>/skills/<skill>` under such a matching plugin
+  entry. A skill-only catalog has no plugin identity, so a skill entry is this
+  skill only when it has the same name and description at `<skill>` or
+  `skills/<skill>`. A verbatim or same-named copy anywhere else is compared and
+  reported. Each check records the excluded catalog paths
+  (`excluded_catalog_paths`) next to `self_matches_excluded`. A changed manifest
+  therefore makes this plugin's older catalog entry, and its bundled skills,
+  ordinary matches: rebuild the catalog to refresh it.
 - **C-inter** reports every catalog skill at or above `--similarity-threshold`
   (default `0.75`), up to 10 per bundled skill, attributed to the bundled skill.
-  The plugin's own skills are excluded by canonical path: the skill's path
-  under a catalog plugin entry that identifies this plugin, a path ending in
-  `<plugin-dir>/skills/<skill>`, a bare `skills/<skill>` in a skill-only
-  catalog, or an identical name and description under a path ending in
-  `<skill>`.
+  This skill's own catalog entries are excluded.
 - **B** reports catalog plugins whose description similarity reaches
   `--similarity-threshold`, or which share at least half of the combined member
-  skill names (Jaccard overlap `0.5` or more), up to the top 10. The plugin itself is
-  excluded when a catalog plugin has the same name or the same manifest
-  fingerprint. Member-overlap-only matches are LOW.
+  skill names (Jaccard overlap `0.5` or more), up to the top 10. This plugin's
+  own entries are excluded. Member-overlap-only matches are LOW. A same-name
+  catalog plugin is always a match (`name_collision: true`; a LOW
+  `NAME_COLLISION` when neither threshold is met) and is listed first.
 - **Optional LLM verdict.** `--llm` asks the configured chat LLM to classify
   each Check B match as `WHOLE_DUPLICATE`, `PARTIAL_OVERLAP`, or `UNIQUE`. It is
   off by default and requires `--catalog`. `UNIQUE` matches stay in the
-  results but raise no finding. A failed or malformed LLM response leaves the
-  similarity finding in place without a verdict.
+  results but raise no finding, except that a name collision stays a LOW
+  `NAME_COLLISION`. A failed or malformed LLM response leaves the similarity
+  finding in place without a verdict.
 
 Each result records its outcome under `plugin.catalog_skill_similarity` or
 `plugin.inter_plugin_similarity` in the JSON report, with `status`

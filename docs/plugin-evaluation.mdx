@@ -609,12 +609,15 @@ C-inter reports every catalog skill at or above `--similarity-threshold`
 (default `0.75`), up to 10 per bundled skill. B reports catalog plugins whose
 description similarity reaches the threshold or which share at least half of
 the combined member skill names (Jaccard overlap of `0.5` or more), up to 10.
-The plugin itself is excluded by name or by manifest fingerprint.
+A catalog plugin is excluded as this plugin only when its manifest fingerprint
+is identical, and so are its bundled skills. A same-name catalog plugin with a
+different manifest is always reported as a name collision.
 
 `--llm` adds an advisory verdict to each Check B match: `WHOLE_DUPLICATE`,
 `PARTIAL_OVERLAP`, or `UNIQUE`. It is off by default and requires `--catalog`.
-`UNIQUE` matches stay in the results but raise no finding. A failed LLM call
-leaves the similarity finding in place without a verdict.
+`UNIQUE` matches stay in the results but raise no finding, except for a name
+collision. A failed LLM call leaves the similarity finding in place without a
+verdict.
 
 Every catalog outcome is recorded under `plugin.catalog_skill_similarity` and
 `plugin.inter_plugin_similarity` with a `status` of `compared` or `skipped`.

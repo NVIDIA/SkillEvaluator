@@ -58,8 +58,9 @@ def _plugin(
     description: str | None,
     skills: list[tuple[str, str]] = (),  # type: ignore[assignment]
     refs: list[str] = (),  # type: ignore[assignment]
+    dirname: str | None = None,
 ) -> Path:
-    directory = root / name
+    directory = root / (dirname or name)
     directory.mkdir(parents=True)
     lines = [f"name: {name}", "author: {email: dev@example.com}"]
     if description is not None:
@@ -355,6 +356,7 @@ class TestInterSkillCheck:
         assert not matched & {"alpha/skills/deploy-app", "alpha/skills/gpu-check"}
         compared = next(d for d in result.success_details if d.check_name == "skill_catalog_comparison")
         assert compared.metadata["self_matches_excluded"] == 2
+        assert compared.metadata["excluded_catalog_paths"] == ["alpha/skills/deploy-app", "alpha/skills/gpu-check"]
 
     def test_self_matches_are_excluded_in_a_catalog_built_from_the_skills_directory(self, plugins: Path) -> None:
         catalog = plugins.parent / "alpha-skills.json"
@@ -364,6 +366,72 @@ class TestInterSkillCheck:
 
         assert result.metadata["plugin"]["catalog_skill_similarity"]["matches"] == []
         assert not result.findings
+
+    def test_verbatim_copy_in_another_catalog_plugin_is_reported(self, tmp_path: Path) -> None:
+        root = tmp_path / "catalog-src"
+        _plugin(root, "team-a", "GPU audit tooling", [("deploy-app", "Deploy apps to a kubernetes cluster")])
+        _plugin(root, "gamma", "Convert confluence docs to markdown", [("conf2md", "Convert confluence docs")])
+        catalog = tmp_path / "catalog.json"
+        _save_catalog(root, catalog)
+        mine = _plugin(
+            tmp_path / "mine", "my-new-plugin", "Review code", [("deploy-app", "Deploy apps to a kubernetes cluster")]
+        )
+
+        result = _by_name(run_plugin_catalog_checks(mine, catalog=catalog))["Inter-Skill Deduplication"]
+
+        [finding] = result.findings
+        assert finding.category == "INTER_SKILL"
+        assert finding.check_name == "EXACT_DUPLICATE"
+        assert finding.metadata["catalog_path"] == "team-a/skills/deploy-app"
+        compared = next(d for d in result.success_details if d.check_name == "skill_catalog_comparison")
+        assert compared.metadata["self_matches_excluded"] == 0
+        assert compared.metadata["excluded_catalog_paths"] == []
+
+    def test_same_basename_plugin_dir_in_catalog_is_not_self(self, tmp_path: Path) -> None:
+        root = tmp_path / "catalog-src"
+        _plugin(
+            root / "team-b",
+            "team-b-kube",
+            "GPU audit tooling",
+            [("deploy", "Deploy services onto a kubernetes cluster")],
+            dirname="tools",
+        )
+        _plugin(root, "gamma", "Convert confluence docs to markdown", [("conf2md", "Convert confluence docs")])
+        catalog = tmp_path / "catalog.json"
+        _save_catalog(root, catalog)
+        mine = _plugin(
+            tmp_path / "mine",
+            "my-kube",
+            "Review code",
+            [("deploy", "Deploy apps to a kubernetes cluster")],
+            dirname="tools",
+        )
+
+        result = _by_name(run_plugin_catalog_checks(mine, catalog=catalog))["Inter-Skill Deduplication"]
+
+        assert [finding.metadata["catalog_path"] for finding in result.findings] == ["team-b/tools/skills/deploy"]
+
+    def test_skills_repo_v1_catalog_same_dir_name_is_reported(self, tmp_path: Path) -> None:
+        # A version 1 catalog of an org skills repo laid out as skills/<name>/SKILL.md.
+        repo = _plugin(tmp_path, "org-skills", "Org skills", [("deploy-app", "Deploy apps to a kubernetes cluster")])
+        catalog = tmp_path / "v1.json"
+        data = _save_catalog(repo, catalog)
+        data["schema_version"] = 1
+        data.pop("plugins")
+        catalog.write_text(json.dumps(data), encoding="utf-8")
+        # A copied, lightly reworded skill that kept its directory name is a distinct skill.
+        mine = _plugin(
+            tmp_path / "mine", "my-plugin", "Review code", [("deploy-app", "Deploy an app onto a kubernetes cluster")]
+        )
+
+        result = _by_name(run_plugin_catalog_checks(mine, catalog=catalog))["Inter-Skill Deduplication"]
+        own = _by_name(run_plugin_catalog_checks(repo, catalog=catalog))["Inter-Skill Deduplication"]
+
+        assert [finding.metadata["catalog_path"] for finding in result.findings] == ["skills/deploy-app"]
+        # The catalog's own source still excludes its identical skill at the same path.
+        assert not own.findings
+        compared = next(d for d in own.success_details if d.check_name == "skill_catalog_comparison")
+        assert compared.metadata["excluded_catalog_paths"] == ["skills/deploy-app"]
 
     def test_plugin_without_bundled_skills_skips_inter_skill(self, plugins: Path) -> None:
         catalog = plugins.parent / "catalog.json"
@@ -400,7 +468,7 @@ class TestInterPluginCheck:
         assert checks["beta"].severity == Severity.MEDIUM
         assert result.passed
 
-    def test_plugin_is_excluded_by_name_and_source_identity(self, plugins: Path) -> None:
+    def test_plugin_is_excluded_by_source_identity(self, plugins: Path) -> None:
         catalog = plugins.parent / "catalog.json"
         data = _save_catalog(plugins, catalog)
         # A renamed catalog copy with alpha's exact manifest bytes is the same source.
@@ -417,6 +485,42 @@ class TestInterPluginCheck:
         assert "alpha-renamed" not in names
         detail = next(d for d in result.success_details if d.check_name == "plugin_catalog_comparison")
         assert detail.metadata["self_matches_excluded"] == 2
+        assert detail.metadata["excluded_catalog_paths"] == ["alpha", "moved/alpha"]
+
+    def test_same_name_plugin_with_a_different_manifest_is_compared_and_reported(self, plugins: Path) -> None:
+        # Catalog names are not unique: another team's "alpha" is a distinct plugin, not this one.
+        _plugin(
+            plugins / "other",
+            "alpha",
+            "Convert confluence docs to markdown",
+            [
+                ("deploy-app", "Deploy apps to a kubernetes cluster"),
+                ("conf-sync", "Sync confluence docs"),
+                ("md-lint", "Lint markdown docs"),
+            ],
+        )
+        catalog = plugins.parent / "catalog.json"
+        _save_catalog(plugins, catalog)
+
+        results = _by_name(run_plugin_catalog_checks(plugins / "alpha", catalog=catalog))
+
+        inter_plugin = results["Inter-Plugin Deduplication"]
+        [collision] = [f for f in inter_plugin.findings if f.metadata["catalog_path"] == "other/alpha"]
+        # Neither description similarity nor member overlap (0.25) would report it: the shared name does.
+        assert collision.check_name == "NAME_COLLISION"
+        assert collision.severity == Severity.LOW
+        assert collision.metadata["name_collision"] is True
+        assert "same plugin name" in collision.message
+        assert "alpha" in [
+            match["name"] for match in inter_plugin.metadata["plugin"]["inter_plugin_similarity"]["matches"]
+        ]
+        detail = next(d for d in inter_plugin.success_details if d.check_name == "plugin_catalog_comparison")
+        assert detail.metadata["self_matches_excluded"] == 1
+        assert detail.metadata["excluded_catalog_paths"] == ["alpha"]
+        # Its bundled skills are not this plugin's own either.
+        inter_skill = results["Inter-Skill Deduplication"]
+        assert "other/alpha/skills/deploy-app" in {f.metadata["catalog_path"] for f in inter_skill.findings}
+        assert inter_plugin.passed and inter_skill.passed
 
     def test_old_skill_only_catalog_skips_check_b_but_runs_c_inter(self, plugins: Path) -> None:
         catalog = plugins.parent / "skills.json"
@@ -424,7 +528,9 @@ class TestInterPluginCheck:
 
         results = _by_name(run_plugin_catalog_checks(plugins / "alpha", catalog=catalog))
 
-        assert results["Inter-Skill Deduplication"].metadata["plugin"]["catalog_skill_similarity"]["status"] == "compared"
+        assert (
+            results["Inter-Skill Deduplication"].metadata["plugin"]["catalog_skill_similarity"]["status"] == "compared"
+        )
         block = results["Inter-Plugin Deduplication"].metadata["plugin"]["inter_plugin_similarity"]
         assert block["status"] == "skipped"
         assert "no plugin entries" in block["reason"]
@@ -500,6 +606,23 @@ class TestInterPluginLLMVerdict:
         assert result.metadata["llm_analysis"]["candidates_completed"] == 2
         [client] = fake_llm.instances
         assert all("Member skills:" in prompt for prompt in client.prompts)
+        assert result.passed
+
+    def test_unique_verdict_keeps_a_name_collision(self, plugins: Path, fake_llm) -> None:
+        _plugin(plugins / "other", "alpha", "Convert confluence docs to markdown")
+        catalog = plugins.parent / "catalog.json"
+        _save_catalog(plugins, catalog)
+        unique = {"verdict": "UNIQUE", "confidence": 0.9, "reasoning": "Different purpose.", "suggestion": ""}
+        fake_llm.responses = {"alpha": unique, "beta": unique, "delta": unique}
+
+        result = _by_name(run_plugin_catalog_checks(plugins / "alpha", catalog=catalog, llm_verdict=True))[
+            "Inter-Plugin Deduplication"
+        ]
+
+        [finding] = result.findings  # the verdict clears beta and delta, not the shared name
+        assert finding.metadata["catalog_path"] == "other/alpha"
+        assert (finding.check_name, finding.severity) == ("NAME_COLLISION", Severity.LOW)
+        assert finding.metadata["verdict"] == "UNIQUE"
         assert result.passed
 
     def test_llm_failures_keep_similarity_findings(self, plugins: Path, fake_llm) -> None:

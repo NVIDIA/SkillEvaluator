@@ -23,6 +23,7 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
+from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
@@ -42,7 +43,8 @@ from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
 from skillevaluator.validators.version import VersionValidator
 from skillevaluator.validators.workflows_schema import WorkflowsSchemaValidator
 
-console = Console()
+# emoji=False: ":name:" codes in untrusted text (such as "root:x:0:0:") must print literally.
+console = Console(emoji=False)
 
 # Per-check progress goes to stderr so piped stdout (reports, JSON) stays
 # clean; without it, slow targets print nothing for minutes and look hung.
@@ -501,6 +503,6 @@ def emit_reports(
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
         reporter.save(results, output_path)
         if announce_paths:
-            console.print(f"[dim]{fmt} report:[/dim] [cyan]{output_path}[/cyan]")
+            console.print(f"[dim]{fmt} report:[/dim] [cyan]{escape_markup(str(output_path))}[/cyan]")
 
     return all(result.passed for result in results)

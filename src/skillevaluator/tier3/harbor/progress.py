@@ -20,6 +20,7 @@ from time import monotonic
 from typing import Literal, Protocol, TextIO, runtime_checkable
 
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 ProgressMode = Literal["auto", "rich", "plain", "off"]
 logger = logging.getLogger(__name__)
@@ -32,9 +33,6 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|credential|password|secret|token)")
-_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-_TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _LIVE_MIN_EVENT_ROWS = 6
 
 
@@ -100,10 +98,7 @@ class ProgressReporter(Protocol):
 
 def redact_progress_detail(detail: object, *, secret_values: set[str] | None = None) -> str:
     """Return a single-line diagnostic safe enough for a progress surface."""
-    text = _OSC_ESCAPE_RE.sub("", str(detail))
-    text = _ANSI_ESCAPE_RE.sub("", text)
-    text = _TERMINAL_CONTROL_RE.sub("", text)
-    text = " ".join(text.split())
+    text = " ".join(strip_terminal_controls(str(detail)).split())
     for secret in sorted(secret_values or (), key=len, reverse=True):
         if len(secret) >= 4:
             text = text.replace(secret, "<redacted>")

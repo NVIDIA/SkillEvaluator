@@ -57,6 +57,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
     paths_refer_to_same_location,
@@ -1279,11 +1280,11 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     run up front instead of opening straight on the Tier 1 section.
     """
     console.print(f"\n[bold]SkillEvaluator {content_type.title()} Validation[/bold]")
-    console.print(f"Target: {target_path}")
+    console.print(f"Target: {escape_markup(str(target_path))}")
     console.print(f"Type: {content_type}")
     if profile:
         profile_color = "cyan"
-        console.print(f"Profile: [{profile_color}]{profile}[/{profile_color}]")
+        console.print(f"Profile: [{profile_color}]{escape_markup(str(profile))}[/{profile_color}]")
 
 
 @cli.command(epilog=_VALIDATE_EPILOG)

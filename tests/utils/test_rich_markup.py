@@ -65,7 +65,31 @@ def test_every_short_string_renders_literally() -> None:
             assert _render(f"[green]<[/green]{escape_markup(text)}[green]>[/green]") == f"<{text}>", text
 
 
-@pytest.mark.parametrize("unit", ["\\", "[a", "\\[", "[a]"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("clear\x1b[2Jscreen", "clearscreen"),
+        ("up\x1b[1A\x1b[2Kerase", "uperase"),
+        ("\x1b]8;;https://evil.test/\x1b\\see docs\x1b]8;;\x1b\\", "see docs"),
+        ("title\x1b]0;forged\x07 set", "title set"),
+        ("bad\x1bc thing", "bad thing"),
+        ("charset\x1b(B reset", "charset reset"),
+        ("eight-bit\x9b2J csi", "eight-bit2J csi"),
+        ("nul\x00 bel\x07 del\x7f", "nul bel del"),
+        ("crlf\r\nline", "crlf\nline"),
+        ("tab\tand\nnewline", "tab\tand\nnewline"),
+    ],
+)
+def test_terminal_controls_are_stripped(text: str, expected: str) -> None:
+    assert escape_markup(text) == expected
+
+
+def test_controls_are_stripped_before_brackets_are_escaped() -> None:
+    text = "[\x1b[0m/x]"
+    assert _render(f"[green]<[/green]{escape_markup(text)}[green]>[/green]") == "<[/x]>"
+
+
+@pytest.mark.parametrize("unit", ["\\", "[a", "\\[", "[a]", "\x1b[", "\x1b]8;;"])
 def test_long_input_is_escaped_in_linear_time(unit: str) -> None:
     started = time.perf_counter()
     escape_markup(unit * 200_000)

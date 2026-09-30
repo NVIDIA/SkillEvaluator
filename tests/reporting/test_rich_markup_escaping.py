@@ -34,12 +34,32 @@ PATH_PAYLOADS = ("[/x]", "[bold]evil[/bold]")
 # A single path component (a skill or agent directory name) cannot contain "/".
 NAME_PAYLOADS = ("[bold]evil", "[green]PASS")
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+# Terminal control sequences untrusted text could carry, and what stays visible.
+CONTROL_PAYLOADS = {
+    "\x1b[1A\x1b[2K": "",  # cursor up one line, erase it
+    "\x1b[2J": "",  # clear the screen
+    "\x1b]8;;https://evil.test/\x1b\\see docs\x1b]8;;\x1b\\": "see docs",  # OSC 8 hyperlink
+    "\x1bc": "",  # RIS: full terminal reset
+    "\x9b2J": "2J",  # 8-bit CSI
+}
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _recording_console(width: int = 200) -> Console:
     # Tests that print absolute tmp paths pass a wider width so long paths do not wrap.
     return Console(file=io.StringIO(), record=True, width=width)
+
+
+def _terminal_console() -> Console:
+    return Console(file=io.StringIO(), force_terminal=True, color_system="truecolor", width=200)
+
+
+def _terminal_text(output: str) -> str:
+    """Drop Rich's own SGR styling and fail if any other control character is left."""
+    text = _SGR.sub("", output)
+    assert _CONTROL.search(text) is None, repr(text)
+    return text
 
 
 def _quality_result(payload: str) -> ValidationResult:
@@ -184,6 +204,26 @@ def test_escaping_does_not_disturb_trusted_status_markup() -> None:
     assert "\\[" not in text  # no escape backslashes leak into the output
 
 
+@pytest.mark.parametrize(("payload", "visible"), CONTROL_PAYLOADS.items())
+def test_cli_report_strips_terminal_control_sequences(payload: str, visible: str) -> None:
+    console = _terminal_console()
+    reporter = CLIReporter(console=console)
+    results = [
+        _rubric_result(payload),
+        _finding_result(payload),
+        _agent_eval_result(payload),
+        _advisory_skip_result(payload),
+    ]
+
+    for result in results:
+        reporter.print(result)
+    reporter.print_all(results)
+
+    text = _terminal_text(console.file.getvalue())
+    for label in ("Judge notes", "Finding message", "Judge reasoning", "Skipped because"):
+        assert f"{label} {visible}".rstrip() in text
+
+
 def test_log_handlers_render_untrusted_text_literally(monkeypatch: pytest.MonkeyPatch) -> None:
     from skillevaluator import logging_config
 
@@ -213,9 +253,19 @@ def test_log_handlers_render_untrusted_text_literally(monkeypatch: pytest.Monkey
             )
             handler.handle(record)
 
+        for index, payload in enumerate(CONTROL_PAYLOADS):
+            record = logging.LogRecord(
+                named.name, logging.WARNING, __file__, 1, "Tool %d said: %s", (index, f"done{payload}"), None
+            )
+            handler.handle(record)
+
     text = console.export_text()
     for payload in PAYLOADS:
         assert text.count(f"Could not read skills/{payload}/SKILL.md") == 2
+    lines = [line.rstrip() for line in text.splitlines()]
+    for index, visible in enumerate(CONTROL_PAYLOADS.values()):
+        assert sum(line.endswith(f"Tool {index} said: done{visible}") for line in lines) == 2
+    assert _CONTROL.search(text) is None
 
 
 @pytest.mark.parametrize("payload", PATH_PAYLOADS)
@@ -268,6 +318,24 @@ def test_tier3_validate_panel_renders_skill_name_literally(
     assert f"Validate: {name}/evals/" in console.export_text()
 
 
+def test_tier3_validate_panel_strips_terminal_control_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3 import commands as tier3_commands
+
+    console = _terminal_console()
+    monkeypatch.setattr(tier3_commands, "console", console)
+
+    tier3_commands._print_validate_results(
+        tmp_path / "demo",
+        [SimpleNamespace(status="error", path="evals/\x1b[2Jevals.json", message="bad\x1bc value")],
+    )
+
+    text = _terminal_text(console.file.getvalue())
+    assert "evals/evals.json" in text
+    assert "bad value" in text
+
+
 @pytest.mark.parametrize("payload", PATH_PAYLOADS)
 def test_tier3_grader_starter_renders_created_path_literally(
     payload: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -313,7 +381,13 @@ def test_tier3_compare_renders_agent_and_summary_values_literally(
     summary_dir = run_dir / agent / "with-skill"
     summary_dir.mkdir(parents=True)
     (summary_dir / "summary.json").write_text(
-        json.dumps({"execution_status": "succeeded", "scores": {"security": 0.9}, "num_trials": "[/x]"}),
+        json.dumps(
+            {
+                "execution_status": "succeeded",
+                "scores": {"security": 0.9, "custom: grader\x1b[2J": 0.5},
+                "num_trials": "[/x]",
+            }
+        ),
         encoding="utf-8",
     )
     (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
@@ -324,6 +398,8 @@ def test_tier3_compare_renders_agent_and_summary_values_literally(
     text = console.export_text()
     assert f"Skill Evaluation - {skill_name}" in text
     assert f"{agent:<16s} 20260709_010000 (Harbor, [/x] trials)" in text
+    assert "custom: grader" in text
+    assert "\x1b" not in text
 
 
 def test_tier3_doctor_renders_provider_and_prerequisite_errors_literally(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,6 +420,30 @@ def test_tier3_doctor_renders_provider_and_prerequisite_errors_literally(monkeyp
     text = console.export_text()
     assert "provider [/x] is not configured" in text
     assert "docker: [bold]evil[/bold]" in text
+
+
+def test_tier3_doctor_strips_terminal_control_sequences(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.provider_config import ProviderConfigurationError
+    from skillevaluator.tier3 import commands as tier3_commands
+
+    console = _terminal_console()
+    monkeypatch.setattr(tier3_commands, "console", console)
+
+    def _unconfigured_provider():
+        raise ProviderConfigurationError("provider\x1b[1A\x1b[2K is not configured\x1bc")
+
+    monkeypatch.setattr(tier3_commands, "resolve_llm_provider", _unconfigured_provider)
+    monkeypatch.setattr(
+        tier3_commands,
+        "_check_prerequisites",
+        lambda **_kwargs: ["docker: \x1b]8;;https://evil.test/\x1b\\see docs\x1b]8;;\x1b\\"],
+    )
+
+    assert tier3_commands.doctor(agents=None, env_mode="local") == 1
+
+    text = _terminal_text(console.file.getvalue())
+    assert "provider is not configured" in text
+    assert "docker: see docs" in text
 
 
 def test_harbor_findings_report_renders_skill_and_model_literally(
@@ -376,13 +476,17 @@ def test_harbor_findings_report_renders_skill_and_model_literally(
         ),
         encoding="utf-8",
     )
-    reward = {"entry_id": "case-001", **scores, "details": {"goal_accuracy": {"reason": "no result [/x]"}}}
+    reward = {
+        "entry_id": "case-001",
+        **scores,
+        "details": {"goal_accuracy": {"reason": "no result [/x]\x1b]8;;https://evil.test/\x1b\\"}},
+    }
     (trial_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
     monkeypatch.setattr(
         report,
         "_generate_suggestions_structured",
         lambda _skill, _findings, _rewards: [
-            {"suggestion": "Write the result file [/x]", "dimension": "goal_accuracy", "evidence_refs": []}
+            {"suggestion": "Write the result file [/x]\x1bc", "dimension": "goal_accuracy", "evidence_refs": []}
         ],
     )
     skill_name = "skill [bold]evil[/bold]"
@@ -399,10 +503,11 @@ def test_harbor_findings_report_renders_skill_and_model_literally(
         tmp_path,
     )
 
-    output = _ANSI.sub("", capsys.readouterr().out)
+    output = _terminal_text(capsys.readouterr().out)
     assert "combination for your skill: codex / gpt-[/x]" in output
     assert f"{skill_name} / codex / gpt-[/x] — Findings" in output
     assert "no result [/x]" in output
+    assert "Write the result file [/x]" in output
 
 
 @pytest.mark.parametrize("name", NAME_PAYLOADS)

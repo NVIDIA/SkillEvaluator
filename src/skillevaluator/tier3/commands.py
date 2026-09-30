@@ -62,7 +62,7 @@ from skillevaluator.tier3.results_location import (
     resolve_results_root,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
-from skillevaluator.utils.rich_markup import escape_markup
+from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
 console = Console()
 
@@ -930,8 +930,8 @@ def _print_validate_results(skill_path: Path, results: list[Any]) -> None:
         icon, style = status_icon.get(result.status, ("[ ? ]", "dim"))
         body.append(f"  {icon:<10s}", style=style)
         path_style = "bold" if result.status in ("error", "missing") else "white"
-        body.append(f"{result.path:<38s}", style=path_style)
-        body.append(f"{result.message}\n", style="dim")
+        body.append(f"{strip_terminal_controls(str(result.path)):<38s}", style=path_style)
+        body.append(f"{strip_terminal_controls(str(result.message))}\n", style="dim")
 
     n_ok = sum(1 for result in results if result.status == "ok")
     n_warn = sum(1 for result in results if result.status == "warning")
@@ -1070,7 +1070,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
             table.add_column("\nlift", justify="right", min_width=7)
 
     for metric in display_metrics:
-        row: list[str | Text] = [Text(metric)]
+        row: list[str | Text] = [Text(strip_terminal_controls(metric))]
         for agent in agents:
             with_score = _safe_score(agent_with[agent], metric)
             row.append(Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}"))

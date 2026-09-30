@@ -506,6 +506,38 @@ def test_bypass_flags_in_hooks_monitors_and_lsp(tmp_path: Path) -> None:
     assert all(f.severity == Severity.HIGH for f in bypass)
 
 
+_BYPASS_HOOKS = {"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "claude --yolo -p x"}]}]}}
+
+
+def test_oversize_hook_config_fails_closed(tmp_path: Path) -> None:
+    padded = json.dumps(_BYPASS_HOOKS) + " " * (PLUGIN_CONFIG_MAX_BYTES + 1)
+    result = _validate(_plugin(tmp_path, {}, {"hooks/hooks.json": padded}))
+    assert _checks(result)["plugin_component_unreadable"] == Severity.HIGH
+    assert not result.passed
+
+
+def test_settings_with_invalid_utf8_fails_closed(tmp_path: Path) -> None:
+    root = _plugin(tmp_path)
+    (root / "settings.json").write_bytes(b'{"permissions": {"defaultMode": "bypassPermissions"}, "x": "\xff"}')
+    result = _validate(root)
+    assert _checks(result)["plugin_component_unreadable"] == Severity.HIGH
+    assert not result.passed
+
+
+def test_large_rules_do_not_starve_config_reads(tmp_path: Path) -> None:
+    files: dict[str, str | dict | list] = {f"rules/r{i}.md": "a" * (1024 * 1024) for i in range(8)}
+    files["settings.json"] = {"permissions": {"defaultMode": "bypassPermissions"}}
+    files["hooks/hooks.json"] = _BYPASS_HOOKS
+    files[".mcp.json"] = {"mcpServers": {"fs": _PINNED_FS}}
+    result = _validate(_plugin(tmp_path, {}, files))
+    checks = _checks(result)
+    assert checks["plugin_settings_bypass_permissions"] == Severity.HIGH
+    assert checks["plugin_permission_bypass_flag"] == Severity.HIGH
+    assert "plugin_component_unreadable" not in checks
+    assert "mcp_config_file_too_large" not in checks
+    assert "fs" in _servers(result)
+
+
 def test_documentation_mentions_of_bypass_flags_are_not_flagged(tmp_path: Path) -> None:
     root = _plugin(
         tmp_path,

@@ -386,11 +386,17 @@ def normalize_declared_path(raw: str) -> DeclaredPath:
 
 
 class PluginRootReader:
-    """No-follow classification and bounded reads beneath one plugin root."""
+    """No-follow classification and bounded reads beneath one plugin root.
+
+    Security-relevant JSON configs (hooks, LSP, monitors, settings, MCP) draw on
+    their own read budget, so large skill or rule files read for the context-cost
+    estimate cannot starve them.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = Path(os.path.abspath(os.fspath(root)))  # noqa: PTH100 - lexical, never resolved
         self.bytes_read = 0
+        self.config_bytes_read = 0
 
     def display(self, rel: PurePosixPath | str) -> str:
         rel_text = str(rel)
@@ -422,21 +428,29 @@ class PluginRootReader:
                 return "special"
         return "special"
 
-    def read_text(self, rel: PurePosixPath, max_bytes: int) -> str:
-        """Bounded, anchored, no-follow UTF-8 read; raises :class:`SecurePathError`."""
-        remaining = CONTENT_DEDUP_MAX_TOTAL_BYTES - self.bytes_read
+    def read_text(self, rel: PurePosixPath, max_bytes: int, *, config: bool = False) -> str:
+        """Bounded, anchored, no-follow UTF-8 read; raises :class:`SecurePathError`.
+
+        ``config`` charges the read to the separate config budget.
+        """
+        used = self.config_bytes_read if config else self.bytes_read
+        budget = "config" if config else "inventory"
+        remaining = CONTENT_DEDUP_MAX_TOTAL_BYTES - used
         if remaining <= 0:
-            raise SecurePathError("total_size_limit", "Plugin inventory read budget exhausted.")
+            raise SecurePathError("total_size_limit", f"Plugin {budget} read budget exhausted.")
         try:
             with SecureRoot(self.root) as secure_root:
                 raw, _metadata = secure_root.read_bytes(Path(*rel.parts), min(max_bytes, remaining))
         except SecurePathError as exc:
             if exc.code == "file_size_limit" and remaining < max_bytes:
                 raise SecurePathError(
-                    "total_size_limit", "Plugin inventory read budget exhausted.", relative_path=rel.as_posix()
+                    "total_size_limit", f"Plugin {budget} read budget exhausted.", relative_path=rel.as_posix()
                 ) from exc
             raise
-        self.bytes_read += len(raw)
+        if config:
+            self.config_bytes_read += len(raw)
+        else:
+            self.bytes_read += len(raw)
         try:
             return raw.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
@@ -992,12 +1006,14 @@ class _Builder:
     # -- JSON-config component types (hooks, lsp, monitors, settings) ----- #
     def _load_json(self, rel: PurePosixPath, field_name: str) -> Any:
         try:
-            text = self.reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES)
+            text = self.reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES, config=True)
             return load_bounded_json(text)
         except (SecurePathError, StructuredDataError, OSError) as exc:
+            # Blocking: an unread hooks/LSP/monitor/settings config skips the
+            # permission-bypass and env-override checks, so fail closed.
             self.inventory.findings.append(
                 _plugin_finding(
-                    Severity.MEDIUM,
+                    Severity.HIGH,
                     "plugin_component_unreadable",
                     f"{field_name} config '{rel.as_posix()}' could not be read or parsed safely: {exc}",
                     self.reader.display(rel),
@@ -1641,14 +1657,19 @@ def _load_mcp_file(
 ) -> None:
     display = reader.display(rel)
     try:
-        text = reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES)
+        text = reader.read_text(rel, PLUGIN_CONFIG_MAX_BYTES, config=True)
     except SecurePathError as exc:
         if exc.code in {"file_size_limit", "total_size_limit"}:
+            problem = (
+                f"exceeds the {PLUGIN_CONFIG_MAX_BYTES}-byte limit"
+                if exc.code == "file_size_limit"
+                else f"could not be read: {exc}"
+            )
             collection.findings.append(
                 _plugin_finding(
                     Severity.HIGH,
                     "mcp_config_file_too_large",
-                    f"MCP config '{rel.as_posix()}' exceeds the {PLUGIN_CONFIG_MAX_BYTES}-byte limit",
+                    f"MCP config '{rel.as_posix()}' {problem}",
                     display,
                     "Keep MCP config files small; declare only server entries.",
                     category=MCP_CATEGORY,

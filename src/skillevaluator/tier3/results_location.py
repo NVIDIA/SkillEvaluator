@@ -929,7 +929,7 @@ def _is_completed_run_dir(path: Path) -> bool:
     pre-result legacy-summary contract. This keeps the symlink-less fallback in
     :func:`resolve_latest_results` from resolving aborted/empty runs,
     ``_harbor-*`` staging dirs, ``astra-cleanup``, or the ``<plugin>-plugin-eval``
-    wrapper directory (MR !29 review 59316310).
+    wrapper directory.
     """
     return run_directory_sort_key(path, require_completed_result=True) is not None
 

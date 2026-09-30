@@ -132,7 +132,7 @@ if TYPE_CHECKING:
     from skillevaluator.plugin_manifest import PluginManifestLocation
 
 # Shared with Harbor's runtime find_evals_file() and the report loader so a
-# dataset accepted/staged here is resolvable downstream (MR !29 review 59316232).
+# dataset accepted/staged here is resolvable downstream.
 _EVAL_DATASET_NAMES = tuple(f"evals{extension}" for extension in DATASET_EXTENSIONS)
 
 # Filename for the plugin's own runnable MCP servers. Kept distinct from the
@@ -185,7 +185,7 @@ class PluginEvalPackage:
         unresolvable remote refs / provider-only MCP that contribute nothing to
         the run) from a full one. Persisted into the agent_eval payload and a
         run-dir sidecar so it survives the temp package cleanup, instead of only
-        living only in temporary generated-package state (MR !29 review 59316231).
+        living only in temporary generated-package state.
         """
         unresolved_skill = list(self.unresolved_skill_refs)
         unresolved_rule = list(self.unresolved_rule_refs)
@@ -356,7 +356,7 @@ def prepare_plugin_eval_package(
     # contained skills (discovered from skills/ on disk), contained rule files are
     # discovered from <plugin>/rules/ and staged so they are actually exercised --
     # honoring the contained-plugin contract rather than silently dropping them.
-    # Bundle-reference plugins resolve their refs as before. MR !52 review.
+    # Bundle-reference plugins resolve their refs as before.
     rules_section = manifest.get("rules")
     if contained_form and not isinstance(rules_section, list):
         contained_rules = _discover_contained_rule_files(plugin_root)
@@ -648,7 +648,7 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
     Writes ``plugin_provenance.json`` into the durable run directory (best
     effort). Complements the copy embedded in the agent_eval payload, so even the
     standalone ``evaluate-plugin`` path (which builds no report payload) leaves a
-    durable record of a partial run (MR !29 review 59316231).
+    durable record of a partial run.
     """
     try:
         run_path = Path(run_dir)
@@ -1480,7 +1480,7 @@ def _reject_symlink_escapes(path: Path, containment_root: Path, *, label: str) -
     symlinks, so a plugin-controlled ``evals/`` or member ``evals/files/*``
     symlink would otherwise capture an arbitrary readable host file into the
     generated package — and thence the task context — *before* the
-    sandbox isolation boundary begins (MR !29 review 59912118).
+    sandbox isolation boundary begins.
 
     The boundary is an INDEPENDENTLY-resolved trusted root (the plugin dir or the
     member skill dir), never ``path`` itself: resolving the thing we are trying to
@@ -1638,8 +1638,7 @@ def _stage_member_files(
         return
     # copy2 + is_file() dereference symlinks, so a member evals/files symlink (the
     # files/ dir itself, or an entry beneath it) could pull a host file into the
-    # staged package. Bound against the member skill root, NOT files_dir itself
-    # (MR !29 review 59912118).
+    # staged package. Bound against the member skill root, NOT files_dir itself.
     _reject_symlink_escapes(files_dir, containment_root, label=f"member '{skill_name}' eval files")
     for src in sorted(p for p in files_dir.rglob("*") if p.is_file()):
         rel = src.relative_to(files_dir).as_posix()

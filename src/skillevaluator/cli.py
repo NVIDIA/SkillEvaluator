@@ -3049,9 +3049,13 @@ def evaluate_plugin(
                 ("Provider-only MCP servers", prepared.unresolved_mcp_servers),
             ):
                 if values:
-                    console.print(f"[yellow]{label} (deferred, not evaluated):[/yellow] {', '.join(values)}")
+                    console.print(
+                        f"[yellow]{label} (deferred, not evaluated):[/yellow] {escape_markup(', '.join(values))}"
+                    )
             if prepared.skipped or prepared.package_path is None:
-                console.print(f"[yellow]Skipping plugin evaluation:[/yellow] {prepared.skip_reason}")
+                console.print(
+                    f"[yellow]Skipping plugin evaluation:[/yellow] {escape_markup(str(prepared.skip_reason))}"
+                )
                 return
             effective_lift_mode, integration_skip_reason = _plugin_lift_mode_for_evidence(prepared, lift_mode)
             if lift_mode in {"integration", "both"}:
@@ -3064,7 +3068,7 @@ def evaluate_plugin(
                     )
                 if integration_skip_reason:
                     console.print(
-                        f"[yellow]Integration skipped:[/yellow] {integration_skip_reason}. "
+                        f"[yellow]Integration skipped:[/yellow] {escape_markup(integration_skip_reason)}. "
                         "Running effectiveness only."
                     )
 

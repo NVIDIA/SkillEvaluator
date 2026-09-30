@@ -330,7 +330,7 @@ def _hostile_patch(scale: int) -> str:
     )
 
 
-def _best_elapsed(run, traj: dict, repeats: int = 3) -> tuple[float, dict]:
+def _best_elapsed(run, traj: dict, repeats: int = 5) -> tuple[float, dict]:
     best = float("inf")
     for _ in range(repeats):
         started = time.perf_counter()

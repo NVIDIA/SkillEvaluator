@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.eval_core import atif_helpers
+from skillevaluator.tier3.eval_core import atif_helpers, secret_redaction
 
 _TEMPLATE = (
     Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
@@ -67,11 +67,34 @@ def test_non_token_github_prefixes_are_untouched(redact, text):
     assert redact(text) == text
 
 
-@REDACTORS
-def test_github_token_redaction_is_linear(redact):
-    text = ("ghp_" + "a" * 300 + " ") * 2_000 + "github_pat_" + "_" * 500_000
+def _near_miss_text(copies: int) -> str:
+    # Each run is one alphanumeric or underscore too long to end on a word boundary
+    # within the 255-character limit, so every match attempt backtracks and fails.
+    return ("ghp_" + "a" * 300 + " ") * copies + (" github_pat_" + "_" * 300) * copies
 
-    started = time.perf_counter()
-    redact(text)
 
-    assert time.perf_counter() - started < 1.0
+def _best_elapsed(pattern, text: str, repeats: int = 5) -> float:
+    best = float("inf")
+    for _ in range(repeats):
+        started = time.perf_counter()
+        pattern.sub("", text)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        secret_redaction.LOG_GITHUB_TOKEN_RE,
+        secret_redaction.LOG_GITHUB_PAT_RE,
+        eval_template.LOG_GITHUB_TOKEN_RE,
+        eval_template.LOG_GITHUB_PAT_RE,
+    ],
+    ids=["host-classic", "host-fine-grained", "template-classic", "template-fine-grained"],
+)
+def test_github_token_patterns_scale_linearly(pattern):
+    small = _best_elapsed(pattern, _near_miss_text(250))
+    large = _best_elapsed(pattern, _near_miss_text(2_000))
+
+    # 8x the input takes about 8x the time when matching is linear, and 64x when it is quadratic.
+    assert large < 24 * small

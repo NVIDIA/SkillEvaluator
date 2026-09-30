@@ -113,6 +113,7 @@ def test_opencode_json_tool_use_and_read():
     assert "Calculator" in read_call["observation"]
     bash_call = next(tc for tc in tcs if tc["action"] == "bash")
     assert "cat" in json.dumps(bash_call["action_input"]).lower()
+    assert "exit_code=0" in bash_call["observation"]
 
 
 def test_opencode_error_only_log_returns_none():
@@ -298,6 +299,28 @@ def test_error_recovery_detects_codex_status_failed_observations():
     result = check_error_recovery(extract_tool_calls_as_dicts(traj))
     assert result["first_attempt_clean"] is False
     assert result["score"] < 1.0
+
+
+def test_error_recovery_detects_opencode_completed_nonzero_exit():
+    # OpenCode can mark bash as status=completed while metadata.exit is nonzero.
+    log = (
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"call-fail",'
+        '"state":{"status":"completed","input":{"command":"python run.py"},'
+        '"output":"","metadata":{"exit":1}}}}\n'
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"call-ok",'
+        '"state":{"status":"completed","input":{"command":"python run.py"},'
+        '"output":"ok","metadata":{"exit":0}}}}\n'
+    )
+    traj = synthetic_trajectory_from_opencode_json(log)
+    assert traj is not None
+    tcs = extract_tool_calls_as_dicts(traj)
+    assert "exit_code=1" in tcs[0]["observation"]
+    assert "status=completed" in tcs[0]["observation"]
+    assert "exit_code=0" in tcs[1]["observation"]
+    result = check_error_recovery(tcs)
+    assert result["first_attempt_clean"] is False
+    assert result["score"] < 1.0
+    assert "All commands succeeded on first attempt" not in result["reason"]
 
 
 def test_codex_command_execution_preserves_failed_terminal_evidence():

@@ -458,11 +458,32 @@ def _opencode_error_text(state: dict[str, Any]) -> str:
     return str(error)
 
 
+def _opencode_exit_code(state: dict[str, Any]) -> int | None:
+    """Return OpenCode bash ``metadata.exit`` when present."""
+    metadata = state.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    exit_code = metadata.get("exit")
+    if exit_code is None:
+        return None
+    try:
+        return int(exit_code)
+    except (TypeError, ValueError):
+        return None
+
+
 def _opencode_tool_observation(state: dict[str, Any]) -> str:
+    """Build a bounded observation that retains status, exit code, and errors."""
+    prefix_parts: list[str] = []
     status = state.get("status")
-    prefix = f"status={status}" if status is not None and str(status).strip() else ""
+    if status is not None and str(status).strip():
+        prefix_parts.append(f"status={status}")
+    exit_code = _opencode_exit_code(state)
+    if exit_code is not None:
+        # Emit exit_code= so Harbor error-recovery matches Codex-shaped evidence.
+        prefix_parts.append(f"exit_code={exit_code}")
     return _bounded_tool_observation(
-        prefix=prefix,
+        prefix="\n".join(prefix_parts),
         body=_opencode_output_payload(state),
         suffix=_opencode_error_text(state),
     )

@@ -64,7 +64,22 @@ _SENSITIVE_QUOTED_ASSIGNMENT_RE = re.compile(
 # The whitespace after ":" must stay backtrackable: in "token:  ," the value is the last blank.
 _SENSITIVE_COLON_ASSIGNMENT_RE = re.compile(rf"(?im){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>:)\s*[^\r\n,;]+")
 _SENSITIVE_EQUALS_ASSIGNMENT_RE = re.compile(rf"(?i){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>=)\s*+[^\s\"',;]+")
-_PRIVATE_KEY_LABEL = r"(?:[A-Z0-9][A-Z0-9-]* )*PRIVATE KEY(?: [A-Z0-9][A-Z0-9-]*)*"
+# A PEM label word is letters and digits joined by single "-" (the RFC 7468 label
+# shape). It used to be ``[A-Z0-9][A-Z0-9-]*``, which can contain "-----", so the
+# label of one "-----BEGIN " header ran on across every later header on the line and
+# each header rescanned the rest of the text ("-----BEGIN A" * n was quadratic).
+# Trade-off: a header is no longer read as a private-key header when a label word has
+# "--" or a trailing "-" ("X- PRIVATE KEY"), or when the label only reaches "PRIVATE
+# KEY" by running on into the next delimiter on the same line ("-----BEGIN
+# CERTIFICATE----------END RSA PRIVATE KEY-----"). RFC 7468 labels do neither.
+_PEM_LABEL_WORD = r"[A-Z0-9]++(?:-[A-Z0-9]++)*+"
+# The label is committed at its first "PRIVATE KEY" pair that is followed by a space
+# or "-----". The former ``(?:word )*PRIVATE KEY`` retried every later pair and
+# rescanned the words after it ("PRIVATE KEY " * n was quadratic), but a later pair
+# can only reach the same label end, because the words after the first pair lead to
+# the same end.
+_PRIVATE_KEY_LABEL = rf"(?>(?:{_PEM_LABEL_WORD} )*?PRIVATE KEY(?= |-----))(?: {_PEM_LABEL_WORD})*+"
+_PRIVATE_KEY_HEADER_RE = re.compile(rf"-----BEGIN {_PRIVATE_KEY_LABEL}-----")
 _PEM_REDACTIONS = (
     (
         re.compile(
@@ -82,19 +97,21 @@ _PEM_REDACTIONS = (
         ),
         "private-key-<redacted>",
     ),
-    (
-        re.compile(
-            rf"-----BEGIN {_PRIVATE_KEY_LABEL}-----"
-            r"(?![\s\S]*-----END )[\s\S]*\Z"
-        ),
-        "private-key-<redacted>",
-    ),
+)
+# A JWT used to start at any ``\beyJ``, so in a run of JWT characters such as
+# "eyJ-" * n every "-eyJ" was a start, and each start scanned to the end of the run
+# looking for ".". Now a match starts only at the beginning of a run. The part of
+# the run before its first ``\beyJ`` is captured as ``lead`` and written back
+# unchanged, which keeps JWTs glued to a "-" (x-eyJ...) redacted. Later starts in the
+# same run are never tried: their first segment reaches the same "." with fewer
+# characters, so they could only fail where the first start failed.
+_JWT_CHAR = r"[A-Za-z0-9_-]"
+_JWT_RE = re.compile(
+    rf"(?<!{_JWT_CHAR})(?P<lead>(?>(?:\b|{_JWT_CHAR}*?-)(?=eyJ)))"
+    rf"eyJ{_JWT_CHAR}{{10,}}+\.eyJ{_JWT_CHAR}{{10,}}+\.{_JWT_CHAR}{{10,}}\b"
 )
 _REDACTIONS = (
-    (
-        re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
-        "jwt-<redacted>",
-    ),
+    (_JWT_RE, r"\g<lead>jwt-<redacted>"),
     (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"), "aws-access-key-<redacted>"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer <redacted>"),
     (re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}"), "sk-<redacted>"),
@@ -137,6 +154,21 @@ def _redact_auth_header(match: re.Match[str]) -> str:
     return f"{match.group('key')}: {match.group('scheme')} <redacted>"
 
 
+def _redact_unterminated_private_key(text: str) -> str:
+    """Redact from the first private-key header with no later ``-----END `` to the end of the text."""
+    # Same result as substituting ``HEADER(?![\s\S]*-----END )[\s\S]*\Z``, whose
+    # lookahead rescanned the rest of the text from every header. A header qualifies
+    # when the last "-----END " in the text starts before the header ends.
+    last_end = text.rfind("-----END ")
+    match = _PRIVATE_KEY_HEADER_RE.search(text)
+    while match is not None:
+        if match.end() > last_end:
+            return f"{text[: match.start()]}private-key-<redacted>"
+        # Headers can overlap ("...PRIVATE KEY-----BEGIN ..."), so resume inside this one.
+        match = _PRIVATE_KEY_HEADER_RE.search(text, match.start() + 1)
+    return text
+
+
 def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:
     """Best-effort masking for credentials before writing logs or artifacts."""
     out = value
@@ -144,6 +176,7 @@ def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:
     # or header rule can consume only its BEGIN delimiter and orphan the body.
     for pattern, replacement in _PEM_REDACTIONS:
         out = pattern.sub(replacement, out)
+    out = _redact_unterminated_private_key(out)
     out = _AUTH_HEADER_RE.sub(_redact_auth_header, out)
     out = _SENSITIVE_QUOTED_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)
     out = _SENSITIVE_COLON_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)

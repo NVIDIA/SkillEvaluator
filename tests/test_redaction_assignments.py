@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sensitive-assignment redaction: representative outputs and linear-time matching."""
+"""Credential redaction: representative outputs and linear-time matching."""
 
 from __future__ import annotations
 
@@ -60,10 +60,85 @@ def test_redact_sensitive_text_redacts_assignments(source: str, expected: str) -
     assert redact_sensitive_text(source) == expected
 
 
-# Inputs shaped to make the former key pattern, ``\b[a-z0-9_.-]*(?:word)[a-z0-9_.-]*``,
-# backtrack: a word boundary at every offset of one long key-character run, many
-# sensitive words in one run, and runs followed by a value that never matches. Each
-# took several seconds with that pattern and takes milliseconds now.
+_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(_JWT, "jwt-<redacted>", id="start-of-text"),
+        pytest.param(f"x {_JWT} y", "x jwt-<redacted> y", id="after-space"),
+        pytest.param(f'"{_JWT}"', '"jwt-<redacted>"', id="quoted"),
+        pytest.param(f"jwt={_JWT}", "jwt=jwt-<redacted>", id="after-equals"),
+        pytest.param(f"Bearer {_JWT}", "Bearer jwt-<redacted>", id="after-bearer"),
+        pytest.param(f"x-{_JWT}", "x-jwt-<redacted>", id="glued-to-dash"),
+        pytest.param(f"abc-def-{_JWT}", "abc-def-jwt-<redacted>", id="glued-to-dashed-run"),
+        pytest.param(f"eyJ-eyJ-{_JWT}", "jwt-<redacted>", id="run-starts-with-eyJ"),
+        pytest.param(f"{_JWT}.{_JWT}", "jwt-<redacted>.jwt-<redacted>", id="two-dotted"),
+        pytest.param(f"a_{_JWT}", f"a_{_JWT}", id="glued-to-underscore-kept"),
+        pytest.param(f"x{_JWT}", f"x{_JWT}", id="glued-to-letter-kept"),
+        pytest.param(f"é{_JWT}", f"é{_JWT}", id="glued-to-non-ascii-letter-kept"),
+    ],
+)
+def test_redact_sensitive_text_redacts_jwt_by_position(source: str, expected: str) -> None:
+    assert redact_sensitive_text(source) == expected
+
+
+_KEY_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(
+            f"-----BEGIN X-Y PRIVATE KEY-----\n{_KEY_BODY}\n-----END X-Y PRIVATE KEY-----",
+            "private-key-<redacted>",
+            id="dashed-label-word",
+        ),
+        pytest.param(
+            f"-----BEGIN A-B-C PRIVATE KEY 1-----\n{_KEY_BODY}\n-----END A-B-C PRIVATE KEY 1-----",
+            "private-key-<redacted>",
+            id="words-before-and-after",
+        ),
+        pytest.param(
+            f"-----BEGIN PRIVATE KEYS PRIVATE KEY-----\n{_KEY_BODY}\n-----END PRIVATE KEYS PRIVATE KEY-----",
+            "private-key-<redacted>",
+            id="later-private-key-pair",
+        ),
+        pytest.param(
+            f"-----BEGIN PRIVATE KEY-----{_KEY_BODY}-----END PRIVATE KEY-----",
+            "private-key-<redacted>",
+            id="single-line",
+        ),
+        pytest.param(
+            f"-----BEGIN A-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY}\n-----END RSA PRIVATE KEY-----",
+            "-----BEGIN Aprivate-key-<redacted>",
+            id="glued-to-earlier-header",
+        ),
+        pytest.param(
+            f"-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\n{_KEY_BODY}",
+            "-----END CERTIFICATE-----\nprivate-key-<redacted>",
+            id="truncated-after-earlier-end",
+        ),
+        pytest.param("-----BEGIN PRIVATE KEY-----END x", "private-key-<redacted>", id="truncated-header-runs-into-end"),
+        pytest.param(
+            f"-----BEGIN PRIVATE KEY-----BEGIN PRIVATE KEY-----\n{_KEY_BODY}",
+            "private-key-<redacted>",
+            id="truncated-overlapping-headers",
+        ),
+    ],
+)
+def test_redact_sensitive_text_redacts_private_key_labels(source: str, expected: str) -> None:
+    assert redact_sensitive_text(source) == expected
+
+
+# Inputs shaped to make the former patterns backtrack. For the assignment key pattern,
+# ``\b[a-z0-9_.-]*(?:word)[a-z0-9_.-]*``: a word boundary at every offset of one long
+# key-character run, many sensitive words in one run, and runs followed by a value
+# that never matches. For the JWT pattern: an ``eyJ`` start after every "-" of one
+# run. For the private-key patterns: header labels that ran on across later headers,
+# many "PRIVATE KEY" pairs in one label, and many headers before one final "-----END ".
+# Each took seconds with the former patterns and takes milliseconds now.
 _ADVERSARIAL_INPUTS = {
     "boundary-at-every-offset": "a-" * 5_000,
     "dotted-boundary-at-every-offset": "x." * 5_000,
@@ -72,17 +147,28 @@ _ADVERSARIAL_INPUTS = {
     "unterminated-quote": "token-" * 300 + "token='" + "x" * 3_000,
     "blank-colon-value": "token" * 5_000 + ":" + "\n" * 25_000 + ",",
     "blank-equals-value": "token" * 5_000 + "=" + " " * 25_000 + ",",
+    "jwt-start-after-every-dash": "eyJ-" * 32_768,
+    "pem-label-across-headers": "-----BEGIN A" * 10_923,
+    "pem-repeated-private-key-headers": "-----BEGIN PRIVATE KEY-----" * 4_855,
+    "pem-repeated-private-key-pairs": "-----BEGIN " + "PRIVATE KEY " * 5_000,
+    "pem-headers-before-final-end": "-----BEGIN PRIVATE KEY-----\n" * 7_000 + "-----END x",
+    "pem-label-word-ending-in-dash": "-----BEGIN PRIVATE KEY X-" * 2_622,
+}
+# Every other adversarial input must come back unchanged.
+_ADVERSARIAL_OUTPUTS = {
+    "pem-repeated-private-key-headers": "private-key-<redacted>",
+    "pem-label-word-ending-in-dash": "private-key-<redacted>",
 }
 
 
-@pytest.mark.parametrize("source", list(_ADVERSARIAL_INPUTS.values()), ids=list(_ADVERSARIAL_INPUTS))
-def test_redact_sensitive_text_is_fast_on_adversarial_assignments(source: str) -> None:
+@pytest.mark.parametrize(("name", "source"), list(_ADVERSARIAL_INPUTS.items()), ids=list(_ADVERSARIAL_INPUTS))
+def test_redact_sensitive_text_is_fast_on_adversarial_inputs(name: str, source: str) -> None:
     started = time.perf_counter()
     redacted = redact_sensitive_text(source)
     elapsed = time.perf_counter() - started
 
     assert elapsed < 1.0, f"redaction took {elapsed:.2f}s on a {len(source)}-character input"
-    assert redacted == source
+    assert redacted == _ADVERSARIAL_OUTPUTS.get(name, source)
 
 
 def test_redact_sensitive_text_redacts_value_after_long_key_run() -> None:

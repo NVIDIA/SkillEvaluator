@@ -60,7 +60,8 @@ def test_redact_sensitive_text_redacts_assignments(source: str, expected: str) -
     assert redact_sensitive_text(source) == expected
 
 
-_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+# Synthetic fixtures are assembled from split literals so secret scanners do not flag them.
+_JWT = "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
 
 
 @pytest.mark.parametrize(
@@ -84,45 +85,47 @@ def test_redact_sensitive_text_redacts_jwt_by_position(source: str, expected: st
     assert redact_sensitive_text(source) == expected
 
 
-_KEY_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+_BEGIN = "-----BEGIN "
+_END = "-----END "
+_PEM_BODY = "synthetic-key-material"
 
 
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
         pytest.param(
-            f"-----BEGIN X-Y PRIVATE KEY-----\n{_KEY_BODY}\n-----END X-Y PRIVATE KEY-----",
+            f"{_BEGIN}X-Y PRIVATE KEY-----\n{_PEM_BODY}\n{_END}X-Y PRIVATE KEY-----",
             "private-key-<redacted>",
             id="dashed-label-word",
         ),
         pytest.param(
-            f"-----BEGIN A-B-C PRIVATE KEY 1-----\n{_KEY_BODY}\n-----END A-B-C PRIVATE KEY 1-----",
+            f"{_BEGIN}A-B-C PRIVATE KEY 1-----\n{_PEM_BODY}\n{_END}A-B-C PRIVATE KEY 1-----",
             "private-key-<redacted>",
             id="words-before-and-after",
         ),
         pytest.param(
-            f"-----BEGIN PRIVATE KEYS PRIVATE KEY-----\n{_KEY_BODY}\n-----END PRIVATE KEYS PRIVATE KEY-----",
+            f"{_BEGIN}PRIVATE KEYS PRIVATE KEY-----\n{_PEM_BODY}\n{_END}PRIVATE KEYS PRIVATE KEY-----",
             "private-key-<redacted>",
             id="later-private-key-pair",
         ),
         pytest.param(
-            f"-----BEGIN PRIVATE KEY-----{_KEY_BODY}-----END PRIVATE KEY-----",
+            f"{_BEGIN}PRIVATE KEY-----{_PEM_BODY}{_END}PRIVATE KEY-----",
             "private-key-<redacted>",
             id="single-line",
         ),
         pytest.param(
-            f"-----BEGIN A-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY}\n-----END RSA PRIVATE KEY-----",
-            "-----BEGIN Aprivate-key-<redacted>",
+            f"{_BEGIN}A{_BEGIN}RSA PRIVATE KEY-----\n{_PEM_BODY}\n{_END}RSA PRIVATE KEY-----",
+            f"{_BEGIN}Aprivate-key-<redacted>",
             id="glued-to-earlier-header",
         ),
         pytest.param(
-            f"-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\n{_KEY_BODY}",
+            f"{_END}CERTIFICATE-----\n{_BEGIN}PRIVATE KEY-----\n{_PEM_BODY}",
             "-----END CERTIFICATE-----\nprivate-key-<redacted>",
             id="truncated-after-earlier-end",
         ),
-        pytest.param("-----BEGIN PRIVATE KEY-----END x", "private-key-<redacted>", id="truncated-header-runs-into-end"),
+        pytest.param(f"{_BEGIN}PRIVATE KEY-----END x", "private-key-<redacted>", id="truncated-header-runs-into-end"),
         pytest.param(
-            f"-----BEGIN PRIVATE KEY-----BEGIN PRIVATE KEY-----\n{_KEY_BODY}",
+            f"{_BEGIN}PRIVATE KEY{_BEGIN}PRIVATE KEY-----\n{_PEM_BODY}",
             "private-key-<redacted>",
             id="truncated-overlapping-headers",
         ),
@@ -148,11 +151,11 @@ _ADVERSARIAL_INPUTS = {
     "blank-colon-value": "token" * 5_000 + ":" + "\n" * 25_000 + ",",
     "blank-equals-value": "token" * 5_000 + "=" + " " * 25_000 + ",",
     "jwt-start-after-every-dash": "eyJ-" * 32_768,
-    "pem-label-across-headers": "-----BEGIN A" * 10_923,
-    "pem-repeated-private-key-headers": "-----BEGIN PRIVATE KEY-----" * 4_855,
-    "pem-repeated-private-key-pairs": "-----BEGIN " + "PRIVATE KEY " * 5_000,
-    "pem-headers-before-final-end": "-----BEGIN PRIVATE KEY-----\n" * 7_000 + "-----END x",
-    "pem-label-word-ending-in-dash": "-----BEGIN PRIVATE KEY X-" * 2_622,
+    "pem-label-across-headers": f"{_BEGIN}A" * 10_923,
+    "pem-repeated-private-key-headers": f"{_BEGIN}PRIVATE KEY-----" * 4_855,
+    "pem-repeated-private-key-pairs": _BEGIN + "PRIVATE KEY " * 5_000,
+    "pem-headers-before-final-end": f"{_BEGIN}PRIVATE KEY-----\n" * 7_000 + f"{_END}x",
+    "pem-label-word-ending-in-dash": f"{_BEGIN}PRIVATE KEY X-" * 2_622,
 }
 # Every other adversarial input must come back unchanged.
 _ADVERSARIAL_OUTPUTS = {

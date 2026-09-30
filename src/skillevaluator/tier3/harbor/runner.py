@@ -2465,6 +2465,7 @@ def _run_harbor_eval_impl(
                     base_image=base_image,
                     custom_dockerfile_mode=dockerfile_mode,
                     copy_repo=copy_repo,
+                    repo_context_exclude_paths=(root,),
                     runtime_env=dict(runtime_plans[agent].staged_env),
                     verifier_env=staged_verifier_env,
                     pre_agent_setup=harbor_config.get("pre_agent_setup", []),

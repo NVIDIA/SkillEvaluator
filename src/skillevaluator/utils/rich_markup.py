@@ -18,6 +18,9 @@ _TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 # quantifier keep long runs linear). The optional group is set when the bracket
 # opens something Rich parses as a tag (same shape as ``rich.markup.RE_TAGS``).
 _OPEN_BRACKET = re.compile(r"(?<!\\)(\\*+)\[(?=([a-z#/@][^\[\]]*\])?)")
+# Rich halves a backslash run only when a tag follows it, so an escaped trailing
+# run is always followed by this empty tag pair.
+_EMPTY_TAG = "[bold][/bold]"
 
 
 def strip_terminal_controls(text: str) -> str:
@@ -47,7 +50,9 @@ def escape_markup(text: str) -> str:
     are removed first (see ``strip_terminal_controls``). Every bracket is then
     escaped: ``rich.markup.escape`` only escapes tag-shaped brackets, but Rich
     also turns every plain-text ``\\[`` into ``[``, so Windows paths such as
-    ``C:\\skills\\[x]`` would lose a separator.
+    ``C:\\skills\\[x]`` would lose a separator. A trailing backslash run is
+    doubled and closed with an empty tag, so it renders literally whatever
+    follows it in the markup (a tag, plain text, or nothing).
 
     Rich also replaces ``:name:`` emoji codes, which markup cannot escape.
     Consoles that print untrusted text must be created with ``emoji=False``, and
@@ -58,5 +63,4 @@ def escape_markup(text: str) -> str:
     escaped = _OPEN_BRACKET.sub(_escape_bracket, text)
     body = escaped.rstrip("\\")
     trailing = len(escaped) - len(body)
-    # Double trailing backslashes so they stay literal and cannot escape the tag that follows.
-    return body + "\\" * (2 * trailing) if trailing else escaped
+    return body + "\\" * (2 * trailing) + _EMPTY_TAG if trailing else escaped

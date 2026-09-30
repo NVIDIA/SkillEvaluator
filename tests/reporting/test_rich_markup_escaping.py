@@ -15,7 +15,7 @@ import io
 import json
 import logging
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -226,6 +226,34 @@ def test_cli_report_strips_terminal_control_sequences(payload: str, visible: str
     text = _terminal_text(console.file.getvalue())
     for label in ("Judge notes", "Finding message", "Judge reasoning", "Skipped because"):
         assert f"{label} {visible}".rstrip() in text
+
+
+def test_trailing_backslashes_render_literally(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator import cli as cli_module
+
+    console = _recording_console(width=250)
+    monkeypatch.setattr(cli_module, "console", console)
+    reporter = CLIReporter(console=console)
+    errored = ValidationResult(validator_name="SCHEMA", validator_description="Schema checks")
+    errored.add_error("Output directory is not writable: D:\\reports\\")
+    # The judge explanation is cut at 80 characters, here right after a backslash.
+    prefix = "Agent wrote its report to C:\\Users\\runner\\AppData\\Local\\Temp\\"
+    explanation = prefix + "r" * (79 - len(prefix)) + "\\ and then exited without writing result.json"
+    judged = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live agent evaluation")
+    judged.metadata["agent_eval"] = {
+        "verdict": "pass",
+        "composite_lift": 0.1,
+        "insights": {"goal": {"score": "PASS", "explanation": explanation}},
+    }
+
+    cli_module._print_run_banner(PureWindowsPath("\\\\fileserver\\skills\\"), "skill", None)
+    reporter.print(errored)
+    reporter.print(judged)
+
+    lines = [line.rstrip(" │") for line in console.export_text().splitlines()]
+    assert "Target: \\\\fileserver\\skills\\" in lines
+    assert "  • Output directory is not writable: D:\\reports\\" in lines
+    assert any(line.endswith(f" {explanation[:80]}") for line in lines)
 
 
 def test_cli_reporter_consoles_print_emoji_codes_literally(

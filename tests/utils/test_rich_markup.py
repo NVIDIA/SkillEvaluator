@@ -14,6 +14,18 @@ from rich.console import Console
 
 from skillevaluator.utils.rich_markup import escape_markup
 
+# Places escaped text can sit in markup, with the expected render. A trailing
+# backslash renders differently depending on what follows it.
+CONTEXTS = {
+    "between tags": ("[green]<[/green]{}[green]>[/green]", "<{}>"),
+    "end of markup": ("pre {}", "pre {}"),
+    "before plain text": ("pre {} post", "pre {} post"),
+    "before a closing tag": ("[dim]{}[/dim]", "{}"),
+    "before an implicit close": ("[dim]{}[/]", "{}"),
+    "inside a style": ("[bold]<{}>[/bold]", "<{}>"),
+    "before a non-tag bracket": ("{}[INCOMPLETE]", "{}[INCOMPLETE]"),
+}
+
 
 def _render(markup: str) -> str:
     console = Console(file=io.StringIO(), record=True, width=10_000, highlight=False)
@@ -57,12 +69,21 @@ def test_escaped_text_renders_literally_between_plain_text() -> None:
     assert _render(f"pre {escape_markup(text)} post") == f"pre {text} post"
 
 
-def test_every_short_string_renders_literally() -> None:
+@pytest.mark.parametrize("text", ["C:\\", "D:\\reports\\", "\\\\fileserver\\skills\\", "a\\\\\\"])
+@pytest.mark.parametrize("context", CONTEXTS)
+def test_trailing_backslashes_render_literally(context: str, text: str) -> None:
+    template, expected = CONTEXTS[context]
+    assert _render(template.replace("{}", escape_markup(text))) == expected.replace("{}", text)
+
+
+@pytest.mark.parametrize("context", CONTEXTS)
+def test_every_short_string_renders_literally(context: str) -> None:
+    template, expected = CONTEXTS[context]
     alphabet = ["[", "]", "\\", "/", "a", "#", "="]
     for length in range(6):
         for chars in itertools.product(alphabet, repeat=length):
             text = "".join(chars)
-            assert _render(f"[green]<[/green]{escape_markup(text)}[green]>[/green]") == f"<{text}>", text
+            assert _render(template.replace("{}", escape_markup(text))) == expected.replace("{}", text), text
 
 
 @pytest.mark.parametrize(

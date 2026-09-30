@@ -372,7 +372,13 @@ def run_plugin_catalog_checks(
     except PluginProfileError as exc:
         return _catalog_check_skips(f"Plugin manifest could not supply a comparable profile: {exc}")
     except (SecurePathError, ValueError) as exc:
-        return [_unsafe_plugin_result(exc, name=INTER_SKILL_NAME, description=INTER_SKILL_DESCRIPTION)]
+        # The profile reads the manifest and the bundled skills, so neither
+        # check can run; both report the refusal so Check B never vanishes.
+        reason = sanitize_path_text(str(exc), (plugin_root, catalog))
+        return [
+            _unsafe_plugin_result(reason, name=INTER_SKILL_NAME, description=INTER_SKILL_DESCRIPTION),
+            _unsafe_plugin_result(reason, name=INTER_PLUGIN_NAME, description=INTER_PLUGIN_DESCRIPTION),
+        ]
 
     safe_paths = (plugin_root, catalog)
     registry = EmbeddingRegistry(EmbeddingClient(model=model), max_scalar_comparisons=max_scalar_comparisons)

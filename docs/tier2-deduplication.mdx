@@ -354,6 +354,9 @@ work limits are recorded as skipped with a reason, not as failures. Direct
 `tier2` rejects a malformed, linked, oversized, or incompatible catalog before
 any model call. Unsafe linked, hard-linked, or special plugin inputs are refused
 as blocking execution failures because the requested check cannot run safely.
+An unsafe or undecodable plugin manifest or bundled skill path fails both
+C-inter and B with a path-free reason, so neither check disappears from the
+report.
 
 The public implementation does not connect to a remote vector database or fetch
 remote component catalogs. Catalog reads use the same bounded, no-follow loader

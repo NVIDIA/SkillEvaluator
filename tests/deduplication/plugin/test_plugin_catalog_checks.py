@@ -759,10 +759,36 @@ class TestUnsafeOrOversizedInputs:
         catalog = tmp_path / "catalog.json"
         catalog.write_text("{}", encoding="utf-8")
 
-        [result] = run_plugin_catalog_checks(plugin, catalog=catalog)
+        results = _by_name(run_plugin_catalog_checks(plugin, catalog=catalog))
 
-        assert not result.passed
-        assert result.metadata["security_failure"] is True
+        assert set(results) == {"Inter-Skill Deduplication", "Inter-Plugin Deduplication"}
+        for result in results.values():
+            assert not result.passed
+            assert result.metadata["security_failure"] is True
+            assert [finding.check_name for finding in result.findings] == ["unsafe_plugin_filesystem"]
+            assert str(tmp_path) not in " ".join(finding.message for finding in result.findings)
+        assert not embed_calls
+
+    def test_unsafe_manifest_emits_both_catalog_results(self, plugins: Path, tmp_path: Path, embed_calls) -> None:
+        catalog = tmp_path / "catalog.json"
+        _save_catalog(plugins, catalog)
+        embed_calls.clear()
+        plugin = tmp_path / "mine" / "alpha"
+        plugin.mkdir(parents=True)
+        # Not valid UTF-8: the manifest locator refuses it as an unsafe manifest.
+        (plugin / "agent_plugin.yaml").write_bytes(b"name: alpha\ndescription: Deploy kubernetes workloads \xff\n")
+
+        results = _by_name(run_plugin_catalog_checks(plugin, catalog=catalog))
+
+        assert set(results) == {"Inter-Skill Deduplication", "Inter-Plugin Deduplication"}
+        for result in results.values():
+            assert not result.passed
+            assert result.metadata["security_failure"] is True
+            assert result.metadata["execution_status"] == "failed"
+            [finding] = result.findings
+            assert finding.category == "PLUGIN_SECURITY"
+            assert "agent_plugin.yaml" in finding.message
+            assert str(tmp_path) not in finding.message
         assert not embed_calls
 
 

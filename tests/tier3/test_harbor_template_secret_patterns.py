@@ -159,6 +159,25 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
 
 
 @pytest.mark.parametrize(
+    "name",
+    [
+        "LOG_SK_RE",
+        "LOG_NVAPI_RE",
+        "LOG_CRSR_RE",
+        "OPENSHIFT_TOKEN_RE",
+        "LOG_JWT_RE",
+        "LOG_GITHUB_TOKEN_RE",
+        "LOG_GITHUB_PAT_RE",
+    ],
+)
+def test_log_redaction_patterns_stay_in_sync_with_eval_core(name):
+    from skillevaluator.tier3.eval_core import secret_redaction
+
+    assert hasattr(eval_template, name), f"template missing {name}"
+    assert _normalize(getattr(eval_template, name)) == _normalize(getattr(secret_redaction, name))
+
+
+@pytest.mark.parametrize(
     "line",
     [
         "plain text with task-granularity is unchanged",
@@ -172,6 +191,8 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
             "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
         ),
         "runtime opaque-secret-value",
+        "github ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8" + " and ghp_short",
+        "github github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123",
     ],
 )
 def test_template_log_redaction_matches_eval_core(line):

@@ -4,6 +4,48 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added public plugin evaluation across all tiers: static schema and MCP checks,
+  advisory offline dependency/context deduplication, and Harbor-backed live
+  evaluation with effectiveness and optional sum-of-parts Integration arms.
+- Tier 3 reports paired case-bootstrap 95% intervals for Skill and Integration
+  lift, pass^k, cost per passed case, token efficiency, and measured context
+  cost as report-only statistics. Integration becomes inconclusive when its
+  interval includes zero, too few cases pair, or per-case coverage is incomplete.
+- Plugin Tier 3 runs record report-only per-trial and per-arm component signals
+  (activations, tool selection, arguments, MCP outcomes, order, handoffs,
+  conflicts, coverage), driven by optional advisory dataset fields.
+- Plugin Tier 2 compares bundled skills and the plugin with a local catalog
+  (`tier2 PLUGIN --catalog FILE`; optional `--llm` verdict); save plugin catalogs
+  with `similarity-check PLUGINS --type plugin --save-catalog FILE`.
+- Tier 1 classifies each plugin skill/rule reference offline as provided,
+  referenced, missing, external, or unresolved, and blocks on a missing
+  same-repository dependency; `validate --repo-root` sets the repository root.
+- Tier 1 runs the version, quality, and lint checks on each skill bundled in a
+  plugin, attributing findings to that skill.
+- Plugin MCP servers are accepted in every `mcpServers` form (inline map, `.json`
+  path, or array) and from the root `.mcp.json`, in Tier 1 and Tier 3 staging.
+- Plugin validation reports a component inventory, MCP pinning, and a static
+  context-cost estimate; Tier 3 provenance adds report-only component coverage.
+- Validation policies accept `mcp.allowed_private_hosts` for intended private
+  MCP endpoints.
+- Plugin reports: JSON, Markdown, SARIF, and HTML render plugin dependencies,
+  components, MCP pinning, and static context cost; Tier 3 reports add component
+  coverage, Integration (including INCONCLUSIVE), lift intervals, and advisory
+  plugin signals.
+- `validate` writes a plugin `BENCHMARK.md` card with component coverage,
+  Effectiveness and Integration results, and the behavior the run excluded.
+- Added a Plugin Evaluation docs page covering all three tiers, the plugin
+  dataset fields, verdicts, and current limitations.
+
+### Changed
+
+- Tier 3 `accuracy`, `goal_accuracy`, and `behavior_check` are now not
+  applicable (N/A) instead of a fabricated 1.0 when an eval case has no
+  `ground_truth` or `expected_behavior`; N/A metrics are left out of overall
+  scores, averages, and lift, and render as N/A.
+
 ### Fixed
 
 - Plugin evaluation review fixes. Tier 1 plugin checks fail closed on unreadable
@@ -33,6 +75,62 @@ All notable changes to SkillEvaluator are documented in this file.
   components were not staged or staged but not observed, and label a
   sum-of-parts lift as integration rather than effectiveness. `regex` is now a
   direct runtime dependency.
+- Kept Tier 3's interactive progress frame at a stable height, bounded visible
+  stage history, serialized terminal redraws, and safely disabled a reporter
+  when initialization or background refresh fails.
+- Tier 3 preserves completed rewards from partially errored jobs only when each
+  aggregate error maps to a concrete failed trial; explicit failed statuses and
+  non-zero aggregate exit codes still suppress ambiguous scores.
+- Plugin manifest discovery is now root-bounded across all tiers, and Integration
+  evaluation requires explicit cross-component dataset evidence instead of
+  reporting unsupported composition claims.
+- The dependency audit now checks the dependencies declared in `pyproject.toml`
+  instead of SkillEvaluator's own environment, and reports unpinned
+  declarations as INFO `dependency-version-unverified`.
+- Re-rendered plugin Tier 3 reports (`view`, standalone renders, and the report
+  delivered after a plugin run) keep plugin provenance and INCOMPLETE status by
+  reading the bounded, no-follow `plugin_provenance.json` sidecar.
+
+### Security
+
+- Hardened plugin input handling with descriptor-anchored, no-follow discovery
+  and reads so linked, hard-linked, reparse-point, escaping, and special files
+  are rejected before provider calls or sandbox staging.
+- Tier 3 security scoring now normalizes home-directory spellings (`/home/<user>`,
+  `/Users/<user>`, `/root`, `$HOME`, `${HOME}`, `~user`) and covers more credential
+  stores and protected shell, SSH, sudoers, and agent-control files.
+- The dependency audit no longer lets pip-audit install or build the audited
+  requirements: it audits only exact pins with `--no-deps --disable-pip` and
+  ignores pip options in the audited files.
+- Plugin static checks flag unpinned MCP package runners, agent permission-bypass
+  flags, library-preload and traffic-redirect environment overrides, auto-approve
+  keys, metadata and private MCP endpoints, bypass settings, shipped `.env` files,
+  and missing or escaping declared component paths.
+- Tier 1 security, PII, license, code-integrity, Unicode, and dependency scans of
+  a plugin that bundles skills now also cover the plugin's root content
+  (`scripts/`, `hooks/`, `.mcp.json`, ...), scanning each file once; a linked,
+  hard-linked, or special entry anywhere in the plugin tree fails closed.
+
+## 0.4.0 - 2026-09-30
+
+### Fixed
+
+- Render untrusted skill content, paths, tool messages, and LLM output literally
+  in CLI reports and logs. Escape Rich markup and strip terminal control
+  sequences to prevent rendering failures and misleading output, including
+  catalog summaries and the compact validation view. Preserve Windows paths
+  and literal emoji codes
+  ([#173](https://github.com/NVIDIA/SkillEvaluator/pull/173),
+  [#175](https://github.com/NVIDIA/SkillEvaluator/pull/175)).
+- Make sensitive-assignment, JWT, and private-key redaction linear-time,
+  preventing long adversarial text from stalling logs and reports. Apply the
+  JWT fix to Tier 3 command output and the bundled Harbor verifier
+  ([#172](https://github.com/NVIDIA/SkillEvaluator/pull/172),
+  [#176](https://github.com/NVIDIA/SkillEvaluator/pull/176)).
+- `--no-llm` full datasets include a negative bucket only when eval guidance
+  supplies an off-skill prompt; template mode no longer guesses canned
+  negatives from a fixed question list. CLI and docs now describe `--full` as
+  up to four cases instead of always four.
 - Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
   `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
   profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
@@ -77,21 +175,6 @@ All notable changes to SkillEvaluator are documented in this file.
 - Report Tier 2 embedding and LLM service failures as incomplete checks, retaining
   a nonzero exit without inventing duplicate-content findings. Provider error
   messages include recovery guidance without echoing raw response bodies.
-- Kept Tier 3's interactive progress frame at a stable height, bounded visible
-  stage history, serialized terminal redraws, and safely disabled a reporter
-  when initialization or background refresh fails.
-- Tier 3 preserves completed rewards from partially errored jobs only when each
-  aggregate error maps to a concrete failed trial; explicit failed statuses and
-  non-zero aggregate exit codes still suppress ambiguous scores.
-- Plugin manifest discovery is now root-bounded across all tiers, and Integration
-  evaluation requires explicit cross-component dataset evidence instead of
-  reporting unsupported composition claims.
-- The dependency audit now checks the dependencies declared in `pyproject.toml`
-  instead of SkillEvaluator's own environment, and reports unpinned
-  declarations as INFO `dependency-version-unverified`.
-- Re-rendered plugin Tier 3 reports (`view`, standalone renders, and the report
-  delivered after a plugin run) keep plugin provenance and INCOMPLETE status by
-  reading the bounded, no-follow `plugin_provenance.json` sidecar.
 - Tier 3 script execution credit now requires evidence that the expected script
   was invoked. `check_script_execution` previously treated the script name as a
   substring of an execution command, so reading, printing or searching the
@@ -183,41 +266,21 @@ All notable changes to SkillEvaluator are documented in this file.
   whether a catalog comparison ran; Tier 3 creates a missing starter dataset
   and preserves existing evaluation sources.
 
-- Added public plugin evaluation across all tiers: static schema and MCP checks,
-  advisory offline dependency/context deduplication, and Harbor-backed live
-  evaluation with effectiveness and optional sum-of-parts Integration arms.
-- Tier 3 reports paired case-bootstrap 95% intervals for Skill and Integration
-  lift, pass^k, cost per passed case, token efficiency, and measured context
-  cost as report-only statistics. Integration becomes inconclusive when its
-  interval includes zero, too few cases pair, or per-case coverage is incomplete.
-- Plugin Tier 3 runs record report-only per-trial and per-arm component signals
-  (activations, tool selection, arguments, MCP outcomes, order, handoffs,
-  conflicts, coverage), driven by optional advisory dataset fields.
-- Plugin Tier 2 compares bundled skills and the plugin with a local catalog
-  (`tier2 PLUGIN --catalog FILE`; optional `--llm` verdict); save plugin catalogs
-  with `similarity-check PLUGINS --type plugin --save-catalog FILE`.
-- Tier 1 classifies each plugin skill/rule reference offline as provided,
-  referenced, missing, external, or unresolved, and blocks on a missing
-  same-repository dependency; `validate --repo-root` sets the repository root.
-- Tier 1 runs the version, quality, and lint checks on each skill bundled in a
-  plugin, attributing findings to that skill.
-- Plugin MCP servers are accepted in every `mcpServers` form (inline map, `.json`
-  path, or array) and from the root `.mcp.json`, in Tier 1 and Tier 3 staging.
-- Plugin validation reports a component inventory, MCP pinning, and a static
-  context-cost estimate; Tier 3 provenance adds report-only component coverage.
-- Validation policies accept `mcp.allowed_private_hosts` for intended private
-  MCP endpoints.
-- Plugin reports: JSON, Markdown, SARIF, and HTML render plugin dependencies,
-  components, MCP pinning, and static context cost; Tier 3 reports add component
-  coverage, Integration (including INCONCLUSIVE), lift intervals, and advisory
-  plugin signals.
-- `validate` writes a plugin `BENCHMARK.md` card with component coverage,
-  Effectiveness and Integration results, and the behavior the run excluded.
-- Added a Plugin Evaluation docs page covering all three tiers, the plugin
-  dataset fields, verdicts, and current limitations.
-
 ### Changed
 
+- Show elapsed waiting time during autopilot dataset generation and identify
+  deterministic starter datasets used after a provider failure. Fully unscored
+  Tier 3 runs show an `INCOMPLETE` summary with coverage, consolidated execution
+  errors, and recovery steps; completed comparisons highlight overall Skill
+  Lift ([#152](https://github.com/NVIDIA/SkillEvaluator/pull/152)).
+- Harden documentation publishing with restricted token permissions, pinned
+  checkout and Fern versions, and disabled persisted checkout credentials.
+  Apply the checkout credential restriction to DCO checks
+  ([#158](https://github.com/NVIDIA/SkillEvaluator/pull/158)).
+- Add the methodology paper as the preferred citation and link research,
+  developer-blog, and livestream resources from the README
+  ([#146](https://github.com/NVIDIA/SkillEvaluator/pull/146),
+  [#159](https://github.com/NVIDIA/SkillEvaluator/pull/159)).
 - `validate PATH` now runs all three tiers for skills by default. Tier 3
   autopilot reuses an existing evaluation source or creates one starter case
   when none exists. `--full` remains compatible but is unnecessary;
@@ -238,26 +301,6 @@ All notable changes to SkillEvaluator are documented in this file.
 - README and getting-started guides lead with provider-plus-key setup for
   NVIDIA Build and OpenAI, explain inherited model defaults, and separate
   credentials from scanner and agent runtime requirements.
-
-### Security
-
-- Hardened plugin input handling with descriptor-anchored, no-follow discovery
-  and reads so linked, hard-linked, reparse-point, escaping, and special files
-  are rejected before provider calls or sandbox staging.
-- Tier 3 security scoring now normalizes home-directory spellings (`/home/<user>`,
-  `/Users/<user>`, `/root`, `$HOME`, `${HOME}`, `~user`) and covers more credential
-  stores and protected shell, SSH, sudoers, and agent-control files.
-- The dependency audit no longer lets pip-audit install or build the audited
-  requirements: it audits only exact pins with `--no-deps --disable-pip` and
-  ignores pip options in the audited files.
-- Plugin static checks flag unpinned MCP package runners, agent permission-bypass
-  flags, library-preload and traffic-redirect environment overrides, auto-approve
-  keys, metadata and private MCP endpoints, bypass settings, shipped `.env` files,
-  and missing or escaping declared component paths.
-- Tier 1 security, PII, license, code-integrity, Unicode, and dependency scans of
-  a plugin that bundles skills now also cover the plugin's root content
-  (`scripts/`, `hooks/`, `.mcp.json`, ...), scanning each file once; a linked,
-  hard-linked, or special entry anywhere in the plugin tree fails closed.
 
 ## 0.3.0 - 2026-09-17
 
@@ -316,10 +359,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `--no-llm` full datasets include a negative bucket only when eval guidance
-  supplies an off-skill prompt; template mode no longer guesses canned
-  negatives from a fixed question list. CLI and docs now describe `--full` as
-  up to four cases instead of always four.
 - Fully covered documentation-only skills no longer fail security validation
   solely because non-applicable SkillSpector analyzers report a partial status
   ([#137](https://github.com/NVIDIA/SkillEvaluator/issues/137)).
@@ -333,10 +372,6 @@ All notable changes to SkillEvaluator are documented in this file.
 - `create-eval-dataset --refine` resolves Harbor trial case ids from persisted
   `reward.json` `entry_id` metadata, using folder-name parsing only as an
   unambiguous legacy fallback.
-- Tier 3 `accuracy`, `goal_accuracy`, and `behavior_check` are now not
-  applicable (N/A) instead of a fabricated 1.0 when an eval case has no
-  `ground_truth` or `expected_behavior`; N/A metrics are left out of overall
-  scores, averages, and lift, and render as N/A.
 - Tier 3 local mode now drops evaluator-managed empty process-loader resets
   while continuing to reject non-empty loader overrides, allowing generated
   tasks to reach agent execution

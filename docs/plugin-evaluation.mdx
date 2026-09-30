@@ -246,11 +246,11 @@ accepts:
 
 | Form | Example | Notes |
 | --- | --- | --- |
-| Inline map | `"mcpServers": { "tracker": { "command": "npx", "args": ["-y", "@example/tracker-mcp@1.4.2"] } }` | One entry per server |
+| Inline map | `"mcpServers": { "tracker": { "command": "npx", "args": ["-y", "@example/tracker-mcp@1.4.2"] } }` | One entry per server; more than 256 servers in one map is HIGH `mcp_config_file_too_large` |
 | Config-file path | `"mcpServers": "./config/mcp.json"` | A `./`-relative `.json` file of at most 256 KiB. The file holds either an object with an `mcpServers` map or the bare server map |
-| Array | `"mcpServers": ["./config/mcp.json", { "docs": { "url": "https://docs.example.com/mcp" } }]` | Mixes paths and inline maps; at most 256 entries are inspected |
+| Array | `"mcpServers": ["./config/mcp.json", { "docs": { "url": "https://docs.example.com/mcp" } }]` | Mixes paths and inline maps; more than 256 entries is HIGH `mcp_config_file_too_large` |
 | Root `.mcp.json` | `.mcp.json` at the plugin root | Loaded first, unless the manifest names it explicitly |
-| MCP bundle | `"./servers/tracker.mcpb"`, or an `https://` URL ending in `.mcpb` or `.dxt` | Recorded but never unpacked or inspected; MEDIUM `mcp_bundle_not_inspected` |
+| MCP bundle | `"./servers/tracker.mcpb"`, or an `https://` URL ending in `.mcpb` or `.dxt` | Recorded but never unpacked or inspected; MEDIUM `mcp_bundle_not_inspected`. A bundle URL over plaintext `http://` is also HIGH `mcp_url_insecure_scheme` |
 
 Sources load in Claude Code order: the root `.mcp.json` first, then each
 declared form in order. A later declaration with the same name replaces an
@@ -294,9 +294,13 @@ SkillEvaluator can do with each type today:
 Each inventoried component has an `origin`: `declared`, `packaged`, or
 `declared+packaged`. It also has a root-relative `path` and a `findings`
 count, which attributes Tier 1 findings from every validator to the component
-that owns the file. Inventory reads are bounded and never follow links. At most
-256 components of each type are listed; beyond that, a LOW
-`plugin_component_scan_truncated` finding is reported.
+that owns the file. Inventory reads are bounded and never follow links. Hooks,
+LSP, monitors, settings, and MCP config files are read from their own budget, so
+large skill or rule files cannot crowd them out. At most 256 components of each
+type are listed; beyond that, a LOW `plugin_component_scan_truncated` finding is
+reported. A declared component list, an LSP server map, or a `commands` map
+longer than 256 entries is HIGH `plugin_component_list_truncated`, because the
+entries past the cap would go unchecked.
 
 `unsupported` means "inventoried, and statically checked where a check exists,
 but not evaluated." For example, hooks, LSP servers, monitors, and settings are
@@ -373,14 +377,17 @@ checks are skipped when a plugin bundles no skills.
 | `plugin_component_path_unsafe` | HIGH | A path is, or passes through, a symlink, hard link, or special file. It is not followed |
 | `plugin_component_path_invalid` | HIGH | A declaration has the wrong shape for its field, such as a command map entry without exactly one of `source` or `content` |
 | `plugin_component_path_style` | MEDIUM | A contained-manifest path does not start with `./` |
-| `plugin_component_unreadable` | MEDIUM | A hooks, LSP, monitors, or settings JSON file is unreadable, invalid, or larger than 256 KiB |
+| `plugin_component_unreadable` | HIGH | A hooks, LSP, monitors, or settings JSON file is unreadable, invalid, or larger than 256 KiB. Its bypass and environment checks cannot run, so it blocks |
+| `plugin_component_list_truncated` | HIGH | A declared component list, an LSP server map, or a `commands` map has more than 256 entries |
 | `plugin_settings_bypass_permissions` | HIGH | Shipped settings set `permissions.defaultMode` to `bypassPermissions` |
 | `plugin_settings_broad_allow` | HIGH | Shipped settings pre-approve unrestricted tools: `Bash`, `Bash(*)`, `Bash(:*)`, `Bash(*:*)`, or `*` |
 | `plugin_settings_auto_approve` | MEDIUM | Shipped settings set `enableAllProjectMcpServers` |
-| `plugin_permission_bypass_flag` | HIGH | A hook, LSP server, monitor, or settings file contains an agent permission-bypass flag |
+| `plugin_permission_bypass_flag` | HIGH | A hook, LSP server, monitor, or settings file contains an agent permission-bypass flag or option, the same forms as `mcp_permission_bypass_flag` |
+| `plugin_permission_bypass_scan_truncated` | HIGH | A hook, LSP server, monitor, or settings config is too large to scan completely for bypass flags |
 | `plugin_env_code_injection` | HIGH | Settings or LSP `env` preloads code (`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, or `NODE_OPTIONS` with `--require`, `-r`, `--import`, `--loader`, or `--experimental-loader`) |
 | `plugin_env_traffic_redirect` | MEDIUM | Settings or LSP `env` overrides a model API base URL, a proxy, or trusted CA certificates |
 | `plugin_env_file_shipped` | MEDIUM | The plugin ships `.env` or `.env.*`. Template names such as `.env.example` and `.env.sample` are allowed. The file is never opened; secret scanning covers the values |
+| `plugin_env_scan_incomplete` | LOW | The `.env` scan stopped early: the plugin has more than 4,096 entries, or a directory could not be opened or listed |
 
 ### MCP static policy
 
@@ -444,15 +451,17 @@ stages a server.
     | Check | Severity | Flags |
     | --- | --- | --- |
     | `mcp_url_dangerous_scheme` | CRITICAL | `file`, `javascript`, `data`, `gopher`, `ftp`, or `ftps`, or no scheme |
-    | `mcp_url_insecure_scheme` | HIGH | Plaintext `http` or `ws` |
+    | `mcp_url_insecure_scheme` | HIGH | Plaintext `http` or `ws`, including a remote `.mcpb` or `.dxt` bundle URL |
     | `mcp_url_scheme_not_allowed` | HIGH | Any other scheme than `https` or `wss` |
-    | `mcp_url_malformed_authority`, `mcp_url_no_host` | HIGH | A malformed host or port, or no host |
+    | `mcp_url_malformed_authority`, `mcp_url_no_host` | HIGH | A URL that cannot be parsed, a malformed host or port, or no host |
     | `mcp_endpoint_metadata` | HIGH | A cloud instance-metadata endpoint such as `169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`, or `metadata.google.internal`. This finding can never be allowlisted |
-    | `mcp_endpoint_private` | MEDIUM | Loopback, `localhost`, RFC 1918, carrier-grade NAT, link-local, unique-local, or unspecified addresses, including IPv4 embedded in IPv6 and decimal, hex, or octal IPv4 encodings |
+    | `mcp_endpoint_private` | MEDIUM | Loopback, `localhost`, RFC 1918, carrier-grade NAT, link-local, unique-local, or unspecified addresses, including IPv4 embedded in IPv6, percent-encoded hosts, and decimal, hex, or octal IPv4 encodings |
 
     The endpoint policy inspects IP literals and well-known host names only.
     DNS resolution and HTTP redirects are not evaluated, so a public-looking
-    host name that resolves to a private address is not flagged.
+    host name that resolves to a private address is not flagged. URL findings
+    show only the scheme, host, port, and path, never user information or the
+    query string.
 
     To allow an intended private endpoint, list it under
     `mcp.allowed_private_hosts` in a [policy overlay](tier1-validation.mdx#validation-profiles-and-policies).
@@ -472,7 +481,8 @@ stages a server.
   <Accordion title="Bypass flags, environment overrides, and auto-approval">
     | Check | Severity | Flags |
     | --- | --- | --- |
-    | `mcp_permission_bypass_flag` | HIGH | `--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, `--allow-dangerously-skip-permissions`, or `--yolo` anywhere in the server config. Mentions inside `description`, `title`, and similar prose keys are ignored |
+    | `mcp_permission_bypass_flag` | HIGH | `--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, `--allow-dangerously-skip-permissions`, or `--yolo` anywhere in the server config, and the options `--permission-mode bypassPermissions`, `--approval-mode yolo`, and `--sandbox danger-full-access` (or `-s`), written as one string or as separate `args` entries. Mentions inside `description`, `title`, and similar prose keys are ignored |
+    | `mcp_permission_bypass_scan_truncated` | HIGH | The server config is too large to scan completely for bypass flags |
     | `mcp_env_code_injection` | HIGH | `env` sets `LD_PRELOAD`, `LD_AUDIT`, or `DYLD_INSERT_LIBRARIES`, or `NODE_OPTIONS` with `--require`, `-r`, `--import`, `--loader`, or `--experimental-loader` |
     | `mcp_env_traffic_redirect` | MEDIUM | `env` overrides a model API endpoint (for example `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or a known provider's `*_BASE_URL` or `*_API_BASE`), `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or a CA bundle variable such as `NODE_EXTRA_CA_CERTS` or `REQUESTS_CA_BUNDLE`. A pure `${NAME}` passthrough of the same variable is allowed |
     | `mcp_auto_approve` | MEDIUM | `autoApprove`, `alwaysAllow`, `autoApproveTools`, or `alwaysAllowTools` set, or `trust: true` |

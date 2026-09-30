@@ -33,8 +33,9 @@ inner call only inherits the outer observation when the normalizer proves it
 owns that observation; otherwise its outcome is unknown.
 
 ``succeeded`` is tri-state. ``True``: a correlated result came back without a
-structured error flag or a failure/unavailable marker in its leading text.
-``False``: the correlated result is flagged or carries such a marker. ``None``:
+structured error flag or a failure/unavailable marker in the head of any of its
+content blocks or in its tail. ``False``: the correlated result is flagged or
+carries such a marker. ``None``:
 no result could be attributed to this call (no id match, or an ambiguous
 multi-call step), or the correlated body is empty. A sibling call's result never
 stands in for this call's outcome.
@@ -931,11 +932,12 @@ def _arguments(tool_call: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _content_text(content: Any) -> str:
+def _content_parts(content: Any) -> list[str]:
+    """Bounded text of each content block (one part for a plain string/object)."""
     if content is None:
-        return ""
+        return []
     if isinstance(content, str):
-        return content[:_MAX_OBSERVATION_CHARS]
+        return [content[:_MAX_OBSERVATION_CHARS]]
     if isinstance(content, list):
         parts: list[str] = []
         size = 0
@@ -950,8 +952,25 @@ def _content_text(content: Any) -> str:
             size += len(part)
             if size >= _MAX_OBSERVATION_CHARS:
                 break
-        return "\n".join(parts)[:_MAX_OBSERVATION_CHARS]
-    return (_bounded_json_text(content, _MAX_OBSERVATION_CHARS) or "")[:_MAX_OBSERVATION_CHARS]
+        return parts
+    return [(_bounded_json_text(content, _MAX_OBSERVATION_CHARS) or "")[:_MAX_OBSERVATION_CHARS]]
+
+
+def _content_text(content: Any) -> str:
+    return "\n".join(_content_parts(content))[:_MAX_OBSERVATION_CHARS]
+
+
+def _failure_scan_text(parts: Sequence[str], text: str) -> str:
+    """What failure markers are checked against: each block's head plus the result's tail.
+
+    Bounded (at most one window per block, within the observation cap) but
+    fail-closed for the usual shapes: an error block after a long first block,
+    or an error line appended to a long body.
+    """
+    windows = [part[:_FAILURE_SCAN_CHARS] for part in parts]
+    if len(text) > _FAILURE_SCAN_CHARS:
+        windows.append(text[-_FAILURE_SCAN_CHARS:])
+    return "\n".join(windows)
 
 
 def _result_flagged(result: Mapping[str, Any]) -> bool:
@@ -968,48 +987,54 @@ def _result_flagged(result: Mapping[str, Any]) -> bool:
     return isinstance(content, Mapping) and content.get("isError") is True
 
 
-def _observations(step: Mapping[str, Any]) -> list[tuple[str, str, bool]]:
+def _observations(step: Mapping[str, Any]) -> list[tuple[str, str, str, bool]]:
+    """``(source_call_id, text, failure_scan_text, flagged)`` for each result of ``step``."""
     observation = step.get("observation")
     if not isinstance(observation, Mapping):
         return []
     results = observation.get("results")
     if not isinstance(results, list):
         return []
-    entries: list[tuple[str, str, bool]] = []
+    entries: list[tuple[str, str, str, bool]] = []
     for result in results[:256]:
         if not isinstance(result, Mapping):
             continue
+        parts = _content_parts(result.get("content"))
+        text = "\n".join(parts)[:_MAX_OBSERVATION_CHARS]
         entries.append(
             (
                 str(result.get("source_call_id") or ""),
-                _content_text(result.get("content")),
+                text,
+                _failure_scan_text(parts, text),
                 _result_flagged(result),
             )
         )
     return entries
 
 
-def _results_for_call(results: list[tuple[str, str, bool]], call_id: str, *, call_count: int) -> list[tuple[str, bool]]:
+def _results_for_call(
+    results: list[tuple[str, str, str, bool]], call_id: str, *, call_count: int
+) -> list[tuple[str, str, bool]]:
     """Results attributable to ``call_id``; id matches win, ambiguity stays unknown."""
     if call_id:
-        matched = [(text, flagged) for rid, text, flagged in results if rid == call_id]
+        matched = [(text, scan, flagged) for rid, text, scan, flagged in results if rid == call_id]
         if matched:
             return matched
     if call_count == 1 and len(results) == 1 and not results[0][0]:
-        return [(results[0][1], results[0][2])]
+        return [results[0][1:]]
     return []
 
 
-def _outcome(correlated: list[tuple[str, bool]]) -> tuple[str | None, bool | None]:
+def _outcome(correlated: list[tuple[str, str, bool]]) -> tuple[str | None, bool | None]:
     if not correlated:
         return None, None
-    text = "".join(item for item, _ in correlated)[:_MAX_OBSERVATION_CHARS]
-    flagged = any(is_error for _, is_error in correlated)
+    text = "".join(item for item, _, _ in correlated)[:_MAX_OBSERVATION_CHARS]
+    flagged = any(is_error for _, _, is_error in correlated)
     if not flagged and not text.strip():
         return text, None
-    head = text[:_FAILURE_SCAN_CHARS]
-    lowered = head.casefold()
-    failed = flagged or any(marker in lowered for marker in _UNAVAILABLE_MARKERS) or bool(_FAILED_CALL_RE.search(head))
+    scan = "\n".join(window for _, window, _ in correlated)
+    lowered = scan.casefold()
+    failed = flagged or any(marker in lowered for marker in _UNAVAILABLE_MARKERS) or bool(_FAILED_CALL_RE.search(scan))
     return text, not failed
 
 

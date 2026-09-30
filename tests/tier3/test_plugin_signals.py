@@ -203,9 +203,23 @@ class TestOutcomeTriState:
         traj = _traj(_one("mcp__github__x", content=content))
         assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
 
-    def test_failure_marker_deep_in_a_long_successful_body_is_ignored(self) -> None:
-        traj = _traj(_one("mcp__github__x", content="x" * 5000 + " permission denied"))
+    def test_failure_marker_mid_way_through_a_long_successful_body_is_ignored(self) -> None:
+        # Scanning is bounded: each block's head and the result's tail, not the middle.
+        traj = _traj(_one("mcp__github__x", content="x" * 5000 + " permission denied " + "y" * 5000))
         assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is True
+
+    def test_failure_marker_at_the_end_of_a_long_body_marks_failure(self) -> None:
+        traj = _traj(_one("mcp__github__x", content="x" * 2100 + "\n401 - Unauthorized"))
+        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
+
+    def test_error_block_after_a_long_first_block_marks_failure(self) -> None:
+        content = [
+            {"type": "text", "text": "Search results preamble " + "." * 2100},
+            {"type": "text", "text": "Error: 403: Failed to decrypt access token"},
+            {"type": "text", "text": "z" * 3000},
+        ]
+        traj = _traj(_one("mcp__github__x", content=content))
+        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
 
     def test_sibling_result_never_proves_success(self) -> None:
         traj = _traj(

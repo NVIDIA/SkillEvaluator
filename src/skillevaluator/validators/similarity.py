@@ -237,6 +237,8 @@ class SimilarityValidator(ValidatorBase):
         safe_paths = (root, self._save_catalog_path)
         try:
             build = registry.build_plugin_catalog(root)
+            for path, reason in build.invalid_plugins:
+                result.add_warning(f"Plugin at '{path}' was not added to the catalog: {reason}")
             if build.plugins == 0 and build.skills == 0:
                 result.add_error("Cannot save a catalog from an empty plugin collection")
                 return result

@@ -167,11 +167,17 @@ class PluginRegistryEntry:
 
 @dataclass
 class PluginCatalogBuild:
-    """Counts from :meth:`EmbeddingRegistry.build_plugin_catalog`."""
+    """Counts from :meth:`EmbeddingRegistry.build_plugin_catalog`.
+
+    ``skipped_plugins`` names plugins without a description (only their bundled
+    skills were indexed); ``invalid_plugins`` holds ``(relative path, reason)``
+    for plugins whose manifest could not supply a profile (nothing was indexed).
+    """
 
     plugins: int = 0
     skills: int = 0
     skipped_plugins: list[str] = field(default_factory=list)
+    invalid_plugins: list[tuple[str, str]] = field(default_factory=list)
 
 
 def classify(score: float) -> tuple[str, Severity]:
@@ -280,12 +286,16 @@ class EmbeddingRegistry:
         Each plugin with a description contributes one plugin entry (name and
         description embedding, member skill names, manifest source fingerprint).
         Every bundled ``skills/**/SKILL.md`` whose frontmatter has a name and
-        description contributes one skill entry. Discovery, manifest reads, and
-        skill reads use the secure bounded helpers; ``max_entries`` bounds the
-        selected plugin and skill manifests, and one aggregate byte budget
-        bounds everything read before any embedding request.
+        description contributes one skill entry. A plugin whose manifest cannot
+        supply a profile is left out and recorded by relative path in
+        ``invalid_plugins``; unsafe inputs still fail the whole build.
+        Discovery, manifest reads, and skill reads use the secure bounded
+        helpers; ``max_entries`` bounds the selected plugin and skill manifests,
+        and one aggregate byte budget bounds everything read before any
+        embedding request.
         """
         from skillevaluator.deduplication.plugin.profile import (
+            PluginProfileError,
             PluginSkillLimitError,
             ProfileByteBudget,
             discover_plugin_roots,
@@ -306,6 +316,11 @@ class EmbeddingRegistry:
         selected = 0
         for plugin_root in plugin_roots:
             selected += 1
+            plugin_absolute = Path(os.path.abspath(os.fspath(plugin_root)))  # noqa: PTH100
+            try:
+                plugin_path = plugin_absolute.relative_to(root_absolute).as_posix() or "."
+            except ValueError as exc:
+                raise ValueError(f"Discovered plugin path escapes scan root: {plugin_root.name}") from exc
             try:
                 profile = load_plugin_profile(plugin_root, max_skills=max(0, limit - selected), budget=budget)
             except PluginSkillLimitError as exc:
@@ -313,12 +328,10 @@ class EmbeddingRegistry:
                     f"Collection entry limit exceeded ({limit}) before embedding; "
                     "increase --max-entries within its supported range to scan the complete collection"
                 ) from exc
+            except PluginProfileError as exc:
+                build.invalid_plugins.append((plugin_path, str(exc)))
+                continue
             selected += len(profile.bundled_skills)
-            plugin_absolute = Path(os.path.abspath(os.fspath(plugin_root)))  # noqa: PTH100
-            try:
-                plugin_path = plugin_absolute.relative_to(root_absolute).as_posix() or "."
-            except ValueError as exc:
-                raise ValueError(f"Discovered plugin path escapes scan root: {plugin_root.name}") from exc
             if profile.description is None:
                 build.skipped_plugins.append(profile.name)
             else:

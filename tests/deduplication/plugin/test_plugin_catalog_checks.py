@@ -194,6 +194,36 @@ class TestSavePluginCatalog:
         assert [plugin["name"] for plugin in data["plugins"]] == ["gamma"]
         assert [entry["path"] for entry in data["entries"]] == ["nodesc/skills/deploy-app"]
 
+    def test_malformed_sibling_manifest_is_skipped_with_its_path(self, plugins: Path) -> None:
+        bad = plugins / "zz-bad"
+        (bad / "skills" / "leaked").mkdir(parents=True)
+        (bad / "agent_plugin.yaml").write_text("- just\n- a list\n", encoding="utf-8")
+        (bad / "skills" / "leaked" / "SKILL.md").write_text(
+            "---\nname: leaked\ndescription: Deploy apps\n---\n", encoding="utf-8"
+        )
+        catalog = plugins.parent / "catalog.json"
+
+        result = SimilarityValidator(content_type="plugin", save_catalog_path=catalog).validate(plugins)
+
+        assert result.passed, result.errors
+        assert any("'zz-bad'" in warning and "not a mapping" in warning for warning in result.warnings)
+        data = json.loads(catalog.read_text(encoding="utf-8"))
+        assert {plugin["path"] for plugin in data["plugins"]} == {"alpha", "beta", "gamma", "delta"}
+        assert not any(entry["path"].startswith("zz-bad/") for entry in data["entries"])
+
+    def test_malformed_single_plugin_root_still_fails(self, tmp_path: Path, embed_calls) -> None:
+        plugin = tmp_path / "bad"
+        plugin.mkdir()
+        (plugin / "agent_plugin.yaml").write_text("- just\n- a list\n", encoding="utf-8")
+        catalog = tmp_path / "catalog.json"
+
+        result = SimilarityValidator(content_type="plugin", save_catalog_path=catalog).validate(plugin)
+
+        assert not result.passed
+        assert any("not a mapping" in warning for warning in result.warnings)
+        assert not catalog.exists()
+        assert not embed_calls
+
     @pytest.mark.parametrize(
         ("kwargs", "message"),
         [

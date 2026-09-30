@@ -292,7 +292,11 @@ it to direct Tier 2:
     `--type plugin` accepts one plugin root or a directory of plugins. Each
     plugin with a description becomes a plugin entry, and each bundled
     `skills/**/SKILL.md` with a name and description becomes a skill entry. A
-    plugin root is detected automatically; a directory of plugins needs
+    plugin without a description contributes only its bundled skills (a warning
+    names it), and a plugin whose manifest cannot supply a profile (for example,
+    one that is not a mapping) is left out entirely (a warning gives its
+    relative path and the reason). Unsafe links or files still fail the whole
+    build. A plugin root is detected automatically; a directory of plugins needs
     `--type plugin`. Plugin catalogs use description embeddings, so
     `--full-body` is rejected.
   </Step>

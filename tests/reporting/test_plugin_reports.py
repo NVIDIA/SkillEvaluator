@@ -29,6 +29,7 @@ from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
 from skillevaluator.reporting.plugin_sections import (
     component_for_path,
+    coverage_view,
     is_plugin_payload,
     statistics_view,
     tier3_plugin_view,
@@ -167,7 +168,7 @@ def test_markdown_tier3_plugin_blocks_state_what_was_not_evaluated(tmp_path: Pat
     markdown = MarkdownReporter(include_timestamp=False).render_all([_tier3_result(tmp_path, integration=integration)])
 
     assert "INCOMPLETE: 1 unresolved skill ref, 1 provider-only MCP server" in markdown
-    assert "**2 components not evaluated** of 4 component(s); 2 staged." in markdown
+    assert "**2 components not staged** of 4 component(s); 2 staged." in markdown
     assert "| mcp | docs | Unavailable | provider-only MCP server |" in markdown
     assert "**Lift mode:** requested `both`, effective `effectiveness`" in markdown
     assert "**INCONCLUSIVE:** No cross-component case completed." in markdown
@@ -200,7 +201,8 @@ def test_sarif_run_and_results_carry_plugin_context(tmp_path: Path) -> None:
         "advisory": True,
     }
     assert plugin["evaluationIncomplete"] is True
-    assert plugin["componentsNotEvaluated"] == 2
+    assert plugin["componentsNotStaged"] == 2
+    assert plugin["componentsStagedNotObserved"] == 0
     finding = next(item for item in run["results"] if item["properties"]["checkName"] == "description_short")
     assert finding["properties"]["pluginComponent"] == {
         "type": "skill",
@@ -280,7 +282,7 @@ def test_html_tier3_coverage_states_what_was_not_demonstrated(tmp_path: Path) ->
     html = HTMLReporter(include_timestamp=False).render_all([_tier3_result(tmp_path)])
 
     coverage = element_text(html, "tier3-plugin-coverage") or ""
-    assert "2 components not evaluated of 4 declared or packaged component(s); 2 staged." in coverage
+    assert "2 components not staged of 4 declared or packaged component(s); 2 staged." in coverage
     assert "Files staged ≠ components loaded ≠ behavior verified." in coverage
     assert "does not verify the component's behavior" in coverage
     assert "mcp docs declared Unavailable not observed provider-only MCP server" in coverage
@@ -289,7 +291,92 @@ def test_html_tier3_coverage_states_what_was_not_demonstrated(tmp_path: Path) ->
     excluded = element_text(html, "tier3-plugin-excluded") or ""
     assert "Provider-only MCP servers were not exercised: docs" in excluded
     assert "Unresolved skill refs were not evaluated: github::org/repo::skills::remote" in excluded
-    assert element_text(html, "tier3-plugin-not-evaluated").startswith("2 components not evaluated")
+    assert element_text(html, "tier3-plugin-not-evaluated").startswith("2 components not staged")
+
+
+def test_staged_but_unexercised_components_are_not_reported_as_evaluated(tmp_path: Path) -> None:
+    """Every component staged, none exercised: the headline counts staging and the rest is listed as excluded."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from skillevaluator.reporting import BenchmarkReporter
+    from skillevaluator.reporting.cli import print_plugin_tier3
+
+    result = _tier3_result(tmp_path, partial=False, statistics=False)
+    declared = ["skill:loader", "mcp:search", "mcp:docs", "hook:pre-commit"]
+    result.metadata["agent_eval"]["agents"]["codex"]["plugin_signals_summary"]["with_skill"]["activation_coverage"] = {
+        "declared": declared,
+        "exercised": [],
+        "unverified": declared,
+        "unavailable": [],
+    }
+
+    view = tier3_plugin_view(result.metadata["agent_eval"])
+    assert view is not None
+    coverage = view["coverage"]
+    assert coverage["headline"] == "0 components not staged"
+    assert coverage["staged_not_observed"] == 4
+    assert coverage["observed_headline"] == "4 staged components not observed in any plugin trial"
+    assert coverage["all_exercised"] is False
+    unobserved = "Staged but not observed in any plugin trial: skill loader, mcp search, mcp docs, hook pre-commit"
+    assert unobserved in view["excluded"]
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    section = element_text(html, "tier3-plugin-coverage") or ""
+    assert "not evaluated" not in (element_text(html, "tier3-plugin-not-evaluated") or "")
+    assert (
+        "0 components not staged of 4 declared or packaged component(s); 4 staged; "
+        "4 staged components not observed in any plugin trial."
+    ) in section
+    assert '<span class="t3-pill warning">0 components not staged</span>' in html
+    assert "4 staged, not observed" in section
+    assert unobserved in (element_text(html, "tier3-plugin-excluded") or "")
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    assert (
+        "**0 components not staged** of 4 component(s); 4 staged; 4 staged components not observed in any plugin trial."
+    ) in markdown
+    console = Console(file=StringIO(), width=200, color_system=None)
+    print_plugin_tier3(view, console)
+    assert (
+        "Component coverage: 0 components not staged (of 4; 4 staged; "
+        "4 staged components not observed in any plugin trial)"
+    ) in " ".join(console.file.getvalue().split())
+    sarif = json.loads(SARIFReporter(include_timestamp=False).render_all([tier1_plugin_result(), result]))
+    assert sarif["runs"][0]["properties"]["plugin"]["componentsStagedNotObserved"] == 4
+    card = BenchmarkReporter(include_timestamp=False, content_type="plugin", skill_name="demo-plugin").render_all(
+        [result]
+    )
+    assert "- Component coverage: 0 components not staged; 4 staged components not observed" in card
+    assert f"- {unobserved}" in card
+    assert "No declared component or measurement was recorded as excluded" not in card
+
+
+def test_coverage_reads_complete_only_when_every_component_was_exercised() -> None:
+    coverage = {
+        "components": [
+            {"type": "skill", "name": "loader", "state": "staged"},
+            {"type": "mcp", "name": "search", "state": "staged"},
+        ]
+    }
+    exercised = {
+        "activation": {
+            "declared": ["skill:loader", "mcp:search"],
+            "exercised": ["skill:loader", "mcp:search"],
+            "unverified": [],
+            "unavailable": [],
+        }
+    }
+
+    complete = coverage_view(coverage, exercised)
+    assert complete is not None
+    assert complete["all_exercised"] is True
+    assert complete["observed_headline"] == ""
+    # Without activation data only staging is known, which never reads as complete.
+    staged_only = coverage_view(coverage)
+    assert staged_only is not None
+    assert staged_only["all_exercised"] is False
+    assert staged_only["staged_not_observed"] is None
 
 
 def test_html_tier3_integration_renders_inconclusive_with_reason(tmp_path: Path) -> None:
@@ -462,7 +549,7 @@ def test_complete_plugin_run_reports_complete_and_no_incomplete_callout(tmp_path
 
     assert result.passed is True
     assert element_text(html, "tier3-plugin-incomplete") is None
-    assert "0 components not evaluated" in (element_text(html, "tier3-plugin-coverage") or "")
+    assert "0 components not staged" in (element_text(html, "tier3-plugin-coverage") or "")
     completeness = element_text(html, "tier3-plugin-completeness") or ""
     assert completeness.startswith("Plugin Dependency Completeness — Complete")
     assert element_text(html, "tier3-plugin-dependency-counts") == (
@@ -521,7 +608,7 @@ def test_cli_reporter_prints_tier3_plugin_blocks(tmp_path: Path) -> None:
     plain = " ".join(plain.split())
 
     assert "INCOMPLETE: 1 unresolved skill ref" in plain
-    assert "Component coverage: 2 components not evaluated (of 4; 2 staged)" in plain
+    assert "Component coverage: 2 components not staged (of 4; 2 staged)" in plain
     assert "Files staged ≠ components loaded ≠ behavior verified." in plain
     assert "Lift mode: requested both · effective effectiveness (fell back)" in plain
     assert "Integration: INCONCLUSIVE — No cross-component case completed. (advisory)" in plain

@@ -88,7 +88,7 @@ Staging a component proves only that it was available. A staged member skill
 that no trial activates appears as `unverified` in `activation_coverage`. A
 component whose every activation failed is `unavailable`. An inventoried hook
 or subagent that Tier 3 cannot stage is `unsupported` in `component_coverage`,
-and its count is part of `not_evaluated`.
+and its count is part of `not_evaluated` (the number of components not staged).
 
 Reports make the gaps explicit instead of letting them read as a pass:
 
@@ -1210,19 +1210,29 @@ and `reason`:
 is not `staged`. Coverage is report-only and does not change the `INCOMPLETE`
 rule.
 
+Staging is not evaluation, so reports headline that count as
+**N components not staged**, never as "not evaluated". When the with-plugin
+trials recorded activation, reports also count and list the staged components
+that no plugin trial exercised. Coverage reads as complete (green) only when
+every component was staged and exercised. It reads red when a component was
+not staged, and yellow otherwise, including when no activation was recorded.
+
 The HTML report shows coverage in the Tier 3 overview as
-**Plugin Component Coverage — N components not evaluated**. That section holds:
+**Plugin Component Coverage — N components not staged**. That section holds:
 
 - the per-component state table;
 - the "Files staged ≠ components loaded ≠ behavior verified" rule;
-- a "Not evaluated by this run" list;
+- a "Not evaluated by this run" list, which includes staged components that no
+  trial exercised;
 - the MCP pinning ratio and the static context-cost estimate;
 - when the with-plugin arm ran, which components were observed.
 
 Dependency status counts appear next to it under
 **Plugin Dependency Completeness**. The Markdown report has the same content
-under `### Plugin Component Coverage`. The CLI summary prints the
-not-evaluated count and list. The JSON report keeps the raw
+under `### Plugin Component Coverage`. The CLI summary prints the not-staged
+and staged-but-not-observed counts and lists. The SARIF run properties carry
+`componentsNotStaged` and, when activation was recorded,
+`componentsStagedNotObserved`. The JSON report keeps the raw
 `plugin_provenance` block in the Tier 3 payload.
 
 ### Where results are recorded
@@ -1297,8 +1307,8 @@ It uses the skill card's fail-closed rules and adds the following sections:
   percentage points, or `INCONCLUSIVE` with the reason. With lift mode
   `integration`, Effectiveness reads "Not measured", and Results at a Glance
   describes the baseline as the sum of parts.
-- **Component Coverage:** per-component states and the list of components that
-  were not evaluated.
+- **Component Coverage:** per-component states, the components that were not
+  staged, and the staged components that no plugin trial exercised.
 - **Provenance and Excluded Behavior:** what the run did not demonstrate. This
   covers unresolved refs, provider-only MCP servers, and component types that
   were only inventoried.

@@ -630,7 +630,8 @@ class BenchmarkReporter(ReporterBase):
             else:
                 lines.append(
                     "Recommended for publication based on the completed evaluation evidence in this report. "
-                    "The recommendation covers only the components and behavior listed as evaluated below."
+                    "The recommendation covers only the components this run staged and the behavior its trials "
+                    "exercised, as listed below."
                 )
             lines.append("")
         elif status == "FAIL":
@@ -825,11 +826,14 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
             return
+        observed = (
+            f"; {_md_cell(coverage['observed_headline'], private_labels)}" if coverage["observed_headline"] else ""
+        )
         lines.extend(
             [
                 (
                     f"**{_md_cell(coverage['headline'], private_labels)}** of {coverage['total']} declared or "
-                    f"packaged component(s); {coverage['staged']} staged."
+                    f"packaged component(s); {coverage['staged']} staged{observed}."
                 ),
                 "",
                 f"Files staged ≠ components loaded ≠ behavior verified. {_md_cell(coverage['note'], private_labels)}",
@@ -846,15 +850,24 @@ class BenchmarkReporter(ReporterBase):
         if coverage["omitted"]:
             lines.append(f"| {coverage['omitted']} more component(s) | | | |")
         lines.append("")
-        if coverage["not_evaluated_rows"]:
-            lines.extend(["Not evaluated:", ""])
-            for row in coverage["not_evaluated_rows"]:
+        if coverage["not_staged_rows"]:
+            lines.extend(["Not staged:", ""])
+            for row in coverage["not_staged_rows"]:
                 reason = f" — {_publication_safe_inline(row['reason'], private_labels)}" if row["reason"] else ""
                 lines.append(
                     f"- {_publication_safe_inline(row['type'], private_labels)} "
                     f"{_publication_safe_inline(row['name'], private_labels)} "
                     f"({_publication_safe_inline(row['state_label'], private_labels)}){reason}"
                 )
+            lines.append("")
+        if coverage["staged_not_observed_rows"]:
+            lines.extend(["Staged but not observed in any plugin trial:", ""])
+            lines.extend(
+                f"- {_publication_safe_inline(row['type'], private_labels)} "
+                f"{_publication_safe_inline(row['name'], private_labels)} "
+                f"({_publication_safe_inline(row['observed'], private_labels)})"
+                for row in coverage["staged_not_observed_rows"]
+            )
             lines.append("")
 
     @staticmethod
@@ -1130,7 +1143,14 @@ def _plugin_metadata_lines(
         lines.append(f"- Cross-component tasks: {cross}")
     coverage = (view or {}).get("coverage")
     if coverage:
-        lines.append(f"- Component coverage: {_publication_safe_inline(coverage['headline'], private_labels)}")
+        observed = (
+            f"; {_publication_safe_inline(coverage['observed_headline'], private_labels)}"
+            if coverage["observed_headline"]
+            else ""
+        )
+        lines.append(
+            f"- Component coverage: {_publication_safe_inline(coverage['headline'], private_labels)}{observed}"
+        )
     if view is not None:
         lines.append(f"- Plugin run: {'INCOMPLETE (partial)' if view['partial'] else 'complete'}")
     return lines

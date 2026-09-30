@@ -441,16 +441,22 @@ class MarkdownReporter(ReporterBase):
         if coverage:
             lines.append("### Plugin Component Coverage")
             lines.append("")
+            observed = f"; {cell(coverage['observed_headline'])}" if coverage["observed_headline"] else ""
             lines.append(
-                f"**{cell(coverage['headline'])}** of {coverage['total']} component(s); {coverage['staged']} staged."
+                f"**{cell(coverage['headline'])}** of {coverage['total']} component(s); "
+                f"{coverage['staged']} staged{observed}."
             )
             lines.append("")
             lines.append(f"*Files staged ≠ components loaded ≠ behavior verified. {cell(coverage['note'])}*")
             lines.append("")
-            if coverage["not_evaluated_rows"]:
+            if coverage["staged_not_observed_rows"]:
+                names = ", ".join(f"{row['type']} {row['name']}" for row in coverage["staged_not_observed_rows"])
+                lines.append(f"Staged but not observed in any plugin trial: {cell(names)}")
+                lines.append("")
+            if coverage["not_staged_rows"]:
                 lines.append("| Type | Component | State | Reason |")
                 lines.append("|------|-----------|-------|--------|")
-                for row in coverage["not_evaluated_rows"]:
+                for row in coverage["not_staged_rows"]:
                     lines.append(
                         f"| {cell(row['type'])} | {cell(row['name'])} | {cell(row['state_label'])} "
                         f"| {cell(row['reason'])} |"

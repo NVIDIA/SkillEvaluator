@@ -73,16 +73,27 @@ def print_plugin_tier3(view: dict, console: Console) -> None:
         )
     coverage = view.get("coverage")
     if coverage:
-        style = "bold red" if coverage["not_evaluated"] else "green"
+        # Green only when every component was staged and exercised: staged alone is not evaluated.
+        style = "bold red" if coverage["not_staged"] else ("green" if coverage["all_exercised"] else "yellow")
+        observed = f"; {esc(coverage['observed_headline'])}" if coverage["observed_headline"] else ""
         console.print(
             f"  [{style}]Component coverage: {esc(coverage['headline'])}[/{style}] "
-            f"(of {coverage['total']}; {coverage['staged']} staged)"
+            f"(of {coverage['total']}; {coverage['staged']} staged{observed})",
+            soft_wrap=True,
         )
         console.print("    [dim]Files staged ≠ components loaded ≠ behavior verified.[/dim]")
-        for row in coverage["not_evaluated_rows"][:10]:
+        for row in coverage["not_staged_rows"][:10]:
             reason = f": {esc(row['reason'])}" if row["reason"] else ""
             console.print(f"    [dim]- {esc(row['type'])} {esc(row['name'])} ({esc(row['state_label'])}){reason}[/dim]")
-        remaining = len(coverage["not_evaluated_rows"]) - 10
+        remaining = len(coverage["not_staged_rows"]) - 10
+        if remaining > 0:
+            console.print(f"    [dim]... and {remaining} more[/dim]")
+        for row in coverage["staged_not_observed_rows"][:10]:
+            console.print(
+                f"    [dim]- {esc(row['type'])} {esc(row['name'])} (staged, {esc(row['observed'])})[/dim]",
+                soft_wrap=True,
+            )
+        remaining = len(coverage["staged_not_observed_rows"]) - 10
         if remaining > 0:
             console.print(f"    [dim]... and {remaining} more[/dim]")
         activation = coverage.get("activation")

@@ -68,7 +68,7 @@ def test_standalone_render_round_trip_preserves_incomplete_and_coverage(tmp_path
     assert "INCOMPLETE" in (element_text(html, "tier3-plugin-incomplete") or "")
     assert '<span class="tier-card-verdict">INCOMPLETE</span>' in html
     coverage = element_text(html, "tier3-plugin-coverage") or ""
-    assert "2 components not evaluated" in coverage
+    assert "2 components not staged" in coverage
     completeness = element_text(html, "tier3-plugin-completeness") or ""
     assert "github::org/repo::skills::remote" in completeness
 
@@ -349,7 +349,7 @@ def test_evaluate_plugin_delivers_report_with_provenance(monkeypatch: pytest.Mon
     html = (run_dir / "report.html").read_text(encoding="utf-8")
     assert "runner report without provenance" not in html
     assert element_text(html, "tier3-plugin-incomplete") is not None
-    assert "2 components not evaluated" in (element_text(html, "tier3-plugin-coverage") or "")
+    assert "2 components not staged" in (element_text(html, "tier3-plugin-coverage") or "")
 
 
 def test_evaluate_plugin_keeps_incomplete_when_the_sidecar_write_fails(

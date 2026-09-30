@@ -117,7 +117,7 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
     assert "- Agents: Codex (`gpt-codex`)" in rendered
     assert "- Tasks: 4 evaluation tasks (3 positive, 1 negative)" in rendered
     assert "- Cross-component tasks: 2" in rendered
-    assert "- Component coverage: 0 components not evaluated" in rendered
+    assert "- Component coverage: 0 components not staged" in rendered
     assert "- Plugin run: complete" in rendered
     assert "| Codex (Baseline → Plugin Uplift) |" in rendered
     assert (
@@ -187,7 +187,7 @@ def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path:
     assert "## Publication Recommendation" not in rendered
     assert "- Plugin run: INCOMPLETE (partial)" in rendered
     assert "| Integration (plugin vs. its own parts) | INCONCLUSIVE — No cross-component case completed. |" in rendered
-    assert "**2 components not evaluated** of 4 declared or packaged component(s); 2 staged." in rendered
+    assert "**2 components not staged** of 4 declared or packaged component(s); 2 staged." in rendered
     assert "- mcp docs (Unavailable) — provider-only MCP server" in rendered
     assert "- Status: **INCOMPLETE** — 1 unresolved skill ref, 1 provider-only MCP server" in rendered
     assert "- Provider-only MCP servers were not exercised: docs" in rendered

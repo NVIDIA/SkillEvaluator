@@ -235,7 +235,10 @@ def _plugin_run_properties(plugin: dict[str, Any], results: list[ValidationResul
             continue
         properties["evaluationIncomplete"] = view["partial"]
         if view["coverage"] is not None:
-            properties["componentsNotEvaluated"] = view["coverage"]["not_evaluated"]
+            # Staged is not evaluated: report the not-staged count, plus the staged
+            # components no plugin trial exercised when trials recorded activation.
+            properties["componentsNotStaged"] = view["coverage"]["not_staged"]
+            properties["componentsStagedNotObserved"] = view["coverage"]["staged_not_observed"]
         break
     return json_safe({key: value for key, value in properties.items() if value is not None})
 

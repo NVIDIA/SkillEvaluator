@@ -212,10 +212,12 @@
 {% set cov = v.coverage %}
 <details class="t3-details" id="tier3-plugin-coverage" open>
     <summary>Plugin Component Coverage &mdash;
-        <span class="t3-pill {{ 'critical' if cov.not_evaluated else 'ok' }}">{{ cov.headline }}</span>
+        {#- Green only when every component was staged and exercised in a trial: staged alone is not evaluated. #}
+        <span class="t3-pill {{ 'critical' if cov.not_staged else ('ok' if cov.all_exercised else 'warning') }}">{{ cov.headline }}</span>
+        {% if cov.staged_not_observed %}<span class="t3-pill warning">{{ cov.staged_not_observed }} staged, not observed</span>{% endif %}
     </summary>
     <div class="t3-details-body">
-    <p class="plugin-headline{{ ' bad' if cov.not_evaluated else '' }}" id="tier3-plugin-not-evaluated"><strong>{{ cov.headline }}</strong> of {{ cov.total }} declared or packaged component(s); {{ cov.staged }} staged.</p>
+    <p class="plugin-headline{{ ' bad' if cov.not_staged else '' }}" id="tier3-plugin-not-evaluated"><strong>{{ cov.headline }}</strong> of {{ cov.total }} declared or packaged component(s); {{ cov.staged }} staged{% if cov.observed_headline %}; {{ cov.observed_headline }}{% endif %}.</p>
     <p class="t3-section-hint"><strong>Files staged &ne; components loaded &ne; behavior verified.</strong> {{ cov.note }}</p>
     <p class="t3-section-hint">{% for row in cov.counts %}<span class="metadata-tag">{{ row.state | replace('_', ' ') }}: {{ row.count }}</span>{% endfor %}</p>
     {% if cov.activation %}

@@ -18,8 +18,9 @@ exactly as before.
 
 The coverage view keeps three claims apart: a component's files were staged,
 the agent loaded or called it, and its behavior was verified. Staging proves
-only the first, so reports built from these views say which components were
-and were not evaluated instead of implying that staged means tested.
+only the first, so reports built from these views count the components that
+were not staged and, when trials recorded activation, the staged components no
+trial exercised, instead of implying that staged means tested.
 """
 
 from __future__ import annotations
@@ -737,13 +738,23 @@ def completeness_view(provenance: object) -> dict[str, Any] | None:
 
 
 def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Return per-component coverage with a prominent not-evaluated count."""
+    """Return per-component coverage with prominent not-staged and not-observed counts.
+
+    The headline counts components that were not staged. Staging is not
+    evaluation, so when trials recorded activation the view also counts the
+    staged components no plugin trial exercised, and ``all_exercised`` is true
+    only when every component was staged and exercised. Without activation
+    data nothing is known beyond staging, so ``all_exercised`` stays false.
+    """
     coverage = _mapping(value)
     if not coverage:
         return None
+    activation = (signals or {}).get("activation")
     rows: list[dict[str, Any]] = []
     total = 0
-    not_evaluated_rows: list[dict[str, Any]] = []
+    not_staged_rows: list[dict[str, Any]] = []
+    unobserved_rows: list[dict[str, Any]] = []
+    unobserved = 0
     computed_counts: dict[str, int] = {}
     for component in _sequence(coverage.get("components")):
         if not isinstance(component, Mapping):
@@ -762,19 +773,23 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
             "reason": text(component.get("reason")),
             "observed": "",
         }
+        if activation:
+            row["observed"] = _observed_activation(row, activation)
         if len(rows) < MAX_TABLE_ROWS:
             rows.append(row)
-        if state != "staged" and len(not_evaluated_rows) < MAX_TABLE_ROWS:
-            not_evaluated_rows.append(row)
-    activation = (signals or {}).get("activation")
-    if activation:
-        for row in rows:
-            row["observed"] = _observed_activation(row, activation)
+        if state != "staged":
+            if len(not_staged_rows) < MAX_TABLE_ROWS:
+                not_staged_rows.append(row)
+        elif activation and row["observed"] != "exercised":
+            unobserved += 1
+            if len(unobserved_rows) < MAX_TABLE_ROWS:
+                unobserved_rows.append(row)
     declared_counts = _mapping(coverage.get("counts"))
     counts = _state_counts(declared_counts or computed_counts, COVERAGE_STATES)
-    not_evaluated = count(coverage.get("not_evaluated"))
-    if not_evaluated is None:
-        not_evaluated = sum(row["count"] for row in counts if row["state"] != "staged")
+    # The producer records the not-staged count as ``not_evaluated``.
+    not_staged = count(coverage.get("not_evaluated"))
+    if not_staged is None:
+        not_staged = sum(row["count"] for row in counts if row["state"] != "staged")
     staged = next((row["count"] for row in counts if row["state"] == "staged"), 0)
     return {
         "rows": rows,
@@ -782,9 +797,15 @@ def coverage_view(value: object, signals: dict[str, Any] | None = None) -> dict[
         "total": total or sum(row["count"] for row in counts),
         "staged": staged,
         "counts": [row for row in counts if row["count"] or row["state"] in COVERAGE_STATES],
-        "not_evaluated": not_evaluated,
-        "not_evaluated_rows": not_evaluated_rows,
-        "headline": f"{_plural(not_evaluated, 'component')} not evaluated",
+        "not_staged": not_staged,
+        "not_staged_rows": not_staged_rows,
+        "headline": f"{_plural(not_staged, 'component')} not staged",
+        "staged_not_observed": unobserved if activation else None,
+        "staged_not_observed_rows": unobserved_rows,
+        "observed_headline": (
+            f"{_plural(unobserved, 'staged component')} not observed in any plugin trial" if unobserved else ""
+        ),
+        "all_exercised": bool(activation) and staged > 0 and not_staged == 0 and unobserved == 0,
         "note": STAGED_IS_NOT_VERIFIED,
         "activation": activation,
     }
@@ -1367,9 +1388,15 @@ def excluded_behavior(view: Mapping[str, Any], provenance: object) -> list[str]:
     if sidecar_reason:
         statements.append(sidecar_reason[:1].upper() + sidecar_reason[1:])
     coverage = _mapping(view.get("coverage"))
-    if coverage and coverage.get("not_evaluated"):
-        names = [f"{row['type']} {row['name']}".strip() for row in _sequence(coverage.get("not_evaluated_rows"))[:12]]
+    if coverage and coverage.get("not_staged"):
+        names = [f"{row['type']} {row['name']}".strip() for row in _sequence(coverage.get("not_staged_rows"))[:12]]
         statements.append(f"{coverage['headline']}: {', '.join(names)}" if names else str(coverage["headline"]))
+    if coverage and coverage.get("staged_not_observed"):
+        rows = _sequence(coverage.get("staged_not_observed_rows"))
+        names = [f"{row['type']} {row['name']}".strip() for row in rows[:12]]
+        omitted = max(0, int(coverage["staged_not_observed"]) - len(names))
+        suffix = f" (+{omitted} more)" if omitted else ""
+        statements.append(f"Staged but not observed in any plugin trial: {', '.join(names)}{suffix}")
     for label, field in (
         ("Provider-only MCP servers were not exercised", "provider_only_mcp_servers"),
         ("MCP servers declare configuration the runtime cannot apply", "mcp_unsupported_config"),

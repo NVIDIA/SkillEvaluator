@@ -221,6 +221,16 @@ class TestOutcomeTriState:
         traj = _traj(_one("mcp__github__x", content=content))
         assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is False
 
+    def test_missing_sibling_file_does_not_fail_a_shell_manifest_read(self) -> None:
+        output = "cat: skills/alpha/REFERENCE.md: No such file or directory\n---\nname: alpha\n---\n"
+        traj = _traj(_one("exec_command", {"cmd": "cat skills/alpha/SKILL.md skills/alpha/REFERENCE.md"}, output))
+        assert detect_component_activations(traj, DECLARED)[0]["succeeded"] is True
+
+    @pytest.mark.parametrize("fn", ["Read", "mcp__github__read_file"])
+    def test_missing_file_still_fails_mcp_and_file_read_tools(self, fn: str) -> None:
+        traj = _traj(_one(fn, {"file_path": "skills/beta/SKILL.md"}, "Error: file does not exist"))
+        assert {a["succeeded"] for a in detect_component_activations(traj, DECLARED)} == {False}
+
     def test_sibling_result_never_proves_success(self) -> None:
         traj = _traj(
             _step(

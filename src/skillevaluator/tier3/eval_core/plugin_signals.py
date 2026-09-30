@@ -35,7 +35,8 @@ owns that observation; otherwise its outcome is unknown.
 ``succeeded`` is tri-state. ``True``: a correlated result came back without a
 structured error flag or a failure/unavailable marker in the head of any of its
 content blocks or in its tail. ``False``: the correlated result is flagged or
-carries such a marker. ``None``:
+carries such a marker ("no such file" only counts for non-shell calls, whose
+output is not a mix of several commands). ``None``:
 no result could be attributed to this call (no id match, or an ambiguous
 multi-call step), or the correlated body is empty. A sibling call's result never
 stands in for this call's outcome.
@@ -283,9 +284,11 @@ _UNAVAILABLE_MARKERS = (
     "connection refused",
     "mcp server not",
     "no mcp server",
-    "no such file or directory",
-    "file does not exist",
 )
+# A missing file means a failed call only for MCP and file-read tools. A shell
+# call's output mixes several commands, so ``cat SKILL.md missing.md`` read the
+# manifest even though its output says "No such file or directory".
+_FILE_MISSING_MARKERS = ("no such file or directory", "file does not exist")
 # A result that came back as a runtime/transport failure rather than an answer.
 _FAILED_CALL_RE = re.compile(
     r"(?:\b[45]\d{2}\b\s*[:\-])"
@@ -1025,7 +1028,7 @@ def _results_for_call(
     return []
 
 
-def _outcome(correlated: list[tuple[str, str, bool]]) -> tuple[str | None, bool | None]:
+def _outcome(correlated: list[tuple[str, str, bool]], *, shell: bool) -> tuple[str | None, bool | None]:
     if not correlated:
         return None, None
     text = "".join(item for item, _, _ in correlated)[:_MAX_OBSERVATION_CHARS]
@@ -1034,7 +1037,8 @@ def _outcome(correlated: list[tuple[str, str, bool]]) -> tuple[str | None, bool 
         return text, None
     scan = "\n".join(window for _, window, _ in correlated)
     lowered = scan.casefold()
-    failed = flagged or any(marker in lowered for marker in _UNAVAILABLE_MARKERS) or bool(_FAILED_CALL_RE.search(scan))
+    markers = _UNAVAILABLE_MARKERS if shell else (*_UNAVAILABLE_MARKERS, *_FILE_MISSING_MARKERS)
+    failed = flagged or any(marker in lowered for marker in markers) or bool(_FAILED_CALL_RE.search(scan))
     return text, not failed
 
 
@@ -1346,11 +1350,12 @@ def _extract_calls(trajectory: Mapping[str, Any], declared: Mapping[str, Sequenc
                     correlated = _results_for_call(results, outer_id, call_count=len(raw_calls))
                 else:
                     correlated = []
-                observation, succeeded = _outcome(correlated)
                 fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
                 args = tool_call.get("arguments")
                 args = args if isinstance(args, dict) else {}
                 idents = _identities(fn, args, declared)
+                shell = _base_tool_name(fn) in _SHELL_TOOLS and not any(ident.kind == COMPONENT_MCP for ident in idents)
+                observation, succeeded = _outcome(correlated, shell=shell)
                 seq = len(calls)
                 if any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
                     owner = seq

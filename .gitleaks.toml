@@ -11,12 +11,6 @@ regexes = ['''^sk-AbCdEf1234567890$''']
 paths = ['''^tests/test_tier3_(progress|result_display)\.py$''']
 
 [[allowlists]]
-description = "Synthetic JWT and private-key fixtures in the first revision of the redaction tests (PR #172); the file now assembles them from split literals"
-condition = "AND"
-commits = ["97a0616f7786fc5b10c49aa24b0a55f8d446bcab"]
-paths = ['''^tests/test_redaction_assignments\.py$''']
-
-[[allowlists]]
 description = "Synthetic basic-auth, cloud-key and URL-token fixtures in the first revisions of the security-evidence and MCP-hardening tests; both files now assemble them from split literals"
 condition = "AND"
 commits = ["66ae1d4c1188e2a8d9f0586abe0a895e04b78758", "727826808a2d4c3c2b7c393d67f5339efde28532"]

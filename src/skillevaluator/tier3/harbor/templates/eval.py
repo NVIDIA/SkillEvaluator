@@ -242,10 +242,12 @@ _SENSITIVE_WRITE_PATHS = [
 
 # apply_patch writes every file named by an "*** Add File: ", "*** Update File: ",
 # "*** Delete File: ", or "*** Move to: " header, so each header path is a write
-# target. The header regex is anchored per line with no nested quantifiers, so
-# scanning every header of a hostile patch stays linear.
+# target. Codex trims every patch line (Rust str::trim), so any whitespace except
+# a newline may precede a header, and a path runs to the end of its line. The
+# regex is anchored per line with no nested quantifiers, so scanning every header
+# of a hostile patch stays linear.
 _APPLY_PATCH_HEADER_RE = re.compile(
-    r"^[ \t]*\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*([^\r\n]*)",
+    r"^[^\S\n]*\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*([^\n]*)",
     re.MULTILINE,
 )
 # Codex runs apply_patch under either command name: "apply_patch" or "applypatch".
@@ -2093,7 +2095,8 @@ def _apply_patch_text(tool_call, action_lower, is_exec_tool):
 
 def _protected_write_entry(target):
     """Return the protected-path entry a written *target* hits, as written or home-normalized."""
-    cleaned = str(target).lower().replace("\\", "/").strip().strip("'\"<>")
+    # OpenCode trims header paths with JavaScript's trim(), which also strips U+FEFF.
+    cleaned = str(target).replace("\ufeff", " ").lower().replace("\\", "/").strip().strip("'\"<>")
     path = ("/" if cleaned.startswith("/") else "") + "/".join(_lexical_path_components(cleaned))
     for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1)):
         for entry in (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS):

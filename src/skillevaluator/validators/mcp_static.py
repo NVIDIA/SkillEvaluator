@@ -150,7 +150,10 @@ def redacted_url(url: str) -> str:
     Userinfo, parameters, query, and fragment are dropped so an inline credential
     is never echoed into reports or CI logs.
     """
-    parsed = urlparse(url.strip())
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:  # e.g. an unbalanced '[' in the authority
+        return "<unparseable URL>"
     return urlunparse((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, "", "", ""))
 
 
@@ -365,9 +368,22 @@ def _validate_url(
         )
         return
 
-    parsed = urlparse(url.strip())
-    scheme = (parsed.scheme or "").lower()
     shown = redacted_url(url)  # messages never echo userinfo or query credentials
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:  # e.g. an unbalanced '[' in the authority
+        findings.append(
+            _finding(
+                Severity.HIGH,
+                "mcp_url_malformed_authority",
+                "url could not be parsed (malformed authority)",
+                file_path,
+                "Use a valid host[:port] authority, e.g. https://host:443/path.",
+                name=name,
+            )
+        )
+        return
+    scheme = (parsed.scheme or "").lower()
     # Inline credentials in userinfo/query are persisted verbatim; check them
     # independent of the scheme (secure https URLs are the common case).
     _check_url_inline_secrets(name, url, parsed, file_path, findings)

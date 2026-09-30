@@ -249,6 +249,13 @@ def test_remote_mcp_urls_are_reported_without_query_credentials(tmp_path: Path) 
     assert all(secret not in row["name"] for row in _components(result, "mcp"))
 
 
+def test_unparseable_remote_mcp_url_is_reported_not_raised(tmp_path: Path) -> None:
+    result = _validate(_plugin(tmp_path, {"mcpServers": ["https://[bad/srv.mcpb", "https://[bad/servers.json"]}))
+    checks = _checks(result)
+    assert checks["mcp_bundle_not_inspected"] == Severity.MEDIUM
+    assert checks["mcp_config_path_invalid"] == Severity.HIGH
+
+
 def test_non_dot_relative_mcp_path_gets_style_finding(tmp_path: Path) -> None:
     root = _plugin(tmp_path, {"mcpServers": "cfg.json"}, {"cfg.json": {"x": _PINNED_FS}})
     result = _validate(root)

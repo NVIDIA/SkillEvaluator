@@ -285,6 +285,13 @@ def test_url_findings_never_echo_userinfo_or_query_credentials(url: str, check: 
     assert repr(shown) in next(f for f in findings if f.check_name == check).message
 
 
+@pytest.mark.parametrize("url", [f"https://user:{_URL_SECRET}@[::1/mcp", "https://[bad/mcp?x=1"])
+def test_unparseable_url_authority_is_a_finding_not_a_crash(url: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
+    assert _checks(findings)["mcp_url_malformed_authority"] == Severity.HIGH
+    assert all(_URL_SECRET not in f.message for f in findings)
+
+
 def test_plaintext_url_still_reports_endpoint_class() -> None:
     checks = _checks(validate_mcp_server_declaration("s", {"url": "http://169.254.169.254/"}, "p.json"))
     assert checks["mcp_url_insecure_scheme"] == Severity.HIGH

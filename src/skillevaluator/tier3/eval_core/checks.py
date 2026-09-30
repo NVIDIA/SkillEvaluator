@@ -93,7 +93,9 @@ _SENSITIVE_WRITE_PATHS = [
     "/root/.bashrc",
     "/root/.zshrc",
     "/etc/profile",
+    "/etc/profile.d",
     "/etc/sudoers",
+    "/etc/sudoers.d",
 ]
 
 # apply_patch writes every file named by an "*** Add File: ", "*** Update File: ",
@@ -322,11 +324,18 @@ def _normalized_write_path(target: Any, workdir: str) -> str:
 
 
 def _protected_write_entry(target: str, workdir: str) -> str | None:
-    """Return the protected-path entry a written *target* hits, as written or home-normalized."""
+    """Return the protected-path entry a written *target* is or is inside, on path-segment boundaries.
+
+    Entries starting with "/" or "~" are anchored at the normalized absolute path
+    or its home-normalized form; relative entries match whole path segments.
+    """
     path = _normalized_write_path(target, workdir)
     for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1)):
         for entry in (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS):
-            if entry in candidate:
+            if entry.startswith(("/", "~")):
+                if candidate == entry or candidate.startswith(f"{entry}/"):
+                    return entry
+            elif f"/{entry}/" in f"{candidate}/":
                 return entry
     return None
 

@@ -82,6 +82,10 @@ def _write_findings(result: dict) -> list[dict]:
         ("*** Update File: src/app.py\n*** Move to: ${HOME}/.profile", "~/.profile"),
         ("*** Add File: /home/agent/.bashrc", "~/.bashrc"),
         ("*** Add File: /workspace/../etc/sudoers", "/etc/sudoers"),
+        ("*** Add File: /etc/sudoers.d/agent", "/etc/sudoers.d"),
+        ("*** Add File: /etc/profile.d/proxy.sh", "/etc/profile.d"),
+        ("*** Update File: /root/.aws/credentials", ".aws/credentials"),
+        ("*** Add File: ~/.config/gcloud/credentials.db", ".config/gcloud"),
     ],
 )
 def test_apply_patch_to_protected_path_is_critical_write(run, header, entry):
@@ -215,6 +219,12 @@ def test_apply_patch_header_after_codex_trimmed_whitespace_is_scanned(run, heade
         "*** Add File: src/app.py",
         "*** Update File: /workspace/project/.bashrc",
         "*** Update File: /home/agent/project/notes.md\n*** Move to: /home/agent/project/docs/notes.md",
+        # Protected entries match whole path segments, anchored at "/" or home.
+        "*** Add File: /workspace/root/.bashrc",
+        "*** Add File: src/root/.zshrc.example",
+        "*** Add File: /workspace/etc/profile.d/x",
+        "*** Add File: docs/.config/gcloud-setup.md",
+        "*** Add File: /home/agent/.bashrc_notes/readme.md",
     ],
 )
 def test_apply_patch_to_workspace_file_is_not_flagged(run, header):

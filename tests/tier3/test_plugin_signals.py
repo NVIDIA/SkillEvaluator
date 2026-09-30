@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import pytest
@@ -367,7 +368,12 @@ class TestArguments:
 
         assert (block["checked"], block["passed"]) == (2, 1)
         assert block["failures"] == [
-            {"tool": "mcp__jira__create_ticket", "arg": "dry_run", "rule": "equals", "detail": "expected false, got 0"}
+            {
+                "tool": "mcp__jira__create_ticket",
+                "arg": "dry_run",
+                "rule": "equals",
+                "detail": "expected false, got integer",
+            }
         ]
 
     def test_rule_without_matching_call_is_reported_but_not_checked(self) -> None:
@@ -378,15 +384,35 @@ class TestArguments:
         assert block["failures"][0]["rule"] == "not_called"
         assert block["status"] == "scored"
 
-    def test_failure_detail_is_redacted(self) -> None:
-        secret = "sk-" + "Ab1" * 8
-        traj = _traj(_one("mcp__github__call", {"header": f"key {secret}"}))
-        case = {"tool_arguments": [{"tool": "mcp__github__call", "equals": {"header": "expected"}}]}
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"equals": {"command": "make test"}},
+            {"contains": {"command": "pytest"}},
+            {"pattern": {"command": "^pytest"}},
+            {"schema": {"properties": {"command": {"enum": ["ls"], "pattern": "^ls"}}}},
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("command", "secret"),
+        [
+            ("git clone https://deploy:S3cr3tP4ss@gitlab.example.com/x.git", "S3cr3tP4ss"),
+            ("psql postgresql://admin:hunter2pw@db:5432/app", "hunter2pw"),
+            ("mysql -u root -phunter2pw -h db", "hunter2pw"),
+            ("printf '-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0'", "MIIEvQIBADANBgkqhkiG9w0"),
+            ("curl -H 'X-Key: sk-" + "Ab1" * 8 + "'", "Ab1Ab1Ab1"),
+        ],
+    )
+    def test_failure_details_never_echo_argument_values(self, rule: dict[str, Any], command: str, secret: str) -> None:
+        traj = _traj(_one("Bash", {"command": command}))
+        case = {"tool_arguments": [{"tool": "Bash", **rule}]}
 
-        (failure,) = _signals(traj, case)["arguments"]["failures"]
+        signals = _signals(traj, case)
 
-        assert secret not in failure["detail"]
-        assert "sk-<redacted>" in failure["detail"]
+        assert secret not in json.dumps(signals)
+        assert signals["arguments"]["failures"]
+        for failure in signals["arguments"]["failures"]:
+            assert f"string(len={len(command)})" in failure["detail"]
 
     def test_failure_detail_is_truncated(self) -> None:
         traj = _traj(_one("mcp__github__call", {"body": "x" * 5000}))
@@ -736,3 +762,62 @@ def test_context_builder_bounds_and_scopes_declared_components() -> None:
     assert context.case_spec("missing") == {}
     assert context.arm_enabled("with_skill") and context.arm_enabled("sum_of_parts")
     assert not context.arm_enabled("without_skill")
+
+
+class TestUntrustedTrajectoryContent:
+    def test_argument_derived_names_persist_only_when_identifier_shaped_or_declared(self) -> None:
+        traj = _traj(
+            _one("Skill", {"skill": "https://u:SuperSecretPW@host/x"}),
+            _one("Task", {"subagent_type": "-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEA"}, call_id="c2"),
+            _one("SlashCommand", {"command": "postgresql://admin:hunter2pw@db/app --now"}, call_id="c3"),
+            _one("Skill", {"skill": "Release Notes"}, call_id="c4"),
+            _one("Task", {"subagent_type": "code-reviewer"}, call_id="c5"),
+            _one("SlashCommand", {"command": "/plugin:deploy prod"}, call_id="c6"),
+        )
+        declared = {**DECLARED, "skill": [*DECLARED["skill"], "release notes"]}
+        case = {"tool_arguments": [{"tool": "Skill:*", "required": ["missing"]}]}
+
+        signals = _signals(traj, case, declared=declared)
+
+        dumped = json.dumps(signals)
+        for secret in ("SuperSecretPW", "MIIEowIBAAKCAQEA", "hunter2pw"):
+            assert secret not in dumped
+        assert [a["name"] for a in signals["activations"]] == [
+            "<non-name>",
+            "<non-name>",
+            "<non-name>",
+            "Release Notes",
+            "code-reviewer",
+            "plugin:deploy",
+        ]
+        assert signals["tool_selection"]["called"] == [
+            "Skill:<non-name>",
+            "Agent:<non-name>",
+            "Command:<non-name>",
+            "Skill:Release Notes",
+            "Agent:code-reviewer",
+            "Command:plugin:deploy",
+        ]
+        assert [f["tool"] for f in signals["arguments"]["failures"]] == ["Skill:<non-name>", "Skill:Release Notes"]
+
+    def test_adversarial_text_for_the_redactor_does_not_stall_collection(self) -> None:
+        payload = "a." * 32_768  # quadratic for the credential redactor's assignment patterns
+        traj = _traj(
+            _one("Skill", {"skill": payload}),
+            _one("Task", {"subagent_type": payload}, call_id="c2"),
+            _one("Bash", {"command": payload}, call_id="c3"),
+        )
+        case = {
+            "tool_arguments": [
+                {"tool": "Bash", "contains": {"command": "pytest"}},
+                {"tool": "Bash", "equals": {"command": "make test"}},
+                {"tool": "Bash", "pattern": {"command": "^pytest"}},
+                {"tool": "Bash", "schema": {"properties": {"command": {"enum": ["ls"]}}}},
+            ]
+        }
+
+        started = time.monotonic()
+        signals = _signals(traj, case)
+
+        assert time.monotonic() - started < 1.0
+        assert len(signals["arguments"]["failures"]) == 4

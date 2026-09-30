@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from skillevaluator.evaluation.tier3_report import _attach_plugin_report_fields
 from skillevaluator.tier3.eval_core.plugin_signals import build_plugin_signals_context
 from skillevaluator.tier3.evals_spec import validate_tier3_source
 from skillevaluator.tier3.harbor import runner
@@ -37,7 +38,17 @@ CASE = {
 }
 
 
-def _trajectory() -> dict[str, Any]:
+def _agent_step(step_id: int, call_id: str, function: str, arguments: dict[str, Any], content: str) -> dict[str, Any]:
+    return {
+        "step_id": step_id,
+        "source": "agent",
+        "message": "",
+        "tool_calls": [{"tool_call_id": call_id, "function_name": function, "arguments": arguments}],
+        "observation": {"results": [{"source_call_id": call_id, "content": content}]},
+    }
+
+
+def _trajectory(*extra_steps: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": "ATIF-v1.2",
         "steps": [
@@ -58,7 +69,8 @@ def _trajectory() -> dict[str, Any]:
                 ],
                 "observation": {"results": [{"source_call_id": "c2", "content": "Issue 7: crash on start"}]},
             },
-            {"step_id": 4, "source": "agent", "message": "done", "tool_calls": [], "observation": {"results": []}},
+            *extra_steps,
+            {"step_id": 9, "source": "agent", "message": "done", "tool_calls": [], "observation": {"results": []}},
         ],
     }
 
@@ -94,9 +106,9 @@ def _write_job(jobs_dir: Path, variant: str, *, trajectory: dict[str, Any] | Non
     return trial_name
 
 
-def _jobs(tmp_path: Path, *, with_trajectory: bool = True) -> Path:
+def _jobs(tmp_path: Path, *, with_trajectory: bool = True, trajectory: dict[str, Any] | None = None) -> Path:
     jobs_dir = tmp_path / "jobs"
-    _write_job(jobs_dir, "with", trajectory=_trajectory() if with_trajectory else None)
+    _write_job(jobs_dir, "with", trajectory=(trajectory or _trajectory()) if with_trajectory else None)
     _write_job(jobs_dir, "without", trajectory=_trajectory())
     _write_job(jobs_dir, "sumofparts", trajectory=_trajectory())
     return jobs_dir
@@ -173,6 +185,31 @@ def test_plugin_run_attaches_per_trial_signals_and_per_arm_summaries(tmp_path: P
     assert _summary(tmp_path, "plugin", "with-skill")["plugin_signals_summary"] == with_summary
     assert "plugin_signals_summary" in _summary(tmp_path, "plugin", "sum-of-parts")
     assert "plugin_signals_summary" not in _summary(tmp_path, "plugin", "without-skill")
+
+
+def test_rewards_and_report_payload_never_carry_argument_values_or_non_name_components(tmp_path: Path) -> None:
+    url = "https://deploy:S3cr3tP4ss@gitlab.example.com/x.git"
+    trajectory = _trajectory(
+        _agent_step(4, "c3", "mcp__github__get_issue", {"number": url}, "Issue 8: flaky"),
+        _agent_step(5, "c4", "Skill", {"skill": "-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEA"}, "Unknown skill"),
+    )
+    case = {**CASE, "tool_arguments": [{"tool": "mcp__github__get_issue", "equals": {"number": 7}}]}
+
+    results = _collect(
+        tmp_path, _jobs(tmp_path, trajectory=trajectory), "plugin", plugin_signals=_context(entries=[case])
+    )
+    reward = _trial_reward(tmp_path, "plugin", "with-skill")
+    raw_agent = {"plugin_signals_summary": results["agents"][AGENT]["plugin_signals_summary"], "rewards": [reward]}
+    payload: dict[str, Any] = {"agents": {AGENT: {}}, "best_agent": AGENT}
+    _attach_plugin_report_fields(payload, {AGENT: raw_agent})
+
+    (top,) = payload["plugin_signals_summary"]["with_skill"]["arguments"]["top_failures"]
+    assert top["detail"] == f"expected 7, got string(len={len(url)})"
+    assert "Skill:<non-name>" in reward["plugin_signals"]["tool_selection"]["called"]
+    persisted = [json.dumps(reward), json.dumps(payload), json.dumps(_summary(tmp_path, "plugin", "with-skill"))]
+    for text in persisted:
+        assert "S3cr3tP4ss" not in text
+        assert "MIIEowIBAAKCAQEA" not in text
 
 
 def test_plugin_signals_never_change_scores_or_pass_results(tmp_path: Path) -> None:

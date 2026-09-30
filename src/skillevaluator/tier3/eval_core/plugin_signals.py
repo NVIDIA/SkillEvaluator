@@ -75,7 +75,10 @@ result.
 * When both are given, both must hold.
 
 Trajectory content is untrusted: step, call, text and regex-subject sizes are
-bounded, and every persisted string is redacted and truncated.
+bounded, and every persisted string is redacted (from a bounded window) and
+truncated. Argument values are never persisted: failure details describe them
+by type and size, and a component name taken from tool arguments is kept only
+when it is identifier-shaped or a declared member.
 """
 
 from __future__ import annotations
@@ -250,6 +253,11 @@ _IDENTITY_PREFIX = {
     COMPONENT_SUBAGENT: "Agent",
     COMPONENT_COMMAND: "Command",
 }
+# Skill/subagent/command names come from agent-written tool arguments. Only an
+# identifier-shaped name (or a declared member) is persisted; anything else, such
+# as a URL with credentials or key material, is reported as ``<non-name>``.
+_PERSISTABLE_NAME_RE = re.compile(r"[A-Za-z0-9_.:/-]{1,128}")
+_NON_NAME = "<non-name>"
 
 # Conservative markers that a component could not be served at runtime.
 _UNAVAILABLE_MARKERS = (
@@ -824,6 +832,15 @@ class _Ident:
     server: str | None = None
     tool: str | None = None
     tool_label: str = ""
+    persist_name: bool = True
+
+    @property
+    def persisted_name(self) -> str:
+        return self.name if self.persist_name else _NON_NAME
+
+    @property
+    def persisted_label(self) -> str:
+        return self.label if self.persist_name else f"{_IDENTITY_PREFIX[self.kind or '']}:{_NON_NAME}"
 
 
 @dataclass
@@ -870,7 +887,10 @@ class _Call:
 
 
 def _safe_text(value: Any, limit: int = _MAX_LABEL_CHARS) -> str:
-    text = str(value if value is not None else "")
+    # The redactor is superlinear on some inputs, so it only ever sees a bounded
+    # window; text past the window would be truncated away anyway. The slack
+    # leaves room for redaction to shorten the text and still fill ``limit``.
+    text = str(value if value is not None else "")[: limit * 4 + 256]
     text = _CONTROL_CHARS_RE.sub(" ", text)
     return redact_sensitive_text(text, max_len=limit)
 
@@ -1210,9 +1230,17 @@ def _declared_skill_read(fn: str, fn_base: str, args: Mapping[str, Any], members
     return None
 
 
-def _component_ident(kind: str, name: str, fn: str, tool_label: str) -> _Ident:
+def _component_ident(kind: str, name: str, fn: str, tool_label: str, *, persist: bool = True) -> _Ident:
     label = f"{_IDENTITY_PREFIX[kind]}:{name}" if name else _IDENTITY_PREFIX[kind]
-    return _Ident(label=label, kind=kind, name=name, fn=fn, tool_label=tool_label)
+    return _Ident(label=label, kind=kind, name=name, fn=fn, tool_label=tool_label, persist_name=persist)
+
+
+def _persistable_name(name: str, members: Sequence[str]) -> bool:
+    """Whether an argument-derived component name may be persisted (identifier-shaped or declared)."""
+    if not name or (_PERSISTABLE_NAME_RE.fullmatch(name) and "://" not in name):
+        return True
+    folded = name.casefold()
+    return any(member.casefold() == folded for member in members)
 
 
 def _identities(fn: str, args: Mapping[str, Any], declared: Mapping[str, Sequence[str]]) -> list[_Ident]:
@@ -1220,14 +1248,16 @@ def _identities(fn: str, args: Mapping[str, Any], declared: Mapping[str, Sequenc
     fn_base = _base_tool_name(fn)
     idents: list[_Ident] = []
     if low in _SKILL_TOOLS:
-        idents.append(_component_ident(COMPONENT_SKILL, _first_string(args, ("skill", "name", "command")), fn, fn))
+        name = _first_string(args, ("skill", "name", "command"))
+        persist = _persistable_name(name, declared.get(COMPONENT_SKILL) or ())
+        idents.append(_component_ident(COMPONENT_SKILL, name, fn, fn, persist=persist))
     elif low in _SUBAGENT_TOOLS:
         name = _first_string(args, ("subagent_type", "subagent", "agent", "agent_name", "agent_type"))
-        idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn))
+        idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn, persist=_persistable_name(name, ())))
     elif low in _COMMAND_TOOLS:
         command = _first_string(args, ("command", "name"))
         name = command.split()[0].lstrip("/") if command.split() else ""
-        idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn))
+        idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn, persist=_persistable_name(name, ())))
     mcp = _mcp_identity(fn, declared.get(COMPONENT_MCP) or ())
     if mcp is not None:
         server, tool = mcp
@@ -1457,7 +1487,7 @@ def grade_tool_selection(
         "expected": [_safe_text(item) for item in expected],
         "acceptable": [_safe_text(item) for item in acceptable],
         "decoys": [_safe_text(item) for item in decoys],
-        "called": [_safe_text(label) for label in called],
+        "called": [_safe_text(ident.persisted_label) for ident in called.values()],
         "precision": precision if scored else None,
         "recall": recall,
         "f1": f1,
@@ -1520,8 +1550,24 @@ def _type_ok(value: Any, expected: str) -> bool:
 
 
 def _preview(value: Any) -> str:
+    """Short redacted rendering of a dataset-authored value (never of agent arguments)."""
     text = value if isinstance(value, str) else (_bounded_json_text(value, _MAX_ARGS_TEXT_CHARS) or _json_type(value))
     return _safe_text(text, _MAX_PREVIEW_CHARS)
+
+
+def _describe(value: Any) -> str:
+    """Type and size of an agent argument value: failure details never echo the value itself.
+
+    Redaction cannot recognize every credential shape (URL userinfo, PEM
+    bodies, ``mysql -p...``), so argument values stay out of persisted signals.
+    """
+    if value is None or isinstance(value, bool):
+        return json.dumps(value)
+    if isinstance(value, str | list):
+        return f"{_json_type(value)}(len={len(value)})"
+    if isinstance(value, Mapping):
+        return f"object(keys={len(value)})"
+    return _json_type(value)
 
 
 def _regex_search(pattern: str, value: Any) -> bool | None:
@@ -1545,18 +1591,18 @@ def _schema_errors(value: Any, schema: Mapping[str, Any], path: str, errors: lis
             errors.append((path, f"expected type {'|'.join(type_list)}, got {_json_type(value)}"))
             return
     if "enum" in schema and not any(_json_equal(value, item) for item in schema["enum"]):
-        errors.append((path, f"value {_preview(value)} is not one of the allowed values"))
+        errors.append((path, f"value {_describe(value)} is not one of the allowed values"))
     if "pattern" in schema and isinstance(value, str):
         found = _regex_search(str(schema["pattern"]), value)
         if found is None:
             errors.append((path, "value exceeds the pattern-check size limit"))
         elif not found:
-            errors.append((path, f"value {_preview(value)} does not match the schema pattern"))
+            errors.append((path, f"value {_describe(value)} does not match the schema pattern"))
     if _is_number(value):
         if _is_number(schema.get("minimum")) and float(value) < float(schema["minimum"]):
-            errors.append((path, f"value {value} is below minimum {schema['minimum']}"))
+            errors.append((path, f"value is below minimum {_preview(schema['minimum'])}"))
         if _is_number(schema.get("maximum")) and float(value) > float(schema["maximum"]):
-            errors.append((path, f"value {value} is above maximum {schema['maximum']}"))
+            errors.append((path, f"value is above maximum {_preview(schema['maximum'])}"))
     if isinstance(value, Mapping):
         for name in schema.get("required") or ():
             if name not in value:
@@ -1584,7 +1630,7 @@ def _argument_failures(args: Mapping[str, Any], rule: Mapping[str, Any]) -> list
         if actual is _MISSING:
             failures.append((name, "equals", "argument is missing"))
         elif not _json_equal(actual, expected):
-            failures.append((name, "equals", f"expected {_preview(expected)}, got {_preview(actual)}"))
+            failures.append((name, "equals", f"expected {_preview(expected)}, got {_describe(actual)}"))
     for name, needle in (rule.get("contains") or {}).items():
         actual = _lookup(args, name)
         if actual is _MISSING:
@@ -1597,7 +1643,7 @@ def _argument_failures(args: Mapping[str, Any], rule: Mapping[str, Any]) -> list
         else:
             found = needle in (_bounded_json_text(actual, _MAX_ARGS_TEXT_CHARS) or "")
         if not found:
-            failures.append((name, "contains", f"value {_preview(actual)} does not contain {_preview(needle)}"))
+            failures.append((name, "contains", f"value {_describe(actual)} does not contain {_preview(needle)}"))
     for name, pattern in (rule.get("pattern") or {}).items():
         actual = _lookup(args, name)
         if actual is _MISSING:
@@ -1607,7 +1653,7 @@ def _argument_failures(args: Mapping[str, Any], rule: Mapping[str, Any]) -> list
         if found is None:
             failures.append((name, "pattern", "value exceeds the pattern-check size limit"))
         elif not found:
-            failures.append((name, "pattern", f"value {_preview(actual)} does not match {_preview(pattern)}"))
+            failures.append((name, "pattern", f"value {_describe(actual)} does not match {_preview(pattern)}"))
     return failures
 
 
@@ -1645,7 +1691,10 @@ def grade_arguments(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> d
             call_failures = _argument_failures(call.args, rule)
             if not call_failures:
                 passed += 1
-            label = next((ident.label for ident in call.idents if any(_ref_matches(r, ident) for r in refs)), call.fn)
+            label = next(
+                (ident.persisted_label for ident in call.idents if any(_ref_matches(r, ident) for r in refs)),
+                call.fn,
+            )
             for arg, rule_name, detail in call_failures:
                 _record(label, arg, rule_name, detail)
     return {
@@ -1937,7 +1986,7 @@ def _activations(calls: Sequence[_Call]) -> list[dict[str, Any]]:
             activations.append(
                 {
                     "type": ident.kind,
-                    "name": _safe_text(ident.name),
+                    "name": _safe_text(ident.persisted_name),
                     "tool": _safe_text(ident.tool_label or ident.fn),
                     "server": _safe_text(ident.server) if ident.server is not None else None,
                     "step_index": call.step_index,

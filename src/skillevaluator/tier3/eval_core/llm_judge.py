@@ -163,6 +163,9 @@ def _has_judge_reference(value: Any) -> bool:
         return bool(value.strip())
     if isinstance(value, (list, tuple)):
         return any(_has_judge_reference(item) for item in value)
+    if isinstance(value, (bool, int, float)):
+        # 0, 0.0 and False are real reference answers, not a missing one.
+        return True
     return bool(value)
 
 

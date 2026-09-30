@@ -1231,6 +1231,26 @@ def test_judges_without_ground_truth_are_not_applicable(judge_module, monkeypatc
     }
 
 
+@pytest.mark.parametrize("ground_truth", [0, 0.0, False])
+def test_falsy_but_defined_ground_truth_is_judged(judge_module, monkeypatch, ground_truth) -> None:
+    accuracy_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        judge_module,
+        "call_public_llm",
+        _recorded_pair_script([(VALID_ACCURACY_RESPONSE, None)], accuracy_calls),
+    )
+    assert judge_module.judge_accuracy("How many tests fail?", ground_truth, "0 failing tests")["score"] == 0.6
+
+    goal_calls: list[dict[str, Any]] = []
+    _patch_goal_script(judge_module, monkeypatch, [(VALID_GOAL_RESPONSE, None, {})], goal_calls)
+    assert judge_module.judge_goal_accuracy("How many tests fail?", ground_truth, "0 failing tests")["score"] == 1.0
+
+    assert (len(accuracy_calls), len(goal_calls)) == (1, 1)
+    assert judge_module._has_judge_reference(ground_truth) is True
+    for missing in (None, "", "  ", [], [""], {}):
+        assert judge_module._has_judge_reference(missing) is False
+
+
 @pytest.mark.parametrize("expected_behaviors", [[], None, ["", "  "]])
 def test_behavior_check_without_expected_behavior_is_not_applicable(
     judge_module, monkeypatch, expected_behaviors

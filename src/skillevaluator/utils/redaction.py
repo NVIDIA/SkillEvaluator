@@ -33,16 +33,37 @@ _TOKEN_COUNT_KEYS = {
     "tokens",
     "total_tokens",
 }
+# Assignment keys are runs of [a-z0-9_.-] (the patterns below are case-insensitive).
+# A key used to be ``\b[a-z0-9_.-]*(?:word)[a-z0-9_.-]*``, which the regex engine
+# retried at every word boundary inside a run and for every way of splitting the
+# run around a sensitive word, so one substitution took cubic time on text such as
+# ``"token-" * n``. The pattern below captures the same ``key``: the part of a
+# maximal key-character run that starts at the run's first word boundary and
+# contains a sensitive word. It only starts matching at the beginning of a run,
+# captures the characters before that first boundary (the ``--`` of ``--api-key``)
+# as ``lead`` so they are written back unchanged, and never backtracks into the
+# key, so each substitution is linear in the input length.
+_SENSITIVE_KEY_CHAR = r"[a-z0-9_.-]"
+_SENSITIVE_KEY_WORD = (
+    r"(?:api[_-]?key|secret|password|credential|authorization|bearer|token|"
+    r"access[_-]?key|session[_-]?token|private[_-]?key)"
+)
 _SENSITIVE_KEY_PATTERN = (
-    r"[a-z0-9_.-]*(?:api[_-]?key|secret|password|credential|authorization|bearer|token|"
-    r"access[_-]?key|session[_-]?token|private[_-]?key)[a-z0-9_.-]*"
+    rf"(?<!{_SENSITIVE_KEY_CHAR})"
+    # ``lead`` is empty when the run starts at a word boundary. Otherwise the first
+    # boundary follows the run's leading [.-] characters ("--api-key"), or its
+    # leading [a-z0-9_] characters when the run is glued to a word character that
+    # is not a key character ("é" in "étoken.secret").
+    r"(?P<lead>\b|(?<=\w)[a-z0-9_]++(?=[.-])|(?<!\w)[.-]++(?=[a-z0-9_]))"
+    rf"(?P<key>(?>{_SENSITIVE_KEY_CHAR}*?{_SENSITIVE_KEY_WORD}){_SENSITIVE_KEY_CHAR}*+)"
 )
 _AUTH_HEADER_RE = re.compile(r"(?im)\b(?P<key>(?:proxy-)?authorization)\s*:\s*(?P<scheme>[A-Za-z]+)\s+[^\r\n]+")
 _SENSITIVE_QUOTED_ASSIGNMENT_RE = re.compile(
-    rf"(?i)\b(?P<key>{_SENSITIVE_KEY_PATTERN})\s*(?P<sep>[:=])\s*(?P<quote>[\"'])(?P<value>[^\r\n]*?)(?P=quote)"
+    rf"(?i){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>[:=])\s*+(?:\"[^\"\r\n]*+\"|'[^'\r\n]*+')"
 )
-_SENSITIVE_COLON_ASSIGNMENT_RE = re.compile(rf"(?im)\b(?P<key>{_SENSITIVE_KEY_PATTERN})\s*(?P<sep>:)\s*[^\r\n,;]+")
-_SENSITIVE_EQUALS_ASSIGNMENT_RE = re.compile(rf"(?i)\b(?P<key>{_SENSITIVE_KEY_PATTERN})\s*(?P<sep>=)\s*[^\s\"',;]+")
+# The whitespace after ":" must stay backtrackable: in "token:  ," the value is the last blank.
+_SENSITIVE_COLON_ASSIGNMENT_RE = re.compile(rf"(?im){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>:)\s*[^\r\n,;]+")
+_SENSITIVE_EQUALS_ASSIGNMENT_RE = re.compile(rf"(?i){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>=)\s*+[^\s\"',;]+")
 _PRIVATE_KEY_LABEL = r"(?:[A-Z0-9][A-Z0-9-]* )*PRIVATE KEY(?: [A-Z0-9][A-Z0-9-]*)*"
 _PEM_REDACTIONS = (
     (
@@ -109,7 +130,7 @@ def _redact_sensitive_assignment(match: re.Match[str]) -> str:
     key = match.group("key")
     if not is_sensitive_key(key):
         return match.group(0)
-    return f"{key}{match.group('sep')}<redacted>"
+    return f"{match.group('lead')}{key}{match.group('sep')}<redacted>"
 
 
 def _redact_auth_header(match: re.Match[str]) -> str:

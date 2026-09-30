@@ -11,6 +11,15 @@ All notable changes to SkillEvaluator are documented in this file.
   normalizes external repository and namespace prefixes, and commutatively
   resolves canonical case IDs across attempt and arm suffix combinations
   while preserving expected case IDs.
+- Treat `apply_patch` file headers (`*** Add File:`, `*** Update File:`, `*** Delete File:`,
+  `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
+  profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
+  shell heredoc, is now a critical `sensitive_file_write` finding whose evidence names the
+  protected path, not the patch. Every header in the patch is checked.
+- Mask GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_`) in Tier 3
+  evidence excerpts and Harbor verifier log output.
+- Stop the PII scan reporting User-Agent product versions such as `Chrome/140.0.0.0`
+  as public IP addresses. Chromium's reduced User-Agent gives every version this shape.
 - Separate Tier 2 collection limits from the 256-file per-skill limit. Fresh
   similarity scans now allow 1,024 selected manifests and 128 million scalar
   comparisons by default, covering 343 skills with 2,048-dimensional embeddings.

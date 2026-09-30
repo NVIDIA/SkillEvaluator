@@ -255,7 +255,7 @@ def test_url_private_endpoint_is_medium_and_names_the_policy_key() -> None:
     assert "DNS resolution" in finding.message
 
 
-_URL_SECRET = "sk-liveABCDEFGHIJKLMNOP1234"
+_URL_SECRET = "sk-live" + "ABCDEFGHIJKLMNOP1234"
 
 
 @pytest.mark.parametrize(

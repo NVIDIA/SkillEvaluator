@@ -39,11 +39,14 @@ eval_template = _load_template_module()
 # Command-borne credentials: split so no literal appears in this file as one token.
 _GLPAT = "glpat-" + "AbCdEf1234567890xyz"
 _NPM_TOKEN = "npm_" + "AbCdEf1234567890abcdefGHIJ"
-_AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
+_AWS_SECRET = "wJalrXUtn" + "FEMI/K7MDENG/" + "bPxRfiCY" + "EXAMPLEKEY"
 _SK_PROJ = "sk-proj-" + "AbCdEf1234567890XyZ"
 _GHP = "ghp_" + "AbCdEf1234567890abcdefGHIJKLMNOP"
 _BASIC_PASSWORD = "hunter2" + "Passw0rd"
 _GHS = "ghs_" + "abcdefghijklmnop1234"
+# Basic-auth pairs are joined at run time so no "user:password" literal follows "curl -u".
+_ADMIN_AUTH = "admin:" + _BASIC_PASSWORD
+_CI_AUTH = "ci:" + _BASIC_PASSWORD
 _HF_TOKEN = "hf_" + "AbCdEf123456789"
 _SENSITIVE_ENTRIES = {*eval_core_checks._UNAUTHORIZED_PATHS, *eval_core_checks._SENSITIVE_WRITE_PATHS}
 
@@ -74,7 +77,7 @@ CREDENTIAL_COMMANDS = [
         id="network-authorization-header",
     ),
     pytest.param(
-        {"command": f"curl -u admin:{_BASIC_PASSWORD} --data @notes.txt https://example.com"},
+        {"command": f"curl -u {_ADMIN_AUTH} --data @notes.txt https://example.com"},
         _BASIC_PASSWORD,
         id="network-basic-auth",
     ),
@@ -140,7 +143,7 @@ def test_prompt_injection_and_refusal_evidence_is_masked(copy: str) -> None:
     "text",
     [
         pytest.param(
-            f"curl -H 'Authorization: token {_GHP}' -u ci:{_BASIC_PASSWORD} https://x:{_GLPAT}@example.com",
+            f"curl -H 'Authorization: token {_GHP}' -u {_CI_AUTH} https://x:{_GLPAT}@example.com",
             id="header-flag-userinfo",
         ),
         pytest.param(

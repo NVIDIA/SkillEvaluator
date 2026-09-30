@@ -367,6 +367,42 @@ def test_html_tier3_statistics_render_ci_reliability_cost_and_context(tmp_path: 
     assert "Attempt shortfall in case-3 (Sum of parts): 1 of 3 attempts observed" in statistics
 
 
+def test_integration_lift_mode_labels_the_baseline_as_sum_of_parts(tmp_path: Path) -> None:
+    """With --lift-mode integration the baseline arm and its interval describe the sum of parts."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from skillevaluator.reporting.cli import print_plugin_tier3
+
+    result = _tier3_result(tmp_path, partial=False)
+    result.metadata["agent_eval"]["lift_mode_requested"] = "integration"
+    result.metadata["agent_eval"]["lift_mode_effective"] = "integration"
+
+    view = tier3_plugin_view(result.metadata["agent_eval"])
+    assert view is not None and view["sum_of_parts_baseline"] is True
+    assert [row["label"] for row in view["statistics"]["primary"]["lift_ci"]] == [
+        "Integration lift (sum-of-parts baseline)"
+    ]
+    assert [arm["label"] for arm in view["statistics"]["primary"]["arms"]] == ["Plugin", "Sum-of-parts baseline"]
+    assert view["statistics"]["primary"]["completeness"]["failed_arms"] == ["Sum of parts"]
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    assert "Integration lift (sum-of-parts baseline): +0.30 [-0.02, +0.55] (95% CI)" in markdown
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    statistics = element_text(html, "tier3-plugin-statistics") or ""
+    assert "Integration lift (sum-of-parts baseline) +0.30 [-0.02, +0.55]" in statistics
+    assert "Sum-of-parts baseline 50% 25% 3 4" in statistics
+    console = Console(file=StringIO(), width=200, color_system=None)
+    print_plugin_tier3(view, console)
+    plain = " ".join(console.file.getvalue().split())
+    assert "Integration lift (sum-of-parts baseline)" in plain
+    assert "Sum-of-parts baseline" in plain
+    for rendered in (markdown, statistics, plain):
+        assert "Effectiveness lift" not in rendered
+        assert "Baseline (no plugin)" not in rendered
+
+
 def test_html_tier3_statistics_show_usd_only_when_present(tmp_path: Path) -> None:
     result = _tier3_result(tmp_path)
     for target in (result.metadata["agent_eval"], result.metadata["agent_eval"]["agents"]["codex"]):

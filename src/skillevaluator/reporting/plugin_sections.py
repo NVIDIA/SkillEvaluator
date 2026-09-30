@@ -57,8 +57,14 @@ ARM_LABELS = {
     "baseline": "Baseline (no plugin)",
     "sum_of_parts": "Sum of parts",
 }
+# In a legacy 2-arm ``--lift-mode integration`` run the only baseline arm stages
+# the plugin's member components individually, so that arm and its interval
+# describe the sum of parts, not a run without the plugin.
+SUM_OF_PARTS_BASELINE_LABEL = "Sum-of-parts baseline"
+_BASELINE_ARMS = frozenset({"without_skill", "baseline"})
 _ARM_ORDER = ("with_skill", "with_plugin", "without_skill", "baseline", "sum_of_parts")
 _LIFT_KINDS = (("effectiveness", "Effectiveness lift"), ("integration", "Integration lift"))
+_SUM_OF_PARTS_LIFT_LABEL = "Integration lift (sum-of-parts baseline)"
 _PRECISION_CLASSES = {"adequate": "ok", "low": "warn", "insufficient": "fail"}
 _INTEGRATION_LIFT_MODES = frozenset({"integration", "both"})
 _INTEGRATION_VERDICTS = {
@@ -649,6 +655,7 @@ def tier3_plugin_view(payload: object) -> dict[str, Any] | None:
         "mcp_pinning": pinning_view(provenance.get("mcp_pinning")),
         "dependency_counts": _state_counts(dependency_counts, DEPENDENCY_STATES) if dependency_counts else [],
         "lift_modes": _lift_modes(source, provenance),
+        "sum_of_parts_baseline": baseline_is_sum_of_parts(source),
         "integration": integration,
         "statistics": statistics,
         "signals": signals,
@@ -801,6 +808,8 @@ def _observed_activation(row: Mapping[str, Any], activation: Mapping[str, Any]) 
 def _lift_modes(payload: Mapping[str, Any], provenance: Mapping[str, Any]) -> dict[str, str] | None:
     integration = _mapping(payload.get("integration"))
     summary = _mapping(payload.get("summary"))
+    # The runner's own record, the only one a raw engine result carries.
+    recorded = _mapping(_mapping(payload.get("run_config")).get("lift_mode"))
     requested = _first(
         (
             (payload, "lift_mode_requested"),
@@ -809,6 +818,7 @@ def _lift_modes(payload: Mapping[str, Any], provenance: Mapping[str, Any]) -> di
             (summary, "lift_mode_requested"),
             (provenance, "lift_mode_requested"),
             (provenance, "requested_lift_mode"),
+            (recorded, "requested"),
         )
     )
     effective = _first(
@@ -819,6 +829,7 @@ def _lift_modes(payload: Mapping[str, Any], provenance: Mapping[str, Any]) -> di
             (summary, "lift_mode_effective"),
             (provenance, "lift_mode_effective"),
             (provenance, "effective_lift_mode"),
+            (recorded, "effective"),
         )
     )
     if not requested and not effective:
@@ -871,7 +882,10 @@ def integration_view(
         if point_verdict and point_verdict != verdict
         else ""
     )
-    completeness = completeness_issues_view(integration.get("completeness")) or completeness_issues_view(integration)
+    sum_of_parts_baseline = bool(modes and modes["effective"] == "integration")
+    completeness = completeness_issues_view(
+        integration.get("completeness"), sum_of_parts_baseline=sum_of_parts_baseline
+    ) or completeness_issues_view(integration, sum_of_parts_baseline=sum_of_parts_baseline)
     return {
         "modes": modes,
         "measured": measured,
@@ -890,6 +904,19 @@ def integration_view(
         "ci": ci,
         "completeness": completeness,
     }
+
+
+def baseline_is_sum_of_parts(payload: object) -> bool:
+    """Return whether the run's only baseline arm was the plugin's sum of parts.
+
+    The legacy 2-arm ``--lift-mode integration`` (effective mode
+    ``integration``) stages the member components individually in the
+    baseline, so its ``without_skill`` arm and ``effectiveness`` interval
+    compare the plugin with its parts. Plugin versus no plugin was not run.
+    """
+    source = _mapping(payload)
+    modes = _lift_modes(source, _plugin_provenance(source))
+    return bool(modes and modes["effective"] == "integration")
 
 
 def _statistic_sources(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -925,6 +952,7 @@ def statistics_view(payload: object) -> dict[str, Any] | None:
     """
     source = _mapping(payload)
     best = text(source.get("best_agent") or _mapping(source.get("summary")).get("best_agent"), limit=64)
+    sum_of_parts_baseline = baseline_is_sum_of_parts(source)
     run_statistics: dict[str, Mapping[str, Any]] = {}
     for key in _STATISTIC_KEYS:
         for candidate in _statistic_sources(source):
@@ -938,9 +966,15 @@ def statistics_view(payload: object) -> dict[str, Any] | None:
         if name == best and agent_statistics:
             agent_statistics = {**run_statistics, **agent_statistics}
         if agent_statistics:
-            scopes.append(_statistics_scope(name, agent_statistics))
+            scopes.append(_statistics_scope(name, agent_statistics, sum_of_parts_baseline=sum_of_parts_baseline))
     if not scopes and run_statistics:
-        scopes.append(_statistics_scope(f"Best agent ({best})" if best else "All agents", run_statistics))
+        scopes.append(
+            _statistics_scope(
+                f"Best agent ({best})" if best else "All agents",
+                run_statistics,
+                sum_of_parts_baseline=sum_of_parts_baseline,
+            )
+        )
     if not scopes:
         return None
     primary = next((scope for scope in scopes if scope["label"] == best), scopes[0])
@@ -988,14 +1022,25 @@ def _ordered_arms(*mappings: Mapping[str, Any]) -> list[str]:
     return sorted(arms, key=lambda arm: (order.get(arm, len(order)), arm))[:MAX_LIST_ITEMS]
 
 
-def arm_label(arm: str) -> str:
+def arm_label(arm: str, *, sum_of_parts_baseline: bool = False) -> str:
+    if sum_of_parts_baseline and arm in _BASELINE_ARMS:
+        return SUM_OF_PARTS_BASELINE_LABEL
     return ARM_LABELS.get(arm, arm.replace("_", " ").title())
 
 
-def _statistics_scope(label: str, statistics: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+def _statistics_scope(
+    label: str,
+    statistics: Mapping[str, Mapping[str, Any]],
+    *,
+    sum_of_parts_baseline: bool = False,
+) -> dict[str, Any]:
     uncertainty = _mapping(statistics.get("lift_uncertainty"))
     lift_ci = [
-        _ci_row(kind, kind_label, _mapping(uncertainty.get(kind)))
+        _ci_row(
+            kind,
+            _SUM_OF_PARTS_LIFT_LABEL if sum_of_parts_baseline and kind == "effectiveness" else kind_label,
+            _mapping(uncertainty.get(kind)),
+        )
         for kind, kind_label in _LIFT_KINDS
         if _mapping(uncertainty.get(kind))
     ]
@@ -1009,7 +1054,7 @@ def _statistics_scope(label: str, statistics: Mapping[str, Mapping[str, Any]]) -
         arms.append(
             {
                 "arm": arm,
-                "label": arm_label(arm),
+                "label": arm_label(arm, sum_of_parts_baseline=sum_of_parts_baseline),
                 "pass_at_k": fmt_rate(arm_reliability.get("pass_at_k")),
                 "pass_hat_k": fmt_rate(arm_reliability.get("pass_hat_k")),
                 "k": fmt_count(arm_reliability.get("k")),
@@ -1034,7 +1079,9 @@ def _statistics_scope(label: str, statistics: Mapping[str, Mapping[str, Any]]) -
         "has_usd": any(row["has_usd"] for row in arms),
         "has_efficiency": any(row["has_efficiency"] for row in arms),
         "context_measured": _context_measured_view(statistics.get("context_cost_measured")),
-        "completeness": completeness_issues_view(statistics.get("integration_completeness")),
+        "completeness": completeness_issues_view(
+            statistics.get("integration_completeness"), sum_of_parts_baseline=sum_of_parts_baseline
+        ),
     }
 
 
@@ -1054,7 +1101,7 @@ def _context_measured_view(value: object) -> dict[str, Any] | None:
     }
 
 
-def completeness_issues_view(value: object) -> dict[str, Any] | None:
+def completeness_issues_view(value: object, *, sum_of_parts_baseline: bool = False) -> dict[str, Any] | None:
     """Return integration completeness issues (missing cases, failed arms, shortfalls)."""
     completeness = _mapping(value)
     if not completeness:
@@ -1069,7 +1116,7 @@ def completeness_issues_view(value: object) -> dict[str, Any] | None:
             shortfall.append(
                 {
                     "case": text(entry.get("case")),
-                    "arm": arm_label(arm) if arm else "",
+                    "arm": arm_label(arm, sum_of_parts_baseline=sum_of_parts_baseline) if arm else "",
                     "expected": fmt_count(entry.get("expected")),
                     "observed": fmt_count(entry.get("observed")),
                 }
@@ -1080,7 +1127,7 @@ def completeness_issues_view(value: object) -> dict[str, Any] | None:
         "complete": complete,
         "missing_cases": missing_cases,
         "missing_omitted": missing_omitted,
-        "failed_arms": [arm_label(arm) for arm in failed_arms],
+        "failed_arms": [arm_label(arm, sum_of_parts_baseline=sum_of_parts_baseline) for arm in failed_arms],
         "attempt_shortfall": shortfall,
         "issues": bool(missing_cases or failed_arms or shortfall or complete is False),
     }
@@ -1124,6 +1171,7 @@ def signals_view(payload: object) -> dict[str, Any] | None:
     is used only when no agent carries its own, so nothing renders twice.
     """
     source = _mapping(payload)
+    sum_of_parts_baseline = baseline_is_sum_of_parts(source)
     sources: list[tuple[str, dict[str, Mapping[str, Any]]]] = []
     for name, agent in _agents(source):
         summaries = _arm_signal_summaries(agent)
@@ -1138,7 +1186,7 @@ def signals_view(payload: object) -> dict[str, Any] | None:
     activation: dict[str, list[str]] = {"declared": [], "exercised": [], "unverified": [], "unavailable": []}
     for scope, summaries in sources:
         for arm in _ordered_arms(summaries):
-            entry = _signal_entry(scope, arm, summaries[arm])
+            entry = _signal_entry(scope, arm, summaries[arm], sum_of_parts_baseline=sum_of_parts_baseline)
             entries.append(entry)
             if entry["activation"] and arm in {"with_skill", "with_plugin"}:
                 for key, collected in activation.items():
@@ -1241,7 +1289,13 @@ def _signal_mcp(mcp_calls: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _signal_entry(scope: str, arm: str, summary: Mapping[str, Any]) -> dict[str, Any]:
+def _signal_entry(
+    scope: str,
+    arm: str,
+    summary: Mapping[str, Any],
+    *,
+    sum_of_parts_baseline: bool = False,
+) -> dict[str, Any]:
     tool_selection = _mapping(summary.get("tool_selection"))
     arguments = _mapping(summary.get("arguments"))
     activation = _mapping(summary.get("activation_coverage"))
@@ -1281,7 +1335,7 @@ def _signal_entry(scope: str, arm: str, summary: Mapping[str, Any]) -> dict[str,
     return {
         "scope": scope,
         "arm": arm,
-        "arm_label": arm_label(arm),
+        "arm_label": arm_label(arm, sum_of_parts_baseline=sum_of_parts_baseline),
         "n_trials": fmt_count(summary.get("n_trials")),
         "n_missing_trajectory": missing or 0,
         "activations_per_trial": fmt_count(activations.get("mean_per_trial")) if activations else "",

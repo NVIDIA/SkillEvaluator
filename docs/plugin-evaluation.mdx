@@ -710,6 +710,12 @@ and the coordination between members together, because the member-skills arm
 has none of them. Integration modes need a baseline, so they cannot be combined
 with `--skip-baseline`.
 
+When the effective mode is `integration`, the reports don't present that lift
+as plugin effectiveness. They label the baseline arm "Sum-of-parts baseline"
+and the interval "Integration lift (sum-of-parts baseline)". The
+`BENCHMARK.md` Effectiveness row reads "Not measured", because this mode never
+runs the plugin against a baseline without it.
+
 ### The Integration evidence gate
 
 Integration is meaningful only when the dataset tests composition. At least one
@@ -1288,7 +1294,9 @@ same output directory. The plugin card has the title `# Plugin Benchmark: <name>
 It uses the skill card's fail-closed rules and adds the following sections:
 
 - **Effectiveness and Integration:** lift with its paired-bootstrap 95% CI in
-  percentage points, or `INCONCLUSIVE` with the reason.
+  percentage points, or `INCONCLUSIVE` with the reason. With lift mode
+  `integration`, Effectiveness reads "Not measured", and Results at a Glance
+  describes the baseline as the sum of parts.
 - **Component Coverage:** per-component states and the list of components that
   were not evaluated.
 - **Provenance and Excluded Behavior:** what the run did not demonstrate. This

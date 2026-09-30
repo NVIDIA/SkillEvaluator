@@ -139,6 +139,45 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
     assert _gate(tmp_path, rendered) == []
 
 
+def test_integration_lift_mode_card_does_not_claim_an_effectiveness_result(tmp_path: Path) -> None:
+    """Legacy 2-arm --lift-mode integration: the only baseline is the sum of parts, never "no plugin"."""
+    effectiveness_interval = deepcopy(STATISTICS["lift_uncertainty"]["effectiveness"])
+    integration = {
+        "verdict": "inconclusive",
+        "point_verdict": "real_integration",
+        "measured": True,
+        "with_plugin": 0.8,
+        "sum_of_parts": 0.5,
+        "integration_lift": 0.3,
+        "components": ["loader", "search"],
+        # The Integration report reuses the effectiveness interval in this mode.
+        "lift_uncertainty": effectiveness_interval,
+        "reason": "The paired case bootstrap interval for the Integration lift includes zero.",
+    }
+    tier3 = _tier3(partial=False, integration=integration)
+    tier3.metadata["agent_eval"]["lift_mode_requested"] = "integration"
+    tier3.metadata["agent_eval"]["lift_mode_effective"] = "integration"
+
+    rendered = _render([tier1_plugin_result(), tier2_plugin_result(), tier3])
+
+    assert (
+        "| Effectiveness (plugin vs. no plugin) | Not measured — lift mode integration compares against "
+        "sum-of-parts | Not measured |"
+    ) in rendered
+    assert (
+        "| Integration (plugin vs. its own parts) | Inconclusive, +30 points "
+        "| \\[-2, +55\\] points (95% CI); precision low; CI includes zero |"
+    ) in rendered
+    assert "so the plugin was never compared with a run without it" in rendered
+    assert (
+        "baseline is the same task attempted with the plugin's member components staged individually "
+        "(sum of parts), not without the plugin"
+    ) in rendered
+    assert "without the target plugin" not in rendered
+    assert "47% sum-of-parts baseline" in rendered
+    assert _gate(tmp_path, rendered) == []
+
+
 def test_partial_plugin_card_is_incomplete_and_lists_excluded_behavior(tmp_path: Path) -> None:
     integration = {"verdict": "inconclusive", "measured": False, "reason": "No cross-component case completed."}
     rendered = _render([tier1_plugin_result(), _tier3(partial=True, integration=integration)])

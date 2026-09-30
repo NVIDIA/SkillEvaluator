@@ -315,6 +315,8 @@ class BenchmarkReporter(ReporterBase):
         ae: dict[str, Any] | None,
         private_labels: tuple[str, ...],
         subject: str = "skill",
+        *,
+        sum_of_parts_baseline: bool = False,
     ) -> None:
         lines.extend(["## Results at a Glance", ""])
         agents = _agents(ae)
@@ -354,17 +356,25 @@ class BenchmarkReporter(ReporterBase):
                 row.append(_score_transition(dimension))
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
+        # Lift mode integration runs no no-plugin arm: its baseline is the sum of parts.
+        baseline = (
+            f"the same task attempted with the {subject}'s member components staged individually "
+            f"(sum of parts), not without the {subject}"
+            if sum_of_parts_baseline
+            else f"the same task attempted without the target {subject}"
+        )
+        example_baseline = "sum-of-parts" if sum_of_parts_baseline else f"no-{subject}"
         lines.extend(
             [
                 "",
                 (
-                    f"**How to read this table:** baseline is the same task attempted without the target {subject}. "
+                    f"**How to read this table:** baseline is {baseline}. "
                     f"Uplift is `{subject} score - baseline score`, shown in percentage points."
                 ),
                 "",
                 (
                     f"Example: `47% → 92% (+45 points)` means the {subject}-assisted run scored 92%, "
-                    f"45 percentage points above its 47% no-{subject} baseline."
+                    f"45 percentage points above its 47% {example_baseline} baseline."
                 ),
                 "",
             ]
@@ -670,7 +680,13 @@ class BenchmarkReporter(ReporterBase):
             extra_lines=_plugin_metadata_lines(plugin, view, private_labels),
         )
         self._render_plugin_purpose(lines)
-        self._render_results_at_a_glance(lines, ae, private_labels, subject="plugin")
+        self._render_results_at_a_glance(
+            lines,
+            ae,
+            private_labels,
+            subject="plugin",
+            sum_of_parts_baseline=bool(view and view["sum_of_parts_baseline"]),
+        )
         self._render_plugin_effectiveness(lines, ae, view, private_labels)
         self._render_plugin_coverage(lines, view, private_labels)
         self._render_plugin_provenance(lines, view, private_labels, plugin)
@@ -726,10 +742,18 @@ class BenchmarkReporter(ReporterBase):
         lift_ci = {row["kind"]: row for row in statistics["primary"]["lift_ci"]} if statistics else {}
         summary = _mapping((ae or {}).get("summary"))
         overall_lift = _number((ae or {}).get("overall_lift", summary.get("overall_lift")))
-        effectiveness = _format_points(overall_lift) if overall_lift is not None else "Not available"
+        sum_of_parts_baseline = bool(view and view["sum_of_parts_baseline"])
+        if sum_of_parts_baseline:
+            # The only baseline staged the member components individually, so the
+            # overall lift and its interval are the Integration comparison.
+            effectiveness = "Not measured — lift mode integration compares against sum-of-parts"
+            effectiveness_uncertainty = "Not measured"
+        else:
+            effectiveness = _format_points(overall_lift) if overall_lift is not None else "Not available"
+            effectiveness_uncertainty = _ci_label(lift_ci.get("effectiveness"))
         lines.append(
             f"| Effectiveness (plugin vs. no plugin) | {_md_cell(effectiveness, private_labels)} "
-            f"| {_md_cell(_ci_label(lift_ci.get('effectiveness')), private_labels)} |"
+            f"| {_md_cell(effectiveness_uncertainty, private_labels)} |"
         )
         integration = (view or {}).get("integration")
         modes = (view or {}).get("lift_modes")
@@ -761,6 +785,16 @@ class BenchmarkReporter(ReporterBase):
                 "",
             ]
         )
+        if sum_of_parts_baseline:
+            lines.extend(
+                [
+                    (
+                        "This run used lift mode `integration`: its only baseline staged the member components "
+                        "individually, so the plugin was never compared with a run without it."
+                    ),
+                    "",
+                ]
+            )
         if modes:
             lines.extend(
                 [

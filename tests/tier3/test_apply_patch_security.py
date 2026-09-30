@@ -165,28 +165,51 @@ def test_shell_patch_headers_without_apply_patch_are_not_writes(run):
 
 
 @RUNNERS
-@pytest.mark.parametrize(("ordinary_headers", "flagged"), [(255, True), (256, False)])
-def test_apply_patch_header_scan_is_capped(run, ordinary_headers, flagged):
-    patch = "*** Begin Patch\n" + "*** Add File: src/ok.py\n+x\n" * ordinary_headers + "*** Add File: /root/.bashrc\n"
+@pytest.mark.parametrize("ordinary_headers", [255, 256, 5_000])
+def test_apply_patch_scan_covers_every_header(run, ordinary_headers):
+    patch = "*** Begin Patch\n" + "*** Delete File: tmp/x\n" * ordinary_headers + "*** Add File: /root/.bashrc\n+x\n"
 
-    assert bool(_write_findings(run(_traj("apply_patch", {"input": patch})))) is flagged
+    result = run(_traj("apply_patch", {"input": patch + "*** End Patch"}))
+
+    assert [f["evidence"] for f in _write_findings(result)] == ["/root/.bashrc"]
 
 
 @RUNNERS
-def test_large_adversarial_patch_stays_fast(run):
-    hostile = (
+def test_apply_patch_scan_reads_past_a_large_file_body(run):
+    body = ("+" + "a" * 1023 + "\n") * 512
+    patch = f"*** Begin Patch\n*** Add File: src/big.txt\n{body}*** Add File: /root/.bashrc\n+x\n*** End Patch"
+
+    result = run(_traj("apply_patch", {"input": patch}))
+
+    assert [f["evidence"] for f in _write_findings(result)] == ["/root/.bashrc"]
+
+
+def _hostile_patch(scale: int) -> str:
+    return (
         "*** Begin Patch\n"
-        + "*** Add File: src/ok.py\n" * 5_000
-        + ("*** Add File: " + " " * 200_000 + "\r") * 5
+        + "*** Add File: src/ok.py\n" * (1_250 * scale)
+        + ("*** Add File: " + " " * (50_000 * scale) + "\r") * 5
         + "*** Update File:"
-        + "\t" * 500_000
+        + "\t" * (125_000 * scale)
         + "\n*** Add File: /root/.bashrc\n*** End Patch"
     )
 
-    started = time.perf_counter()
-    result = run(_traj("apply_patch", {"input": hostile}))
-    elapsed = time.perf_counter() - started
 
-    assert elapsed < 1.0
-    # The protected header sits past the header and character caps, so it is not scanned.
-    assert _write_findings(result) == []
+def _best_elapsed(run, traj: dict, repeats: int = 3) -> tuple[float, dict]:
+    best = float("inf")
+    for _ in range(repeats):
+        started = time.perf_counter()
+        result = run(traj)
+        best = min(best, time.perf_counter() - started)
+    return best, result
+
+
+@RUNNERS
+def test_large_adversarial_patch_is_scanned_in_linear_time(run):
+    small, small_result = _best_elapsed(run, _traj("apply_patch", {"input": _hostile_patch(1)}))
+    large, large_result = _best_elapsed(run, _traj("apply_patch", {"input": _hostile_patch(8)}))
+
+    assert [f["evidence"] for f in _write_findings(small_result)] == ["/root/.bashrc"]
+    assert [f["evidence"] for f in _write_findings(large_result)] == ["/root/.bashrc"]
+    # 8x the input takes about 8x the time when the scan is linear, and 64x when it is quadratic.
+    assert large < 24 * small

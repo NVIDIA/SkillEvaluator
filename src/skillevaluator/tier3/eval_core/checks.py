@@ -98,10 +98,8 @@ _SENSITIVE_WRITE_PATHS = [
 
 # apply_patch writes every file named by an "*** Add File: ", "*** Update File: ",
 # "*** Delete File: ", or "*** Move to: " header, so each header path is a write
-# target. The header regex is anchored per line with no nested quantifiers and
-# the scan is capped in characters and headers, so hostile patches stay linear.
-_APPLY_PATCH_MAX_CHARS = 262_144
-_APPLY_PATCH_MAX_HEADERS = 256
+# target. The header regex is anchored per line with no nested quantifiers, so
+# scanning every header of a hostile patch stays linear.
 _APPLY_PATCH_HEADER_RE = re.compile(
     r"^[ \t]*\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*([^\r\n]*)",
     re.MULTILINE,
@@ -299,9 +297,7 @@ def _protected_write_entry(target: str) -> str | None:
 
 def _apply_patch_protected_entry(patch: str) -> str | None:
     """Return the protected-path entry the first protected apply_patch file header targets."""
-    for count, match in enumerate(_APPLY_PATCH_HEADER_RE.finditer(patch, 0, _APPLY_PATCH_MAX_CHARS)):
-        if count >= _APPLY_PATCH_MAX_HEADERS:
-            break
+    for match in _APPLY_PATCH_HEADER_RE.finditer(patch):
         if entry := _protected_write_entry(match.group(1)):
             return entry
     return None

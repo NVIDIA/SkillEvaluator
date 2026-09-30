@@ -10,7 +10,7 @@ All notable changes to SkillEvaluator are documented in this file.
   `*** Move to:`) as write targets in the Tier 3 security check. A patch that targets a shell
   profile, SSH, credential, or privileged config path, sent as an `apply_patch` tool call or a
   shell heredoc, is now a critical `sensitive_file_write` finding whose evidence names the
-  protected path, not the patch. Each patch scan stops after 256 KiB or 256 headers.
+  protected path, not the patch. Every header in the patch is checked.
 - Mask GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_`) in Tier 3
   evidence excerpts and Harbor verifier log output.
 - Stop the PII scan reporting User-Agent product versions such as `Chrome/140.0.0.0`

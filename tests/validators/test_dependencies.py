@@ -194,6 +194,9 @@ def test_pip_audit_failure_without_json_is_a_warning(tmp_path: Path, pip_audit_a
         result = DependencySecurityValidator(use_safety=False).validate(skill)
 
     assert any("pip-audit failed: ERROR: network unreachable" in w for w in result.warnings)
+    # Standalone skills keep the warning; plugin runs mark the Python audit INCOMPLETE
+    # (see test_dependency_ecosystems.py).
+    assert not result.is_incomplete
 
 
 def test_linked_dependency_file_is_refused(tmp_path: Path, pip_audit_available) -> None:

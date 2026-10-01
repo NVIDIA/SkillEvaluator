@@ -23,6 +23,7 @@ All notable changes to SkillEvaluator are documented in this file.
   (`_SCHEMA_UNSUPPORTED_TARGETS`), boolean prompt alignment, and a guard for
   missing `message` fields on reasoning token exhaustion. The canonical OpenAI
   RAGAS goal scorer retains its separate scoring path.
+- Configurable evidence bundle budgets (`SKILL_EVAL_ACCURACY_BUDGET`, `SKILL_EVAL_GOAL_ACCURACY_BUDGET`, `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`) and final response limit (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`).
 
 ## 0.4.0 - 2026-09-30
 

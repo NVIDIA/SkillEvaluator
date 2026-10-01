@@ -133,7 +133,9 @@ def test_complete_plugin_card(tmp_path: Path) -> None:
     assert "Files staged ≠ components loaded ≠ behavior verified." in rendered
     assert "- Status: complete — every declared dependency was resolved for Tier 3." in rendered
     assert "- Dataset: 4 case(s), 2 cross-component case(s)" in rendered
-    assert "- Unsupported component types are listed by static validation but not evaluated: hook" in rendered
+    # The hook is staged in this run, so it is not listed as excluded.
+    assert "no check evaluates them" not in rendered
+    assert "Tier 1 checks them statically" not in rendered
     assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
     assert "Regenerate this benchmark when the plugin or any of its components" in rendered
     assert _gate(tmp_path, rendered) == []

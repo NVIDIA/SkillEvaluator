@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    {#- The report is a local file full of untrusted skill and plugin text. Inline
+        scripts and handlers stay allowed (the report needs them), but nothing
+        may load a script other than the pinned Chart.js file or send data out. #}
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ title }}</title>
     <style>
@@ -1273,7 +1277,7 @@
     {% set tier3_execution_status = (tier3.get('execution_status') or tier3_summary_data.get('execution_status')) if has_tier3 else none %}
     {% set tier3_is_skipped = tier3_execution_status == 'skipped' or (tier3_provenance_data.get('advisory') and tier3_provenance_data.get('reason') == 'skipped') %}
     {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
-    {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_modes_line, statistics_section, signals_section %}
+    {%- from "plugin_sections.html.j2" import tier1_plugin_section, tier3_incomplete_callout, tier3_coverage_section, tier3_completeness_section, integration_section, lift_modes_line, statistics_section, signals_section, hook_census_section, canary_section, mcp_proof_section, tier3_plugin_load_section %}
     {%- set tier3_plugin_incomplete = has_tier3 and tier3_plugin and tier3_plugin.partial and not tier3_is_skipped %}
     <div class="main-header">
         <div class="header-content">
@@ -1594,8 +1598,8 @@
                                     <div class="skills-pills">
                                         {% for skill in issue.skills_affected[:5] %}
                                         <span class="skill-pill-group">
-                                            <span class="skill-pill" onclick="event.stopPropagation(); scrollToFinding('{{ skill }}', '{{ issue.issue_key }}')" title="Jump to this issue in {{ skill }}">{{ skill }}</span>
-                                            <span class="quality-pill" onclick="event.stopPropagation(); scrollToQualityScore('{{ skill }}')" title="View quality score for {{ skill }}">Q</span>
+                                            <span class="skill-pill" data-skill="{{ skill }}" data-issue-key="{{ issue.issue_key }}" onclick="event.stopPropagation(); scrollToFinding(this.dataset.skill, this.dataset.issueKey)" title="Jump to this issue in {{ skill }}">{{ skill }}</span>
+                                            <span class="quality-pill" data-skill="{{ skill }}" onclick="event.stopPropagation(); scrollToQualityScore(this.dataset.skill)" title="View quality score for {{ skill }}">Q</span>
                                         </span>
                                         {% endfor %}
                                         {% if issue.skills_affected | length > 5 %}
@@ -1653,7 +1657,7 @@
                                 <td>
                                     <div class="contributor-items">
                                         {% for item in contrib['items'][:8] %}
-                                        <span class="contributor-item-pill {{ 'pass' if item.passed else 'fail' }}" onclick="scrollToSkill('{{ item.name }}')" title="{{ item.name }}: {{ 'Passed' if item.passed else 'Failed (' + item.issue_count|string + ' issues)' }}">{{ item.name }}</span>
+                                        <span class="contributor-item-pill {{ 'pass' if item.passed else 'fail' }}" data-skill="{{ item.name }}" onclick="scrollToSkill(this.dataset.skill)" title="{{ item.name }}: {{ 'Passed' if item.passed else 'Failed (' + item.issue_count|string + ' issues)' }}">{{ item.name }}</span>
                                         {% endfor %}
                                         {% if contrib['items'] | length > 8 %}
                                         <span class="contributor-item-pill pass">+{{ contrib['items'] | length - 8 }} more</span>
@@ -2419,6 +2423,7 @@
             </div>
             {%- if tier3_plugin %}
             {%- if tier3_plugin.coverage %}{{ tier3_coverage_section(tier3_plugin) }}{% endif %}
+            {%- if tier3_plugin.plugin_load %}{{ tier3_plugin_load_section(tier3_plugin) }}{% endif %}
             {%- if tier3_plugin.completeness %}{{ tier3_completeness_section(tier3_plugin) }}{% endif %}
             {%- endif %}
 
@@ -2513,7 +2518,7 @@
                     <thead><tr>
                         <th>Dimension</th>
                         {% for name, _agent in t3_agents.items() %}
-                        <th><button class="t3-agent-link" type="button" data-tier3-agent-link="{{ t3_agent_anchor_ids[name] }}" onclick="jumpToTier3Agent('{{ t3_agent_anchor_ids[name] }}')">{{ name }}</button></th>
+                        <th><button class="t3-agent-link" type="button" data-tier3-agent-link="{{ t3_agent_anchor_ids[name] }}" onclick="jumpToTier3Agent(this.dataset.tier3AgentLink)">{{ name }}</button></th>
                         {% endfor %}
                     </tr></thead>
                     <tbody>
@@ -2576,6 +2581,9 @@
             {%- if tier3_plugin.integration %}{{ integration_section(tier3_plugin.integration) }}{% elif tier3_plugin.lift_modes %}{{ lift_modes_line(tier3_plugin.lift_modes) }}{% endif %}
             {%- if tier3_plugin.statistics %}{{ statistics_section(tier3_plugin.statistics) }}{% endif %}
             {%- if tier3_plugin.signals %}{{ signals_section(tier3_plugin.signals) }}{% endif %}
+            {%- if tier3_plugin.canary %}{{ canary_section(tier3_plugin.canary) }}{% endif %}
+            {%- if tier3_plugin.hook_census %}{{ hook_census_section(tier3_plugin.hook_census) }}{% endif %}
+            {%- if tier3_plugin.mcp_proof %}{{ mcp_proof_section(tier3_plugin.mcp_proof) }}{% endif %}
             {%- endif %}
 
             {% if t3_agents %}
@@ -2593,8 +2601,8 @@
                              role="button"
                              tabindex="0"
                              data-tier3-agent-link="{{ t3_agent_anchor_ids[name] }}"
-                             onclick="jumpToTier3Agent('{{ t3_agent_anchor_ids[name] }}')"
-                             onkeydown="tier3MaybeActivateAgentLink(event, '{{ t3_agent_anchor_ids[name] }}')"
+                             onclick="jumpToTier3Agent(this.dataset.tier3AgentLink)"
+                             onkeydown="tier3MaybeActivateAgentLink(event, this.dataset.tier3AgentLink)"
                              aria-label="Open Agent Details for {{ name }}"
                              title="Open Agent Details for {{ name }}">
                             <div class="t3-agent-name">{{ name }}</div>
@@ -3012,7 +3020,7 @@
                         role="tab"
                         data-tier3-agent="{{ name }}"
                         style="--accent: {{ agent_color }};"
-                        onclick="showTier3Agent('{{ name }}', this)">
+                        onclick="showTier3Agent(this.dataset.tier3Agent, this)">
                     <span class="t3-tab-dot"></span>{{ name }}
                     <span class="t3-tab-score">{{ "%.2f" | format(agent_score) if agent_score is not none else "N/A" }}{% if agent.lift is not none %} ({{ "%+.2f" | format(agent.lift) }}){% endif %}</span>
                 </button>
@@ -4069,8 +4077,16 @@
                 t.textContent = expand ? '▲' : '▼';
             });
         }
+        // Compare attribute values instead of building a CSS selector from a
+        // skill name: a quote or bracket in the name would break the selector.
+        function _findSkillCard(skillName) {
+            for (const card of document.querySelectorAll('.skill-card[data-skill-name]')) {
+                if (card.getAttribute('data-skill-name') === skillName) return card;
+            }
+            return null;
+        }
         function scrollToSkill(skillName) {
-            const card = document.querySelector('.skill-card[data-skill-name="' + skillName + '"]');
+            const card = _findSkillCard(skillName);
             if (!card) return;
             // Make sure it's visible (clear any active filter)
             card.style.display = '';
@@ -4090,7 +4106,7 @@
         // every "jump into a skill card" entry point so they keep identical
         // visibility / expansion semantics.
         function _openSkillCard(skillName) {
-            const card = document.querySelector('.skill-card[data-skill-name="' + skillName + '"]');
+            const card = _findSkillCard(skillName);
             if (!card) return null;
             card.style.display = '';
             const content = card.querySelector('.skill-content');

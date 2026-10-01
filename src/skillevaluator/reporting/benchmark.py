@@ -22,9 +22,10 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.reporting.base import ReporterBase, is_advisory_agent_eval_skip, passes_required_gate
-from skillevaluator.reporting.plugin_sections import inventory_view, tier3_plugin_view
+from skillevaluator.reporting.plugin_sections import inventory_view, statically_checked_types, tier3_plugin_view
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -100,6 +101,11 @@ class BenchmarkReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
+        # Untrusted text can carry lone surrogates (which UTF-8 cannot encode) and
+        # terminal escape sequences (which run when someone prints the card).
+        return strip_terminal_controls(self._render_card(results))
+
+    def _render_card(self, results: list[ValidationResult]) -> str:
         ae = _agent_eval_payload(results)
         if self.content_type == "plugin":
             return self._render_plugin_card(results, ae)
@@ -689,6 +695,7 @@ class BenchmarkReporter(ReporterBase):
             sum_of_parts_baseline=bool(view and view["sum_of_parts_baseline"]),
         )
         self._render_plugin_effectiveness(lines, ae, view, private_labels)
+        self._render_plugin_canary(lines, view, private_labels)
         self._render_plugin_coverage(lines, view, private_labels)
         self._render_plugin_provenance(lines, view, private_labels, plugin)
         tier3_override = (
@@ -808,6 +815,25 @@ class BenchmarkReporter(ReporterBase):
             )
 
     @staticmethod
+    def _render_plugin_canary(
+        lines: list[str],
+        view: dict[str, Any] | None,
+        private_labels: tuple[str, ...],
+    ) -> None:
+        """Surface canary exfiltration results, so a plugin-attributable leak is on the card."""
+        canary = (view or {}).get("canary")
+        if not canary:
+            return
+        lines.extend(["## Canary Exfiltration", ""])
+        for entry in canary["entries"]:
+            marker = "**CRITICAL:** " if entry.get("verdict_class") == "fail" else ""
+            lines.append(
+                f"- {_publication_safe_inline(entry['scope'], private_labels)}: "
+                f"{marker}{_publication_safe_inline(entry['verdict'], private_labels)}"
+            )
+        lines.append("")
+
+    @staticmethod
     def _render_plugin_coverage(
         lines: list[str],
         view: dict[str, Any] | None,
@@ -881,10 +907,25 @@ class BenchmarkReporter(ReporterBase):
         excluded = list((view or {}).get("excluded") or [])
         inventory = inventory_view(plugin.get("component_inventory"))
         if inventory and inventory["unsupported_types"]:
-            excluded.append(
-                "Unsupported component types are listed by static validation but not evaluated: "
-                + ", ".join(inventory["unsupported_types"])
-            )
+            # A type is evaluated when a Tier 3 row of that type was staged, loaded
+            # or exercised (native loading), and checked when Tier 1 has
+            # static-risk rows for it. Only the rest is excluded outright.
+            coverage = (view or {}).get("coverage") or {}
+            runtime_types = {row["type"] for row in coverage.get("rows") or [] if row.get("staged")}
+            static_types = statically_checked_types(plugin)
+            remaining = [name for name in inventory["unsupported_types"] if name not in runtime_types]
+            static_only = [name for name in remaining if name in static_types]
+            not_evaluated = [name for name in remaining if name not in static_types]
+            if static_only:
+                excluded.append(
+                    "Runtime behavior of these component types was not evaluated (Tier 3 does not stage them in "
+                    "wrapper mode); Tier 1 checks them statically: " + ", ".join(static_only)
+                )
+            if not_evaluated:
+                excluded.append(
+                    "Tier 3 does not stage these component types in wrapper mode, and no check evaluates them: "
+                    + ", ".join(not_evaluated)
+                )
         completeness = (view or {}).get("completeness")
         if not completeness:
             lines.append(
@@ -1596,7 +1637,7 @@ def _publication_safe_label(value: object, private_labels: tuple[str, ...] = ())
 
 def _publication_safe_inline(value: object, private_labels: tuple[str, ...] = ()) -> str:
     """Render untrusted metadata as one publication-safe Markdown line."""
-    text = " ".join(str(value).split())
+    text = " ".join(strip_terminal_controls(str(value)).split())
     text = _redact_absolute_paths(text)
     text = _RETIRED_SANDBOX_REFERENCE.sub("isolated sandbox", text)
     for label in sorted(private_labels, key=len, reverse=True):

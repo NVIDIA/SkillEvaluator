@@ -623,6 +623,7 @@ def test_safe_reporter_becomes_inactive_after_post_start_failure() -> None:
 def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
     progress = _progress_module()
     heartbeat_failed = threading.Event()
+    failed_on: list[threading.Thread] = []
 
     class FailingLive:
         def __init__(self, _table, **_kwargs) -> None:
@@ -635,6 +636,7 @@ def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
             assert refresh
             self.update_calls += 1
             if self.update_calls == 2:
+                failed_on.append(threading.current_thread())
                 heartbeat_failed.set()
                 raise RuntimeError("heartbeat redraw failed")
 
@@ -645,9 +647,16 @@ def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
     rich_reporter._live_factory = FailingLive
     reporter = progress.safe_progress_reporter(rich_reporter)
     reporter.start(_plan(progress))
+    heartbeat = rich_reporter._thread
+    assert heartbeat is not None
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
 
-    assert heartbeat_failed.wait(timeout=1)
+    assert heartbeat_failed.wait(timeout=10)
+    # The redraw sets the event before it raises, so the heartbeat thread may still be
+    # turning the reporter off. That thread ends right after, so wait for it to end.
+    heartbeat.join(timeout=10)
+    assert not heartbeat.is_alive()
+    assert failed_on == [heartbeat]
     assert not reporter.is_active
     reporter.close()
 

@@ -43,6 +43,7 @@ from skillevaluator.reporting.base import (
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 from skillevaluator.reporting.plugin_sections import tier1_plugin_view, tier3_plugin_view
+from skillevaluator.utils.rich_markup import replace_unencodable
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -71,7 +72,8 @@ class _Tier3PreviewBudget:
 
 
 def _compact_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    # ensure_ascii=False keeps lone surrogates from untrusted text, which UTF-8 cannot encode.
+    return replace_unencodable(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
 
 
 def _script_safe_json(value: object) -> str:
@@ -674,7 +676,7 @@ class HTMLReporter(ReporterBase):
         16 hex chars (~64 bits) is well below collision risk for the few
         dozen unique issue groups a single report ever shows.
         """
-        payload = f"{category}::{group_key}".encode()
+        payload = f"{category}::{group_key}".encode("utf-8", "surrogatepass")
         return hashlib.sha1(payload, usedforsecurity=False).hexdigest()[:16]
 
     @staticmethod
@@ -1356,7 +1358,7 @@ class HTMLReporter(ReporterBase):
 
         template = self._env.get_template("report.html.j2")
         cl = self.content_label
-        return template.render(
+        rendered = template.render(
             title=self.title,
             timestamp=timestamp,
             version=__version__,
@@ -1417,6 +1419,8 @@ class HTMLReporter(ReporterBase):
             plugin_view=plugin_view,
             tier3_plugin=tier3_plugin,
         )
+        # Untrusted text can carry lone surrogates, which UTF-8 cannot encode.
+        return replace_unencodable(rendered)
 
     def get_file_extension(self) -> str:
         return ".html"

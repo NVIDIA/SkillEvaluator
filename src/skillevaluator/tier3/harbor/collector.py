@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 import sys
+from collections.abc import Mapping
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,12 @@ from skillevaluator.tier3.eval_core.plugin_signals import (
     PluginSignalsContext,
     compute_plugin_signals,
     summarize_plugin_signals,
+)
+from skillevaluator.tier3.eval_core.runtime_evidence import (
+    canary_arm_comparison,
+    read_hook_census,
+    summarize_canary,
+    summarize_hook_census,
 )
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
@@ -71,6 +78,7 @@ AGENT_LOG_ARTIFACTS = (
     "gemini-cli.txt",
     "cline.txt",
     "opencode.txt",
+    "hermes.txt",
 )
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",
@@ -2839,6 +2847,101 @@ def _plugin_signal_trajectory(trial_root: Path) -> dict[str, Any] | None:
     return _merged_step_trajectory(trial_root)
 
 
+_CODEX_LOG_MAX_BYTES = 16 * 1024 * 1024
+_CODEX_SESSION_FILES = 8
+_CODEX_MCP_CALLS = 4_000
+_CODEX_SERVER_NAME_RE = re.compile(r"[^\x00-\x1f\x7f-\x9f]{1,128}")
+
+
+def _codex_server(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    server = value.removeprefix("mcp__").removesuffix("__")
+    return server if _CODEX_SERVER_NAME_RE.fullmatch(server) else None
+
+
+def _codex_json_lines(path: Path) -> list[Any]:
+    """Parsed JSON lines that mention MCP (bounded, no-follow read; unparsable lines are skipped)."""
+    text = _read_bounded_text(path, max_bytes=_CODEX_LOG_MAX_BYTES)
+    if not text or "mcp" not in text.casefold():
+        return []
+    events: list[Any] = []
+    for line in text.splitlines():
+        if "mcp" not in line.casefold():
+            continue
+        try:
+            events.append(json.loads(line))
+        except (ValueError, RecursionError):
+            continue
+    return events
+
+
+def _codex_session_files(sessions: Path) -> list[Path]:
+    found: list[Path] = []
+    if sessions.is_symlink():
+        return found
+    try:
+        for directory, subdirs, files in os.walk(sessions):
+            subdirs[:] = sorted(name for name in subdirs if not (Path(directory) / name).is_symlink())
+            found.extend(Path(directory) / name for name in sorted(files) if name.endswith(".jsonl"))
+            if len(found) >= _CODEX_SESSION_FILES:
+                break
+    except OSError:
+        return []
+    return found[:_CODEX_SESSION_FILES]
+
+
+def _codex_mcp_call_servers(trial_root: Path, trajectory: Mapping[str, Any] | None) -> dict[str, str]:
+    """Tool call id -> MCP server for Codex trials, read from the raw Codex logs.
+
+    Harbor's Codex trajectory keeps only the bare MCP tool name (for example
+    ``lookup``), while Codex's own session log records the server (``namespace:
+    "mcp__<server>"`` on the call, and an ``McpToolCall`` item with the call
+    id). When no session log is readable, the ``codex.txt`` JSON stream's
+    ``mcp_tool_call`` items (server and tool, in call order) are matched to the
+    trajectory's calls of the same tool name, in order. Empty for other harnesses.
+    """
+    servers: dict[str, str] = {}
+    agent_dir = trial_root / "agent"
+    for path in _codex_session_files(agent_dir / "sessions"):
+        for event in _codex_json_lines(path):
+            payload = event.get("payload") if isinstance(event, Mapping) else None
+            if not isinstance(payload, Mapping):
+                continue
+            item = payload.get("item")
+            if isinstance(item, Mapping) and item.get("type") in {"McpToolCall", "mcp_tool_call"}:
+                call_id, server = item.get("id"), _codex_server(item.get("server"))
+            elif payload.get("type") in {"function_call", "custom_tool_call"}:
+                namespace = payload.get("namespace")
+                call_id = payload.get("call_id")
+                server = _codex_server(namespace) if isinstance(namespace, str) and namespace[:5] == "mcp__" else None
+            else:
+                continue
+            if isinstance(call_id, str) and call_id and server and len(servers) < _CODEX_MCP_CALLS:
+                servers.setdefault(call_id, server)
+    if servers or not isinstance(trajectory, Mapping):
+        return servers
+    queues: dict[str, list[str]] = {}
+    for event in _codex_json_lines(agent_dir / "codex.txt"):
+        item = event.get("item") if isinstance(event, Mapping) and event.get("type") == "item.completed" else None
+        if isinstance(item, Mapping) and item.get("type") == "mcp_tool_call" and isinstance(item.get("tool"), str):
+            server = _codex_server(item.get("server"))
+            if server:
+                queues.setdefault(item["tool"], []).append(server)
+    if not queues:
+        return servers
+    for step in trajectory.get("steps") or ():
+        for call in (step.get("tool_calls") if isinstance(step, Mapping) else None) or ():
+            if not isinstance(call, Mapping):
+                continue
+            name, call_id = call.get("function_name"), call.get("tool_call_id")
+            if isinstance(name, str) and isinstance(call_id, str) and call_id and queues.get(name):
+                servers.setdefault(call_id, queues[name].pop(0))
+                if len(servers) >= _CODEX_MCP_CALLS:
+                    return servers
+    return servers
+
+
 def _attach_plugin_signals(
     rewards: list[dict[str, Any]],
     job_dir: Path | None,
@@ -2863,18 +2966,135 @@ def _attach_plugin_signals(
         if root:
             groups.setdefault(root, []).append(reward)
     per_trial: list[dict[str, Any] | None] = []
+    censuses: list[dict[str, Any]] = []
     for root, rows in groups.items():
+        trajectory = _plugin_signal_trajectory(job_dir / root)
         signals = compute_plugin_signals(
-            _plugin_signal_trajectory(job_dir / root),
+            trajectory,
             context.case_spec(_entry_id(rows[0], case_ids)),
             declared=context.declared_for(arm),
             wrapper_skills=context.wrapper_skills,
+            mcp_call_servers=_codex_mcp_call_servers(job_dir / root, trajectory),
+            subagent_aliases=context.aliases_for(arm),
         )
+        # Hook census lines written by templates/hook_census.sh (native hook staging).
+        census = read_hook_census(job_dir / root)
+        censuses.append(census)
+        if signals is not None:
+            signals["hook_census"] = census
         per_trial.append(signals)
         if signals is not None:
             for row in rows:
                 row["plugin_signals"] = signals
-    return summarize_plugin_signals(per_trial)
+    summary = summarize_plugin_signals(per_trial)
+    summary["hook_census"] = summarize_hook_census(censuses)
+    return summary
+
+
+def _arm_trial_roots(job_dir: Path | None) -> list[str]:
+    """Every trial directory of one Harbor job, scored or not (never a link)."""
+    if job_dir is None:
+        return []
+    try:
+        children = sorted(job_dir.iterdir())
+    except OSError:
+        return []
+    roots: list[str] = []
+    for child in children:
+        kind, _reason = _inspect_trial_directory(child)
+        if kind == "directory" and _looks_like_trial_dir(child) and _safe_trial_path_component(child.name):
+            roots.append(child.name)
+    return roots
+
+
+def _arm_hook_census(job_dir: Path | None) -> dict[str, Any]:
+    """Hook census summary over every trial of one arm, including trials that were not scored."""
+    return summarize_hook_census([read_hook_census(job_dir / root) for root in _arm_trial_roots(job_dir)])
+
+
+def _trial_load_census(
+    trial_root: Path,
+    plan: Mapping[str, Any],
+    *,
+    agent: str,
+    mode: str,
+    declared: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """One trial's load census: the in-container listing, then the harness's own report."""
+    from skillevaluator.tier3.plugin_native import (
+        CLAUDE_CODE_LOG_FILENAME,
+        LOAD_CENSUS_FILENAME,
+        apply_claude_init_evidence,
+        claude_init_event,
+        fallback_census,
+        read_census_file,
+        read_harness_log_prefix,
+        restrict_census,
+    )
+
+    census = read_census_file(trial_root / "agent" / LOAD_CENSUS_FILENAME) if mode == "native" else None
+    if census is None:
+        return fallback_census(agent, mode, declared)
+    census = restrict_census(census, declared, agent=agent)
+    harness = plan.get("harness") if isinstance(plan.get("harness"), Mapping) else {}
+    if harness.get("kind") == "claude-code-init" and isinstance(harness.get("plugin"), str):
+        text = read_harness_log_prefix(trial_root / "agent" / CLAUDE_CODE_LOG_FILENAME)
+        init = claude_init_event(text) if text else None
+        if init is not None:
+            census = apply_claude_init_evidence(census, declared, init, plugin=harness["plugin"])
+    return census
+
+
+def _attach_load_census(
+    rewards: list[dict[str, Any]],
+    job_dir: Path | None,
+    plan: Mapping[str, Any] | None,
+    *,
+    agent: str,
+) -> dict[str, Any] | None:
+    """Read every with-plugin trial's native load census and return the per-agent summary.
+
+    The census comes from ``agent/skilleval-load-census.json`` in each trial
+    directory (written in the container by ``/skilleval/native/setup.sh``),
+    scored or not, so a run whose trials failed still reports what loaded.
+    Entries for components that were never staged are ignored (the file is
+    writable from the sandbox). For Claude Code the harness's own
+    ``system/init`` event then confirms or refutes each component. A trial
+    without a census gets the declared-staged fallback. Scored rows get their
+    trial's census. Report-only: the census never changes a score, pass
+    result, or verdict.
+    """
+    from skillevaluator.tier3.plugin_native import summarize_censuses
+
+    if plan is None or job_dir is None:
+        return None
+    mode = "native" if plan.get("mode") == "native" else "wrapper"
+    declared = [item for item in plan.get("declared", []) if isinstance(item, Mapping)]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for reward in rewards:
+        root = _safe_trial_path_component(reward.get("_trial_root_name"))
+        if root:
+            groups.setdefault(root, []).append(reward)
+    roots = _arm_trial_roots(job_dir)
+    roots += [root for root in groups if root not in roots]
+    censuses: list[dict[str, Any]] = []
+    unlaunched = 0
+    for root in roots:
+        census = _trial_load_census(job_dir / root, plan, agent=agent, mode=mode, declared=declared)
+        for row in groups.get(root, ()):
+            row["plugin_load_census"] = census
+        if census.get("fallback") and root not in groups:
+            # An unscored trial with no census most likely failed before the agent
+            # launched; it says nothing about loading, so it neither confirms nor
+            # downgrades a component. A scored trial without one still counts.
+            unlaunched += 1
+            continue
+        censuses.append(census)
+    hook_ids = plan.get("hook_ids") if isinstance(plan.get("hook_ids"), Mapping) else None
+    summary = summarize_censuses(agent, mode, censuses, staged_hook_ids=hook_ids)
+    if unlaunched:
+        summary["unscored_trials_without_census"] = unlaunched
+    return summary
 
 
 def _save_trials(
@@ -3383,6 +3603,7 @@ def _collect_report_only_condition(
         pass_summary = {}
         overall_score = None
     condition_dir = output_dir / agent / directory_name
+    canary_summary = summarize_canary(rewards)
     plugin_signals_summary = _attach_plugin_signals(
         rewards,
         job_dir,
@@ -3426,6 +3647,7 @@ def _collect_report_only_condition(
                 "job_failure": job_failure,
                 "trial_failures": trial_failures,
                 **({"plugin_signals_summary": plugin_signals_summary} if plugin_signals_summary is not None else {}),
+                **({"canary_summary": canary_summary} if canary_summary is not None else {}),
             },
             indent=2,
         ),
@@ -3452,6 +3674,7 @@ def _collect_report_only_condition(
             job_failure=job_failure,
         ),
         "plugin_signals_summary": plugin_signals_summary,
+        "canary_summary": canary_summary,
     }
 
 
@@ -3474,12 +3697,16 @@ def collect_harbor_results(
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
     plugin_signals: PluginSignalsContext | None = None,
+    plugin_load_census: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
     Returns a dict with per-agent scores, lift, and a cross-agent comparison.
     ``plugin_signals`` is set only for plugin evaluations; it adds report-only
     per-trial ``plugin_signals`` and per-arm ``plugin_signals_summary``.
+    ``plugin_load_census`` (``--plugin-load native|auto``) maps an agent to its
+    load mode and declared native components; it adds a per-trial
+    ``plugin_load_census`` and a per-agent ``plugin_load_census`` summary.
     """
     if expected_trials is not None and expected_total_trials is not None and expected_trials != expected_total_trials:
         raise ValueError("Conflicting expected trial counts were provided")
@@ -3521,6 +3748,8 @@ def collect_harbor_results(
         with_job_failure = ""
         with_execution: dict[str, Any] = {}
         with_plugin_signals: dict[str, Any] | None = None
+        with_canary: dict[str, Any] | None = None
+        with_load_census: dict[str, Any] | None = None
 
         if with_job_dir:
             with_job_ok, with_job_failure = validate_harbor_job_result(
@@ -3567,9 +3796,16 @@ def collect_harbor_results(
             with_overall_score = (
                 _average_overall(with_logical_rewards) if with_execution["execution_status"] == "succeeded" else None
             )
+            with_load_census = _attach_load_census(
+                with_rewards, with_job_dir, (plugin_load_census or {}).get(agent), agent=agent
+            )
             with_plugin_signals = _attach_plugin_signals(
                 with_rewards, with_job_dir, plugin_signals, arm="with_skill", expected_case_ids=expected_case_ids
             )
+            if with_plugin_signals is not None:
+                # Hook runs from every with-plugin trial, scored or not.
+                with_plugin_signals["hook_census"] = _arm_hook_census(with_job_dir)
+            with_canary = summarize_canary(with_rewards)
             _save_trials(
                 with_collected_rewards,
                 agent_dir / "with-skill" / "trials",
@@ -3604,6 +3840,7 @@ def collect_harbor_results(
                         "job_failure": with_job_failure,
                         "trial_failures": with_trial_failures,
                         **({"plugin_signals_summary": with_plugin_signals} if with_plugin_signals is not None else {}),
+                        **({"canary_summary": with_canary} if with_canary is not None else {}),
                     },
                     indent=2,
                 ),
@@ -3691,6 +3928,7 @@ def collect_harbor_results(
         without_execution: dict[str, Any] = {}
         without_job_dir: Path | None = None
         without_plugin_signals: dict[str, Any] | None = None
+        without_canary: dict[str, Any] | None = None
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
             without_job_dir = _find_job_dir(jobs_dir, without_job_name)
@@ -3748,6 +3986,7 @@ def collect_harbor_results(
                     arm="without_skill",
                     expected_case_ids=expected_case_ids,
                 )
+                without_canary = summarize_canary(without_rewards)
                 _save_trials(
                     without_collected_rewards,
                     agent_dir / "without-skill" / "trials",
@@ -3781,6 +4020,7 @@ def collect_harbor_results(
                             **without_execution,
                             "job_failure": without_job_failure,
                             "trial_failures": without_trial_failures,
+                            **({"canary_summary": without_canary} if without_canary is not None else {}),
                             **(
                                 {"plugin_signals_summary": without_plugin_signals}
                                 if without_plugin_signals is not None
@@ -4078,6 +4318,16 @@ def collect_harbor_results(
             "num_trials_sum_of_parts": sum_of_parts["num_trials"],
             "output_dir": str(agent_dir.resolve()),
         }
+        canary = canary_arm_comparison(
+            {
+                "with_skill": with_canary,
+                "without_skill": without_canary,
+                "sum_of_parts": sum_of_parts.get("canary_summary"),
+            }
+        )
+        if canary is not None:
+            # Per-arm canary exfiltration results; the verifier already scored each leak.
+            all_results["agents"][agent]["canary_summary"] = canary
         if plugin_signals is not None:
             # Report-only plugin component signals; never part of a score or verdict.
             all_results["agents"][agent]["plugin_signals_summary"] = {
@@ -4089,6 +4339,9 @@ def collect_harbor_results(
                 )
                 if summary is not None
             }
+        if with_load_census is not None:
+            # Report-only native load census (``--plugin-load native|auto``).
+            all_results["agents"][agent]["plugin_load_census"] = with_load_census
 
     _write_generated_root_json(output_dir / "attempt_policy.json", output_dir, all_results["attempt_policy"])
 

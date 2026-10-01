@@ -20,9 +20,15 @@ Each normalized tool call is mapped to zero or more component activations:
   ``grep``/``printf`` of the same path never count.
 * ``mcp``      -- ``mcp__<server>__<tool>``; for *declared* runnable servers the
   ``<server>__<tool>``/``<server>.<tool>``/``<server>/<tool>`` spellings used by
-  other agents are also recognized and canonicalized to ``mcp__<server>__<tool>``.
+  other agents, Hermes ``mcp_<server>_<tool>`` and OpenCode ``<server>_<tool>``
+  are also recognized and canonicalized to ``mcp__<server>__<tool>``. Claude
+  Code's plugin servers (``mcp__plugin_<plugin>_<server>__<tool>``) and
+  harness-sanitized names map back to the declared server; Codex bare tool
+  names map through the server its log recorded (``mcp_call_servers``).
 * ``subagent`` -- ``Task``/``Agent`` (name from ``subagent_type``...).
-* ``command``  -- ``SlashCommand`` (name from the first token of ``command``).
+* ``command``  -- ``SlashCommand`` (name from the first token of ``command``),
+  or the ``Skill`` tool naming a declared command (``<plugin>:<command>``),
+  which is how Claude Code runs plugin commands.
 * ``rule_read`` is reserved by the output contract but never emitted: plugin
   rules are inlined into the generated wrapper skill, so there is no separate
   rule file for an agent to read.
@@ -36,7 +42,9 @@ owns that observation; otherwise its outcome is unknown.
 structured error flag or a failure/unavailable marker in the head of any of its
 content blocks or in its tail. ``False``: the correlated result is flagged or
 carries such a marker ("no such file" only counts for non-shell calls, whose
-output is not a mix of several commands). ``None``:
+output is not a mix of several commands). A file read or skill load returns
+file text, so only its first line counts (past a harness's shell status lines),
+plus, for a shell read, any shell error line that names a ``SKILL.md``. ``None``:
 no result could be attributed to this call (no id match, or an ambiguous
 multi-call step), or the correlated body is empty. A sibling call's result never
 stands in for this call's outcome.
@@ -229,6 +237,36 @@ _PATH_ARG_KEYS = (
 )
 _SHELL_COMMAND_KEYS = ("cmd", "command", "code", "script", "input")
 _TOOL_NAME_SEPARATORS = ("__", ".", ":", "/")
+# MCP tool-name spellings (see ``_mcp_identity``). Hermes names MCP tools
+# ``mcp_<server>_<tool>`` with every character outside ``[A-Za-z0-9_]`` as ``_``;
+# Claude Code names plugin servers ``plugin_<plugin>_<server>``.
+_HERMES_NAME_RE = re.compile(r"[^a-z0-9_]")
+_CLAUDE_PLUGIN_SERVER_PREFIX = "plugin_"
+# Harnesses that never name an MCP tool ``<server>_<tool>`` (only OpenCode does).
+_NO_BARE_MCP_PREFIX_AGENTS = frozenset({"claude-code", "codex", "hermes"})
+# Built-in tool names that a declared server called ``web``/``read``/... must not claim as ``<server>_<tool>``.
+_BUILTIN_TOOL_NAMES = (
+    _SKILL_TOOLS
+    | _SUBAGENT_TOOLS
+    | _COMMAND_TOOLS
+    | _SHELL_TOOLS
+    | _READ_TOOLS
+    | _WRITE_TOOLS
+    | frozenset(
+        {
+            "web_search",
+            "web_fetch",
+            "web_extract",
+            "update_plan",
+            "write_stdin",
+            "view_image",
+            "execute_code",
+            "search_files",
+            "todo_write",
+            "todo_read",
+        }
+    )
+)
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _SHELL_PREFIX_WORDS = frozenset({"sudo", "env", "time", "nohup", "command", "exec", "builtin", "nice"})
 _FILE_READER_VERBS = frozenset(
@@ -291,6 +329,15 @@ _UNAVAILABLE_MARKERS = (
 # call's output mixes several commands, so ``cat SKILL.md missing.md`` read the
 # manifest even though its output says "No such file or directory".
 _FILE_MISSING_MARKERS = ("no such file or directory", "file does not exist")
+# Status lines a harness puts in front of shell output (Codex ``exec_command``).
+# They are not file text, so a shell read looks past them for its first line.
+_SHELL_STATUS_LINE_RE = re.compile(
+    r"chunk id:.*|wall time:.*|process exited with code -?\d+|exit code:\s*-?\d+"
+    r"|original token count:.*|total output lines:.*|output:",
+    re.IGNORECASE,
+)
+# A shell tool's error line about a file (``cat: <dir>/SKILL.md: Permission denied``).
+_SHELL_ERROR_LINE_RE = re.compile(r"[\w./+-]+:\s")
 # A result that came back as a runtime/transport failure rather than an answer.
 _FAILED_CALL_RE = re.compile(
     r"(?:\b[45]\d{2}\b\s*[:\-])"
@@ -786,6 +833,13 @@ class PluginSignalsContext:
     wrapper_skills: tuple[str, ...] = ()
     cases: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     baseline_has_members: bool = False
+    # Declared plugin subagents and commands. They count toward activation
+    # coverage in the with-plugin arm only, the one arm that carries the plugin.
+    subagents: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+    # Staged subagent name (casefolded) -> declared name, for harnesses that
+    # rename a plugin agent (OpenCode stages ``build`` as ``<plugin>-build``).
+    subagent_aliases: Mapping[str, str] = field(default_factory=dict)
 
     def arm_enabled(self, arm: str) -> bool:
         if arm in {ARM_WITH_SKILL, ARM_SUM_OF_PARTS}:
@@ -795,8 +849,17 @@ class PluginSignalsContext:
     def declared_for(self, arm: str) -> dict[str, list[str]]:
         """Declared components staged in ``arm`` (MCP is wired into the with-plugin arm only)."""
         declared: dict[str, list[str]] = {COMPONENT_SKILL: list(self.member_skills)}
-        declared[COMPONENT_MCP] = list(self.mcp_servers) if arm == ARM_WITH_SKILL else []
+        with_plugin = arm == ARM_WITH_SKILL
+        declared[COMPONENT_MCP] = list(self.mcp_servers) if with_plugin else []
+        if with_plugin and self.subagents:
+            declared[COMPONENT_SUBAGENT] = list(self.subagents)
+        if with_plugin and self.commands:
+            declared[COMPONENT_COMMAND] = list(self.commands)
         return declared
+
+    def aliases_for(self, arm: str) -> Mapping[str, str]:
+        """Subagent name aliases for ``arm`` (declared subagents count in the with-plugin arm only)."""
+        return self.subagent_aliases if arm == ARM_WITH_SKILL and self.subagents else {}
 
     def case_spec(self, case_id: str) -> Mapping[str, Any]:
         return self.cases.get(case_id) or {}
@@ -809,6 +872,9 @@ def build_plugin_signals_context(
     wrapper_skills: Iterable[Any] = (),
     entries: Iterable[Any] = (),
     baseline_has_members: bool = False,
+    subagents: Iterable[Any] = (),
+    commands: Iterable[Any] = (),
+    subagent_aliases: Mapping[str, Any] | None = None,
 ) -> PluginSignalsContext:
     """Build a bounded :class:`PluginSignalsContext` from dataset case entries."""
     cases: dict[str, Mapping[str, Any]] = {}
@@ -823,13 +889,32 @@ def build_plugin_signals_context(
         spec = plugin_case_spec(entry)
         if spec:
             cases[case_id] = spec
+    declared_subagents = _clean_names(subagents)
     return PluginSignalsContext(
         member_skills=_clean_names(member_skills),
         mcp_servers=_clean_names(mcp_servers),
         wrapper_skills=_clean_names(wrapper_skills),
         cases=cases,
         baseline_has_members=bool(baseline_has_members),
+        subagents=declared_subagents,
+        commands=_clean_names(str(name).lstrip("/") for name in commands if isinstance(name, str)),
+        subagent_aliases=_clean_aliases(subagent_aliases, declared_subagents),
     )
+
+
+def _clean_aliases(aliases: Mapping[str, Any] | None, declared: Sequence[str]) -> dict[str, str]:
+    """Bounded ``staged name (casefolded) -> declared name`` pairs whose target is a declared subagent."""
+    by_folded = {name.casefold(): name for name in declared}
+    cleaned: dict[str, str] = {}
+    for alias, name in (aliases or {}).items():
+        if len(cleaned) >= MAX_DECLARED_COMPONENTS:
+            break
+        if not isinstance(alias, str) or not isinstance(name, str):
+            continue
+        target = by_folded.get(name.strip().casefold())
+        if target is not None and alias.strip():
+            cleaned[alias.strip().casefold()[:_MAX_LABEL_CHARS]] = target
+    return cleaned
 
 
 # =============================================================================
@@ -1030,14 +1115,52 @@ def _results_for_call(
     return []
 
 
-def _outcome(correlated: list[tuple[str, str, bool]], *, shell: bool) -> tuple[str | None, bool | None]:
+def _first_line(text: str, *, shell: bool = False) -> str:
+    for line in text[:_FAILURE_SCAN_CHARS].splitlines():
+        stripped = line.strip()
+        if stripped and not (shell and _SHELL_STATUS_LINE_RE.fullmatch(stripped)):
+            return line
+    return ""
+
+
+def _content_read_scan(text: str, *, shell: bool) -> str:
+    """The lines of a file read or skill load that can say the read failed.
+
+    The first line, past any shell status lines. A shell read can also fail
+    after other output, so every shell error line that names a skill manifest
+    (``cat: <dir>/SKILL.md: Permission denied``) counts too.
+    """
+    lines = [_first_line(text, shell=shell)]
+    if shell:
+        lines.extend(
+            line
+            for line in text.splitlines()
+            if "skill.md" in line.casefold() and _SHELL_ERROR_LINE_RE.match(line.strip())
+        )
+    return "\n".join(lines)
+
+
+def _outcome(
+    correlated: list[tuple[str, str, bool]], *, shell: bool, content_read: bool = False
+) -> tuple[str | None, bool | None]:
+    """``(observation text, succeeded)`` for one call (see the module docs).
+
+    For a ``content_read`` (a file read or a skill load) the body is file or
+    skill text, so words like "not available" in it say nothing about the call:
+    only a structured error flag, a marker on the first line of a result (past
+    a harness's shell status lines), or a shell error line that names a skill
+    manifest counts.
+    """
     if not correlated:
         return None, None
     text = "".join(item for item, _, _ in correlated)[:_MAX_OBSERVATION_CHARS]
     flagged = any(is_error for _, _, is_error in correlated)
     if not flagged and not text.strip():
         return text, None
-    scan = "\n".join(window for _, window, _ in correlated)
+    if content_read:
+        scan = "\n".join(_content_read_scan(item, shell=shell) for item, _, _ in correlated)
+    else:
+        scan = "\n".join(window for _, window, _ in correlated)
     lowered = scan.casefold()
     markers = _UNAVAILABLE_MARKERS if shell else (*_UNAVAILABLE_MARKERS, *_FILE_MISSING_MARKERS)
     failed = flagged or any(marker in lowered for marker in markers) or bool(_FAILED_CALL_RE.search(scan))
@@ -1056,19 +1179,93 @@ def _norm_server(value: str) -> str:
     return re.sub(r"[^a-z0-9_-]", "_", value.casefold())
 
 
-def _mcp_identity(fn: str, declared_mcp: Sequence[str]) -> tuple[str, str] | None:
-    if fn[:5].casefold() == "mcp__":
-        rest = fn[5:]
-        server, _, tool = rest.partition("__")
-        return (server, tool) if server else None
+def _server_spellings(server: str) -> tuple[str, ...]:
+    """Casefolded spellings of a declared server name inside harness tool names, exact spelling first.
+
+    Claude Code and OpenCode replace characters outside ``[A-Za-z0-9_-]`` with
+    ``_``; Hermes also replaces ``-``.
+    """
+    low = server.casefold()
+    return tuple(dict.fromkeys((low, _norm_server(server), _HERMES_NAME_RE.sub("_", low))))
+
+
+def match_declared_mcp_server(observed: str, declared: Iterable[str]) -> str | None:
+    """The one declared server that ``observed`` (a server name taken from a tool name) refers to.
+
+    An exact (case-insensitive) match wins. Otherwise a harness spelling of a
+    declared name counts only when exactly one declared server has it, so
+    ``my.docs`` and ``my-docs`` never credit each other. Claude Code names
+    plugin servers ``plugin_<plugin>_<server>``; the plugin slug never holds
+    ``_``, so the server is what follows the first ``_`` (a longest declared
+    suffix is the fallback).
+    """
+    names = [name for name in declared if isinstance(name, str) and name]
+    low = observed.casefold()
+    if not low or not names:
+        return None
+    exact = [name for name in names if name.casefold() == low]
+    if exact:
+        return exact[0]
+    spelled = list(dict.fromkeys(name for name in names if low in _server_spellings(name)))
+    if len(spelled) == 1:
+        return spelled[0]
+    if spelled or not low.startswith(_CLAUDE_PLUGIN_SERVER_PREFIX):
+        return None
+    rest = low[len(_CLAUDE_PLUGIN_SERVER_PREFIX) :]
+    slug, sep, server = rest.partition("_")
+    if slug and sep and server:
+        found = match_declared_mcp_server(server, names)
+        if found is not None:
+            return found
+    suffixes: dict[int, list[str]] = {}
+    for name in names:
+        for spelling in _server_spellings(name):
+            if rest.endswith("_" + spelling) and len(rest) > len(spelling) + 1:
+                suffixes.setdefault(len(spelling), []).append(name)
+    if not suffixes:
+        return None
+    longest = list(dict.fromkeys(suffixes[max(suffixes)]))
+    return longest[0] if len(longest) == 1 else None
+
+
+def _mcp_identity(fn: str, declared_mcp: Sequence[str], *, agent: str = "") -> tuple[str, str] | None:
+    """``(server, tool)`` of an MCP tool call, with the server mapped to its declared name when known.
+
+    Recognized spellings: ``mcp__<server>__<tool>`` (Claude Code, Codex; Claude
+    Code plugin servers appear as ``plugin_<plugin>_<server>``), and for
+    declared servers ``<server>__<tool>``/``.``/``/``/``:``, Hermes
+    ``mcp_<server>_<tool>``, and OpenCode ``<server>_<tool>`` (not for
+    harnesses that never use it). The longest matching prefix wins; on a tie an
+    exact spelling beats a normalized one, and a remaining tie between servers
+    is left unattributed.
+    """
     low = fn.casefold()
+    if low[:5] == "mcp__":
+        server, _, tool = fn[5:].partition("__")
+        if not server:
+            return None
+        return match_declared_mcp_server(server, declared_mcp) or server, tool
+    bare_prefix = agent.casefold() not in _NO_BARE_MCP_PREFIX_AGENTS and low not in _BUILTIN_TOOL_NAMES
+    best: tuple[int, int] | None = None
+    best_spelling = ""
+    winners: list[str] = []
     for server in declared_mcp:
-        for candidate in dict.fromkeys((server.casefold(), _norm_server(server))):
-            for separator in ("__", ".", "/", ":"):
-                prefix = candidate + separator
-                if low.startswith(prefix) and len(low) > len(prefix):
-                    return server, fn[len(prefix) :]
-    return None
+        for rank, spelling in enumerate(_server_spellings(server)):
+            prefixes = [spelling + separator for separator in _TOOL_NAME_SEPARATORS] + [f"mcp_{spelling}_"]
+            if bare_prefix:
+                prefixes.append(spelling + "_")
+            for prefix in prefixes:
+                if not (low.startswith(prefix) and len(low) > len(prefix)):
+                    continue
+                key = (len(prefix), -min(rank, 1))
+                if best is None or key > best:
+                    best, best_spelling, winners = key, spelling, [server]
+                elif key == best and server not in winners:
+                    winners.append(server)
+    if best is None:
+        return None
+    # Two declared servers share this spelling: count the call under the spelling itself.
+    return (winners[0] if len(winners) == 1 else best_spelling), fn[best[0] :]
 
 
 def _first_string(args: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -1271,30 +1468,41 @@ def _member_manifest_match(path: str, members: Sequence[str]) -> str | None:
     return None
 
 
-def _declared_skill_read(fn: str, fn_base: str, args: Mapping[str, Any], members: Sequence[str]) -> str | None:
-    """Return the declared member whose ``SKILL.md`` this call reads, if any."""
+def _declared_skill_reads(fn: str, fn_base: str, args: Mapping[str, Any], members: Sequence[str]) -> list[str]:
+    """The declared members whose ``SKILL.md`` this call reads, in order (every one in a chained shell command)."""
     if not members:
-        return None
+        return []
     is_mcp = fn[:5].casefold() == "mcp__"
     reads_file = fn_base in _READ_TOOLS or (is_mcp and bool(_READ_VERB_RE.search(fn_base)))
     if fn_base in {"str_replace_editor", "str_replace_based_edit_tool"}:
         reads_file = str(args.get("command") or "").casefold() == "view"
+    paths: list[str] = []
     if reads_file:
-        for path in _path_args(args):
-            member = _member_manifest_match(path, members)
-            if member is not None:
-                return member
-        return None
-    if fn_base in _SHELL_TOOLS and not is_mcp:
+        paths = _path_args(args)
+    elif fn_base in _SHELL_TOOLS and not is_mcp:
         for text in _shell_texts(fn_base, args):
-            if "skill.md" not in text.casefold():
-                continue
-            reads, _writes = _shell_io(text, reader_verbs=_FILE_READER_VERBS)
-            for path in reads:
-                member = _member_manifest_match(path, members)
-                if member is not None:
-                    return member
-    return None
+            if "skill.md" in text.casefold():
+                paths.extend(_shell_io(text, reader_verbs=_FILE_READER_VERBS)[0])
+    found: dict[str, None] = {}
+    for path in paths:
+        member = _member_manifest_match(path, members)
+        if member is not None:
+            found[member] = None
+    return list(found)
+
+
+def _declared_command(name: str, declared: Mapping[str, Sequence[str]]) -> bool:
+    """Whether a ``Skill`` tool name is a declared plugin command (``<plugin>:<command>`` or bare).
+
+    Claude Code runs plugin commands through its ``Skill`` tool. A name that is
+    also a declared member skill stays a skill.
+    """
+    commands = {command.casefold() for command in declared.get(COMPONENT_COMMAND) or ()}
+    if not name or not commands:
+        return False
+    candidates = _name_candidates(name)
+    skills = {skill.casefold() for skill in declared.get(COMPONENT_SKILL) or ()}
+    return candidates[-1] in commands and not any(candidate in skills for candidate in candidates)
 
 
 def _component_ident(kind: str, name: str, fn: str, tool_label: str, *, persist: bool = True) -> _Ident:
@@ -1310,22 +1518,36 @@ def _persistable_name(name: str, members: Sequence[str]) -> bool:
     return any(member.casefold() == folded for member in members)
 
 
-def _identities(fn: str, args: Mapping[str, Any], declared: Mapping[str, Sequence[str]]) -> list[_Ident]:
+def _identities(
+    fn: str,
+    args: Mapping[str, Any],
+    declared: Mapping[str, Sequence[str]],
+    *,
+    agent: str = "",
+    subagent_aliases: Mapping[str, str] | None = None,
+) -> list[_Ident]:
     low = fn.casefold()
     fn_base = _base_tool_name(fn)
     idents: list[_Ident] = []
     if low in _SKILL_TOOLS:
         name = _first_string(args, ("skill", "name", "command"))
-        persist = _persistable_name(name, declared.get(COMPONENT_SKILL) or ())
-        idents.append(_component_ident(COMPONENT_SKILL, name, fn, fn, persist=persist))
+        if _declared_command(name.lstrip("/"), declared):
+            name = name.lstrip("/")
+            persist = _persistable_name(name, declared.get(COMPONENT_COMMAND) or ())
+            idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn, persist=persist))
+        else:
+            persist = _persistable_name(name, declared.get(COMPONENT_SKILL) or ())
+            idents.append(_component_ident(COMPONENT_SKILL, name, fn, fn, persist=persist))
     elif low in _SUBAGENT_TOOLS:
         name = _first_string(args, ("subagent_type", "subagent", "agent", "agent_name", "agent_type"))
+        # A harness that renamed a plugin agent when staging it calls it by the staged name.
+        name = (subagent_aliases or {}).get(name.casefold(), name)
         idents.append(_component_ident(COMPONENT_SUBAGENT, name, fn, fn, persist=_persistable_name(name, ())))
     elif low in _COMMAND_TOOLS:
         command = _first_string(args, ("command", "name"))
         name = command.split()[0].lstrip("/") if command.split() else ""
         idents.append(_component_ident(COMPONENT_COMMAND, name, fn, fn, persist=_persistable_name(name, ())))
-    mcp = _mcp_identity(fn, declared.get(COMPONENT_MCP) or ())
+    mcp = _mcp_identity(fn, declared.get(COMPONENT_MCP) or (), agent=agent)
     if mcp is not None:
         server, tool = mcp
         canonical = f"mcp__{server}__{tool}" if tool else f"mcp__{server}"
@@ -1340,19 +1562,39 @@ def _identities(fn: str, args: Mapping[str, Any], declared: Mapping[str, Sequenc
                 tool_label=canonical,
             )
         )
-    if not any(ident.kind == COMPONENT_SKILL for ident in idents):
-        member = _declared_skill_read(fn, fn_base, args, declared.get(COMPONENT_SKILL) or ())
-        if member is not None:
+    if not any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
+        for member in _declared_skill_reads(fn, fn_base, args, declared.get(COMPONENT_SKILL) or ()):
             idents.append(_component_ident(COMPONENT_SKILL, member, fn, f"{fn}:skill-md-read"))
     if not idents:
         idents.append(_Ident(label=fn, kind=None, name=fn, fn=fn, tool_label=fn))
     return idents
 
 
-def _extract_calls(trajectory: Mapping[str, Any], declared: Mapping[str, Sequence[str]]) -> list[_Call] | None:
+def _trajectory_agent(trajectory: Mapping[str, Any]) -> str:
+    agent = trajectory.get("agent")
+    name = agent.get("name") if isinstance(agent, Mapping) else None
+    return name.strip()[:_MAX_LABEL_CHARS] if isinstance(name, str) else ""
+
+
+def _is_content_read(fn: str, idents: Sequence[_Ident]) -> bool:
+    """A skill load or a plain file read: its result is file or skill text, not a status message."""
+    if any(ident.kind == COMPONENT_MCP for ident in idents):
+        return False
+    if fn.casefold() in _SKILL_TOOLS or any(ident.kind == COMPONENT_SKILL for ident in idents):
+        return True
+    return _base_tool_name(fn) in _READ_TOOLS
+
+
+def _extract_calls(
+    trajectory: Mapping[str, Any],
+    declared: Mapping[str, Sequence[str]],
+    mcp_call_servers: Mapping[str, str] | None = None,
+    subagent_aliases: Mapping[str, str] | None = None,
+) -> list[_Call] | None:
     steps = trajectory.get("steps")
     if not isinstance(steps, list):
         return None
+    agent = _trajectory_agent(trajectory)
     calls: list[_Call] = []
     owner: int | None = None
     for step_index, step in enumerate(steps[:_MAX_STEPS]):
@@ -1365,7 +1607,12 @@ def _extract_calls(trajectory: Mapping[str, Any], declared: Mapping[str, Sequenc
         results = _observations(step)
         for raw in raw_calls:
             outer_id = str(raw.get("tool_call_id") or raw.get("id") or "")
-            prepared = {**raw, "function_name": _tool_name(raw), "arguments": _arguments(raw)}
+            name = _tool_name(raw)
+            server = (mcp_call_servers or {}).get(outer_id) if outer_id else None
+            if server and name and name[:5].casefold() != "mcp__":
+                # The harness log names the server this bare MCP tool name came from (Codex).
+                name = f"mcp__{server}__{name}"[:_MAX_LABEL_CHARS]
+            prepared = {**raw, "function_name": name, "arguments": _arguments(raw)}
             try:
                 normalized = normalize_tool_call(prepared)
             except (TypeError, ValueError, RecursionError):
@@ -1381,9 +1628,9 @@ def _extract_calls(trajectory: Mapping[str, Any], declared: Mapping[str, Sequenc
                 fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
                 args = tool_call.get("arguments")
                 args = args if isinstance(args, dict) else {}
-                idents = _identities(fn, args, declared)
+                idents = _identities(fn, args, declared, agent=agent, subagent_aliases=subagent_aliases)
                 shell = _base_tool_name(fn) in _SHELL_TOOLS and not any(ident.kind == COMPONENT_MCP for ident in idents)
-                observation, succeeded = _outcome(correlated, shell=shell)
+                observation, succeeded = _outcome(correlated, shell=shell, content_read=_is_content_read(fn, idents))
                 seq = len(calls)
                 if any(ident.kind in {COMPONENT_SKILL, COMPONENT_COMMAND} for ident in idents):
                     owner = seq
@@ -2030,18 +2277,19 @@ def grade_conflict(calls: Sequence[_Call], spec: Mapping[str, Any] | None) -> di
 
 def _declared_keys(declared: Mapping[str, Sequence[str]] | None) -> list[tuple[str, str]]:
     keys: list[tuple[str, str]] = []
-    for kind in (COMPONENT_SKILL, COMPONENT_MCP):
+    for kind in (COMPONENT_SKILL, COMPONENT_MCP, COMPONENT_SUBAGENT, COMPONENT_COMMAND):
         for name in (declared or {}).get(kind) or ():
             if isinstance(name, str) and name and (kind, name) not in keys:
                 keys.append((kind, name))
     return keys
 
 
-def _ident_is_component(ident: _Ident, kind: str, name: str) -> bool:
+def _ident_is_component(ident: _Ident, kind: str, name: str, declared_mcp: Sequence[str] = ()) -> bool:
     if ident.kind != kind:
         return False
     if kind == COMPONENT_MCP:
-        return _norm_server(ident.server or "") == _norm_server(name)
+        # ``_mcp_identity`` already maps a recognizable server to its declared name.
+        return match_declared_mcp_server(ident.server or "", declared_mcp or (name,)) == name
     return name.casefold() in _name_candidates(ident.name)
 
 
@@ -2054,11 +2302,14 @@ def grade_activation_coverage(calls: Sequence[_Call], declared: Mapping[str, Seq
     exercised: list[str] = []
     unverified: list[str] = []
     unavailable: list[str] = []
+    declared_mcp = [name for kind, name in _declared_keys(declared) if kind == COMPONENT_MCP]
     for kind, name in _declared_keys(declared):
         label = _safe_text(f"{kind}:{name}")
         declared_labels.append(label)
         outcomes = [
-            call.succeeded for call in calls if any(_ident_is_component(ident, kind, name) for ident in call.idents)
+            call.succeeded
+            for call in calls
+            if any(_ident_is_component(ident, kind, name, declared_mcp) for ident in call.idents)
         ]
         if not outcomes:
             unverified.append(label)
@@ -2089,10 +2340,18 @@ def _activations(calls: Sequence[_Call]) -> list[dict[str, Any]]:
 
 
 def detect_component_activations(
-    trajectory: Mapping[str, Any], declared: Mapping[str, Sequence[str]] | None = None
+    trajectory: Mapping[str, Any],
+    declared: Mapping[str, Sequence[str]] | None = None,
+    *,
+    mcp_call_servers: Mapping[str, str] | None = None,
+    subagent_aliases: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Ordered component activations (C3 ``activations``) in one ATIF trajectory."""
-    calls = _extract_calls(trajectory, declared or {}) if isinstance(trajectory, Mapping) else None
+    calls = (
+        _extract_calls(trajectory, declared or {}, mcp_call_servers, subagent_aliases)
+        if isinstance(trajectory, Mapping)
+        else None
+    )
     return _activations(calls or [])
 
 
@@ -2102,17 +2361,23 @@ def compute_plugin_signals(
     *,
     declared: Mapping[str, Sequence[str]] | None = None,
     wrapper_skills: Sequence[str] = (),
+    mcp_call_servers: Mapping[str, str] | None = None,
+    subagent_aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Per-trial C3 ``plugin_signals`` for one ATIF trajectory, or ``None`` if unreadable.
 
     ``case`` is a :func:`plugin_case_spec` result (raw entries are normalized
-    defensively). ``declared`` maps ``skill``/``mcp`` to the declared component
-    names staged in this arm.
+    defensively). ``declared`` maps ``skill``/``mcp`` (and, in the with-plugin
+    arm, ``subagent``/``command``) to the declared component names in this arm.
+    ``mcp_call_servers`` maps a tool call id to the MCP server the harness log
+    says it went to, for harnesses whose trajectory keeps only the bare tool
+    name (Codex). ``subagent_aliases`` maps a staged subagent name (casefolded)
+    to the declared name, for harnesses that rename a plugin agent (OpenCode).
     """
     if not isinstance(trajectory, Mapping):
         return None
     declared_map: Mapping[str, Sequence[str]] = declared or {}
-    calls = _extract_calls(trajectory, declared_map)
+    calls = _extract_calls(trajectory, declared_map, mcp_call_servers, subagent_aliases)
     if calls is None:
         return None
     spec: Mapping[str, Any] = case if isinstance(case, Mapping) else {}
@@ -2300,6 +2565,7 @@ __all__ = [
     "build_plugin_signals_context",
     "compute_plugin_signals",
     "detect_component_activations",
+    "match_declared_mcp_server",
     "plugin_case_spec",
     "summarize_plugin_signals",
     "validate_plugin_case_fields",

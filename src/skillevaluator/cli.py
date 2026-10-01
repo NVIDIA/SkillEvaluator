@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import logging
@@ -46,6 +47,7 @@ from skillevaluator.reporting.naming import report_basename
 # imported lazily inside the command callbacks. This keeps `import skillevaluator.cli`
 # and the CLI surface available on a base install without those extras.
 from skillevaluator.tier1.commands import (
+    ReportsNotWrittenError,
     console,
     emit_reports,
     enabled_check_lineup,
@@ -56,7 +58,7 @@ from skillevaluator.tier1.commands import (
     run_security_scan,
     run_validation,
 )
-from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS
+from skillevaluator.tier3_environments import HARBOR_ENVIRONMENTS, PLUGIN_LOAD_CHOICES
 from skillevaluator.tier_group import TierGroup
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -106,6 +108,25 @@ def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter,
     return value
 
 
+_PROBE_MCP_ENV_HELP = (
+    "Plugin only, with --probe-mcp: a host environment variable the probe may expand into a server's declared "
+    "${VAR} headers (repeatable). NAME sends it to every URL server whose headers use it; NAME=HOST only to "
+    "servers whose URL host is HOST; NAME@SERVER only to that server. The plugin chooses the URL, so headers "
+    "that reference any other variable are not sent."
+)
+
+
+def _validate_probe_mcp_env(_ctx: click.Context, _param: click.Parameter, value: tuple[str, ...]) -> tuple[str, ...]:
+    from skillevaluator.tier3.mcp_proof import parse_env_grant
+
+    for item in value:
+        try:
+            parse_env_grant(item)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+    return tuple(dict.fromkeys(value))
+
+
 # Heading + intro for the grouped Tier 3 options in ``validate --help``.
 _RUN_GROUP = "Run & Reports"
 _RUN_GROUP_DESC = "Applies to the whole run: target typing, policy profile, reports, tier selection."
@@ -124,7 +145,8 @@ Content types (--type):
   rules      .mdc files in team-rules/
   workflows  workflow-rules.mdc in a workflow directory
   plugin     Bundle-reference manifest (agent_plugin.yaml/.yml) or
-             contained plugin (.claude-plugin/plugin.json)
+             contained plugin (.claude-plugin/, .codex-plugin/, or
+             .cursor-plugin/plugin.json, or an Agent Plugins root plugin.json)
 
 Report formats (-r/--report):
   cli        Rich terminal output (default)
@@ -464,6 +486,8 @@ def _partial_agent_eval_result(
     failure: str,
     results_dir: Path | None,
     env_mode: str,
+    dataset_source: Path | None = None,
+    plugin_provenance: dict[str, Any] | None = None,
 ) -> ValidationResult | None:
     """Normalize an engine run that produced usable results alongside errors.
 
@@ -493,6 +517,8 @@ def _partial_agent_eval_result(
             results_dir=results_dir,
             env_mode=env_mode,
             engine_result=engine_result,
+            **({"dataset_source": dataset_source} if dataset_source is not None else {}),
+            **({"plugin_provenance": plugin_provenance} if plugin_provenance is not None else {}),
         )
     except Exception:
         return None
@@ -629,6 +655,10 @@ def _run_agent_eval_or_skip(
     kind: str = "skill",
     lift_mode: str = "effectiveness",
     repo_root: Path | None = None,
+    probe_mcp: bool = False,
+    probe_mcp_env: tuple[str, ...] = (),
+    allowed_private_hosts: tuple[str, ...] = (),
+    plugin_load: str = "wrapper",
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
 
@@ -660,6 +690,10 @@ def _run_agent_eval_or_skip(
             progress_reporter=progress_reporter,
             lift_mode=lift_mode,
             repo_root=repo_root,
+            probe_mcp=probe_mcp,
+            probe_mcp_env=probe_mcp_env,
+            allowed_private_hosts=allowed_private_hosts,
+            plugin_load=plugin_load,
         )
 
     if validate_source:
@@ -787,6 +821,132 @@ def _plugin_lift_fallback_metadata(
     return metadata
 
 
+def _plugin_mcp_proof(
+    prepared: Any,
+    *,
+    probe_mcp: bool,
+    allowed_private_hosts: tuple[str, ...] = (),
+    probe_mcp_env: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    """Pre-run MCP proof for author-supplied URL MCP servers, or ``None`` when there are none.
+
+    Without ``--probe-mcp`` every URL server is recorded as ``declared``; with it,
+    each gets one bounded host probe (``initialize`` + ``tools/list``) under the
+    endpoint policy. Only the host variables named with ``--probe-mcp-env`` (for every
+    server, one host, or one server) are expanded into declared headers, and the
+    variables that may be sent are printed per host before the probe runs.
+    Advisory only: it never changes the INCOMPLETE rule.
+    """
+    targets = tuple(getattr(prepared, "mcp_probe_targets", ()) or ())
+    if not targets:
+        return None
+    from skillevaluator.tier3.mcp_proof import declared_mcp_proof, planned_env_sends, probe_mcp_servers
+
+    if not probe_mcp:
+        return declared_mcp_proof(targets)
+    # Say which opted-in host variables may leave the machine, and to which host, before any probe runs.
+    for server, host, names in planned_env_sends(targets, probe_mcp_env):
+        console.print(
+            f"MCP probe may send {escape_markup(', '.join(names))} to {escape_markup(host or 'an unknown host')} "
+            f"(server {escape_markup(server)}, --probe-mcp-env)"
+        )
+    return probe_mcp_servers(targets, allowed_private_hosts=allowed_private_hosts, expand_env=probe_mcp_env)
+
+
+def _incomplete_plugin_provenance(
+    prepared: Any,
+    engine_result: Any,
+    mcp_proof: dict[str, Any] | None,
+    failure: str,
+    metadata: dict[str, str],
+) -> dict[str, Any] | None:
+    """Plugin provenance for a run that did not complete, written to the run dir before any error.
+
+    The with-plugin arm's load census, hook census, canary, and coverage are
+    still evidence even when another arm (or some trials) failed, so they are
+    kept and the run is marked INCOMPLETE instead of being dropped.
+    """
+    from skillevaluator.tier3.plugin_eval import write_plugin_provenance
+
+    try:
+        provenance = _plugin_provenance_with_runtime_evidence(prepared, engine_result, mcp_proof)
+    except Exception:
+        return None
+    provenance.update(metadata)
+    provenance["execution_incomplete"] = f"Tier 3 plugin evaluation did not complete: {failure}"[:2000]
+    provenance["partial"] = True
+    run_dir = engine_result.get("run_dir") if isinstance(engine_result, dict) else None
+    if run_dir and Path(str(run_dir)).is_dir():
+        # Best effort: the in-memory provenance still reaches the result and reports.
+        with contextlib.suppress(Exception):
+            write_plugin_provenance(Path(str(run_dir)), provenance)
+    return provenance
+
+
+def _plugin_provenance_with_runtime_evidence(
+    prepared: Any, engine_result: Any, mcp_proof: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Plugin provenance plus runtime coverage (``exercised``) and the MCP proof."""
+    from skillevaluator.tier3.plugin_native import finalize_native_provenance
+    from skillevaluator.tier3.plugin_runtime import apply_runtime_evidence
+
+    provenance = prepared.provenance()
+    if mcp_proof is not None:
+        provenance["mcp_proof"] = mcp_proof
+    # Native load census first: runtime evidence reads provenance["plugin_load"].
+    finalize_native_provenance(provenance, engine_result)
+    return apply_runtime_evidence(provenance, engine_result if isinstance(engine_result, dict) else None)
+
+
+def _incomplete_plugin_agent_eval_result(
+    plugin_dir: Path,
+    *,
+    prepared: Any,
+    engine_result: Any,
+    failure: str,
+    mcp_proof: dict[str, Any] | None,
+    metadata: dict[str, str],
+    results_dir: Path | None,
+    env_mode: str,
+) -> ValidationResult:
+    """An INCOMPLETE ``AGENT_EVAL`` result for a plugin run that did not complete.
+
+    Writes ``plugin_provenance.json`` first, then builds the result from this
+    run's own output so the with-plugin canary, load census, hook census, and
+    coverage stay in every report. Falls back to an advisory skip only when the
+    run left no usable results.
+    """
+    from skillevaluator.evaluation.tier3_report import (
+        _incomplete_skip_reason,
+        advisory_skip_result,
+        refresh_plugin_run_report,
+    )
+
+    message = f"Tier 3 plugin evaluation did not complete: {failure}"
+    provenance = _incomplete_plugin_provenance(prepared, engine_result, mcp_proof, failure, metadata)
+    result = _partial_agent_eval_result(
+        plugin_dir,
+        engine_result=engine_result,
+        failure=message,
+        results_dir=results_dir,
+        env_mode=env_mode,
+        dataset_source=getattr(prepared, "package_path", None),
+        plugin_provenance=provenance,
+    )
+    if result is None:
+        return advisory_skip_result(message, skill_name=plugin_dir.name)
+    result.passed = False
+    result.metadata["execution_status"] = "skipped"
+    result.metadata["skip_reason"] = _incomplete_skip_reason(provenance or {"execution_incomplete": message})
+    result.metadata.update(metadata)
+    run_dir = engine_result.get("run_dir") if isinstance(engine_result, dict) else None
+    if run_dir:
+        # The runner rendered report.html before the sidecar existed.
+        with contextlib.suppress(Exception):
+            refresh_plugin_run_report(plugin_dir, Path(str(run_dir)), result=result)
+    return result
+
+
 def _run_plugin_agent_eval(
     plugin_target: Path,
     *,
@@ -810,6 +970,10 @@ def _run_plugin_agent_eval(
     progress_reporter=None,
     lift_mode: str = "effectiveness",
     repo_root: Path | None = None,
+    probe_mcp: bool = False,
+    probe_mcp_env: tuple[str, ...] = (),
+    allowed_private_hosts: tuple[str, ...] = (),
+    plugin_load: str = "wrapper",
 ) -> ValidationResult:
     """Stage and evaluate a public plugin without fetching remote components."""
     import tempfile
@@ -837,6 +1001,9 @@ def _run_plugin_agent_eval(
                 stage_root=Path(temp_dir),
                 include_skills=include_skills,
                 repo_root=repo_root,
+                plugin_load=plugin_load,
+                agents=agents,
+                env_mode=env_mode,
             )
             if prepared.skipped or prepared.package_path is None:
                 return _skipped(
@@ -852,6 +1019,12 @@ def _run_plugin_agent_eval(
                 lift_mode,
                 effective_lift_mode,
                 integration_skip_reason,
+            )
+            mcp_proof = _plugin_mcp_proof(
+                prepared,
+                probe_mcp=probe_mcp,
+                allowed_private_hosts=allowed_private_hosts,
+                probe_mcp_env=probe_mcp_env,
             )
 
             options = EvaluationOptions(
@@ -874,6 +1047,8 @@ def _run_plugin_agent_eval(
                 eval_target_kind="plugin",
                 lift_mode_requested=lift_mode,
                 integration_skip_reason=integration_skip_reason,
+                plugin_load=plugin_load,
+                native_plugin_source=getattr(prepared, "native_source", None),
                 results_dir=results_dir,
                 resolved_results_root=resolve_results_root(plugin_dir, results_dir),
                 copy_repo=copy_repo,
@@ -887,9 +1062,18 @@ def _run_plugin_agent_eval(
             else:
                 engine_result = service.evaluate(options)
             if failure := service.failure_reason(engine_result):
-                return _skipped(f"Tier 3 plugin evaluation did not complete: {failure}")
+                return _incomplete_plugin_agent_eval_result(
+                    plugin_dir,
+                    prepared=prepared,
+                    engine_result=engine_result,
+                    failure=failure,
+                    mcp_proof=mcp_proof,
+                    metadata=fallback_metadata,
+                    results_dir=results_dir,
+                    env_mode=env_mode,
+                )
 
-            provenance = prepared.provenance()
+            provenance = _plugin_provenance_with_runtime_evidence(prepared, engine_result, mcp_proof)
             provenance.update(fallback_metadata)
             if isinstance(engine_result, dict) and engine_result.get("run_dir"):
                 write_plugin_provenance(Path(str(engine_result["run_dir"])), provenance)
@@ -1115,6 +1299,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--profile", str(params["profile"])])
     if params.get("repo_root"):
         argv.extend(["--repo-root", str(params["repo_root"])])
+    if params.get("resolve_endpoints"):
+        argv.append("--resolve-endpoints")
     if params.get("agent_eval") is True:
         argv.append("--tier3")
     elif params.get("agent_eval") is False:
@@ -1137,6 +1323,13 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     lift_mode = params.get("lift_mode", "effectiveness")
     if lift_mode != "effectiveness":
         argv.extend(["--lift-mode", str(lift_mode)])
+    if params.get("probe_mcp"):
+        argv.append("--probe-mcp")
+    for name in params.get("probe_mcp_env") or ():
+        argv.extend(["--probe-mcp-env", str(name)])
+    plugin_load = params.get("plugin_load", "wrapper")
+    if plugin_load != "wrapper":
+        argv.extend(["--plugin-load", str(plugin_load)])
     if params.get("skip_baseline"):
         argv.append("--skip-baseline")
     if params.get("n_concurrent") is not None:
@@ -1560,7 +1753,8 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
     "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
-    "opt-in (not run by default): dependency. "
+    "opt-in (not run by default): dependency, and claude-validate (plugins: parity with "
+    "'claude plugin validate --strict' when the claude CLI is installed). "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
 )
 @click.option(
@@ -1661,6 +1855,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "references stay unresolved (advisory).",
 )
 @click.option(
+    "--resolve-endpoints",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Plugin only, opt-in network check: resolve MCP and HTTP hook URL hosts and send one "
+    "credential-free HEAD (no redirects followed) to flag names or redirects that reach private, "
+    "link-local, or cloud-metadata addresses. Also enabled by 'endpoints.resolve: true' in the policy. "
+    "Default: off (Tier 1 stays network-free).",
+)
+@click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
     "dedup",
@@ -1730,6 +1934,36 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
     help="Plugin only: compare against no plugin, sum-of-parts, or both baselines.",
+)
+@click.option(
+    "--probe-mcp",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Plugin only: before Tier 3, probe author-supplied URL MCP servers from the host "
+    "(initialize + tools/list, bounded) under the endpoint policy. Sends only literal declared headers "
+    "unless --probe-mcp-env names a variable. Advisory.",
+)
+@click.option(
+    "--probe-mcp-env",
+    "probe_mcp_env",
+    multiple=True,
+    metavar="NAME[=HOST|@SERVER]",
+    callback=_validate_probe_mcp_env,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help=_PROBE_MCP_ENV_HELP,
+)
+@click.option(
+    "--plugin-load",
+    type=click.Choice(PLUGIN_LOAD_CHOICES),
+    default="wrapper",
+    show_default=True,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Plugin only: how the with-plugin arm loads the plugin. 'wrapper' stages a generated wrapper skill; "
+    "'native' stages it the way each harness loads plugins (fails for unsupported agents or local mode); "
+    "'auto' uses native where supported and the wrapper otherwise.",
 )
 @click.option(
     "--skip-baseline",
@@ -1883,6 +2117,7 @@ def validate(
     external: bool,
     policy_path: Path | None,
     repo_root: Path | None,
+    resolve_endpoints: bool,
     dedup: bool,
     block_on_dedup: bool | None,
     agent_eval: bool | None,
@@ -1891,6 +2126,9 @@ def validate(
     agents: str | None,
     env_mode: str,
     lift_mode: str,
+    probe_mcp: bool,
+    probe_mcp_env: tuple[str, ...],
+    plugin_load: str,
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
@@ -1924,8 +2162,9 @@ def validate(
     Rules, workflows, and plugins retain Tier 1/2 by default; their Tier 3
     evaluation requires an explicit --tier3, --autopilot, or --full request.
 
-    A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest or a
-    contained ``.claude-plugin/plugin.json`` manifest) is auto-detected and
+    A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest, or a
+    contained ``.claude-plugin/``, ``.codex-plugin/``, or ``.cursor-plugin/``
+    ``plugin.json`` or Agent Plugins root ``plugin.json``) is auto-detected and
     validated against its public contract; quality/lint/version checks run on
     each skill bundled under the plugin's ``skills/`` directory.
     """
@@ -1943,7 +2182,6 @@ def validate(
         CONTENT_TYPE_SKILL,
         CONTENT_TYPE_UNKNOWN,
         CONTENT_TYPE_WORKFLOWS,
-        PLUGIN_CONTAINED_MANIFEST_DIR,
         PLUGIN_CONTAINED_MANIFEST_FILE,
         PLUGIN_MANIFEST_FILES,
         RULES_FILE_EXTENSION,
@@ -1963,10 +2201,8 @@ def validate(
     declared_is_selected_manifest = (
         target_path.name in SKILL_MANIFEST_VARIANTS
         or target_path.name in PLUGIN_MANIFEST_FILES
-        or (
-            target_path.name == PLUGIN_CONTAINED_MANIFEST_FILE
-            and target_path.parent.name == PLUGIN_CONTAINED_MANIFEST_DIR
-        )
+        # Any plugin.json: vendor-directory manifests and the Agent Plugins root manifest.
+        or target_path.name == PLUGIN_CONTAINED_MANIFEST_FILE
         or target_path.suffix == RULES_FILE_EXTENSION
     )
     if stat.S_ISREG(declared_metadata.st_mode) and getattr(declared_metadata, "st_nlink", 1) != 1:
@@ -2129,6 +2365,7 @@ def validate(
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
         repo_root=repo_root,
+        resolve_endpoints=resolve_endpoints,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -2251,6 +2488,10 @@ def validate(
             kind=resolved_type,
             lift_mode=lift_mode,
             repo_root=repo_root,
+            probe_mcp=probe_mcp,
+            probe_mcp_env=probe_mcp_env,
+            allowed_private_hosts=tuple(policy.mcp_allowed_private_hosts),
+            plugin_load=plugin_load,
         )
         results.append(tier3_result)
         tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
@@ -2313,18 +2554,25 @@ def validate(
     # "cli", which renders the full Rich report below the pipeline view.
     effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
-    emit_reports(
-        results,
-        report_formats=effective_formats,
-        output_dir=output_dir,
-        basename=report_basename_value,
-        policy=policy,
-        target_path=target_display,
-        content_label=content_label,
-        announce_paths=not quiet,
-        sarif_scan_root=target_path,
-        sarif_repository_root=sarif_repository_root,
-    )
+    reports_error: ReportsNotWrittenError | None = None
+    try:
+        emit_reports(
+            results,
+            report_formats=effective_formats,
+            output_dir=output_dir,
+            basename=report_basename_value,
+            policy=policy,
+            target_path=target_display,
+            content_label=content_label,
+            announce_paths=not quiet,
+            sarif_scan_root=target_path,
+            sarif_repository_root=sarif_repository_root,
+        )
+    except ReportsNotWrittenError as exc:
+        # A requested report is missing, so the command must fail; it does so
+        # after BENCHMARK.md and the footer, which no longer links that file.
+        reports_error = exc
+        effective_formats = tuple(fmt for fmt in effective_formats if fmt not in exc.formats)
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
 
     # BENCHMARK.md is generated compulsorily for skills and plugins (matches SkillEvaluator),
@@ -2373,6 +2621,10 @@ def validate(
             target_path=target_path,
             agent_eval=agent_eval,
         )
+    if reports_error is not None:
+        if gate_failed:
+            raise click.ClickException(f"validation failed, and {reports_error.message}")
+        raise reports_error
     if gate_failed:
         raise click.ClickException("validation failed")
 
@@ -2968,6 +3220,17 @@ def evaluate(
         "when composition evidence is unavailable."
     ),
 )
+@click.option(
+    "--plugin-load",
+    type=click.Choice(PLUGIN_LOAD_CHOICES),
+    default="wrapper",
+    show_default=True,
+    help=(
+        "How the with-plugin arm loads the plugin: 'wrapper' (generated wrapper skill), 'native' "
+        "(the harness's own plugin layout; fails for unsupported agents or local mode), or 'auto' "
+        "(native where supported, the wrapper otherwise). Baseline arms are unchanged."
+    ),
+)
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option("--stop-on-pass/--no-stop-on-pass", default=None)
@@ -2984,6 +3247,23 @@ def evaluate(
     help="Clone-root override for deterministic same-repository reference resolution.",
 )
 @click.option("--copy-repo", is_flag=True)
+@click.option(
+    "--probe-mcp",
+    is_flag=True,
+    help=(
+        "Before the run, probe each author-supplied URL MCP server from the host (initialize + tools/list, "
+        "bounded) under the endpoint policy. Sends only literal declared headers unless --probe-mcp-env names "
+        "a variable. Advisory; recorded as mcp_proof in plugin provenance."
+    ),
+)
+@click.option(
+    "--probe-mcp-env",
+    "probe_mcp_env",
+    multiple=True,
+    metavar="NAME[=HOST|@SERVER]",
+    callback=_validate_probe_mcp_env,
+    help=_PROBE_MCP_ENV_HELP,
+)
 @click.option("--grading-mode", type=GRADING_MODE_CHOICE, default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 @click.option("--harbor-keep-jobs", is_flag=True)
@@ -3005,6 +3285,7 @@ def evaluate_plugin(
     env_mode: str,
     skip_baseline: bool,
     lift_mode: str,
+    plugin_load: str,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
@@ -3016,6 +3297,8 @@ def evaluate_plugin(
     include_skills: tuple[Path, ...],
     repo_root: Path | None,
     copy_repo: bool,
+    probe_mcp: bool,
+    probe_mcp_env: tuple[str, ...],
     grading_mode: str | None,
     results_dir: Path | None,
     harbor_keep_jobs: bool,
@@ -3047,6 +3330,9 @@ def evaluate_plugin(
                 evals_source=evals_source,
                 include_skills=include_skills,
                 repo_root=repo_root,
+                plugin_load=plugin_load,
+                agents=agents,
+                env_mode=env_mode,
             )
             for label, values in (
                 ("Unresolved remote skill refs", prepared.unresolved_skill_refs),
@@ -3076,6 +3362,23 @@ def evaluate_plugin(
                         f"[yellow]Integration skipped:[/yellow] {escape_markup(integration_skip_reason)}. "
                         "Running effectiveness only."
                     )
+            allowed_private_hosts: tuple[str, ...] = ()
+            if probe_mcp:
+                from skillevaluator.validators.policy import resolve_policy
+
+                allowed_private_hosts = tuple(resolve_policy().mcp_allowed_private_hosts)
+            mcp_proof = _plugin_mcp_proof(
+                prepared,
+                probe_mcp=probe_mcp,
+                allowed_private_hosts=allowed_private_hosts,
+                probe_mcp_env=probe_mcp_env,
+            )
+            if probe_mcp and mcp_proof:
+                for server, entry in mcp_proof.items():
+                    console.print(
+                        f"MCP proof [bold]{escape_markup(server)}[/bold]: {escape_markup(entry['status'])} "
+                        f"[dim]({escape_markup(entry['detail'])})[/dim]"
+                    )
 
             options = EvaluationOptions(
                 skill_path=prepared.package_path,
@@ -3097,6 +3400,8 @@ def evaluate_plugin(
                 eval_target_kind="plugin",
                 lift_mode_requested=lift_mode,
                 integration_skip_reason=integration_skip_reason,
+                plugin_load=plugin_load,
+                native_plugin_source=getattr(prepared, "native_source", None),
                 copy_repo=copy_repo,
                 grading_mode=grading_mode,
                 results_dir=results_dir,
@@ -3110,21 +3415,42 @@ def evaluate_plugin(
             )
             reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
             engine_result = service.evaluate(options, progress_reporter=reporter)
+            lift_metadata = _plugin_lift_fallback_metadata(lift_mode, effective_lift_mode, integration_skip_reason)
+            failure = service.failure_reason(engine_result)
+            # Build the plugin provenance before the summary, so the summary shows the same coverage,
+            # completeness, and load blocks as the reports (the engine result alone has none of them).
+            provenance: dict[str, Any] | None = None
+            provenance_error: Exception | None = None
+            if failure:
+                # Keep the with-plugin evidence: write the sidecar and re-render before failing.
+                incomplete = _incomplete_plugin_provenance(prepared, engine_result, mcp_proof, failure, lift_metadata)
+                provenance = incomplete
+            else:
+                try:
+                    provenance = _plugin_provenance_with_runtime_evidence(prepared, engine_result, mcp_proof)
+                    provenance.update(lift_metadata)
+                except Exception as exc:  # still show the run summary first
+                    provenance_error = exc
             if isinstance(engine_result, dict):
                 from skillevaluator.tier3.result_display import render_evaluation_result
 
-                render_evaluation_result(engine_result, console=console)
-            if failure := service.failure_reason(engine_result):
+                shown = engine_result if provenance is None else {**engine_result, "plugin_provenance": provenance}
+                render_evaluation_result(shown, console=console)
+            if provenance_error is not None:
+                raise provenance_error
+            if failure:
+                if incomplete is not None and isinstance(engine_result, dict) and engine_result.get("run_dir"):
+                    with contextlib.suppress(Exception):
+                        refresh_plugin_run_report(
+                            plugin_dir,
+                            Path(str(engine_result["run_dir"])),
+                            env_mode=env_mode,
+                            engine_result=engine_result,
+                            plugin_provenance=incomplete,
+                        )
                 raise click.ClickException(f"Tier 3 plugin evaluation did not complete: {failure}")
 
-            provenance = prepared.provenance()
-            provenance.update(
-                _plugin_lift_fallback_metadata(
-                    lift_mode,
-                    effective_lift_mode,
-                    integration_skip_reason,
-                )
-            )
+            provenance = provenance or {}
             if isinstance(engine_result, dict) and engine_result.get("run_dir"):
                 write_plugin_provenance(Path(str(engine_result["run_dir"])), provenance)
                 # The runner rendered report.html before the sidecar existed.

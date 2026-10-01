@@ -112,11 +112,17 @@ def test_secure_url_schemes_pass(url) -> None:
     assert validate_contained_mcp_servers({"s": {"url": url, "transport": "http"}}, "p.json") == []
 
 
-@pytest.mark.parametrize("url", ["https://", "wss://", "https:///path"])
+@pytest.mark.parametrize("url", ["https://", "wss://"])
 def test_url_secure_scheme_without_host_blocked(url) -> None:
     # A secure scheme with no host is not a usable endpoint; reject it statically
     # rather than stage it runnable and fail later in Harbor.
     assert "mcp_url_no_host" in _checks(validate_contained_mcp_servers({"s": {"url": url}}, "p.json"))
+
+
+def test_url_with_extra_slashes_is_blocked_as_ambiguous() -> None:
+    # urllib reads no host in https:///path; WHATWG clients (Node) connect to host 'path'.
+    findings = validate_contained_mcp_servers({"s": {"url": "https:///path"}}, "p.json")
+    assert [f.check_name for f in findings if f.severity == "high"] == ["mcp_url_malformed_authority"]
 
 
 def test_url_malformed_authority_blocked() -> None:
@@ -439,3 +445,44 @@ def test_command_arg_credential_flag_followed_by_flag_not_flagged() -> None:
     # `--api-key` immediately followed by another flag has no inline value.
     findings = validate_contained_mcp_servers({"s": {"command": "srv", "args": ["--api-key", "--verbose"]}}, "p.json")
     assert "mcp_command_inline_secret" not in _checks(findings)
+
+
+# JWT-shaped fixtures, assembled from parts so secret scanners do not flag the test source.
+_JWT_HEAD = "eyJ" + "hbGciOiJIUzI1NiJ9"
+_JWT_BODY = "eyJ" + "zdWIiOiIxMjM0In0"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"{_JWT_HEAD}.{_JWT_BODY}.c2lnbmF0dXJl",
+        f"prefix-{_JWT_HEAD}.{_JWT_BODY}",
+        f"xeyJ{_JWT_HEAD}.{_JWT_BODY}",
+        f"Bearer={_JWT_HEAD}.{_JWT_BODY}",
+    ],
+)
+def test_jwt_like_env_and_arg_values_are_still_inline_secrets(value: str) -> None:
+    findings = validate_contained_mcp_servers(
+        {"s": {"command": "srv", "args": [value], "env": {"SETTING": value}}}, "p.json"
+    )
+    assert {"mcp_inline_secret", "mcp_command_inline_secret"} <= _checks(findings)
+
+
+@pytest.mark.parametrize("value", [f"eyJshort.{_JWT_HEAD}", _JWT_HEAD, "keyJhbGc.x"])
+def test_values_that_are_not_jwt_like_stay_clean(value: str) -> None:
+    findings = validate_contained_mcp_servers({"s": {"command": "srv", "env": {"SETTING": value}}}, "p.json")
+    assert "mcp_inline_secret" not in _checks(findings)
+
+
+@pytest.mark.parametrize("unit", ["eyJ", "eyJa", "-eyJ", "eyJ" + "a" * 12 + "eyJ"])
+def test_inline_secret_scan_is_linear_on_a_long_jwt_like_run(unit: str) -> None:
+    import time
+
+    from skillevaluator.validators.mcp_static import _looks_like_inline_secret
+
+    # 256 KB with no "." after the run: a per-"eyJ" scan took about 15 s here.
+    value = unit * (262_144 // len(unit))
+    started = time.perf_counter()
+    assert _looks_like_inline_secret("SETTING", value) is False
+    assert validate_contained_mcp_servers({"s": {"command": "srv", "args": [value]}}, "p.json") is not None
+    assert time.perf_counter() - started < 2.0

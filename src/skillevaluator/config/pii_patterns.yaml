@@ -53,8 +53,13 @@ home_paths:
     suggestion: "Use a generic path or an environment variable like $HOME"
 
 # Email addresses (excluding placeholder/test domains and OData property names)
+# The local part is capped at the RFC 5321 limit of 64 characters. Unbounded, every
+# start in a long run of local-part characters scanned to the end of the run, so
+# one long line took minutes. A match starts at the start of the run or exactly 64
+# characters before the "@", the leftmost start the cap allows. Later starts would
+# check the same domain again, so they are not tried.
 emails:
-  - pattern: '[A-Za-z0-9._%+-]+@(?!([a-z0-9-]+\.)*example\.com|([a-z0-9-]+\.)*example\.org|([a-z0-9-]+\.)*test\.com|odata\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+  - pattern: '(?:(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}|[A-Za-z0-9._%+-]{64})@(?!([a-z0-9-]+\.)*example\.com|([a-z0-9-]+\.)*example\.org|([a-z0-9-]+\.)*test\.com|odata\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
     severity: high
     description: Non-placeholder email address
     suggestion: "Remove the address or use a placeholder like user@example.com"
@@ -115,8 +120,15 @@ ip_addresses:
     suggestion: "Use private IP (10.x.x.x, 192.168.x.x) or placeholder like 0.0.0.0"
 
 # Database connection strings (CRITICAL - common in config files)
+# Every pattern here must stay linear on one long line. In a database URL the user
+# stops at "/" and the password at the next "://", so each scan ends where the
+# next URL starts; the password may hold a raw "/" (generated passwords often do),
+# and the possessive "++" never re-scans it. A "password" that is only digits
+# followed by "/", "?", "#" or a space is a port (redis://cache:6379/0?x=ops@corp),
+# not a credential. The connection-string rule tries only the first "connection
+# string" on a line (the atomic group commits to it); "value" is the reported part.
 database_credentials:
-  - pattern: '(postgres|postgresql|mysql|mariadb|mongodb|redis)://[^:]+:[^@]+@[^/\s]+'
+  - pattern: '(postgres|postgresql|mysql|mariadb|mongodb|redis)://[^:/]+:(?!\d+[/?#\s])(?:[^@:]|:(?!//))++@[^/\s]+'
     severity: critical
     description: Database connection string with credentials
     suggestion: "Use environment variable like $DATABASE_URL or config file reference"
@@ -126,14 +138,17 @@ database_credentials:
     description: JDBC connection string
     suggestion: "Move connection string to environment variable or secure config"
 
-  - pattern: '(?i)(connection|conn)[-_]?string.*password='
+  - pattern: '(?i)^(?>.*?(?=(?:connection|conn)[-_]?string))(?P<value>(?:connection|conn)[-_]?string.*password=)'
     severity: critical
     description: Connection string containing password
     suggestion: "Remove password from connection string - use environment variable"
 
 # JWT tokens (commonly leaked in logs/examples)
+# A match starts only at the beginning of a run of JWT characters, so "eyJ-" * n
+# is scanned once instead of once per "eyJ". "lead" is the part of the run before
+# its first "eyJ" at a word start; "value" is the token that gets reported.
 jwt_tokens:
-  - pattern: '\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+  - pattern: '(?<![A-Za-z0-9_-])(?=(?P<lead>(?:\b|[A-Za-z0-9_-]*?-)(?=eyJ)))(?P=lead)(?P<value>eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b)'
     severity: high
     description: JWT token
     suggestion: "Remove JWT token - use placeholder like eyJ...REDACTED...xyz"

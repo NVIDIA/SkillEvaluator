@@ -22,7 +22,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path, PurePosixPath
 
-from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES, SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import (
+    SCAN_ARTIFACT_DIRS,
+    SCAN_EXCLUDED_DIRS,
+    SCAN_EXCLUDED_FILES,
+    SKILL_MANIFEST_VARIANTS,
+)
 
 # Import from the canonical location in models
 from skillevaluator.models.result import (
@@ -216,14 +221,23 @@ class ValidatorBase(ABC):
         """Recursively find all skill directories containing SKILL.md files.
 
         Manifests beneath any directory in :data:`SCAN_EXCLUDED_DIRS` (e.g.
-        ``evals/``, ``results/``, ``.versions/``) are skipped so that
-        evaluation snapshots and version archives do not get scanned as
-        live skills.
+        ``evals/``, ``results/``, ``.versions/``) below *root_path* are skipped
+        so that evaluation snapshots and version archives do not get scanned as
+        live skills. Only the part of the path below *root_path* counts, so a
+        plugin that lives under a folder named ``results`` or ``versions`` is
+        still searched. In a folder named ``skills`` (a plugin's skills folder)
+        a first-level ``evals/``, ``results/``, or ``versions/`` folder is a
+        skill folder that clients load, as in plugin skill discovery.
         """
+        skills_folder = root_path.name == "skills"
         skill_dirs: set[Path] = set()
         for manifest_name in SKILL_MANIFEST_VARIANTS:
             for skill_md in root_path.rglob(manifest_name):
-                if any(part in SCAN_EXCLUDED_DIRS for part in skill_md.parts):
+                parts = skill_md.relative_to(root_path).parts[:-1]
+                if any(
+                    part in SCAN_EXCLUDED_DIRS and not (skills_folder and index == 0 and part in SCAN_ARTIFACT_DIRS)
+                    for index, part in enumerate(parts)
+                ):
                     continue
                 skill_dirs.add(skill_md.parent)
         return sorted(skill_dirs)

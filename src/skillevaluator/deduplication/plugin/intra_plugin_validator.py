@@ -56,7 +56,7 @@ class IntraPluginValidator(ValidatorBase):
             self._mark_security_failure(result, str(exc))
             return result
         if located is None or located.manifest_type != PLUGIN_MANIFEST_TYPE:
-            # Contained (.claude-plugin/plugin.json) or manifest-less plugins
+            # Contained (Claude, Codex, Cursor, Agent Plugins) or manifest-less plugins
             # expose no parsed refs, so Check A simply does not apply.
             result.add_success(
                 "plugin_dep_dedup",

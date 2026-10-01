@@ -141,6 +141,45 @@ PLUGIN_MANIFEST_TYPE = "agent_bundle_yaml"
 PLUGIN_MODE = "bundle_reference"
 PLUGIN_CONTAINED_MANIFEST_TYPE = "claude_plugin_json"
 PLUGIN_CONTAINED_MODE = "contained"
+
+# Additional native plugin manifest formats. Each is a contained plugin: its
+# components ship inside the plugin root, like ``.claude-plugin/plugin.json``.
+PLUGIN_CODEX_MANIFEST_DIR = ".codex-plugin"
+PLUGIN_CURSOR_MANIFEST_DIR = ".cursor-plugin"
+# Agent Plugins v1 (agent-plugins.org) roots a plugin with ``plugin.json`` at
+# the plugin root itself, not inside a vendor directory.
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE = PLUGIN_CONTAINED_MANIFEST_FILE
+PLUGIN_CODEX_MANIFEST_TYPE = "codex_plugin_json"
+PLUGIN_CURSOR_MANIFEST_TYPE = "cursor_plugin_json"
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE = "agent_plugins_v1"
+# Root-relative manifest paths in discovery precedence order, with the manifest
+# type each one selects. When a root holds more than one, the first one wins
+# and the others are recorded as additional manifest declarations.
+PLUGIN_MANIFEST_PRECEDENCE: tuple[tuple[str, str], ...] = (
+    ("agent_plugin.yaml", PLUGIN_MANIFEST_TYPE),
+    ("agent_plugin.yml", PLUGIN_MANIFEST_TYPE),
+    (f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CONTAINED_MANIFEST_TYPE),
+    (PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE),
+    (f"{PLUGIN_CODEX_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CODEX_MANIFEST_TYPE),
+    (f"{PLUGIN_CURSOR_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CURSOR_MANIFEST_TYPE),
+)
+PLUGIN_MANIFEST_RELATIVE_PATHS: tuple[str, ...] = tuple(path for path, _type in PLUGIN_MANIFEST_PRECEDENCE)
+# Vendor directories whose ``plugin.json`` roots a contained plugin at the
+# directory's parent.
+PLUGIN_NATIVE_MANIFEST_DIRS: tuple[str, ...] = (
+    PLUGIN_CONTAINED_MANIFEST_DIR,
+    PLUGIN_CODEX_MANIFEST_DIR,
+    PLUGIN_CURSOR_MANIFEST_DIR,
+)
+# Manifest types whose components are contained in the plugin root.
+PLUGIN_CONTAINED_MANIFEST_TYPES = frozenset(
+    {
+        PLUGIN_CONTAINED_MANIFEST_TYPE,
+        PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+        PLUGIN_CODEX_MANIFEST_TYPE,
+        PLUGIN_CURSOR_MANIFEST_TYPE,
+    }
+)
 # Static plugin component inventory bounds (Tier 1 and Tier 3 coverage).
 PLUGIN_COMPONENT_MAX_ITEMS = 256
 # Byte cap for plugin JSON config files (.mcp.json, referenced MCP configs,
@@ -163,15 +202,16 @@ BANNED_PACKAGES = [
 # File extensions to scan
 SCANNABLE_EXTENSIONS = {".py", ".sh", ".yaml", ".yml", ".json", ".md", ".txt"}
 
+# Evaluation output and version-snapshot folder names (a skill's own artifacts).
+SCAN_ARTIFACT_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+
 # Directories to skip at any depth during Tier 1 file-tree walks (scan artifact roots, version snapshots, build caches).
+# Plugin skill discovery skips the artifact names only inside a skill: a folder
+# with one of those names directly under a plugin's skills/ is searched, and a
+# SKILL.md deeper inside one is reported (utils.helpers).
 SCAN_EXCLUDED_DIRS = frozenset(
     {
-        "evals",
-        ".evals",
-        "results",
-        ".results",
-        "versions",
-        ".versions",
+        *SCAN_ARTIFACT_DIRS,
         "__pycache__",
         ".git",
         ".venv",

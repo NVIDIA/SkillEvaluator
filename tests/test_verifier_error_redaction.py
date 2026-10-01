@@ -68,6 +68,8 @@ def verifier_module(tmp_path: Path):
     module.REWARD_JSON = tmp_path / "reward.json"
     module.REWARD_TXT = tmp_path / "reward.txt"
     module.SKILL_EVALUATOR_REWARD_JSON = tmp_path / "skill_evaluator_reward.json"
+    # Transient judge errors are retried with a backoff; keep these tests instant.
+    module._judge_retry_sleep = lambda _seconds: None
     return module
 
 
